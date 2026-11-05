@@ -33,19 +33,25 @@ fn push_values(pairs: &mut Vec<(String, String)>, key: &str, value: &str) {
     }
 }
 
-// ponytail: arrays of up to 6 lines; use the toml crate for longer or nested ones
+// ponytail: flat arrays only; use the toml crate for nested arrays or inline tables
 fn toml_settings(text: &str) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
     let mut table = String::new();
-    let mut lines = text.lines();
+    let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
         let mut line = strip_comment(line).trim().to_owned();
         if line.split_once('=').is_some_and(|(_, value)| value.trim().starts_with('[') && !value.contains(']')) {
-            for next in lines.by_ref().take(5) {
-                line.push_str(strip_comment(next).trim());
+            let mut closed = false;
+            while let Some(next) = lines.next_if(|next| !next.trim_start().starts_with('[')) {
+                let next = strip_comment(next).trim();
+                line.push_str(next);
                 if next.contains(']') {
+                    closed = true;
                     break;
                 }
+            }
+            if !closed {
+                continue;
             }
         }
         let line = line.as_str();
@@ -276,6 +282,19 @@ mod tests {
             settings("/project/flyway.toml", toml),
             pairs(&[("flyway.locations", "filesystem:sql"), ("flyway.locations", "filesystem:more"), ("flyway.sqlMigrationPrefix", "M")])
         );
+    }
+
+    #[test]
+    fn reads_long_toml_arrays_and_skips_unclosed_ones() {
+        let items: Vec<String> = (1..=8).map(|i| format!("  \"filesystem:sql{i}\", # ] not the end\n")).collect();
+        let toml = format!("[flyway]\nlocations = [\n{}]\nsqlMigrationPrefix = \"M\"\n", items.concat());
+        let found = settings("/project/flyway.toml", &toml);
+        assert_eq!(found.len(), 9, "{found:?}");
+        assert_eq!(found[7], ("flyway.locations".to_owned(), "filesystem:sql8".to_owned()));
+        assert_eq!(found[8], ("flyway.sqlMigrationPrefix".to_owned(), "M".to_owned()));
+
+        let unclosed = "[flyway]\nlocations = [\n  \"filesystem:sql\",\n[flyway.placeholders]\ntenant = \"acme\"\n";
+        assert_eq!(settings("/project/flyway.toml", unclosed), pairs(&[("flyway.placeholders.tenant", "acme")]));
     }
 
     #[test]

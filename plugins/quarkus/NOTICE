@@ -1,4 +1,4 @@
-quarkus-properties.tsv is derived from the quarkus-config-model.json and
+data/quarkus-properties.tsv is derived from the quarkus-config-model.json and
 quarkus-config-javadoc.json files (META-INF/quarkus-config-doc/) of the
 io.quarkus artifacts quarkus-core, quarkus-arc, quarkus-vertx,
 quarkus-vertx-http, quarkus-rest, quarkus-rest-jackson, quarkus-rest-client,
