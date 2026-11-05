@@ -1,6 +1,7 @@
 //! The OpenAPI document model: version detection and the operations under `paths`.
 
 pub use spring_text::config::Key;
+use std::collections::HashMap;
 
 pub const METHODS: [&str; 8] = ["get", "put", "post", "delete", "options", "head", "patch", "trace"];
 
@@ -29,12 +30,18 @@ pub fn parse(text: &str) -> Option<Spec> {
     Some(Spec { version, keys })
 }
 
+/// The first key (in document order) for each exact key path.
+pub fn exact(keys: &[Key]) -> HashMap<&str, &Key> {
+    let mut by_key = HashMap::with_capacity(keys.len());
+    for k in keys {
+        by_key.entry(k.key.as_str()).or_insert(k);
+    }
+
+    by_key
+}
+
 pub fn operations(text: &str, keys: &[Key]) -> Vec<Operation> {
-    let paths: Vec<(&Key, &str)> = keys
-        .iter()
-        .map(|k| (k, &text[k.at..k.end]))
-        .filter(|(k, segment)| segment.starts_with('/') && k.key == format!("paths.{segment}"))
-        .collect();
+    let by_key = exact(keys);
 
     keys.iter()
         .filter_map(|k| {
@@ -43,8 +50,12 @@ pub fn operations(text: &str, keys: &[Key]) -> Vec<Operation> {
                 return None;
             }
 
-            let (_, path) = paths.iter().find(|(p, _)| k.key == format!("{}.{method}", p.key))?;
-            let operation_id_key = format!("{}.operationId", k.key);
+            let path_key = k.key.strip_suffix(method)?.strip_suffix('.')?;
+            let path_item = by_key.get(path_key)?;
+            let path = &text[path_item.at..path_item.end];
+            if !path.starts_with('/') || path_key != format!("paths.{path}") {
+                return None;
+            }
 
             Some(Operation {
                 method: method.to_uppercase(),
@@ -52,7 +63,7 @@ pub fn operations(text: &str, keys: &[Key]) -> Vec<Operation> {
                 key: k.key.clone(),
                 at: k.at,
                 end: k.end,
-                operation_id: keys.iter().find(|v| v.key == operation_id_key).map(|v| v.value.clone()),
+                operation_id: by_key.get(format!("{}.operationId", k.key).as_str()).map(|v| v.value.clone()),
             })
         })
         .collect()
@@ -140,29 +151,50 @@ fn escape_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
 }
 
-pub fn target<'k>(keys: &'k [Key], fragment: &str) -> Option<&'k Key> {
-    let exists = |path: &str| {
-        keys.iter().any(|k| {
-            k.key.strip_prefix(path).is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '[']))
-        })
-    };
+/// Every key path prefix that ends at a `.` or `[` boundary, mapped to the first key under it.
+pub struct Index<'k>(HashMap<&'k str, &'k Key>);
 
-    let mut path = String::new();
-    for raw in fragment.strip_prefix('/')?.split('/') {
-        let segment = unescape_segment(raw);
-        let mut next = if path.is_empty() { segment.clone() } else { format!("{path}.{segment}") };
-        if !exists(&next) && !path.is_empty() && !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()) {
-            next = format!("{path}[{segment}]");
+impl<'k> Index<'k> {
+    pub fn new(keys: &'k [Key]) -> Self {
+        let mut prefixes = HashMap::new();
+        for k in keys {
+            let boundaries = k.key.match_indices(['.', '[']).map(|(i, _)| i).chain([k.key.len()]);
+            for end in boundaries {
+                prefixes.entry(&k.key[..end]).or_insert(k);
+            }
         }
-        if !exists(&next) {
-            return None;
-        }
-        path = next;
+
+        Self(prefixes)
     }
 
-    keys.iter().find(|k| {
-        k.key.strip_prefix(&path).is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '[']))
-    })
+    pub fn contains(&self, path: &str) -> bool {
+        self.0.contains_key(path)
+    }
+
+    pub fn target(&self, fragment: &str) -> Option<&'k Key> {
+        let mut path = String::new();
+        for raw in fragment.strip_prefix('/')?.split('/') {
+            let segment = unescape_segment(raw);
+            let mut next = if path.is_empty() { segment.clone() } else { format!("{path}.{segment}") };
+            if !self.contains(&next)
+                && !path.is_empty()
+                && !segment.is_empty()
+                && segment.bytes().all(|b| b.is_ascii_digit())
+            {
+                next = format!("{path}[{segment}]");
+            }
+            if !self.contains(&next) {
+                return None;
+            }
+            path = next;
+        }
+
+        self.0.get(path.as_str()).copied()
+    }
+}
+
+pub fn target<'k>(keys: &'k [Key], fragment: &str) -> Option<&'k Key> {
+    Index::new(keys).target(fragment)
 }
 
 pub fn ref_targets(text: &str, keys: &[Key]) -> Vec<String> {

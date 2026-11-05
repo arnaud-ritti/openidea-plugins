@@ -1,7 +1,7 @@
 //! Problems in an OpenAPI document: unresolved `$ref`s, duplicate operationIds
 //! and path parameters that disagree with their path template.
 
-use crate::spec::{Key, Operation, Spec, operations, refs, split_ref, target};
+use crate::spec::{Index, Key, Operation, Spec, exact, operations, refs, split_ref};
 use openidea_plugin::{Diagnostic, Severity};
 use spring_text::range;
 use std::collections::{HashMap, HashSet};
@@ -29,9 +29,11 @@ enum Loaded {
 
 pub fn check(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Fetched) -> Vec<Diagnostic> {
     let ops = operations(text, &spec.keys);
-    let mut found = unresolved_refs(text, spec, read);
-    found.extend(duplicate_operation_ids(text, spec, &ops));
-    found.extend(path_parameters(text, spec, &ops));
+    let by_key = exact(&spec.keys);
+    let index = Index::new(&spec.keys);
+    let mut found = unresolved_refs(text, &index, read);
+    found.extend(duplicate_operation_ids(text, &by_key, &ops));
+    found.extend(path_parameters(text, &by_key, &index, &ops));
     found
 }
 
@@ -41,32 +43,50 @@ fn problem(text: &str, (at, end): (usize, usize), severity: Severity, code: &str
     diagnostic
 }
 
-fn unresolved_refs(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Fetched) -> Vec<Diagnostic> {
+fn unresolved_refs(text: &str, local: &Index, read: &dyn Fn(&str) -> Fetched) -> Vec<Diagnostic> {
+    let found_refs = refs(text);
     let mut files: HashMap<String, Loaded> = HashMap::new();
-    let mut found = Vec::new();
+    for r in &found_refs {
+        let Some((file, _)) = split_ref(&r.target) else {
+            continue;
+        };
+        if file.is_empty() {
+            continue;
+        }
 
-    for r in refs(text) {
+        files.entry(file.to_owned()).or_insert_with(|| match read(file) {
+            Fetched::Missing => Loaded::Missing,
+            Fetched::Unreadable => Loaded::Unreadable,
+            Fetched::Text(_) if file.ends_with(".json") => Loaded::Keys(Vec::new()),
+            Fetched::Text(content) => Loaded::Keys(spring_text::config::yaml(&content)),
+        });
+    }
+
+    let indexes: HashMap<&str, Index> = files
+        .iter()
+        .filter_map(|(file, loaded)| match loaded {
+            Loaded::Keys(keys) => Some((file.as_str(), Index::new(keys))),
+            _ => None,
+        })
+        .collect();
+
+    let mut found = Vec::new();
+    for r in found_refs {
         let Some((file, fragment)) = split_ref(&r.target) else {
             continue;
         };
 
         let message = if file.is_empty() {
-            let resolves = fragment.is_empty() || target(&spec.keys, fragment).is_some();
+            let resolves = fragment.is_empty() || local.target(fragment).is_some();
             (!resolves).then(|| format!("Cannot find `{}`", r.target))
         } else {
-            let loaded = files.entry(file.to_owned()).or_insert_with(|| match read(file) {
-                Fetched::Missing => Loaded::Missing,
-                Fetched::Unreadable => Loaded::Unreadable,
-                Fetched::Text(_) if file.ends_with(".json") => Loaded::Keys(Vec::new()),
-                Fetched::Text(content) => Loaded::Keys(spring_text::config::yaml(&content)),
-            });
-            match loaded {
-                Loaded::Missing => Some(format!("Cannot find file `{file}`")),
-                Loaded::Unreadable => None,
-                Loaded::Keys(_) if file.ends_with(".json") || fragment.is_empty() => None,
-                Loaded::Keys(keys) => {
-                    target(keys, fragment).is_none().then(|| format!("Cannot find `{}`", r.target))
-                }
+            match (&files[file], indexes.get(file)) {
+                (Loaded::Missing, _) => Some(format!("Cannot find file `{file}`")),
+                (Loaded::Unreadable, _) => None,
+                (Loaded::Keys(_), _) if file.ends_with(".json") || fragment.is_empty() => None,
+                (Loaded::Keys(_), index) => index
+                    .is_some_and(|i| i.target(fragment).is_none())
+                    .then(|| format!("Cannot find `{}`", r.target)),
             }
         };
 
@@ -78,7 +98,7 @@ fn unresolved_refs(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Fetched) -> V
     found
 }
 
-fn duplicate_operation_ids(text: &str, spec: &Spec, ops: &[Operation]) -> Vec<Diagnostic> {
+fn duplicate_operation_ids(text: &str, by_key: &Keys, ops: &[Operation]) -> Vec<Diagnostic> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for id in ops.iter().filter_map(|op| op.operation_id.as_deref()).filter(|id| !id.is_empty()) {
         *counts.entry(id).or_default() += 1;
@@ -87,7 +107,7 @@ fn duplicate_operation_ids(text: &str, spec: &Spec, ops: &[Operation]) -> Vec<Di
     ops.iter()
         .filter_map(|op| {
             let id = op.operation_id.as_deref().filter(|id| counts.get(id).is_some_and(|&n| n > 1))?;
-            let value = spec.keys.iter().find(|k| k.key == format!("{}.operationId", op.key))?;
+            let value = by_key.get(format!("{}.operationId", op.key).as_str())?;
             let message = format!("operationId `{id}` is used by more than one operation");
 
             Some(problem(text, (value.value_at, value.value_end), Severity::Error, "duplicate-operation-id", message))
@@ -96,7 +116,7 @@ fn duplicate_operation_ids(text: &str, spec: &Spec, ops: &[Operation]) -> Vec<Di
 }
 
 /// `None` when the parameters can't be read reliably: flow style, or a `$ref` that isn't local.
-fn parameters(keys: &[Key], by_key: &Keys, list: &str) -> Option<Vec<Parameter>> {
+fn parameters(index: &Index, by_key: &Keys, list: &str) -> Option<Vec<Parameter>> {
     if by_key.get(list).is_some_and(|k| !k.value.is_empty()) {
         return None;
     }
@@ -104,8 +124,7 @@ fn parameters(keys: &[Key], by_key: &Keys, list: &str) -> Option<Vec<Parameter>>
     let mut found = Vec::new();
     for i in 0.. {
         let item = format!("{list}[{i}]");
-        let item_children = format!("{item}.");
-        if !keys.iter().any(|k| k.key == item || k.key.starts_with(&item_children)) {
+        if !index.contains(&item) {
             break;
         }
 
@@ -115,7 +134,7 @@ fn parameters(keys: &[Key], by_key: &Keys, list: &str) -> Option<Vec<Parameter>>
                 return None;
             }
 
-            let referenced = &target(keys, fragment)?.key;
+            let referenced = &index.target(fragment)?.key;
             let name = by_key.get(format!("{referenced}.name").as_str())?;
             let location = by_key.get(format!("{referenced}.in").as_str())?;
             found.push(Parameter { name: name.value.clone(), location: location.value.clone(), declared_at: None });
@@ -140,15 +159,14 @@ fn template_names(path: &str) -> Vec<&str> {
     path.split('{').skip(1).filter_map(|rest| rest.split_once('}').map(|(name, _)| name)).collect()
 }
 
-fn path_parameters(text: &str, spec: &Spec, ops: &[Operation]) -> Vec<Diagnostic> {
-    let by_key: Keys = spec.keys.iter().map(|k| (k.key.as_str(), k)).collect();
+fn path_parameters(text: &str, by_key: &Keys, index: &Index, ops: &[Operation]) -> Vec<Diagnostic> {
     let mut found = Vec::new();
 
     for op in ops {
         let path_item = &op.key[..op.key.len() - op.method.len() - 1];
         let (Some(shared), Some(own)) = (
-            parameters(&spec.keys, &by_key, &format!("{path_item}.parameters")),
-            parameters(&spec.keys, &by_key, &format!("{}.parameters", op.key)),
+            parameters(index, by_key, &format!("{path_item}.parameters")),
+            parameters(index, by_key, &format!("{}.parameters", op.key)),
         ) else {
             continue;
         };
@@ -243,5 +261,28 @@ mod tests {
         assert!(found(flow).iter().all(|f| f.2 != "path-parameter"));
         let external = "openapi: 3.0.0\npaths:\n  /a/{id}:\n    get:\n      parameters:\n        - $ref: 'common.yaml#/Pet'\n      responses: {}\n";
         assert!(found(external).iter().all(|f| f.2 != "path-parameter"));
+    }
+
+    #[test]
+    fn checks_a_large_spec_quickly() {
+        let mut text = String::from("openapi: 3.0.0\npaths:\n");
+        for i in 0..3500 {
+            text.push_str(&format!(
+                "  /p{i}/{{id}}:\n    get:\n      operationId: op{i}\n      parameters:\n        - name: id\n          in: path\n      responses:\n        '200':\n          $ref: '#/components/schemas/S{}'\n",
+                i % 200
+            ));
+        }
+        text.push_str("components:\n  schemas:\n");
+        for i in 0..200 {
+            text.push_str(&format!("    S{i}:\n      type: object\n"));
+        }
+        assert!(text.lines().count() > 30_000);
+
+        let started = std::time::Instant::now();
+        let problems = found(&text);
+        let elapsed = started.elapsed();
+        assert!(problems.is_empty());
+        assert!(elapsed.as_millis() < 1000, "took {elapsed:?}");
+        eprintln!("large spec check: {elapsed:?}");
     }
 }
