@@ -20,9 +20,9 @@ Changelogs are checked as you type, without saving.
 |---|---|---|
 | `duplicate-changeset` | error | A changeset with the same id and author is already defined in the file. The first definition is linked. Ids compare as text, so `id: 1` and `id: "1"` are the same. |
 | `incomplete-changeset` | error | A changeset without an id, without an author, or without both. In SQL the message shows `--changeset author:id`. |
-| `unknown-change-type` | warning | A YAML entry under `changes:` or `rollback:` that isn't a built-in Liquibase change type (`createTabel`). |
+| `unknown-change-type` | warning | A YAML entry under `changes:` that isn't a built-in Liquibase change type (`createTabel`). |
 | `unresolved-include` | error | An `include` file or an `includeAll` directory that can't be found. |
-| `missing-header` | warning | A formatted SQL changelog whose first line isn't `--liquibase formatted sql`. |
+| `missing-header` | warning | A formatted SQL changelog whose first non-blank line isn't `--liquibase formatted sql`. |
 
 A quoted SQL author with spaces (`--changeset "Jane Doe":2`) is one author.
 
@@ -87,7 +87,7 @@ records, rather than paths relative to wherever the CLI runs.
 - Includes resolve against `src/main/resources`, `src/test/resources` or the
   project root. Other classpath layouts aren't modelled.
 - Only open files are checked.
-- Unknown change types are reported in YAML only.
+- Unknown change types are reported in YAML only, under `changes:`.
 - Run configurations take fixed arguments, so `rollback-count` and per-changelog
   runs aren't offered.
 

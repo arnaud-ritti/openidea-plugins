@@ -925,7 +925,7 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 
 ### Shared with other plugins
 
-- Diagnostics come only from the `line-markers` provider, and the IDE has no database API: see the Spring plugins section.
+- Diagnostics come only from the `line-markers` provider, and there is no database API: see the Spring plugins rows "Diagnostics have no provider of their own" and "No database API".
 
 ## All plugins
 
