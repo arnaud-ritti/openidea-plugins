@@ -1,12 +1,14 @@
 //! Quarkus Tools for OpenIDEA: completion and checks for Quarkus configuration
 //! files, ported from Quarkus Tools for IntelliJ 2.6.1 (Red Hat, EPL-2.0).
 
+mod java;
+
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::{Error, Invocation, Plugin, Position, register_plugin};
 use spring_text::config::is_config_file;
-use spring_text::index::project_of;
-use spring_text::metadata::{Catalog, Lookup, parse_tsv, properties_completion, yaml_completion};
+use spring_text::index::{Indexes, PROVIDER_BUDGET, project_of};
+use spring_text::metadata::{Catalog, Lookup, Meta, parse_tsv, properties_completion, yaml_completion};
 use spring_text::range;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -29,13 +31,31 @@ pub fn is_quarkus_config(path: &str) -> bool {
     name == "microprofile-config.properties" || (is_config_file(path) && name.starts_with("application"))
 }
 
-#[derive(Default)]
 pub struct QuarkusTools {
+    sources: Indexes<Meta>,
     /// Whether a directory is inside a Quarkus module, by absolute path.
     modules: BTreeMap<String, bool>,
 }
 
+impl Default for QuarkusTools {
+    fn default() -> Self {
+        Self { sources: Indexes::new(&["**/*.java"], java::config_meta), modules: BTreeMap::new() }
+    }
+}
+
 impl QuarkusTools {
+    /// The project's own properties, and whether a whole pass over the project was read.
+    fn project(&mut self, doc: &Document) -> (Catalog, bool) {
+        let mut catalog = Catalog::default();
+        let Some(index) = self.sources.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else {
+            return (catalog, false);
+        };
+        for (_, meta) in index.iter() {
+            catalog.add(meta);
+        }
+        (catalog, index.complete())
+    }
+
     /// Looks for `io.quarkus` in the build files of the file's directory and
     /// its parents, up to the project root: in a multi-module build only the
     /// root (or a parent) may name Quarkus.
@@ -90,7 +110,8 @@ impl Providers for QuarkusTools {
             return Vec::new();
         }
         let Some(at) = offset(&doc.text, at) else { return Vec::new() };
-        let lookup = Lookup(vec![bundled()]);
+        let (project, _) = self.project(doc);
+        let lookup = Lookup(vec![&project, bundled()]);
         if !doc.path.ends_with(".properties") {
             return yaml_completion(&doc.text, at, &lookup);
         }
@@ -157,6 +178,17 @@ mod tests {
         assert_eq!(labels(&complete(PROPS, "quarkus.http.cors.enabled=")), ["true", "false"]);
         assert_eq!(find(&complete(YAML, "quarkus:\n  http:\n    po"), "port").insert_text, "port: ");
         assert!(complete(PROPS, "# quarkus.").is_empty());
+    }
+
+    #[test]
+    fn completes_project_config_keys() {
+        let host = quarkus_project();
+        host.add_file("src/main/java/org/acme/GreetingResource.java",
+            "class G { @ConfigProperty(name = \"greeting.message\", defaultValue = \"hello\") String message; }");
+        let items = complete(PROPS, "greeting.");
+        let message = find(&items, "greeting.message");
+        assert_eq!(message.detail.as_deref(), Some("String"));
+        assert_eq!(message.documentation.as_deref(), Some("Default: `hello`"));
     }
 
     #[test]
