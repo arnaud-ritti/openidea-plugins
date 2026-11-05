@@ -2,6 +2,8 @@
 
 #[allow(dead_code)]
 mod manifest;
+#[allow(dead_code)]
+mod osv;
 
 use openidea_plugin::providers::Providers;
 use openidea_plugin::views::{View, Viewport, Views};
