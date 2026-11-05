@@ -1,0 +1,72 @@
+id = "aritti.liquibase"
+name = "Liquibase Changelogs"
+version = "0.1.0"
+description = "Liquibase changelog support for XML, YAML and formatted SQL. Flags duplicate and incomplete changesets, unknown change types, missing includes and missing formatted SQL headers while you type; completes change types and their attributes in YAML and changeset comments in SQL; Go to Definition on include; New › Liquibase Changelog templates; status, validate, update-sql and update run configurations for projects with a liquibase.properties. Independent implementation, not affiliated with Liquibase Inc. or JetBrains."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.1.0: first release. Live checks (duplicate and incomplete changesets, unknown change types in YAML, unresolved include and includeAll, formatted SQL header), YAML and formatted SQL completion, Go to Definition on include, changelog templates and Liquibase CLI run configurations. Change type and attribute names from the Liquibase 4.29 XSD (Apache-2.0)."
+categories = ["tools", "linters"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-language:xml", "on-language:yaml", "on-language:sql"]
+
+[capabilities]
+required = ["project.read"]
+
+[[contributes.providers]]
+kinds = ["line-markers"]
+languages = ["xml", "yaml", "sql"]
+
+[[contributes.providers]]
+kinds = ["definition"]
+languages = ["xml", "yaml"]
+
+[[contributes.providers]]
+kinds = ["completion"]
+languages = ["yaml", "sql"]
+
+[[contributes.runDetectors]]
+id = "status"
+name = "Liquibase: status"
+files = ["liquibase.properties"]
+command = "liquibase"
+args = ["status", "--verbose"]
+
+[[contributes.runDetectors]]
+id = "validate"
+name = "Liquibase: validate"
+files = ["liquibase.properties"]
+command = "liquibase"
+args = ["validate"]
+
+[[contributes.runDetectors]]
+id = "update-sql"
+name = "Liquibase: update-sql (preview, no changes)"
+files = ["liquibase.properties"]
+command = "liquibase"
+args = ["update-sql"]
+
+[[contributes.runDetectors]]
+id = "update"
+name = "Liquibase: update (writes to the database)"
+files = ["liquibase.properties"]
+command = "liquibase"
+args = ["update"]
+
+[[contributes.fileTemplates]]
+id = "changelog-xml"
+name = "Liquibase Changelog (XML)"
+extension = "xml"
+path = "templates/changelog.xml"
+
+[[contributes.fileTemplates]]
+id = "changelog-yaml"
+name = "Liquibase Changelog (YAML)"
+extension = "yaml"
+path = "templates/changelog.yaml"
+
+[[contributes.fileTemplates]]
+id = "changelog-sql"
+name = "Liquibase Changelog (Formatted SQL)"
+extension = "sql"
+path = "templates/changelog.sql"

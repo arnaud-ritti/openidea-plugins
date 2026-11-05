@@ -1,0 +1,9 @@
+Liquibase Changelogs
+Copyright (c) 2026 Arnaud RITTI. Licensed under the MIT License (LICENSE).
+
+The change type and attribute names in src/catalog.rs were taken from the
+Liquibase 4.29 changelog schema (dbchangelog-4.29.xsd), Copyright Liquibase
+Inc., licensed under the Apache License 2.0. The schema itself is not included.
+
+Liquibase is a trademark of Liquibase Inc. This plugin is not affiliated with
+or endorsed by Liquibase Inc. or JetBrains.
