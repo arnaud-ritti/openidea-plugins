@@ -927,6 +927,30 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 
 - Diagnostics come only from the `line-markers` provider, and there is no database API: see the Spring plugins rows "Diagnostics have no provider of their own" and "No database API".
 
+## aritti.openapi (clean-room, inspired by com.intellij.swagger)
+
+Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
+
+### Not implemented
+
+| Feature of the original | Why | API that would unlock it |
+|---|---|---|
+| Preview opened automatically for any OpenAPI file | `customEditors.patterns` match file names only; an OpenAPI file is a generic `.yaml`/`.json`. Other names need Open With | A content matcher on custom editors (first-line regex or top-level key), as languages have `first-line` |
+| Schema validation for JSON specs, and without editing the file | No way to register a schema with the built-in `yaml-language-server` / `vscode-json-language-server`, so the plugin inserts a modeline into the YAML file (same gap as kube-explorer) | Schema associations for built-in language servers |
+| Rename of a component everywhere, find usages of a schema, hover with the target's definition | No `rename`, `references` or `hover` provider kinds | Those provider kinds |
+| Structure view of a spec | `syntax-provider` outline only runs for plugin-owned languages; `yaml` is built in | An outline provider for any language |
+| Problems while typing | No `document-changed` event or diagnostics provider (see Symfony section) | Same |
+| Multi-file specs in the preview | Web views have no network and can't read project files | A read-only project file API for web views (or posting files from code, possible today, not done) |
+
+### Implementation limits
+
+- Editing features cover YAML only (no JSON scanner).
+- Flow-style mappings are only seen for `$ref`.
+- No file-name completion in `$ref`: `find_files` is too slow for the 50 ms budget.
+- The endpoints view re-scans the project on each render.
+- The dark theme is a colour inversion.
+- A missing `$ref` file is told apart from an unreadable one by treating `NotFound` and `Invalid` as missing: see "Missing files are reported as `Invalid`" in the Liquibase section.
+
 ## All plugins
 
 Checked against the host and frontend source of v0.1.37 on 2026-11-05.
