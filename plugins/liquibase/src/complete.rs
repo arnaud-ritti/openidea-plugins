@@ -80,12 +80,16 @@ pub fn yaml(text: &str, at: usize) -> Vec<CompletionItem> {
     let indent = typed_at - line_start;
     let rest = &text[at..end.max(at)];
     let word_end = at + rest.find(|c: char| c == ':' || c.is_whitespace()).unwrap_or(rest.len());
+    let has_colon = text[word_end..end.max(word_end)].trim_start().starts_with(':');
     let replace = range(text, typed_at, word_end);
     let child = " ".repeat(indent + 2);
 
     keys_under(&without_indices(&parent))
         .into_iter()
         .map(|(key, nested)| {
+            if has_colon {
+                return CompletionItem { replace: Some(replace), ..CompletionItem::new(key, CompletionKind::Property) };
+            }
             if key == "changeSet" {
                 let i = &child;
                 return CompletionItem {

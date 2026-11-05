@@ -338,6 +338,11 @@ mod tests {
         assert!(item(&items, "changeSet").snippet);
         assert!(labels(&items).contains(&"includeAll"));
 
+        let existing = format!("{SET}        - createTable:\n            tab: x");
+        let caret = existing.len() - ": x".len();
+        let items = Liquibase.completion(&doc(y, &existing), openidea_plugin::text::position(&existing, caret), None);
+        assert_eq!(item(&items, "tableName").insert_text, "tableName");
+
         assert!(complete_at_end(y, "databaseChangeLog:\n  - changeSet:\n      author: ").is_empty());
         assert!(complete_at_end("/project/src/main/resources/application.yml", "spring:\n  ").is_empty());
     }
