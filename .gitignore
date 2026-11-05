@@ -3,3 +3,5 @@ dist/
 *.oiplugin
 *.key
 .DS_Store
+.claude/worktrees/
+.superpowers/
