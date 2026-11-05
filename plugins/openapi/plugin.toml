@@ -13,3 +13,7 @@ activation = ["on-event:file-opened", "on-event:file-saved"]
 
 [capabilities]
 required = ["project.read", "events"]
+
+[[contributes.providers]]
+kinds = ["completion", "definition", "code-actions"]
+languages = ["yaml"]

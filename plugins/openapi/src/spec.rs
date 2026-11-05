@@ -188,6 +188,26 @@ pub fn ref_targets(text: &str, keys: &[Key]) -> Vec<String> {
         .collect()
 }
 
+pub fn schema_url(version: &str) -> Option<&'static str> {
+    match version {
+        "2.0" => Some("https://spec.openapis.org/oas/2.0/schema/2017-08-27"),
+        v if v.starts_with("3.0.") => Some("https://spec.openapis.org/oas/3.0/schema/2024-10-18"),
+        v if v.starts_with("3.1.") => Some("https://spec.openapis.org/oas/3.1/schema/2025-11-23"),
+        v if v.starts_with("3.2.") => Some("https://spec.openapis.org/oas/3.2/schema/2025-11-23"),
+        _ => None,
+    }
+}
+
+const MODELINE: &str = "# yaml-language-server: $schema=";
+
+pub fn modeline(text: &str, version: &str) -> Option<String> {
+    if text.contains(MODELINE) {
+        return None;
+    }
+
+    schema_url(version).map(|url| format!("{MODELINE}{url}\n"))
+}
+
 #[cfg(test)]
 pub(crate) const PETSTORE: &str = "openapi: 3.0.3
 info:
