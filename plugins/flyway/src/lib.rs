@@ -4,6 +4,7 @@
 //! - Migration file names are checked against the configured naming scheme.
 
 mod checks;
+mod complete;
 mod config;
 mod naming;
 
@@ -11,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use openidea_plugin::host;
-use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Project, register_plugin};
+use openidea_plugin::providers::{CompletionItem, Document, Providers};
+use openidea_plugin::text::offset;
+use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project, register_plugin};
 use spring_text::config::is_config_file;
 use spring_text::index::project_of;
 
@@ -22,8 +25,7 @@ const TITLE: &str = "Flyway";
 
 #[derive(Default)]
 pub struct Flyway {
-    /// Placeholder names of the last config read (completion, Task 6).
-    #[allow(dead_code)] // read by completion in a later task
+    /// Placeholder names of the last config read.
     placeholders: Vec<String>,
     /// Paths this instance published problems for.
     flagged: BTreeSet<String>,
@@ -199,7 +201,19 @@ impl Plugin for Flyway {
     }
 }
 
-register_plugin!(Flyway);
+impl Providers for Flyway {
+    fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        let Some(at) = offset(&doc.text, at) else { return Vec::new() };
+        match doc.language.as_str() {
+            "sql" => complete::placeholders(&doc.text, at, &self.placeholders),
+            "ini" if is_flyway_config(&doc.path) => complete::conf_keys(&doc.text, at),
+            "toml" if is_flyway_config(&doc.path) => complete::toml_keys(&doc.text, at),
+            _ => Vec::new(),
+        }
+    }
+}
+
+register_plugin!(Flyway, providers);
 
 #[cfg(test)]
 mod tests {
@@ -328,5 +342,20 @@ mod tests {
         let host = MockHost::install().with_capabilities(&["project.read", "events"]);
         assert_eq!(Flyway::default().run_command("validate", &host.invocation(), None).unwrap(), None);
         assert_eq!(host.notifications()[0].body, "Allow running flyway for Flyway Migrations in Settings › Plugins.");
+    }
+
+    #[test]
+    fn completion_uses_project_placeholders_and_file_names() {
+        let host = host();
+        host.add_file("flyway.conf", "flyway.placeholders.tenant=acme\n");
+        let mut flyway = Flyway::default();
+        flyway.handle_events(&[Event::FileOpened(format!("{DIR}/V1__init.sql"))], &host.invocation());
+
+        let sql = Document { path: format!("{DIR}/V3__x.sql"), language: "sql".into(), version: 1, text: "${te".into() };
+        assert!(flyway.completion(&sql, Position::new(0, 4), None).iter().any(|i| i.label == "tenant"));
+
+        let conf = |path: &str| Document { path: path.into(), language: "ini".into(), version: 1, text: "flyway.".into() };
+        assert!(!flyway.completion(&conf("/project/flyway.conf"), Position::new(0, 7), None).is_empty());
+        assert!(flyway.completion(&conf("/project/app.conf"), Position::new(0, 7), None).is_empty());
     }
 }
