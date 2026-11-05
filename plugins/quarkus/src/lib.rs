@@ -64,6 +64,7 @@ impl QuarkusTools {
         let Ok(root) = project.root() else { return false };
         let root = root.trim_end_matches('/');
         let start = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        // ponytail: answers (negatives too) are kept for the plugin's lifetime; invalidate on build-file save events if users hit it
         if let Some(&known) = self.modules.get(start) {
             return known;
         }
@@ -90,7 +91,7 @@ impl QuarkusTools {
 fn profile_items(text: &str, at: usize) -> Vec<CompletionItem> {
     let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
     let typed = text[line_start..at].trim_start();
-    if !typed.is_empty() && (!typed.starts_with('%') || typed.contains('.')) {
+    if !typed.is_empty() && (!typed.starts_with('%') || typed.contains(['.', '=', ':'])) {
         return Vec::new();
     }
     let from = at - typed.len();
@@ -134,8 +135,14 @@ fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool) -> Vec<Diag
 }
 
 impl Providers for QuarkusTools {
-    /// Publishes the file's problems; there are no gutter markers.
+    /// Publishes the file's problems; there are no gutter markers. Java documents only refresh the index.
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        if doc.path.ends_with(".java") {
+            if self.uses_quarkus(&doc.path) {
+                self.sources.for_document(&doc.path, &doc.text, PROVIDER_BUDGET);
+            }
+            return Vec::new();
+        }
         if !is_quarkus_config(&doc.path) {
             return Vec::new();
         }
@@ -250,6 +257,29 @@ mod tests {
         let text = "server.x=1\n%dev.quarkus.http.po";
         assert_eq!(find(&complete(PROPS, text), "quarkus.http.port").replace, Some(range(text, 16, text.len())));
         assert_eq!(labels(&complete(PROPS, "%test.quarkus.http.ssl.client-auth=")), ["none", "request", "required"]);
+        assert!(profile_items("%dev=", 5).is_empty());
+        assert!(profile_items("%dev:", 5).is_empty());
+    }
+
+    #[test]
+    fn sees_java_edits_without_waiting_for_the_index_ttl() {
+        let host = quarkus_project();
+        let java = "/project/src/main/java/org/acme/Mail.java";
+        let before = "class M { @ConfigProperty(name = \"app.mail.from\") String from; }";
+        let after = "class M { @ConfigProperty(name = \"app.mail.from\") String from; @ConfigProperty(name = \"app.mail.to\") String to; }";
+        host.add_file("src/main/java/org/acme/Mail.java", before);
+        let mut tools = QuarkusTools::default();
+        let typed = "app.mail.";
+        let items = tools.completion(&doc(PROPS, typed), position(typed, typed.len()), None);
+        assert!(labels(&items).contains(&"app.mail.from"));
+        assert!(!labels(&items).contains(&"app.mail.to"));
+        assert!(tools.line_markers(&doc(java, after)).is_empty());
+        let items = tools.completion(&doc(PROPS, typed), position(typed, typed.len()), None);
+        assert!(labels(&items).contains(&"app.mail.to"));
+        let text = "app.mail.to=x\n";
+        tools.line_markers(&doc(PROPS, text));
+        assert!(host.diagnostics().get(PROPS).is_none_or(|d| d.is_empty()));
+        assert!(host.diagnostics().get(java).is_none());
     }
 
     #[test]

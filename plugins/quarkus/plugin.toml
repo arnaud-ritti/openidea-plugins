@@ -22,6 +22,10 @@ required = ["project.read"]
 kinds = ["completion", "line-markers"]
 languages = ["properties", "yaml"]
 
+[[contributes.providers]]
+kinds = ["line-markers"]
+languages = ["java"]
+
 [[contributes.commands]]
 id = "open-code-quarkus"
 title = "Quarkus: Open code.quarkus.io"

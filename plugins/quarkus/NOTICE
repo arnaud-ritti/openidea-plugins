@@ -1,3 +1,42 @@
+quarkus-properties.tsv is derived from the quarkus-config-model.json and
+quarkus-config-javadoc.json files (META-INF/quarkus-config-doc/) of the
+io.quarkus artifacts quarkus-core, quarkus-arc, quarkus-vertx,
+quarkus-vertx-http, quarkus-rest, quarkus-rest-jackson, quarkus-rest-client,
+quarkus-jackson, quarkus-hibernate-orm, quarkus-hibernate-orm-panache,
+quarkus-hibernate-validator, quarkus-datasource, quarkus-agroal,
+quarkus-jdbc-postgresql, quarkus-jdbc-mysql, quarkus-jdbc-h2,
+quarkus-reactive-pg-client, quarkus-flyway, quarkus-liquibase,
+quarkus-smallrye-health, quarkus-smallrye-openapi,
+quarkus-smallrye-fault-tolerance, quarkus-smallrye-jwt, quarkus-micrometer,
+quarkus-opentelemetry, quarkus-oidc, quarkus-oidc-client, quarkus-security,
+quarkus-messaging-kafka, quarkus-kafka-client, quarkus-scheduler,
+quarkus-cache, quarkus-redis-client, quarkus-mongodb-client, quarkus-qute,
+quarkus-mailer, quarkus-grpc, quarkus-websockets-next,
+quarkus-container-image-jib, quarkus-kubernetes, quarkus-logging-json and
+quarkus-config-yaml, and of their -deployment jars, at version 3.40.1:
+property names, types, defaults, deprecations, value hints and the first
+sentence of each description.
+
+Quarkus 3.40.1
+Copyright the Quarkus authors
+
+Licensed under the Apache License, Version 2.0; the full text follows below.
+
+The mp.* keys and the log level values come from the static-properties/
+directory of Quarkus Tools for IntelliJ 2.6.1
+(redhat-developer/intellij-quarkus, be058542ce55eda5a72d3b35a205d3027e8a906f).
+Copyright Red Hat, Inc. Licensed under the Eclipse Public License 2.0; a copy
+of the License is in LICENSE.
+
+Regenerate the file with scripts/gen-metadata.py.
+
+Source code: this plugin's source repository, directory `plugins/quarkus`.
+
+
+==============================================================================
+Apache License 2.0
+==============================================================================
+
 
                                  Apache License
                            Version 2.0, January 2004

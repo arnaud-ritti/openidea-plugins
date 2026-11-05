@@ -81,7 +81,7 @@ impl Catalog {
     }
 }
 
-/// `data/boot-properties.tsv`, see `scripts/gen-metadata.py`.
+/// The TSV a plugin's `scripts/gen-metadata.py` writes.
 pub fn parse_tsv(text: &str) -> Meta {
     let mut meta = Meta::default();
     for line in text.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {

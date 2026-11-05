@@ -10,13 +10,13 @@ Ported from Red Hat's Quarkus Tools for IntelliJ (EPL-2.0), `com.redhat.devtools
 - Quarkus: Open code.quarkus.io (Find Action) opens the project generator in the browser.
 - Dev Mode run configurations: `mvn quarkus:dev`, `gradle quarkusDev` and `quarkus dev`.
 
-The plugin acts only in Quarkus modules, found by an `io.quarkus` mention in the nearest `pom.xml`, `build.gradle` or `build.gradle.kts` up to the project root. The answer is cached per directory, so after adding `io.quarkus` to a build file, reload the plugin.
+The plugin acts only in Quarkus modules, found by an `io.quarkus` mention in the nearest `pom.xml`, `build.gradle` or `build.gradle.kts` up to the project root. The answer is cached per directory, so after adding `io.quarkus` to a build file, reload the plugin. Gradle builds that declare the Quarkus plugin only in `gradle/libs.versions.toml` (`alias(libs.plugins.quarkus)`) aren't detected.
 
 The IDE itself provides Go to Definition and Find Usages between keys and Java code.
 
 Where keys come from:
 
-- Quarkus 3.40.1's own configuration metadata for a curated set of extensions, bundled in `data/quarkus-properties.tsv` (Apache-2.0, see `data/NOTICE`). Regenerate it with `python3 -I scripts/gen-metadata.py 3.40.1 data/quarkus-properties.tsv [extra-artifact-id…]`.
+- Quarkus 3.40.1's own configuration metadata for a curated set of extensions, bundled in `data/quarkus-properties.tsv` (Apache-2.0, see `NOTICE`). Regenerate it with `python3 -I scripts/gen-metadata.py 3.40.1 data/quarkus-properties.tsv [extra-artifact-id…]`.
 - The MicroProfile Config keys of the original plugin's static metadata.
 - `@ConfigProperty` and `@ConfigMapping` declarations in the project's Java sources.
 
@@ -29,6 +29,8 @@ Dev Mode run configurations:
 - `./mvnw` and `./gradlew` can't be run (a `process:` program must be on `PATH` or absolute).
 
 Not ported: Java-side MicroProfile/Quarkus language server features (hover, go to definition, code lens, inlay hints, JAX-RS symbols, Java diagnostics and quick fixes), Qute support, the in-IDE project wizard (use code.quarkus.io), debugger auto-attach to Dev Mode and the run dashboard, named-map entries in completion (`quarkus.datasource."name".*`), and keys from extensions outside the bundled set. See `LIMITATIONS.md`.
+
+Source code: this plugin's source repository, directory `plugins/quarkus`.
 
 ```sh
 cargo test
