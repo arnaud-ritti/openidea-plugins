@@ -51,6 +51,7 @@ pub fn placeholders(text: &str, at: usize, project: &[String]) -> Vec<Completion
     }
 
     let from = at - typed.len();
+    let end = if text[at..].starts_with('}') { at + 1 } else { at };
     let defaults = DEFAULT_PLACEHOLDERS.iter().map(|(name, detail)| (*name, *detail, CompletionKind::Constant));
     let custom = project
         .iter()
@@ -64,7 +65,7 @@ pub fn placeholders(text: &str, at: usize, project: &[String]) -> Vec<Completion
             item.detail = Some(detail.to_owned());
             item.insert_text = format!("{name}}}");
             item.filter_text = Some(name.to_owned());
-            replacing(text, from, at, &mut item);
+            replacing(text, from, end, &mut item);
             item
         })
         .collect()
@@ -135,6 +136,11 @@ mod tests {
         let user = items.iter().find(|i| i.label == "flyway:user").unwrap();
         assert_eq!(user.insert_text, "flyway:user}");
         assert_eq!(user.replace, Some(Range::new(Position::new(0, 16), Position::new(0, 18))));
+
+        let closed = "select ${fl}";
+        let items = placeholders(closed, 11, &[]);
+        let user = items.iter().find(|i| i.label == "flyway:user").unwrap();
+        assert_eq!(user.replace, Some(Range::new(Position::new(0, 9), Position::new(0, 12))));
 
         assert!(placeholders("select '${done}' ", 17, &[]).is_empty(), "closed placeholder");
         assert!(placeholders("select 1", 8, &[]).is_empty());

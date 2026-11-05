@@ -18,17 +18,19 @@ use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, P
 use spring_text::config::is_config_file;
 use spring_text::index::project_of;
 
-use config::{Config, is_flyway_config, load, location_glob, migration_files};
+use config::{Config, is_flyway_config, load, location_glob, migration_files, vendor_prefixes};
 use naming::{Kind, Name, next_version, parse, version_key};
 
 const TITLE: &str = "Flyway";
 
 #[derive(Default)]
 pub struct Flyway {
-    /// Placeholder names of the last config read.
-    placeholders: Vec<String>,
+    /// Placeholder names by project root.
+    placeholders: BTreeMap<String, Vec<String>>,
     /// Paths this instance published problems for.
     flagged: BTreeSet<String>,
+    /// Project roots scanned by this instance; problems from before it started are unknown.
+    scanned: BTreeSet<String>,
     /// When `clean` was asked for the first time.
     clean_asked: Option<Instant>,
 }
@@ -40,30 +42,36 @@ fn root_relative<'a>(path: &'a str, root: &str) -> &'a str {
 impl Flyway {
     fn scan(&mut self, project: &Project) -> (Config, Vec<String>, BTreeMap<String, Vec<Diagnostic>>) {
         let config = load(project);
-        self.placeholders = config.placeholders.clone();
         let files = migration_files(project, &config);
         let root = project.root().unwrap_or_default();
-        let results = checks::check(&root, &files, &config.naming);
+        self.placeholders.insert(root.clone(), config.placeholders.clone());
+        let vendors = vendor_prefixes(&config.locations, &root);
+        let results = checks::check(&root, &files, &config.naming, &vendors);
         (config, files, results)
     }
 
-    fn publish(&mut self, results: &BTreeMap<String, Vec<Diagnostic>>, everything: bool) {
-        let paths: BTreeSet<&String> = results.keys().chain(self.flagged.iter()).collect();
+    fn publish(&mut self, root: &str, results: &BTreeMap<String, Vec<Diagnostic>>, everything: bool) {
+        let everything = self.scanned.insert(root.to_owned()) || everything;
+        let prefix = format!("{}/", root.trim_end_matches('/'));
+        let flagged_here: BTreeSet<String> = self.flagged.iter().filter(|path| path.starts_with(&prefix)).cloned().collect();
+        let paths: BTreeSet<&String> = results.keys().chain(flagged_here.iter()).collect();
         for path in paths {
             let diagnostics = results.get(path).map(Vec::as_slice).unwrap_or_default();
-            if diagnostics.is_empty() && !self.flagged.contains(path) && !everything {
+            if diagnostics.is_empty() && !flagged_here.contains(path) && !everything {
                 continue;
             }
 
             let _ = host::publish_diagnostics(path, diagnostics);
         }
 
-        self.flagged = results.iter().filter(|(_, list)| !list.is_empty()).map(|(path, _)| path.clone()).collect();
+        self.flagged.retain(|path| !path.starts_with(&prefix));
+        self.flagged.extend(results.iter().filter(|(_, list)| !list.is_empty()).map(|(path, _)| path.clone()));
     }
 
     fn check_command(&mut self, project: &Project) {
         let (config, _, results) = self.scan(project);
-        self.publish(&results, true);
+        let root = project.root().unwrap_or_default();
+        self.publish(&root, &results, true);
 
         if results.is_empty() {
             let locations = config.locations.join(", ");
@@ -197,7 +205,8 @@ impl Plugin for Flyway {
         let Some(project) = project_of(path) else { return };
 
         let (_, _, results) = self.scan(&project);
-        self.publish(&results, false);
+        let root = project.root().unwrap_or_default();
+        self.publish(&root, &results, false);
     }
 }
 
@@ -205,7 +214,16 @@ impl Providers for Flyway {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(at) = offset(&doc.text, at) else { return Vec::new() };
         match doc.language.as_str() {
-            "sql" => complete::placeholders(&doc.text, at, &self.placeholders),
+            "sql" => {
+                let project = self
+                    .placeholders
+                    .iter()
+                    .filter(|(root, _)| doc.path.starts_with(&format!("{}/", root.trim_end_matches('/'))))
+                    .max_by_key(|(root, _)| root.len())
+                    .map(|(_, names)| names.as_slice())
+                    .unwrap_or_default();
+                complete::placeholders(&doc.text, at, project)
+            }
             "ini" if is_flyway_config(&doc.path) => complete::conf_keys(&doc.text, at),
             "toml" if is_flyway_config(&doc.path) => complete::toml_keys(&doc.text, at),
             _ => Vec::new(),
@@ -254,6 +272,50 @@ mod tests {
         host.set_setting("locations", "\"filesystem:none\"");
         flyway.handle_events(&[Event::FileSaved(format!("{DIR}/V2_bad.sql"))], &host.invocation());
         assert!(host.diagnostics().is_empty(), "{:?}", host.diagnostics());
+    }
+
+    fn problem(path: &str) -> BTreeMap<String, Vec<Diagnostic>> {
+        let range = openidea_plugin::Range::new(Position::new(0, 0), Position::new(0, 0));
+        BTreeMap::from([(path.to_owned(), vec![Diagnostic::new(range, Severity::Error, "x")])])
+    }
+
+    #[test]
+    fn publishing_one_project_leaves_the_others_problems() {
+        let host = MockHost::install();
+        let mut flyway = Flyway::default();
+        flyway.publish("/a", &problem("/a/V1__x.sql"), true);
+        flyway.publish("/b", &problem("/b/V1__x.sql"), false);
+        assert_eq!(host.diagnostics().len(), 2);
+        assert!(!host.diagnostics()["/a/V1__x.sql"].is_empty());
+
+        flyway.publish("/b", &BTreeMap::new(), false);
+        assert!(!host.diagnostics().contains_key("/b/V1__x.sql"));
+        assert!(!host.diagnostics()["/a/V1__x.sql"].is_empty());
+    }
+
+    #[test]
+    fn the_first_scan_of_a_root_clears_stale_problems() {
+        let host = MockHost::install();
+        let clean = BTreeMap::from([("/a/V1__x.sql".to_owned(), Vec::new())]);
+        let range = openidea_plugin::Range::new(Position::new(0, 0), Position::new(0, 0));
+        host::publish_diagnostics("/a/V1__x.sql", &[Diagnostic::new(range, Severity::Error, "old")]).unwrap();
+        let mut flyway = Flyway::default();
+        flyway.publish("/a", &clean, false);
+        assert!(!host.diagnostics().contains_key("/a/V1__x.sql"));
+    }
+
+    #[test]
+    fn placeholders_do_not_leak_across_projects() {
+        let host = MockHost::install();
+        let mut flyway = Flyway::default();
+        flyway.placeholders.insert("/a".into(), vec!["tenant".into()]);
+        flyway.placeholders.insert("/b".into(), vec!["other".into()]);
+        let sql = |path: &str| Document { path: path.into(), language: "sql".into(), version: 1, text: "${".into() };
+        let labels = |items: Vec<CompletionItem>| items.into_iter().map(|i| i.label).collect::<Vec<_>>();
+        let in_a = labels(flyway.completion(&sql("/a/x.sql"), Position::new(0, 2), None));
+        assert!(in_a.contains(&"tenant".to_owned()) && !in_a.contains(&"other".to_owned()));
+        assert!(!labels(flyway.completion(&sql("/c/x.sql"), Position::new(0, 2), None)).contains(&"tenant".to_owned()));
+        drop(host);
     }
 
     #[test]

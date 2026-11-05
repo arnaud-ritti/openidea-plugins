@@ -33,12 +33,22 @@ fn push_values(pairs: &mut Vec<(String, String)>, key: &str, value: &str) {
     }
 }
 
-// ponytail: single-line values only; use the toml crate when multi-line arrays show up
+// ponytail: arrays of up to 6 lines; use the toml crate for longer or nested ones
 fn toml_settings(text: &str) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
     let mut table = String::new();
-    for line in text.lines() {
-        let line = strip_comment(line).trim();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let mut line = strip_comment(line).trim().to_owned();
+        if line.split_once('=').is_some_and(|(_, value)| value.trim().starts_with('[') && !value.contains(']')) {
+            for next in lines.by_ref().take(5) {
+                line.push_str(strip_comment(next).trim());
+                if next.contains(']') {
+                    break;
+                }
+            }
+        }
+        let line = line.as_str();
         if let Some(header) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
             table = header.trim().to_owned();
             continue;
@@ -166,6 +176,19 @@ pub fn load(project: &Project) -> Config {
     config
 }
 
+/// Directories (relative, with a trailing `/`) that precede `{vendor}` in the locations.
+pub fn vendor_prefixes(locations: &[String], root: &str) -> Vec<String> {
+    let mut prefixes = Vec::new();
+    for location in locations {
+        let Some((before, _)) = location.split_once("{vendor}") else { continue };
+        let path = before.split_once(':').map_or(before, |(_, path)| path);
+        let path = path.strip_prefix("./").unwrap_or(path);
+        let path = path.strip_prefix(root.trim_end_matches('/')).unwrap_or(path).trim_matches('/');
+        prefixes.push(if path.is_empty() { String::new() } else { format!("{path}/") });
+    }
+    prefixes
+}
+
 // ponytail: main resources only; add src/test/resources when test migrations matter
 pub fn location_glob(location: &str, root: &str) -> Option<String> {
     let location = location.replace("{vendor}", "*");
@@ -244,6 +267,21 @@ mod tests {
             settings("/project/src/main/resources/application.properties", "spring.flyway.sql-migration-prefix=M\nserver.port=8080\n"),
             pairs(&[("flyway.sql-migration-prefix", "M")])
         );
+    }
+
+    #[test]
+    fn reads_multi_line_toml_arrays() {
+        let toml = "[flyway]\nlocations = [\n  \"filesystem:sql\", # first\n  'filesystem:more',\n]\nsqlMigrationPrefix = \"M\"\n";
+        assert_eq!(
+            settings("/project/flyway.toml", toml),
+            pairs(&[("flyway.locations", "filesystem:sql"), ("flyway.locations", "filesystem:more"), ("flyway.sqlMigrationPrefix", "M")])
+        );
+    }
+
+    #[test]
+    fn vendor_prefixes_precede_the_vendor_segment() {
+        let locations = ["classpath:db/migration/{vendor}".to_owned(), "filesystem:/project/sql/{vendor}/".to_owned(), "classpath:db/plain".to_owned()];
+        assert_eq!(vendor_prefixes(&locations, "/project"), ["db/migration/", "sql/"]);
     }
 
     #[test]
