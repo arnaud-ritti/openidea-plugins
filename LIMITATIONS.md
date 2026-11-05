@@ -895,6 +895,38 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 - **Why:** same as *Problems aren't re-checked while typing* in the Symfony section.
 - **Workaround:** for a rename done outside the IDE, run Flyway: Check Migrations.
 
+## Liquibase Changelogs (aritti.liquibase, clean-room)
+
+Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
+
+### Run configurations can't confirm or ask
+
+- **Blocks:** `rollback-count` (it needs a count), per-changelog runs, and any confirmation before `update`.
+- **Why:** `runDetectors` take fixed `args` and match marker files at the project root only (`crates/ide-host/src/plugins/run_detectors.rs:134-140`). `update` runs on one click, and a `liquibase.properties` outside the root isn't detected.
+- **Would need:** run configurations computed by code, or `ui.show-input` / a confirm dialog.
+
+### No file-exists API
+
+- **Blocks:** a reliable "include not found" check.
+- **Why:** include resolution reads each included file with `read_file`, and `includeAll` uses `find_files`, which skips hidden and gitignored directories.
+- **Would need:** `workspace.project.exists(path)` or a `stat` call.
+
+### Missing files are reported as `Invalid`
+
+- **Blocks:** telling a missing file from a bad path by error kind.
+- **Why:** the host's `read_file` returns `Error::Invalid("...: no such file")` for a missing path (`crates/ide-plugin/src/sandbox.rs:17`, via `crates/ide-plugin/src/wit_host.rs:323-326`), while MockHost returns `NotFound`. Existence checks must treat both as absent.
+- **Would need:** `NotFound` for a missing file, or an `exists` / `stat` call.
+
+### No source roots or classpath
+
+- **Blocks:** resolving `classpath:` includes exactly.
+- **Why:** they are resolved against `src/main/resources` and `src/test/resources` by path heuristics.
+- **Would need:** `project.source-roots()`.
+
+### Shared with other plugins
+
+- Diagnostics come only from the `line-markers` provider, and the IDE has no database API: see the Spring plugins section.
+
 ## All plugins
 
 Checked against the host and frontend source of v0.1.37 on 2026-11-05.
