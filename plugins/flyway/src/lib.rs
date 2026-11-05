@@ -8,7 +8,7 @@ mod config;
 mod naming;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use openidea_plugin::host;
 use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Project, register_plugin};
@@ -27,8 +27,7 @@ pub struct Flyway {
     placeholders: Vec<String>,
     /// Paths this instance published problems for.
     flagged: BTreeSet<String>,
-    /// When `clean` was asked for the first time (Task 5).
-    #[allow(dead_code)] // read by the terminal commands in a later task
+    /// When `clean` was asked for the first time.
     clean_asked: Option<Instant>,
 }
 
@@ -130,6 +129,38 @@ impl Flyway {
         }
         Ok(())
     }
+
+    fn run_flyway(&mut self, goal: &str) -> Result<Option<String>, Error> {
+        if goal == "clean" {
+            let confirmed = self.clean_asked.take().is_some_and(|asked| asked.elapsed() < Duration::from_secs(30));
+            if !confirmed {
+                self.clean_asked = Some(Instant::now());
+                host::notify(
+                    NotificationLevel::Warning,
+                    TITLE,
+                    "Clean drops every object in the schemas Flyway manages. Run Flyway: Clean (Drops All Objects)… again within 30 seconds to confirm.",
+                );
+                return Ok(None);
+            }
+        }
+
+        let maven = host::setting_string("runner").as_deref() == Some("mvn");
+        let program = if maven { "mvn" } else { "flyway" };
+        let mut args = vec![if maven { format!("flyway:{goal}") } else { goal.to_owned() }];
+        // ponytail: no shell quoting; quote-aware split when someone needs spaces in a value
+        args.extend(host::setting_string("arguments").unwrap_or_default().split_whitespace().map(str::to_owned));
+
+        match host::open_terminal(&format!("Flyway {goal}"), program, &args) {
+            Ok(()) => {}
+            Err(Error::Denied(_)) => host::notify(
+                NotificationLevel::Warning,
+                TITLE,
+                &format!("Allow running {program} for Flyway Migrations in Settings › Plugins."),
+            ),
+            Err(e) => return Err(e),
+        }
+        Ok(None)
+    }
 }
 
 impl Plugin for Flyway {
@@ -145,6 +176,7 @@ impl Plugin for Flyway {
                 self.copy_next_version(&project)?;
                 Ok(None)
             }
+            "info" | "validate" | "migrate" | "repair" | "clean" => self.run_flyway(id),
             _ => Err(Error::NotFound(format!("command {id}"))),
         }
     }
@@ -255,5 +287,46 @@ mod tests {
             host.notifications()[0].body,
             "Next migration: V8__<description>.sql in src/main/resources/db/migration. Allow the clipboard for Flyway Migrations in Settings › Plugins to copy it."
         );
+    }
+
+    #[test]
+    fn runs_flyway_goals_in_a_terminal() {
+        let host = host();
+        host.set_setting("arguments", "\"-environment=dev\"");
+        Flyway::default().run_command("migrate", &host.invocation(), None).unwrap();
+        host.set_setting("runner", "\"mvn\"");
+        Flyway::default().run_command("info", &host.invocation(), None).unwrap();
+
+        let runs: Vec<(String, String, Vec<String>)> = host.terminals().into_iter().map(|t| (t.title, t.program, t.args)).collect();
+        assert_eq!(runs, [
+            ("Flyway migrate".to_owned(), "flyway".to_owned(), vec!["migrate".to_owned(), "-environment=dev".to_owned()]),
+            ("Flyway info".to_owned(), "mvn".to_owned(), vec!["flyway:info".to_owned(), "-environment=dev".to_owned()]),
+        ]);
+    }
+
+    #[test]
+    fn clean_runs_only_when_confirmed() {
+        let host = host();
+        let mut flyway = Flyway::default();
+        flyway.run_command("clean", &host.invocation(), None).unwrap();
+        assert!(host.terminals().is_empty());
+        assert_eq!(host.notifications()[0].level, NotificationLevel::Warning);
+        assert_eq!(
+            host.notifications()[0].body,
+            "Clean drops every object in the schemas Flyway manages. Run Flyway: Clean (Drops All Objects)… again within 30 seconds to confirm."
+        );
+
+        flyway.run_command("clean", &host.invocation(), None).unwrap();
+        assert_eq!(host.terminals()[0].args, ["clean"]);
+
+        flyway.run_command("clean", &host.invocation(), None).unwrap();
+        assert_eq!(host.terminals().len(), 1, "confirmation is used up");
+    }
+
+    #[test]
+    fn asks_for_the_program_when_denied() {
+        let host = MockHost::install().with_capabilities(&["project.read", "events"]);
+        assert_eq!(Flyway::default().run_command("validate", &host.invocation(), None).unwrap(), None);
+        assert_eq!(host.notifications()[0].body, "Allow running flyway for Flyway Migrations in Settings › Plugins.");
     }
 }
