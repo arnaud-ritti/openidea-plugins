@@ -2,7 +2,7 @@ use super::*;
 use crate::manifest::{Dep, Ecosystem};
 use crate::osv::tests::{JACKSON, dep};
 use openidea_plugin::mock::MockHost;
-use openidea_plugin::{HttpRequest, HttpResponse};
+use openidea_plugin::{Event, HttpRequest, HttpResponse, Severity};
 use serde_json::{Value, json};
 
 pub const CAPS: &[&str] = &["project.read", "storage", "events", "net:api.osv.dev"];
@@ -133,4 +133,88 @@ fn a_hostile_advisory_id_is_never_fetched_or_stored() {
     assert_eq!(findings[0].advisories[0].id, "../querybatch");
     assert!(host.requests().iter().all(|r| r.method == "POST"));
     assert!(host.storage().keys().all(|k| !k.starts_with("v:")));
+}
+
+pub const POM: &str = "<project>\n  <dependencies>\n    <dependency><groupId>org.yaml</groupId><artifactId>snakeyaml</artifactId><version>2.2</version></dependency>\n    <dependency><!-- 😀 --><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>2.12.3</version></dependency>\n  </dependencies>\n</project>\n";
+pub const PACKAGE: &str = "{\n  \"dependencies\": {\n    \"lodash\": \"^4.17.15\"\n  }\n}\n";
+pub const PACKAGE_LOCK: &str = r#"{"lockfileVersion": 3, "packages": {"": {}, "node_modules/lodash": {"version": "4.17.15"}}}"#;
+
+fn opened(host: &MockHost, path: &str) {
+    DependencyAudit::default().handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+}
+
+#[test]
+fn opening_a_pom_publishes_a_diagnostic_on_the_dependency() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("pom.xml", POM);
+
+    opened(&host, "/project/pom.xml");
+
+    let problems = &host.diagnostics()["/project/pom.xml"];
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0].severity, Severity::Error);
+    assert_eq!(problems[0].code.as_deref(), Some("GHSA-57j2-w4cx-62h2"));
+    assert_eq!(problems[0].source.as_deref(), Some("OSV"));
+    assert!(problems[0].message.ends_with("Upgrade to 2.12.7.1."), "{}", problems[0].message);
+}
+
+#[test]
+fn diagnostic_range_counts_utf16_columns() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("pom.xml", POM);
+
+    opened(&host, "/project/pom.xml");
+
+    let range = host.diagnostics()["/project/pom.xml"][0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.character), (3, 84, 100));
+}
+
+#[test]
+fn package_json_uses_the_sibling_lockfile() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("web/package.json", PACKAGE);
+    host.add_file("web/package-lock.json", PACKAGE_LOCK);
+
+    opened(&host, "/project/web/package.json");
+
+    assert_eq!(host.diagnostics()["/project/web/package.json"][0].range.start.line, 2);
+}
+
+#[test]
+fn auto_check_off_sends_nothing() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.set_setting("autoCheck", "false");
+    host.add_file("pom.xml", POM);
+
+    opened(&host, "/project/pom.xml");
+
+    assert!(host.requests().is_empty());
+    assert!(host.diagnostics().is_empty());
+}
+
+#[test]
+fn other_files_are_ignored() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+
+    DependencyAudit::default().handle_events(&[Event::FileSaved("/project/src/App.java".into())], &host.invocation());
+
+    assert!(host.requests().is_empty());
+}
+
+#[test]
+fn an_osv_outage_logs_and_keeps_quiet() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(|_| Err(Error::Failed("offline".into())));
+    host.add_file("pom.xml", POM);
+
+    opened(&host, "/project/pom.xml");
+
+    assert!(host.diagnostics().is_empty());
+    assert!(host.notifications().is_empty());
+    assert!(host.logs().iter().any(|(_, line)| line.contains("OSV check of /project/pom.xml: offline")));
 }
