@@ -2,84 +2,11 @@
 //! project's metadata files and its `@ConfigurationProperties` classes.
 
 use serde_json::Value;
-use spring_text::config::canonical;
+use spring_text::metadata::{Catalog, Deprecation, Meta, Prop, parse_tsv};
 use spring_text::java::{self, JavaFile, TypeRef};
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-/// The type of a prefix bound to something we can't see (a `@Bean` method's
-/// return type, a superclass): any key below it is accepted.
-const OPEN: &str = "*";
 const MAX_DESCRIPTION: usize = 110;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Prop {
-    pub name: String,
-    /// Simple type names: `Map<String,String>`.
-    pub ty: String,
-    pub default: String,
-    pub deprecated: Option<Deprecation>,
-    pub description: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Deprecation {
-    /// Level `error`: the key no longer does anything.
-    pub removed: bool,
-    /// May be empty.
-    pub replacement: String,
-}
-
-impl Prop {
-    /// A map (or an open prefix): any key below it binds.
-    pub fn open(&self) -> bool {
-        self.ty.starts_with("Map<") || self.ty == "Properties" || self.ty == OPEN
-    }
-
-    pub fn boolean(&self) -> bool {
-        matches!(self.ty.as_str(), "Boolean" | "boolean")
-    }
-
-    fn open_prefix(name: String) -> Self {
-        Prop { name, ty: OPEN.into(), ..Prop::default() }
-    }
-}
-
-/// What one source declares.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Meta {
-    pub props: Vec<Prop>,
-    /// Key (`logging.level.values` for a map's values) → its values.
-    pub hints: Vec<(String, Vec<String>)>,
-}
-
-#[derive(Default)]
-pub struct Catalog {
-    /// Canonical name → property.
-    props: BTreeMap<String, Prop>,
-    hints: BTreeMap<String, Vec<String>>,
-    /// Canonical names of the groups of two segments or more properties are in.
-    groups: BTreeSet<String>,
-}
-
-impl Catalog {
-    pub fn add(&mut self, meta: &Meta) {
-        for p in &meta.props {
-            let name = canonical(&p.name);
-            let mut group = name.as_str();
-            while let Some((parent, _)) = group.rsplit_once('.') {
-                if parent.contains('.') {
-                    self.groups.insert(parent.to_owned());
-                }
-                group = parent;
-            }
-            self.props.entry(name).or_insert_with(|| p.clone());
-        }
-        for (name, values) in &meta.hints {
-            self.hints.entry(canonical(name)).or_insert_with(|| values.clone());
-        }
-    }
-}
 
 /// Spring Boot's own properties.
 pub fn bundled() -> &'static Catalog {
@@ -89,107 +16,6 @@ pub fn bundled() -> &'static Catalog {
         c.add(&parse_tsv(include_str!("../data/boot-properties.tsv")));
         c
     })
-}
-
-/// `data/boot-properties.tsv`, see `scripts/gen-metadata.py`.
-fn parse_tsv(text: &str) -> Meta {
-    let mut meta = Meta::default();
-    for line in text.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
-        let mut f = line.split('\t');
-        let name = f.next().unwrap_or_default();
-        if let Some(hint) = name.strip_prefix('@') {
-            meta.hints.push((hint.to_owned(), f.map(str::to_owned).collect()));
-            continue;
-        }
-        let mut next = || f.next().unwrap_or_default().to_owned();
-        let (ty, default, deprecation, description) = (next(), next(), next(), next());
-        let deprecated = deprecation.split_once(':').map(|(level, replacement)| Deprecation {
-            removed: level == "e",
-            replacement: replacement.to_owned(),
-        });
-        meta.props.push(Prop { name: name.to_owned(), ty, default, deprecated, description });
-    }
-    meta
-}
-
-/// Several catalogs, the first ones winning.
-pub struct Lookup<'a>(pub Vec<&'a Catalog>);
-
-impl Lookup<'_> {
-    pub fn prop(&self, key: &str) -> Option<&Prop> {
-        let key = canonical(key);
-        self.0.iter().find_map(|c| c.props.get(&key))
-    }
-
-    fn group(&self, canonical: &str) -> bool {
-        self.0.iter().any(|c| c.groups.contains(canonical))
-    }
-
-    /// The map property `key` is an entry of (`logging.level` for `logging.level.com.acme`).
-    pub fn map_of(&self, key: &str) -> Option<&Prop> {
-        let key = canonical(key);
-        let mut at = key.len();
-        while let Some(dot) = key[..at].rfind('.') {
-            if let Some(p) = self.0.iter().find_map(|c| c.props.get(&key[..dot])).filter(|p| p.open()) {
-                return Some(p);
-            }
-            at = dot;
-        }
-        None
-    }
-
-    fn hints(&self, key: &str) -> Option<&Vec<String>> {
-        let key = canonical(key);
-        self.0.iter().find_map(|c| c.hints.get(&key))
-    }
-
-    /// The values `key` can take: its hints, the map's value hints, booleans.
-    pub fn values(&self, key: &str) -> Vec<String> {
-        if let Some(h) = self.hints(key) {
-            return h.clone();
-        }
-        let boolean = match self.prop(key) {
-            Some(p) => p.boolean(),
-            None => match self.map_of(key) {
-                Some(map) => {
-                    if let Some(h) = self.hints(&format!("{}.values", map.name)) {
-                        return h.clone();
-                    }
-                    map.ty.ends_with(",Boolean>")
-                }
-                None => false,
-            },
-        };
-        if boolean { vec!["true".into(), "false".into()] } else { Vec::new() }
-    }
-
-    /// The map keys hinted for `map` (`root` for `logging.level`).
-    pub fn map_keys(&self, map: &str) -> Vec<String> {
-        self.hints(&format!("{map}.keys")).cloned().unwrap_or_default()
-    }
-
-    /// Every property, each once.
-    pub fn all(&self) -> impl Iterator<Item = &Prop> {
-        let mut seen = BTreeSet::new();
-        self.0.iter().flat_map(|c| c.props.iter()).filter(move |(k, _)| seen.insert(k.as_str())).map(|(_, p)| p)
-    }
-
-    /// The written parent of `key` when it is not a property although that
-    /// parent is a known group (`spring.datasource` for `spring.datasource.urll`).
-    /// Keys below unknown groups, maps or list items are never reported.
-    pub fn unknown<'k>(&self, key: &'k str) -> Option<&'k str> {
-        if key.contains("${") || key.contains("#{") {
-            return None;
-        }
-        let base = key.split('[').next().unwrap_or(key);
-        let c = canonical(base);
-        if self.prop(base).is_some() || self.group(&c) || self.map_of(base).is_some() {
-            return None;
-        }
-        let (parent, _) = c.rsplit_once('.')?;
-        let (written, _) = base.rsplit_once('.')?;
-        (parent.contains('.') && self.group(parent)).then_some(written)
-    }
 }
 
 /// `java.util.Map<java.lang.String,Foo$Bar>` → `Map<String,Foo.Bar>`.
@@ -348,6 +174,7 @@ fn bind(file: &JavaFile, text: &str, i: usize, prefix: &str, depth: usize, out: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spring_text::metadata::Lookup;
 
     #[test]
     fn reads_the_bundled_metadata() {

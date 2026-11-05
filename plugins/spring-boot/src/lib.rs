@@ -7,14 +7,14 @@
 mod cron;
 mod meta;
 
-use meta::{Catalog, Lookup, Meta, Prop, bundled};
-use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
+use meta::bundled;
+use openidea_plugin::providers::{CodeAction, CompletionItem, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::{Diagnostic, Error, Invocation, Plugin, Position, Range, Severity, TextEdit, host, register_plugin};
-use spring_text::config::{self, Key, canonical, is_config_file, yaml_parent};
+use spring_text::config::{self, Key, canonical, is_config_file};
+use spring_text::metadata::{Catalog, Lookup, Meta, properties_completion, yaml_completion};
 use spring_text::index::{Indexes, PROVIDER_BUDGET};
 use spring_text::{contains, java, range};
-use std::collections::BTreeMap;
 
 const SOURCES: &[&str] = &["**/META-INF/*spring-configuration-metadata.json", "**/*.java"];
 
@@ -127,156 +127,6 @@ fn cron_problems(text: &str) -> Vec<Diagnostic> {
             }
             let error = cron::check(&s.value)?;
             Some(Diagnostic::new(range(text, s.at, s.end), Severity::Error, error).code("invalid-cron"))
-        })
-        .collect()
-}
-
-fn documentation(p: &Prop) -> Option<String> {
-    let mut doc = p.description.clone();
-    if !p.default.is_empty() {
-        doc += &format!("\n\nDefault: `{}`", p.default);
-    }
-    if let Some(dep) = &p.deprecated {
-        doc += &match dep.replacement.as_str() {
-            "" => "\n\nDeprecated.".to_owned(),
-            r => format!("\n\nDeprecated: use `{r}`."),
-        };
-    }
-    let doc = doc.trim();
-    (!doc.is_empty()).then(|| doc.to_owned())
-}
-
-fn prop_item(label: &str, insert: String, p: Option<&Prop>, kind: CompletionKind, replace: Range) -> CompletionItem {
-    let deprecated = p.is_some_and(|p| p.deprecated.is_some());
-    CompletionItem {
-        detail: p.map(|p| p.ty.clone()).filter(|t| !t.is_empty() && t != "*"),
-        insert_text: insert,
-        replace: Some(replace),
-        sort_text: Some(format!("{}{label}", u8::from(deprecated))),
-        documentation: p.and_then(documentation),
-        ..CompletionItem::new(label, kind)
-    }
-}
-
-fn value_items(lookup: &Lookup, key: &str, replace: Range) -> Vec<CompletionItem> {
-    lookup
-        .values(key)
-        .into_iter()
-        .map(|v| CompletionItem { replace: Some(replace), ..CompletionItem::new(&v, CompletionKind::Value) })
-        .collect()
-}
-
-fn usable(p: &&Prop) -> bool {
-    p.deprecated.as_ref().is_none_or(|d| !d.removed)
-}
-
-/// The line around byte `at`: its start and its end without trailing blanks.
-fn line_bounds(text: &str, at: usize) -> (usize, usize) {
-    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
-    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
-    (start, start + text[start..end].trim_end().len())
-}
-
-fn properties_completion(text: &str, at: usize, lookup: &Lookup) -> Vec<CompletionItem> {
-    let (start, end) = line_bounds(text, at);
-    let line = &text[start..end.max(at)];
-    if line.trim_start().starts_with(['#', '!']) {
-        return Vec::new();
-    }
-    let sep = line.find(['=', ':']).map(|i| start + i);
-    if let Some(sep) = sep.filter(|&s| at > s) {
-        let after = &text[sep + 1..end.max(sep + 1)];
-        let value_at = (sep + 1 + after.len() - after.trim_start().len()).min(at);
-        return value_items(lookup, text[start..sep].trim(), range(text, value_at, end.max(at)));
-    }
-    let key_start = (start + line.len() - line.trim_start().len()).min(at);
-    let key_end = sep.map_or(end, |s| start + text[start..s].trim_end().len()).max(at);
-    let typed = &text[key_start..at];
-    let done = typed.rsplit_once('.').map(|(d, _)| canonical(d) + ".");
-    let replace = range(text, key_start, key_end);
-    let assign = if sep.is_some() { "" } else { "=" };
-    let mut items = Vec::new();
-    for p in lookup.all().filter(usable) {
-        if done.as_ref().is_some_and(|d| !canonical(&p.name).starts_with(d.as_str())) {
-            continue;
-        }
-        if p.open() {
-            for k in lookup.map_keys(&p.name) {
-                let name = format!("{}.{k}", p.name);
-                items.push(prop_item(&name, format!("{name}{assign}"), Some(p), CompletionKind::Property, replace));
-            }
-            let name = format!("{}.", p.name);
-            items.push(prop_item(&name, name.clone(), Some(p), CompletionKind::Module, replace));
-        } else {
-            items.push(prop_item(&p.name, format!("{}{assign}", p.name), Some(p), CompletionKind::Property, replace));
-        }
-    }
-    items
-}
-
-/// Completion of a YAML key offers the next segment under the parent: a
-/// property (`url: `) or a group to nest (`datasource:` and a new line).
-fn yaml_completion(text: &str, at: usize, lookup: &Lookup) -> Vec<CompletionItem> {
-    let (parent, typed) = yaml_parent(text, at);
-    if typed.starts_with('#') {
-        return Vec::new();
-    }
-    let (line_start, end) = line_bounds(text, at);
-    let typed_at = at - typed.len();
-    let join = |a: &str, b: &str| if a.is_empty() || b.is_empty() { format!("{a}{b}") } else { format!("{a}.{b}") };
-    if let Some(colon) = typed.find(": ") {
-        let value = &typed[colon + 1..];
-        let value_at = typed_at + colon + 1 + value.len() - value.trim_start().len();
-        let key = join(&parent, typed[..colon].trim().trim_matches(['"', '\'']));
-        return value_items(lookup, &key, range(text, value_at, end.max(at)));
-    }
-    let typed_done = typed.rfind('.').map_or("", |d| &typed[..=d]);
-    let done = join(&parent, typed_done.trim_end_matches('.'));
-    let depth = if done.is_empty() { 0 } else { done.split('.').count() };
-    let prefix = if done.is_empty() { String::new() } else { canonical(&done) + "." };
-    let rest = &text[at..end.max(at)];
-    let word_end = at + rest.find(|c: char| c == ':' || c.is_whitespace()).unwrap_or(rest.len());
-    let has_colon = text[word_end..end.max(word_end)].trim_start().starts_with(':');
-    let nested = format!(":\n{}", " ".repeat(typed_at - line_start + 2));
-    let replace = range(text, typed_at, word_end);
-
-    // Segment → (property when it is one, properties below it).
-    let mut found: BTreeMap<String, (Option<&Prop>, usize)> = BTreeMap::new();
-    if let Some(map) = lookup.prop(&done).filter(|p| p.open()) {
-        for k in lookup.map_keys(&map.name) {
-            found.entry(k).or_insert((Some(map), 0));
-        }
-    }
-    for p in lookup.all().filter(usable) {
-        if !canonical(&p.name).starts_with(&prefix) {
-            continue;
-        }
-        let segments: Vec<&str> = p.name.split('.').collect();
-        let Some(seg) = segments.get(depth) else { continue };
-        let entry = found.entry((*seg).to_owned()).or_insert((None, 0));
-        if segments.len() == depth + 1 {
-            entry.0 = Some(p);
-        } else {
-            entry.1 += 1;
-        }
-    }
-    found
-        .into_iter()
-        .map(|(seg, (prop, below))| {
-            let map_key = prop.is_some_and(|p| canonical(&p.name) == canonical(&done));
-            let leaf = prop.filter(|p| below == 0 && (map_key || !p.open()));
-            let suffix = match (has_colon, leaf) {
-                (true, _) => "",
-                (false, Some(_)) => ": ",
-                (false, None) => &nested,
-            };
-            let kind = if leaf.is_some() { CompletionKind::Property } else { CompletionKind::Module };
-            let mut item = prop_item(&seg, format!("{typed_done}{seg}{suffix}"), prop, kind, replace);
-            item.filter_text = Some(format!("{typed_done}{seg}"));
-            if prop.is_none() {
-                item.detail = Some(format!("{below} properties"));
-            }
-            item
         })
         .collect()
 }

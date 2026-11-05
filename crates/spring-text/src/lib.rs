@@ -9,6 +9,7 @@ pub mod diagram;
 pub mod index;
 pub mod java;
 pub mod kotlin;
+pub mod metadata;
 pub mod tree;
 pub mod xml;
 
