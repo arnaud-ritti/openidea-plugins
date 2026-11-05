@@ -3,12 +3,12 @@
 
 mod java;
 
-use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, Providers};
+use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
-use openidea_plugin::{Error, Invocation, Plugin, Position, register_plugin};
-use spring_text::config::is_config_file;
+use openidea_plugin::{Diagnostic, Error, Invocation, Plugin, Position, Severity, host, register_plugin};
+use spring_text::config::{self, is_config_file};
 use spring_text::index::{Indexes, PROVIDER_BUDGET, project_of};
-use spring_text::metadata::{Catalog, Lookup, Meta, parse_tsv, properties_completion, yaml_completion};
+use spring_text::metadata::{Catalog, Lookup, Meta, parse_tsv, properties_completion, strip_profile, yaml_completion};
 use spring_text::range;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -104,7 +104,51 @@ fn profile_items(text: &str, at: usize) -> Vec<CompletionItem> {
         .collect()
 }
 
+fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool) -> Vec<Diagnostic> {
+    let keys = config::keys(path, text);
+    let mut out = Vec::new();
+    for k in &keys {
+        let base = strip_profile(&k.key);
+        if base.is_empty() {
+            continue;
+        }
+        let range = range(text, k.at, k.end);
+        if let Some(dep) = lookup.prop(base).and_then(|p| p.deprecated.as_ref()) {
+            let message = match dep.replacement.as_str() {
+                "" => format!("`{base}` is deprecated."),
+                r => format!("`{base}` is deprecated. Use `{r}` instead."),
+            };
+            let mut d = Diagnostic::new(range, Severity::Warning, message).code("deprecated-property");
+            d.deprecated = true;
+            out.push(d);
+        } else if complete
+            // A YAML parent (`http:` with keys below) is checked through its children.
+            && !keys.iter().any(|o| o.key.len() > k.key.len() && o.key.starts_with(&k.key) && matches!(o.key.as_bytes()[k.key.len()], b'.' | b'['))
+            && let Some(group) = lookup.unknown(base)
+        {
+            let message = format!("`{base}` is not a known property of `{group}`.");
+            out.push(Diagnostic::new(range, Severity::Warning, message).code("unknown-property"));
+        }
+    }
+    out
+}
+
 impl Providers for QuarkusTools {
+    /// Publishes the file's problems; there are no gutter markers.
+    fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        if !is_quarkus_config(&doc.path) {
+            return Vec::new();
+        }
+        let found = if self.uses_quarkus(&doc.path) {
+            let (project, complete) = self.project(doc);
+            problems(&doc.path, &doc.text, &Lookup(vec![&project, bundled()]), complete)
+        } else {
+            Vec::new()
+        };
+        let _ = host::publish_diagnostics(&doc.path, &found);
+        Vec::new()
+    }
+
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         if !is_quarkus_config(&doc.path) || !self.uses_quarkus(&doc.path) {
             return Vec::new();
@@ -137,6 +181,7 @@ mod tests {
     use openidea_plugin::providers::{CompletionItem, Document, Providers};
     use openidea_plugin::text::position;
     use spring_text::range;
+    use openidea_plugin::Range;
 
     const PROPS: &str = "/project/src/main/resources/application.properties";
     const YAML: &str = "/project/src/main/resources/application.yaml";
@@ -230,6 +275,49 @@ mod tests {
         for p in ["/p/bootstrap.properties", "/p/messages.properties", "/p/applications.yml"] {
             assert!(!is_quarkus_config(p), "{p}");
         }
+    }
+
+    /// (code, text under the squiggle) of each problem.
+    fn codes<'t, 'p>(text: &'t str, problems: &'p [Diagnostic]) -> Vec<(&'p str, &'t str)> {
+        problems.iter().map(|d| {
+            let (a, b) = (offset(text, d.range.start).unwrap(), offset(text, d.range.end).unwrap());
+            (d.code.as_deref().unwrap_or_default(), &text[a..b])
+        }).collect()
+    }
+
+    #[test]
+    fn warns_about_deprecated_and_unknown_keys() {
+        let host = quarkus_project();
+        let text = "quarkus.hibernate-orm.database.generation=update\nquarkus.http.portt=8080\n%dev.quarkus.http.prot=1\nquarkus.acme-extension.x=1\napp.greeting=hi\nquarkus.log.category.\"io.acme\".level=DEBUG\n";
+        QuarkusTools::default().line_markers(&doc(PROPS, text));
+        let diagnostics = host.diagnostics();
+        let problems = &diagnostics[PROPS];
+        assert_eq!(codes(text, problems), [
+            ("deprecated-property", "quarkus.hibernate-orm.database.generation"),
+            ("unknown-property", "quarkus.http.portt"),
+            ("unknown-property", "%dev.quarkus.http.prot"),
+        ]);
+        assert!(problems[0].deprecated);
+        assert_eq!(problems[0].message, "`quarkus.hibernate-orm.database.generation` is deprecated.");
+        assert_eq!(problems[2].message, "`quarkus.http.prot` is not a known property of `quarkus.http`.");
+    }
+
+    #[test]
+    fn checks_profiled_yaml_keys_as_their_base_key() {
+        let host = quarkus_project();
+        let text = "\"%dev\":\n  quarkus:\n    http:\n      portt: 1\n      port: 8081\n";
+        QuarkusTools::default().line_markers(&doc(YAML, text));
+        assert_eq!(codes(text, &host.diagnostics()[YAML]), [("unknown-property", "portt")]);
+    }
+
+    #[test]
+    fn publishes_nothing_outside_quarkus_modules() {
+        let host = MockHost::install();
+        let stale = Diagnostic::new(Range::default(), Severity::Warning, "stale");
+        host::publish_diagnostics(PROPS, &[stale]).unwrap();
+        assert_eq!(host.diagnostics()[PROPS].len(), 1);
+        QuarkusTools::default().line_markers(&doc(PROPS, "quarkus.http.portt=1\n"));
+        assert!(host.diagnostics().get(PROPS).is_none());
     }
 
     #[test]

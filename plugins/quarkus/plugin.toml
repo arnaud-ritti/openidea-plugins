@@ -19,5 +19,5 @@ activation = [
 required = ["project.read"]
 
 [[contributes.providers]]
-kinds = ["completion"]
+kinds = ["completion", "line-markers"]
 languages = ["properties", "yaml"]
