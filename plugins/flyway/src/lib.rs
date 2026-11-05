@@ -7,6 +7,8 @@
 mod naming;
 #[allow(dead_code)] // consumed by the next tasks
 mod config;
+#[allow(dead_code)] // published by the next task
+mod checks;
 
 use openidea_plugin::{Error, Invocation, Plugin, register_plugin};
 
