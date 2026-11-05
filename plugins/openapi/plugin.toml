@@ -1,0 +1,10 @@
+id = "aritti.openapi"
+name = "OpenAPI"
+version = "0.1.0"
+description = "Editing support for OpenAPI 3 and Swagger 2 files in YAML: $ref completion and navigation, problems for unresolved references, duplicate operationIds and path parameters, the official schema for validation, an endpoints tool window, a Swagger UI preview beside the text, and requests for the HTTP client. Independent implementation, not affiliated with JetBrains or SmartBear."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT AND Apache-2.0"
+change-notes = "0.1.0: first release, with $ref completion and go to definition, problems on open and save, the OpenAPI schema modeline, the endpoints tool window, the Swagger UI preview (bundles Swagger UI 5.34.1, Apache-2.0) and Copy Requests for the HTTP Client."
+categories = ["languages", "tools"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
