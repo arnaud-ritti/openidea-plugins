@@ -80,6 +80,7 @@ pub fn lockfile(path: &str) -> Option<String> {
 pub fn parse(path: &str, text: &str, _lock: Option<&str>) -> Vec<Dep> {
     match kind(path) {
         Some(Kind::Pom) => pom(path, text),
+        Some(Kind::Gradle) => gradle(path, text),
         _ => Vec::new(),
     }
 }
@@ -146,6 +147,44 @@ fn pom(path: &str, text: &str) -> Vec<Dep> {
     deps
 }
 
+fn gradle(path: &str, text: &str) -> Vec<Dep> {
+    let is_name = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
+
+    let mut deps = Vec::new();
+    let mut line_start = 0;
+    for line in text.split_inclusive('\n') {
+        let mut at = 0;
+        while let Some(open) = line[at..].find(['\'', '"']).map(|i| at + i) {
+            let quote = &line[open..=open];
+            let Some(len) = line[open + 1..].find(quote) else {
+                break;
+            };
+            let (from, to) = (open + 1, open + 1 + len);
+            at = to + 1;
+
+            let parts: Vec<&str> = line[from..to].split(':').collect();
+            let [group, artifact, version] = parts[..] else {
+                continue;
+            };
+            if !is_name(group) || !is_name(artifact) || !version.starts_with(|c: char| c.is_ascii_digit()) || version.contains('$') {
+                continue;
+            }
+
+            deps.push(Dep {
+                path: path.to_owned(),
+                ecosystem: Ecosystem::Maven,
+                name: format!("{group}:{artifact}"),
+                version: version.to_owned(),
+                at: (line_start + from, line_start + to),
+                version_at: Some((line_start + to - version.len(), line_start + to)),
+            });
+        }
+        line_start += line.len();
+    }
+
+    deps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +233,26 @@ mod tests {
         let text = format!("{POM}é");
         for end in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
             parse("/p/pom.xml", &text[..end], None);
+        }
+    }
+
+    const GRADLE: &str = "plugins {\n    id 'org.springframework.boot' version '3.1.0'\n}\ndependencies {\n    implementation 'org.yaml:snakeyaml:1.33'\n    implementation(\"com.google.guava:guava:31.0-jre\")\n    implementation \"org.x:y:$v\"\n    implementation 'org.springframework.boot:spring-boot-starter'\n}\n";
+
+    #[test]
+    fn gradle_reads_string_coordinates() {
+        let deps = parse("/p/build.gradle.kts", GRADLE, None);
+
+        assert_eq!(found(&deps), [("org.yaml:snakeyaml", "1.33"), ("com.google.guava:guava", "31.0-jre")]);
+        let (from, to) = deps[1].version_at.unwrap();
+        assert_eq!(&GRADLE[from..to], "31.0-jre");
+        assert_eq!(&GRADLE[deps[0].at.0..deps[0].at.1], "org.yaml:snakeyaml:1.33");
+    }
+
+    #[test]
+    fn gradle_never_panics_on_half_typed_text() {
+        let text = format!("{GRADLE}implementation 'é:é:1' \"é");
+        for end in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+            parse("/p/build.gradle", &text[..end], None);
         }
     }
 }
