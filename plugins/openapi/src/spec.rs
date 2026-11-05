@@ -86,22 +86,20 @@ pub fn refs(text: &str) -> Vec<Ref> {
         if bytes.get(i) != Some(&b':') {
             continue;
         }
-        let at;
-        let end;
         let start = skip_spaces(i + 1);
         let eol = line_end(start);
-        match bytes.get(start) {
+        let (at, end) = match bytes.get(start) {
             Some(&quote @ (b'"' | b'\'')) => {
-                at = start + 1;
-                end = text[at..eol].find(quote as char).map_or(eol, |n| at + n);
+                let at = start + 1;
+                (at, text[at..eol].find(quote as char).map_or(eol, |n| at + n))
             }
             _ => {
-                at = start;
+                let at = start;
                 let stop = text[at..eol].find([',', '}']).map_or(eol, |n| at + n);
                 let stop = text[at..stop].find(" #").map_or(stop, |n| at + n);
-                end = at + text[at..stop].trim_end_matches(' ').len();
+                (at, at + text[at..stop].trim_end_matches(' ').len())
             }
-        }
+        };
         found.push(Ref { target: text[at..end].to_string(), at, end });
         from = end.max(from);
     }

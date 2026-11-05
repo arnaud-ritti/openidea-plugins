@@ -267,7 +267,10 @@ impl Views for OpenApi {
                 };
                 host::open_location(path, line, column)
             }
-            ViewEvent::Button(button) if button == "refresh" => Ok(host::refresh_view(ENDPOINTS)),
+            ViewEvent::Button(button) if button == "refresh" => {
+                host::refresh_view(ENDPOINTS);
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
