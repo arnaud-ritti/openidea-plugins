@@ -5,7 +5,8 @@ mod spec;
 
 use checks::Fetched;
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, Providers};
-use openidea_plugin::text::offset;
+use openidea_plugin::text::{offset, position};
+use openidea_plugin::views::{Body, Button, ListItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
     Diagnostic, Error, Event, Invocation, Location, LogLevel, Plugin, Position, Project, Range, TextEdit, host,
     register_plugin,
@@ -181,7 +182,74 @@ impl Providers for OpenApi {
     }
 }
 
-register_plugin!(OpenApi, providers);
+pub const ENDPOINTS: &str = "endpoints";
+
+// ponytail: re-scans the project on every render; cache per file version if large projects make it slow.
+fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
+    let mut paths = project.find_files("**/*.yaml", 500)?;
+    paths.extend(project.find_files("**/*.yml", 500)?);
+
+    let mut items = Vec::new();
+    let mut files = 0;
+    for path in paths {
+        let Ok(text) = project.read_file(&path) else {
+            continue;
+        };
+        let Some(spec) = spec::parse(&text) else {
+            continue;
+        };
+
+        files += 1;
+        let file_name = path.rsplit('/').next().unwrap_or(&path);
+        for operation in spec::operations(&text, &spec.keys) {
+            let at = position(&text, operation.at);
+            let detail = match &operation.operation_id {
+                Some(id) => format!("{id} · {file_name}"),
+                None => file_name.to_owned(),
+            };
+            let key = format!("{}:{}:{path}", at.line, at.character);
+            items.push(ListItem::new(&key, &format!("{} {}", operation.method, operation.path)).detail(&detail));
+        }
+    }
+
+    Ok((items, files))
+}
+
+impl Views for OpenApi {
+    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, _ctx: &Invocation) -> Result<View, Error> {
+        let Some(project) = host::projects()?.into_iter().next() else {
+            return Ok(View::message("Open a project to list its endpoints."));
+        };
+
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let (items, files) = endpoint_items(&project)?;
+        if items.is_empty() {
+            return Ok(View::message("No OpenAPI files in this project.").button(refresh));
+        }
+
+        let status = format!("{} endpoints in {files} files", items.len());
+        Ok(View::new(Body::List(items)).button(refresh).status(&status))
+    }
+
+    fn handle(&mut self, _view: &str, event: ViewEvent, _ctx: &Invocation) -> Result<(), Error> {
+        match event {
+            ViewEvent::Activate(key) => {
+                let mut parts = key.splitn(3, ':');
+                let (Some(line), Some(column), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+                    return Ok(());
+                };
+                let (Ok(line), Ok(column)) = (line.parse(), column.parse()) else {
+                    return Ok(());
+                };
+                host::open_location(path, line, column)
+            }
+            ViewEvent::Button(button) if button == "refresh" => Ok(host::refresh_view(ENDPOINTS)),
+            _ => Ok(()),
+        }
+    }
+}
+
+register_plugin!(OpenApi, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -289,5 +357,30 @@ mod tests {
         assert_eq!(spec::schema_url("3.1.1"), Some("https://spec.openapis.org/oas/3.1/schema/2025-11-23"));
         assert_eq!(spec::schema_url("3.2.0"), Some("https://spec.openapis.org/oas/3.2/schema/2025-11-23"));
         assert_eq!(spec::schema_url("4.0.0"), None);
+    }
+
+    #[test]
+    fn lists_endpoints_of_every_spec_and_opens_them() {
+        let host = MockHost::install();
+        host.add_file("/project/api/openapi.yaml", PETSTORE);
+        host.add_file("/project/k8s.yml", "kind: Pod\n");
+        let view = OpenApi.render(ENDPOINTS, None, &host.invocation()).unwrap();
+        let Body::List(items) = view.body else { panic!("expected a list") };
+        assert_eq!(
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
+            ["GET /pets", "GET /pets/{petId}", "DELETE /pets/{petId}"]
+        );
+        assert_eq!(items[0].detail.as_deref(), Some("listPets · openapi.yaml"));
+        OpenApi.handle(ENDPOINTS, ViewEvent::Activate(items[1].key.clone()), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations(), [("/project/api/openapi.yaml".to_owned(), 21, 4)]);
+        OpenApi.handle(ENDPOINTS, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert_eq!(host.refreshed_views(), [ENDPOINTS]);
+    }
+
+    #[test]
+    fn says_so_when_no_spec_is_found() {
+        let host = MockHost::install();
+        host.add_file("/project/k8s.yaml", "kind: Pod\n");
+        assert!(matches!(OpenApi.render(ENDPOINTS, None, &host.invocation()).unwrap().body, Body::Message(_)));
     }
 }

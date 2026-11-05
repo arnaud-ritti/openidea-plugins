@@ -9,7 +9,7 @@ categories = ["languages", "tools"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
 
-activation = ["on-event:file-opened", "on-event:file-saved"]
+activation = ["on-event:file-opened", "on-event:file-saved", "on-view:endpoints"]
 
 [capabilities]
 required = ["project.read", "events"]
@@ -17,3 +17,9 @@ required = ["project.read", "events"]
 [[contributes.providers]]
 kinds = ["completion", "definition", "code-actions"]
 languages = ["yaml"]
+
+[[contributes.views]]
+id = "endpoints"
+title = "OpenAPI Endpoints"
+icon = "web"
+location = "right"
