@@ -2,6 +2,8 @@
 
 #[allow(dead_code)]
 mod catalog;
+#[allow(dead_code)]
+mod changelog;
 
 use openidea_plugin::providers::Providers;
 use openidea_plugin::{Error, Invocation, Plugin, register_plugin};
