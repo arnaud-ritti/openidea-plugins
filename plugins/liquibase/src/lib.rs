@@ -20,14 +20,20 @@ impl Plugin for Liquibase {
     }
 }
 
-/// Whether a probe saw the thing; `None` when the host failed for a reason other than absence.
+/// Whether reading a file worked; `None` when the host failed for a reason other than absence.
 /// The host reports a missing file as `Invalid` (and the mock as `NotFound`); an unreadable one as `Failed`.
-fn exists<T>(probe: Result<T, Error>, present: impl Fn(&T) -> bool) -> Option<bool> {
-    match probe {
-        Ok(value) => Some(present(&value)),
+fn file_exists(read: Result<String, Error>) -> Option<bool> {
+    match read {
+        Ok(_) => Some(true),
         Err(Error::NotFound(_) | Error::Invalid(_)) => Some(false),
         Err(_) => None,
     }
+}
+
+/// Whether a directory glob matched a file; `None` on any error, since the host also
+/// answers `Invalid` when the glob doesn't compile (a directory named with `[` or `{`).
+fn has_files(found: Result<Vec<String>, Error>) -> Option<bool> {
+    found.ok().map(|files| !files.is_empty())
 }
 
 /// Where `include`, written in `changelog` (inside `project`, rooted at `root`), points.
@@ -45,9 +51,9 @@ fn target(project: &Project, root: &str, changelog: &str, include: &Include) -> 
         let seen = if include.dir {
             let relative = candidate.strip_prefix(root.trim_end_matches('/')).unwrap_or(&candidate).trim_start_matches('/');
             let glob = if relative.is_empty() { "**/*".to_owned() } else { format!("{relative}/**/*") };
-            exists(project.find_files(&glob, 1), |files| !files.is_empty())
+            has_files(project.find_files(&glob, 1))
         } else {
-            exists(project.read_file(&candidate), |_| true)
+            file_exists(project.read_file(&candidate))
         };
         match seen {
             Some(true) => return Target::Found(candidate),
@@ -221,9 +227,17 @@ mod tests {
 
     #[test]
     fn classifies_read_errors_as_absent_or_unsure() {
-        assert_eq!(exists(Ok(String::new()), |_| true), Some(true));
-        assert_eq!(exists(Err::<String, _>(Error::NotFound("x".into())), |_| true), Some(false));
-        assert_eq!(exists(Err::<String, _>(Error::Invalid("x: no such file".into())), |_| true), Some(false));
-        assert_eq!(exists(Err::<String, _>(Error::Failed("too large".into())), |_| true), None);
+        assert_eq!(file_exists(Ok(String::new())), Some(true));
+        assert_eq!(file_exists(Err(Error::NotFound("x".into()))), Some(false));
+        assert_eq!(file_exists(Err(Error::Invalid("x: no such file".into()))), Some(false));
+        assert_eq!(file_exists(Err(Error::Failed("too large".into()))), None);
+    }
+
+    #[test]
+    fn directory_glob_errors_are_unsure() {
+        assert_eq!(has_files(Ok(vec!["a".into()])), Some(true));
+        assert_eq!(has_files(Ok(Vec::new())), Some(false));
+        assert_eq!(has_files(Err(Error::Invalid("\"a[/**/*\": unclosed".into()))), None);
+        assert_eq!(has_files(Err(Error::Failed("io".into()))), None);
     }
 }
