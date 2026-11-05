@@ -1,0 +1,1125 @@
+//! Kube Explorer for OpenIDEA: a tool window that browses a cluster with
+//! `kubectl` (contexts, namespaces, workloads, config, storage, nodes) and
+//! shows `describe` / diff output in place, YAML in an editor that applies on
+//! save, terminals for logs, shells, attach and port forwards, commands for
+//! the open manifest (apply, dry-run, diff, delete), Kustomize and Helm.
+//!
+//! Every cluster call is a `kubectl` run with the chosen context and
+//! namespace as flags, so the user's kubeconfig is never changed.
+
+mod schema;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{BuildHasher, RandomState};
+
+use openidea_plugin::providers::{CodeAction, Document, Providers};
+use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
+use openidea_plugin::{
+    Context, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Range, host, register_plugin,
+};
+
+pub const TREE: &str = "kube";
+const KUBECTL: &str = "kubectl";
+/// Writes the YAML to edit: the plugin API has no file writes.
+const TEE: &str = "tee";
+const HELM: &str = "helm";
+/// Keeps reads under the 5 s call budget on an unreachable cluster.
+const REQUEST_TIMEOUT: &str = "--request-timeout=4s";
+/// Shows `describe`, YAML and diff output, highlighted; YAML can be edited.
+const PAGE: &str = include_str!("page.html");
+/// Shown in the YAML panel when the IDE blocks the page's script, which Apply and Save to File need.
+const NO_SCRIPTS: &str = "<p id=\"nojs\">Apply and Save to File don't work in this panel: this version of the IDE blocks scripts in plugin pages. \
+    To edit, allow tee for Kube Explorer in Settings &rsaquo; Plugins. The YAML then opens in an editor tab, and saving the file applies it.</p>";
+
+/// A Kubernetes icon of the package (a `fileIcons` entry of `plugin.toml`).
+macro_rules! k8s {
+    ($id:literal) => {
+        concat!("ext:fileIcon/aritti.kube-explorer/", $id)
+    };
+}
+
+/// `kubectl get` resource, tree label and icon.
+const KINDS: &[(&str, &str, &str)] = &[
+    ("pods", "Pods", k8s!("pod")),
+    ("deployments", "Deployments", k8s!("deploy")),
+    ("statefulsets", "Stateful Sets", k8s!("sts")),
+    ("daemonsets", "Daemon Sets", k8s!("ds")),
+    ("jobs", "Jobs", k8s!("job")),
+    ("cronjobs", "Cron Jobs", k8s!("cronjob")),
+    ("services", "Services", k8s!("svc")),
+    ("ingresses", "Ingresses", k8s!("ing")),
+    ("configmaps", "Config Maps", k8s!("cm")),
+    ("secrets", "Secrets", k8s!("secret")),
+    ("persistentvolumeclaims", "Persistent Volume Claims", k8s!("pvc")),
+    ("events", "Events", "bell"),
+    ("nodes", "Nodes", k8s!("node")),
+    ("persistentvolumes", "Persistent Volumes", k8s!("pv")),
+];
+
+/// Kinds whose pods `kubectl logs --all-pods` follows.
+const WORKLOADS: &[&str] = &["deployments", "statefulsets", "daemonsets", "jobs"];
+/// Kinds `kubectl port-forward` takes, and where their ports are.
+const FORWARDABLE: &[(&str, &str)] = &[
+    ("pods", "{.spec.containers[*].ports[*].containerPort}"),
+    ("services", "{.spec.ports[*].port}"),
+    ("deployments", "{.spec.template.spec.containers[*].ports[*].containerPort}"),
+    ("statefulsets", "{.spec.template.spec.containers[*].ports[*].containerPort}"),
+];
+
+#[derive(Default)]
+pub struct KubeExplorer {
+    /// `None`: the kubeconfig's current context / the context's namespace.
+    context: Option<String>,
+    namespace: Option<String>,
+    current_context: Option<String>,
+    /// Children of the tree's expandable keys (`ctx`, `ns`, `kind:<kind>`).
+    children: BTreeMap<String, Result<Vec<String>, String>>,
+    expanded: BTreeSet<String>,
+    /// Kind and name of the selected resource.
+    selected: Option<(String, String)>,
+    confirm_delete: bool,
+    /// Shown instead of the tree.
+    details: Option<Details>,
+    /// Port forward being set up (shown instead of the tree): target and ports.
+    forward: Option<(String, String)>,
+    /// The manifest whose resources the shown dry run would delete.
+    pending_delete: Option<String>,
+}
+
+/// `describe`, YAML or diff output.
+pub struct Details {
+    title: String,
+    text: String,
+    /// `yaml`, `diff` or `text` (highlighting).
+    lang: &'static str,
+    /// Kind and name of the object an editable YAML is of.
+    editing: Option<(String, String)>,
+    /// What the last apply printed.
+    note: Option<String>,
+}
+
+impl KubeExplorer {
+    fn args(&self, rest: &[&str]) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(path) = host::setting_string("kubeconfig").filter(|p| !p.is_empty()) {
+            args.push(format!("--kubeconfig={path}"));
+        }
+        if let Some(context) = &self.context {
+            args.push(format!("--context={context}"));
+        }
+        if let Some(namespace) = &self.namespace {
+            args.push(format!("--namespace={namespace}"));
+        }
+        args.extend(rest.iter().map(|s| (*s).to_owned()));
+        args
+    }
+
+    fn kubectl(&self, rest: &[&str], stdin: Option<&str>) -> Result<String, Error> {
+        let out = host::run_process(KUBECTL, &self.args(rest), stdin)?;
+        if out.status == Some(0) {
+            return Ok(out.stdout);
+        }
+        Err(failure(KUBECTL, &out.stderr, out.status))
+    }
+
+    fn load(&self, parent: &str) -> Result<Vec<String>, String> {
+        if parent == "ctx" {
+            let out = self.kubectl(&["config", "get-contexts", "-o", "name"], None)?;
+            return Ok(out.lines().map(str::to_owned).collect());
+        }
+        let kind = if parent == "ns" { "namespaces" } else { parent.trim_start_matches("kind:") };
+        let label = KINDS.iter().find(|(k, ..)| *k == kind).map_or(kind.to_owned(), |(_, label, _)| label.to_lowercase());
+        let _task = host::begin_task(&format!("Loading {label}"), false);
+        let out = self.kubectl(&["get", kind, "-o", "name", REQUEST_TIMEOUT], None)?;
+        Ok(out.lines().map(|line| line.split_once('/').map_or(line, |(_, name)| name).to_owned()).collect())
+    }
+
+    /// Drops cached children and reloads those of expanded nodes.
+    fn reload(&mut self) {
+        self.children.clear();
+        self.current_context = None;
+        for key in self.expanded.clone() {
+            let loaded = self.load(&key);
+            self.children.insert(key, loaded);
+        }
+        host::refresh_view(TREE);
+    }
+
+    /// `context/namespace` the cluster calls go to, for messages.
+    fn target(&self) -> String {
+        let current = || self.kubectl(&["config", "current-context"], None).ok().map(|out| out.trim().to_owned());
+        let context = self.context.clone().or_else(|| self.current_context.clone()).or_else(current);
+        let context = context.unwrap_or_else(|| "(kubectl unavailable)".into());
+        format!("{context}/{}", self.namespace.as_deref().unwrap_or("(default)"))
+    }
+
+    fn save(&self) {
+        for (key, value) in [("context", &self.context), ("namespace", &self.namespace)] {
+            let _ = match value {
+                Some(v) => host::storage::set(key, v),
+                None => host::storage::delete(key),
+            };
+        }
+    }
+
+    fn show(&mut self, title: String, text: String, lang: &'static str) {
+        self.details = Some(Details { title, text, lang, editing: None, note: None });
+        self.forward = None;
+        self.pending_delete = None;
+        host::refresh_view(TREE);
+    }
+
+    /// The YAML in an editor on a temp file (saving applies it), else in the panel.
+    fn edit_yaml(&mut self, kind: &str, name: &str) -> Result<(), Error> {
+        let _task = host::begin_task(&format!("Loading {kind}/{name}"), false);
+        let text = self.kubectl(&["get", kind, name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
+        let yaml = without_resource_version(&text);
+        let yaml = format!("{}{yaml}", schema::modeline(&yaml).unwrap_or_default());
+        if let Err(e) = self.open_temp_file(kind, name, &yaml) {
+            host::log(LogLevel::Info, &format!("editing {kind}/{name} in the panel: {e}"));
+            self.show_yaml(kind, name, text, None);
+        }
+        Ok(())
+    }
+
+    fn open_temp_file(&self, kind: &str, name: &str, yaml: &str) -> Result<(), Error> {
+        // Unguessable, so another local user can't plant a symlink at it in /tmp.
+        let nonce = RandomState::new().hash_one(0u8) as u32;
+        let path = format!("/tmp/kube-explorer-{}-{}-{nonce:08x}.yaml", file_safe(kind), file_safe(name));
+        let out = host::run_process(TEE, &[path.clone()], Some(yaml))?;
+        if out.status != Some(0) {
+            return Err(failure(TEE, &out.stderr, out.status));
+        }
+        // ponytail: one storage entry per opened file, never pruned; prune by age if 1 MiB gets near.
+        let origin = [self.context.as_deref().unwrap_or(""), self.namespace.as_deref().unwrap_or(""), kind, name];
+        host::storage::set(&format!("edit:{path}"), &origin.join("\n"))?;
+        host::subscribe(EventKind::FileSaved)?;
+        host::open_location(&path, 0, 0)
+    }
+
+    /// Replaces the object a saved temp file was opened for, in the context it came from.
+    fn apply_saved(path: &str) {
+        let Ok(Some(origin)) = host::storage::get(&format!("edit:{path}")) else {
+            return;
+        };
+        let parts: Vec<&str> = origin.split('\n').collect();
+        let [context, namespace, kind, name] = parts[..] else {
+            return;
+        };
+        let given = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+        let origin = KubeExplorer { context: given(context), namespace: given(namespace), ..KubeExplorer::default() };
+        let _task = host::begin_task(&format!("Applying {kind}/{name}"), false);
+        match origin.kubectl(&["replace", "-f", path], None) {
+            Ok(out) => host::notify(NotificationLevel::Info, &format!("Applied {kind}/{name}"), out.trim()),
+            Err(e) => host::notify(NotificationLevel::Error, &format!("Could not apply {kind}/{name}"), &e.to_string()),
+        }
+    }
+
+    fn open_yaml(&mut self, kind: &str, name: &str, note: Option<String>) -> Result<(), Error> {
+        let _task = host::begin_task(&format!("Loading {kind}/{name}"), false);
+        let text = self.kubectl(&["get", kind, name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
+        self.show_yaml(kind, name, text, note);
+        Ok(())
+    }
+
+    fn describe(&mut self, kind: &str, name: &str) -> Result<(), Error> {
+        let _task = host::begin_task(&format!("Describing {kind}/{name}"), false);
+        let text = self.kubectl(&["describe", kind, name, REQUEST_TIMEOUT], None)?;
+        self.show(format!("{kind}/{name}"), text, "yaml");
+        Ok(())
+    }
+
+    fn show_yaml(&mut self, kind: &str, name: &str, text: String, note: Option<String>) {
+        let editing = Some((kind.to_owned(), name.to_owned()));
+        self.details = Some(Details { title: format!("{kind}/{name}"), text, lang: "yaml", editing, note });
+        host::refresh_view(TREE);
+    }
+
+    /// Replaces the edited object; on failure the page keeps the edits and shows why.
+    fn apply_yaml(&mut self, yaml: &str) -> Result<(), Error> {
+        let Some((kind, name)) = self.details.as_ref().and_then(|d| d.editing.clone()) else {
+            return Ok(());
+        };
+        let _task = host::begin_task(&format!("Applying {kind}/{name}"), false);
+        match self.kubectl(&["replace", "-f", "-"], Some(yaml)) {
+            Ok(out) => self.open_yaml(&kind, &name, Some(out.trim().to_owned())),
+            Err(e) => host::post_view_message(TREE, &format!("error:{e}")),
+        }
+    }
+
+    fn render_details(&self, details: &Details) -> View {
+        let page = PAGE
+            .replace("{{lang}}", details.lang)
+            .replace("{{name}}", &escape_html(&details.title.replace('/', "-")))
+            .replace("{{readonly}}", if details.editing.is_some() { "" } else { "readonly" })
+            .replace("{{nojs}}", if details.editing.is_some() { NO_SCRIPTS } else { "" })
+            .replace("{{highlighted}}", &highlight(&details.text, details.lang))
+            .replace("{{text}}", &escape_html(&details.text));
+        let status = match &details.note {
+            Some(note) => format!("{} · {note}", details.title),
+            None => details.title.clone(),
+        };
+        let mut view = View::new(Body::Html(page)).status(&status).button(Button::new("back", "Back").icon("arrow-left"));
+        if details.editing.is_some() {
+            view = view
+                .button(Button::new("apply", "Apply").icon("check"))
+                .button(Button::new("save-file", "Save to File").icon("export"))
+                .button(Button::new("reload-yaml", "Refresh").icon("refresh"));
+        }
+        if self.pending_delete.is_some() {
+            return view.button(Button::new("confirm-delete-manifest", "Confirm Delete").icon("trash"));
+        }
+        self.actions(view)
+    }
+
+    fn start_port_forward(&mut self, kind: &str, name: &str) -> Result<(), Error> {
+        let Some((_, ports_path)) = FORWARDABLE.iter().find(|(k, _)| *k == kind) else {
+            return Ok(());
+        };
+        let found = self.kubectl(&["get", kind, name, "-o", &format!("jsonpath={ports_path}"), REQUEST_TIMEOUT], None)?;
+        // A port served over TCP and UDP is listed twice; forwarding it twice fails.
+        let mut ports: Vec<&str> = Vec::new();
+        for port in found.split_whitespace() {
+            if !ports.contains(&port) {
+                ports.push(port);
+            }
+        }
+        let ports = ports.iter().map(|p| format!("{p}:{p}")).collect::<Vec<_>>().join(" ");
+        self.forward = Some((format!("{kind}/{name}"), ports));
+        self.details = None;
+        host::refresh_view(TREE);
+        Ok(())
+    }
+
+    fn render_forward(&self, target: &str, ports: &str) -> View {
+        let field = Field::new("ports", "Ports (local:remote, separated by spaces)", FieldValue::Text(ports.into()));
+        View::new(Body::Form(vec![field]))
+            .status(&format!("Port forward to {target}"))
+            .button(Button::new("back", "Back").icon("arrow-left"))
+            .button(Button::new("start-forward", "Start").icon("run"))
+    }
+
+    fn render_tree(&mut self) -> Result<View, Error> {
+        if let Some((target, ports)) = &self.forward {
+            return Ok(self.render_forward(target, ports));
+        }
+        if let Some(details) = &self.details {
+            return Ok(self.render_details(details));
+        }
+        if self.context.is_none() && self.current_context.is_none() {
+            self.current_context = match self.kubectl(&["config", "current-context"], None) {
+                Ok(out) => Some(out.trim().to_owned()),
+                Err(Error::Denied(_)) => {
+                    return Ok(View::message("Kube Explorer needs permission to run kubectl. Grant it in Settings › Plugins."));
+                }
+                Err(_) => Some("(kubectl unavailable)".into()),
+            };
+        }
+        let context = self.context.as_ref().or(self.current_context.as_ref()).cloned().unwrap_or_default();
+        let namespace = self.namespace.clone().unwrap_or_else(|| "(default)".into());
+
+        let mut items = Vec::new();
+        self.push_node(&mut items, "ctx", &format!("Context: {context}"), k8s!("cluster"), Some(&context));
+        self.push_node(&mut items, "ns", &format!("Namespace: {namespace}"), k8s!("ns"), self.namespace.as_ref());
+        for (kind, label, icon) in KINDS {
+            self.push_node(&mut items, &format!("kind:{kind}"), label, icon, None);
+        }
+
+        let view = View::new(Body::Tree(items)).status("Double-click a context or namespace to switch");
+        Ok(self.actions(view.button(Button::new("refresh", "Refresh").icon("refresh"))))
+    }
+
+    /// The buttons acting on the selected resource.
+    fn actions(&self, view: View) -> View {
+        let kind = self.selected.as_ref().map_or("", |(kind, _)| kind.as_str());
+        let pod_selected = kind == "pods";
+        let logs = pod_selected || WORKLOADS.contains(&kind);
+        let forwardable = FORWARDABLE.iter().any(|(k, _)| *k == kind);
+        let delete = match (&self.selected, self.confirm_delete) {
+            (Some((kind, name)), true) => format!("Confirm Delete {kind}/{name}"),
+            _ => "Delete".into(),
+        };
+        view.button(Button::new("describe", "Describe").icon("info").enabled(self.selected.is_some()))
+            .button(Button::new("yaml", "YAML").icon("file-yaml").enabled(self.selected.is_some()))
+            .button(Button::new("logs", "Logs").icon("file-log").enabled(logs))
+            .button(Button::new("shell", "Shell").icon("terminal").enabled(pod_selected))
+            .button(Button::new("attach", "Attach").icon("attach-to-process").enabled(pod_selected))
+            .button(Button::new("port-forward", "Port Forward").icon("external-link").enabled(forwardable))
+            .button(Button::new("delete", &delete).icon("trash").enabled(self.selected.is_some()))
+    }
+
+    fn push_node(&self, items: &mut Vec<TreeItem>, key: &str, label: &str, icon: &str, active: Option<&String>) {
+        let expanded = self.expanded.contains(key);
+        items.push(TreeItem::new(key, label).icon(icon).expandable(expanded));
+        if !expanded {
+            return;
+        }
+        match self.children.get(key) {
+            // An expandable node without children is drawn as still loading.
+            Some(Ok(names)) if names.is_empty() => {
+                items.push(TreeItem::new(&format!("{key}!"), "No resources").parent(key).icon("info"));
+            }
+            Some(Ok(names)) => {
+                for name in names {
+                    let child = TreeItem::new(&format!("{key}/{name}"), name).parent(key).icon(icon);
+                    items.push(if Some(name) == active { child.detail("active") } else { child });
+                }
+            }
+            // kubectl repeats client-side noise first; its last line is the reason.
+            Some(Err(e)) => {
+                let reason = e.lines().last().unwrap_or(e);
+                items.push(TreeItem::new(&format!("{key}!"), reason).parent(key).icon("error"));
+            }
+            None => {}
+        }
+    }
+
+    fn handle_tree(&mut self, event: ViewEvent) -> Result<(), Error> {
+        match event {
+            ViewEvent::Expand(key) => {
+                if !self.children.contains_key(&key) {
+                    let loaded = self.load(&key);
+                    self.children.insert(key.clone(), loaded);
+                }
+                self.expanded.insert(key);
+                host::refresh_view(TREE);
+            }
+            ViewEvent::Collapse(key) => {
+                self.expanded.remove(&key);
+            }
+            ViewEvent::Select(key) => {
+                self.selected = resource(&key);
+                self.confirm_delete = false;
+                host::refresh_view(TREE);
+            }
+            ViewEvent::Activate(key) => match key.split_once('/') {
+                Some(("ctx", name)) => {
+                    self.context = Some(name.to_owned());
+                    self.namespace = None;
+                    self.selected = None;
+                    self.save();
+                    self.reload();
+                }
+                Some(("ns", name)) => {
+                    self.namespace = Some(name.to_owned());
+                    self.selected = None;
+                    self.save();
+                    self.reload();
+                }
+                _ => {
+                    if let Some((kind, name)) = resource(&key) {
+                        self.describe(&kind, &name)?;
+                    }
+                }
+            },
+            ViewEvent::Button(button) => self.button(&button)?,
+            ViewEvent::Field(key, value) if key == "ports" => {
+                if let Some((_, ports)) = &mut self.forward {
+                    *ports = value;
+                }
+            }
+            ViewEvent::Message(message) => {
+                if let Some(yaml) = message.strip_prefix("apply\n") {
+                    self.apply_yaml(yaml)?;
+                }
+                if let Some(problem) = message.strip_prefix("diag:") {
+                    host::log(LogLevel::Warn, &format!("details page: {problem}"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn button(&mut self, button: &str) -> Result<(), Error> {
+        if button == "refresh" {
+            self.reload();
+            return Ok(());
+        }
+        match button {
+            "back" => {
+                self.details = None;
+                self.forward = None;
+                self.pending_delete = None;
+                host::refresh_view(TREE);
+                return Ok(());
+            }
+            "start-forward" => {
+                let Some((target, ports)) = &self.forward else {
+                    return Ok(());
+                };
+                let mut args = vec!["port-forward", target.as_str()];
+                args.extend(ports.split_whitespace());
+                return host::open_terminal(&format!("Port Forward: {target}"), KUBECTL, &self.args(&args));
+            }
+            "confirm-delete-manifest" => {
+                let Some(manifest) = self.pending_delete.take() else {
+                    return Ok(());
+                };
+                let _task = host::begin_task("Deleting the manifest's resources", false);
+                let out = self.kubectl(&["delete", "-f", "-"], Some(&manifest))?;
+                self.show("Deleted".into(), out, "text");
+                self.reload();
+                return Ok(());
+            }
+            "apply" => return host::post_view_message(TREE, "collect:apply"),
+            "save-file" => return host::post_view_message(TREE, "collect:save"),
+            "reload-yaml" => {
+                if let Some((kind, name)) = self.details.as_ref().and_then(|d| d.editing.clone()) {
+                    self.open_yaml(&kind, &name, None)?;
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        let Some((kind, name)) = self.selected.clone() else {
+            return Ok(());
+        };
+        let target = format!("{kind}/{name}");
+        match button {
+            "describe" => self.describe(&kind, &name)?,
+            "yaml" => self.edit_yaml(&kind, &name)?,
+            "logs" if kind == "pods" => {
+                host::open_terminal(&format!("Logs: {name}"), KUBECTL, &self.args(&["logs", "-f", "--tail=500", &name]))?
+            }
+            "logs" => host::open_terminal(
+                &format!("Logs: {target}"),
+                KUBECTL,
+                &self.args(&["logs", "-f", &target, "--all-pods=true", "--all-containers", "--max-log-requests=20", "--tail=200"]),
+            )?,
+            "attach" => host::open_terminal(&format!("Attach: {name}"), KUBECTL, &self.args(&["attach", "-it", &name]))?,
+            "port-forward" => self.start_port_forward(&kind, &name)?,
+            "shell" => host::open_terminal(
+                &format!("Shell: {name}"),
+                KUBECTL,
+                &self.args(&["exec", "-it", &name, "--", "sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"]),
+            )?,
+            "delete" if !self.confirm_delete => {
+                self.confirm_delete = true;
+                host::refresh_view(TREE);
+            }
+            "delete" => {
+                let _task = host::begin_task(&format!("Deleting {target}"), false);
+                self.kubectl(&["delete", &kind, &name, "--wait=false"], None)?;
+                self.selected = None;
+                self.confirm_delete = false;
+                self.details = None;
+                self.reload();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// `(kind, name)` of a resource node key (`kind:pods/web-1`).
+fn resource(key: &str) -> Option<(String, String)> {
+    let (parent, name) = key.split_once('/')?;
+    let kind = parent.strip_prefix("kind:")?;
+    Some((kind.to_owned(), name.to_owned()))
+}
+
+fn failure(program: &str, stderr: &str, status: Option<i32>) -> Error {
+    let message = stderr.trim();
+    if !message.is_empty() {
+        return Error::Failed(message.to_owned());
+    }
+    match status {
+        Some(code) => Error::Failed(format!("{program} exited with status {code}.")),
+        None => Error::Failed(format!("{program} stopped without an exit status.")),
+    }
+}
+
+/// Drops `metadata.resourceVersion`, so each save of an edited object replaces
+/// it whatever changed in between (a kept one fails every save after the first).
+fn without_resource_version(yaml: &str) -> String {
+    let mut in_metadata = false;
+    let mut out = String::with_capacity(yaml.len());
+    for line in yaml.split_inclusive('\n') {
+        if !line.starts_with(' ') {
+            in_metadata = line.trim_end() == "metadata:";
+        }
+        if in_metadata && line.starts_with("  resourceVersion:") {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// The directory of a file path.
+fn parent(path: &str) -> &str {
+    path.rsplit_once('/').map_or(".", |(dir, _)| dir)
+}
+
+/// The innermost Helm chart (a directory with `Chart.yaml`) holding `file`.
+fn chart_dir(ctx: &Invocation, file: &str) -> Result<String, Error> {
+    let project = ctx.project().ok_or("No project is open.")?;
+    let charts = project.find_files("**/Chart.yaml", 1000)?;
+    charts
+        .iter()
+        .filter_map(|chart| chart.strip_suffix("/Chart.yaml"))
+        .filter(|dir| file.starts_with(&format!("{dir}/")))
+        .max_by_key(|dir| dir.len())
+        .map(str::to_owned)
+        .ok_or_else(|| "The open file is not in a Helm chart (no Chart.yaml in its folder or above).".into())
+}
+
+fn file_safe(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
+}
+
+/// The page's highlighting (`page.html` does the same while editing), done here so it shows when
+/// the IDE blocks the page's script. `lang` is `yaml`, `diff` or `text`.
+fn highlight(text: &str, lang: &str) -> String {
+    let line: fn(&str) -> String = match lang {
+        "diff" => diff_line,
+        "text" => escape_html,
+        _ => yaml_line,
+    };
+    // The extra line keeps a trailing newline as tall as in the textarea.
+    text.split('\n').map(line).collect::<Vec<_>>().join("\n") + "\n "
+}
+
+fn span(class: &str, text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    format!("<span class=\"{class}\">{}</span>", escape_html(text))
+}
+
+fn yaml_value(v: &str) -> String {
+    let t = v.trim();
+    let quoted = t.len() >= 2 && (t.starts_with('"') && t.ends_with('"') || t.starts_with('\'') && t.ends_with('\''));
+    let number = t.strip_prefix('-').unwrap_or(t).split_once('.').map_or(is_digits(t.strip_prefix('-').unwrap_or(t)), |(a, b)| is_digits(a) && is_digits(b));
+    match () {
+        _ if t.starts_with('#') => span("m", v),
+        _ if quoted => span("s", v),
+        _ if number || matches!(t, "true" | "false" | "null" | "~") => span("n", v),
+        _ => escape_html(v),
+    }
+}
+
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn yaml_line(line: &str) -> String {
+    if line.trim_start().starts_with('#') {
+        return span("m", line);
+    }
+
+    let mut prefix = line.len() - line.trim_start().len();
+    while let Some(rest) = line[prefix..].strip_prefix('-')
+        && rest.starts_with(char::is_whitespace)
+    {
+        prefix = line.len() - rest.trim_start().len();
+    }
+    let (lead, rest) = line.split_at(prefix);
+
+    let key_end = match rest.chars().next() {
+        Some(q @ ('"' | '\'')) => rest[1..].find(q).map(|i| i + 2),
+        Some(c) if !c.is_whitespace() && c != '#' && c != '-' => rest.find([':', '#']).filter(|&i| rest[i..].starts_with(':')),
+        _ => None,
+    };
+    if let Some(end) = key_end
+        && let Some(after) = rest[end..].strip_prefix(':')
+        && (after.is_empty() || after.starts_with(char::is_whitespace))
+    {
+        return format!("{}{}:{}", span("m", lead), span("k", &rest[..end]), yaml_value(after));
+    }
+
+    match lead.contains('-') {
+        true => span("m", lead) + &yaml_value(rest),
+        false => yaml_value(line),
+    }
+}
+
+fn diff_line(line: &str) -> String {
+    match () {
+        _ if line.starts_with("@@") => span("hunk", line),
+        _ if line.starts_with('+') => span("add", line),
+        _ if line.starts_with('-') => span("del", line),
+        _ => escape_html(line),
+    }
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+impl Plugin for KubeExplorer {
+    fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
+        self.context = host::storage::get("context").ok().flatten();
+        self.namespace = host::storage::get("namespace").ok().flatten();
+        Ok(())
+    }
+
+    fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
+        for event in events {
+            if let Event::FileSaved(path) = event {
+                Self::apply_saved(path);
+            }
+        }
+    }
+
+    /// The IDE drops a command's result text: it is shown in a notification.
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        let (working, done) = match id {
+            "apply" => ("Applying manifest", "Manifest applied"),
+            "dry-run" => ("Validating manifest", "Manifest validated"),
+            "diff" => ("Comparing manifest with cluster", "Manifest diff"),
+            "delete-manifest" => ("Previewing deletion", "Deletion preview"),
+            "kustomize-render" => ("Rendering Kustomization", "Kustomization rendered"),
+            "kustomize-apply" => ("Applying Kustomization", "Kustomization applied"),
+            "helm-template" => ("Rendering Helm chart", "Helm chart rendered"),
+            "helm-lint" => ("Linting Helm chart", "Helm chart linted"),
+            "helm-dependency-update" => ("Updating Helm dependencies", "Helm dependencies updated"),
+            _ => return Err(Error::NotFound(format!("command {id}"))),
+        };
+        let _task = host::begin_task(working, false);
+        let text = self.command(id, ctx)?;
+        host::notify(NotificationLevel::Info, done, &text);
+        Ok(None)
+    }
+}
+
+impl KubeExplorer {
+    fn command(&mut self, id: &str, ctx: &Invocation) -> Result<String, Error> {
+        let editor = ctx.editor().ok_or("No manifest is open.")?;
+        let manifest = editor.document()?.text;
+        let path = editor.path();
+        match id {
+            "delete-manifest" => {
+                let out = self.kubectl(&["delete", "--dry-run=server", "-f", "-"], Some(&manifest))?;
+                self.show("Delete these resources?".into(), out, "text");
+                self.pending_delete = Some(manifest);
+                Ok("Review the resources in Kube Explorer, then click Confirm Delete.".into())
+            }
+            "kustomize-render" => {
+                let dir = parent(&path);
+                let out = self.kubectl(&["kustomize", dir], None)?;
+                self.show(format!("Kustomize: {dir}"), out, "yaml");
+                Ok("The rendered YAML is shown in Kube Explorer.".into())
+            }
+            "kustomize-apply" => {
+                let out = self.kubectl(&["apply", "-k", parent(&path)], None)?;
+                let target = self.target();
+                self.reload();
+                Ok(format!("{target}: {}", out.trim()))
+            }
+            "helm-template" | "helm-lint" | "helm-dependency-update" => {
+                let chart = chart_dir(ctx, &path)?;
+                let release = chart.rsplit('/').next().unwrap_or("release");
+                let args: &[&str] = match id {
+                    "helm-template" => &["template", release, &chart],
+                    "helm-lint" => &["lint", &chart],
+                    _ => &["dependency", "update", &chart],
+                };
+                let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+                let out = host::run_process(HELM, &args, None)?;
+                // `helm lint` reports problems on stdout and fails; show them either way.
+                if id == "helm-lint" {
+                    self.show(format!("Helm lint: {release}"), format!("{}{}", out.stdout, out.stderr), "text");
+                    return Ok(if out.status == Some(0) { "The chart passed lint. The output is shown in Kube Explorer." } else { "The chart has lint errors. The output is shown in Kube Explorer." }.into());
+                }
+                if out.status != Some(0) {
+                    return Err(failure(HELM, &out.stderr, out.status));
+                }
+                if id == "helm-template" {
+                    self.show(format!("Helm template: {release}"), out.stdout, "yaml");
+                    return Ok("The rendered YAML is shown in Kube Explorer.".into());
+                }
+                Ok(out.stdout.trim().to_owned())
+            }
+            "apply" => {
+                let out = self.kubectl(&["apply", "-f", "-"], Some(&manifest))?;
+                let target = self.target();
+                self.reload();
+                Ok(format!("{target}: {}", out.trim()))
+            }
+            "dry-run" => {
+                let out = self.kubectl(&["apply", "--dry-run=server", "-f", "-"], Some(&manifest))?;
+                Ok(out.trim().to_owned())
+            }
+            "diff" => {
+                let out = host::run_process(KUBECTL, &self.args(&["diff", "-f", "-"]), Some(&manifest))?;
+                match out.status {
+                    Some(0) => Ok("No differences with the cluster.".into()),
+                    Some(1) => {
+                        self.show(format!("Diff: {}", editor.path()), out.stdout, "diff");
+                        Ok("The differences are shown in Kube Explorer.".into())
+                    }
+                    status => Err(failure(KUBECTL, &out.stderr, status)),
+                }
+            }
+            _ => Err(Error::NotFound(format!("command {id}"))),
+        }
+    }
+}
+
+impl Providers for KubeExplorer {
+    fn code_actions(&mut self, doc: &Document, _selection: Range) -> Vec<CodeAction> {
+        schema::code_actions(doc)
+    }
+}
+
+impl Views for KubeExplorer {
+    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, _ctx: &Invocation) -> Result<View, Error> {
+        self.render_tree()
+    }
+
+    fn handle(&mut self, _view: &str, event: ViewEvent, _ctx: &Invocation) -> Result<(), Error> {
+        self.handle_tree(event)
+    }
+}
+
+register_plugin!(KubeExplorer, providers, views);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openidea_plugin::ProcessOutput;
+    use openidea_plugin::mock::MockHost;
+    use openidea_plugin::views::FieldValue;
+
+    fn ok(stdout: &str) -> Result<ProcessOutput, Error> {
+        Ok(ProcessOutput { status: Some(0), stdout: stdout.into(), stderr: String::new() })
+    }
+
+    fn host() -> MockHost {
+        let host = MockHost::install().with_capabilities(&["process:kubectl", "editor.read", "storage"]);
+        host.on_process(KUBECTL, |args, stdin| match args.iter().find(|a| !a.starts_with("--")).map(String::as_str) {
+            Some("config") if args.contains(&"current-context".to_owned()) => ok("minikube\n"),
+            Some("config") => ok("minikube\narn:aws:eks:eu-west-1:1:cluster/prod\n"),
+            Some("get") if args.iter().any(|a| a.starts_with("jsonpath=")) => ok("80 80 443"),
+            Some("get") if args.contains(&"yaml".to_owned()) => ok("apiVersion: v1\nkind: Pod\nmetadata:\n  name: web-1\n"),
+            Some("get") if args.contains(&"pods".to_owned()) => ok("pod/web-1\npod/web-2\n"),
+            Some("describe") => ok("Name: web-1\n"),
+            Some("kustomize") => ok("kind: ConfigMap\n"),
+            Some("replace") if stdin.is_some_and(|s| s.contains("conflict")) => {
+                Ok(ProcessOutput { status: Some(1), stdout: String::new(), stderr: "the object has been modified\n".into() })
+            }
+            Some("replace") => ok("pod/web-1 replaced\n"),
+            Some("delete") => ok("pod \"web-1\" deleted\n"),
+            Some("apply") if stdin == Some("kind: Deployment") => ok("deployment.apps/web configured\n"),
+            _ => ok(""),
+        });
+        host
+    }
+
+    fn keys(view: View) -> Vec<String> {
+        match view.body {
+            Body::Tree(items) => items.into_iter().map(|i| i.key).collect(),
+            other => panic!("not a tree: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expanding_a_kind_lists_its_resources_and_a_pod_opens_logs() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+
+        kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
+        let tree = keys(kube.render(TREE, None, &host.invocation()).unwrap());
+        assert!(tree.contains(&"kind:pods/web-1".to_owned()));
+
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Button("logs".into()), &host.invocation()).unwrap();
+        assert_eq!(host.terminals()[0].args, ["logs", "-f", "--tail=500", "web-1"]);
+    }
+
+    #[test]
+    fn choosing_a_context_with_a_slash_persists_it_and_passes_it_to_kubectl() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+
+        kube.handle(TREE, ViewEvent::Expand("ctx".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Activate("ctx/arn:aws:eks:eu-west-1:1:cluster/prod".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
+
+        assert_eq!(host.storage()["context"], "arn:aws:eks:eu-west-1:1:cluster/prod");
+        assert!(host.process_runs().last().unwrap().args.contains(&"--context=arn:aws:eks:eu-west-1:1:cluster/prod".to_owned()));
+    }
+
+    #[test]
+    fn describe_shows_its_output_in_the_tree_view_until_back() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Button("describe".into()), &host.invocation()).unwrap();
+        let shown = kube.render(TREE, None, &host.invocation()).unwrap().body;
+        kube.handle(TREE, ViewEvent::Button("back".into()), &host.invocation()).unwrap();
+        let back = kube.render(TREE, None, &host.invocation()).unwrap().body;
+
+        assert!(matches!(shown, Body::Html(page) if page.contains("Name: web-1")));
+        assert!(matches!(back, Body::Tree(_)));
+        assert!(host.tasks().iter().any(|t| t.title == "Describing pods/web-1" && t.ended));
+    }
+
+    fn page(kube: &mut KubeExplorer, host: &MockHost) -> String {
+        match kube.render(TREE, None, &host.invocation()).unwrap().body {
+            Body::Html(page) => page,
+            other => panic!("not a page: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn highlights_yaml_and_diffs_like_the_page() {
+        assert_eq!(yaml_line("  name: web # x"), r#"<span class="m">  </span><span class="k">name</span>: web # x"#);
+        assert_eq!(yaml_line(r#"- image: "nginx""#), r#"<span class="m">- </span><span class="k">image</span>:<span class="s"> &quot;nginx&quot;</span>"#);
+        assert_eq!(yaml_line("replicas: 3"), r#"<span class="k">replicas</span>:<span class="n"> 3</span>"#);
+        assert_eq!(yaml_line("  - 10.0.0.1"), r#"<span class="m">  - </span>10.0.0.1"#);
+        assert_eq!(yaml_line("url: http://x"), r#"<span class="k">url</span>: http://x"#);
+        assert_eq!(yaml_line("# note"), r#"<span class="m"># note</span>"#);
+        assert_eq!(diff_line("+  replicas: 2"), r#"<span class="add">+  replicas: 2</span>"#);
+        assert_eq!(highlight("a <b>", "text"), "a &lt;b&gt;\n ");
+    }
+
+    #[test]
+    fn yaml_is_editable_and_describe_is_read_only() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
+        let yaml = page(&mut kube, &host);
+        kube.handle(TREE, ViewEvent::Button("describe".into()), &host.invocation()).unwrap();
+        let describe = page(&mut kube, &host);
+
+        assert!(yaml.contains("name: web-1") && !yaml.contains("readonly"));
+        assert!(describe.contains("readonly"));
+        assert!(describe.contains(r#"<pre id="hl"><span class="k">Name</span>: web-1"#), "highlighted without the script");
+        assert!(yaml.contains(r#"id="nojs""#) && !describe.contains(r#"id="nojs""#));
+    }
+
+    #[test]
+    fn applying_edited_yaml_replaces_the_object_and_shows_it_again() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Message("apply\nkind: Pod # edited".into()), &host.invocation()).unwrap();
+
+        assert!(host.process_runs().iter().any(|r| r.args.ends_with(&["replace".into(), "-f".into(), "-".into()])));
+        assert!(page(&mut kube, &host).contains("name: web-1"));
+    }
+
+    #[test]
+    fn a_rejected_apply_keeps_the_edits_and_reports_why() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
+        let refreshes = host.refreshed_views().len();
+
+        kube.handle(TREE, ViewEvent::Message("apply\nkind: Pod # conflict".into()), &host.invocation()).unwrap();
+
+        assert_eq!(host.view_messages().last().unwrap().1, "error:the object has been modified");
+        assert_eq!(host.refreshed_views().len(), refreshes);
+    }
+
+    fn host_with_tee() -> (MockHost, std::rc::Rc<std::cell::RefCell<String>>) {
+        let host = host().with_capabilities(&["process:kubectl", "process:tee", "editor.read", "storage", "events", "project.read"]);
+        let written = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let sink = written.clone();
+        host.on_process("tee", move |_, stdin| {
+            *sink.borrow_mut() = stdin.unwrap_or_default().to_owned();
+            ok("")
+        });
+        (host, written)
+    }
+
+    fn open_in_editor(kube: &mut KubeExplorer, host: &MockHost) -> String {
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
+        host.opened_locations()[0].0.clone()
+    }
+
+    #[test]
+    fn yaml_opens_in_an_editor_on_a_temp_file_when_tee_is_granted() {
+        let (host, written) = host_with_tee();
+        let mut kube = KubeExplorer::default();
+
+        let path = open_in_editor(&mut kube, &host);
+
+        assert!(path.starts_with("/tmp/kube-explorer-pods-web-1-") && path.ends_with(".yaml"));
+        let tee = host.process_runs().into_iter().find(|r| r.program == "tee").unwrap();
+        assert_eq!(tee.args, [path]);
+        assert!(written.borrow().contains("name: web-1"));
+        assert!(host.subscriptions().contains(&openidea_plugin::EventKind::FileSaved));
+    }
+
+    #[test]
+    fn saving_the_temp_file_replaces_the_object_in_the_context_it_came_from() {
+        let (host, _) = host_with_tee();
+        let mut kube = KubeExplorer { context: Some("prod".into()), ..KubeExplorer::default() };
+        let path = open_in_editor(&mut kube, &host);
+        kube.context = Some("dev".into());
+
+        KubeExplorer::default().handle_events(&[openidea_plugin::Event::FileSaved(path.clone())], &host.invocation());
+
+        let replace = host.process_runs().into_iter().find(|r| r.args.contains(&"replace".to_owned())).unwrap();
+        assert!(replace.args.contains(&"--context=prod".to_owned()));
+        assert!(replace.args.ends_with(&["replace".into(), "-f".into(), path]));
+    }
+
+    #[test]
+    fn saving_another_file_does_nothing() {
+        let (host, _) = host_with_tee();
+
+        KubeExplorer::default().handle_events(&[openidea_plugin::Event::FileSaved("/project/a.yaml".into())], &host.invocation());
+
+        assert!(host.process_runs().is_empty());
+    }
+
+    #[test]
+    fn only_the_objects_own_resource_version_is_dropped() {
+        let yaml = "kind: Event\ninvolvedObject:\n  resourceVersion: \"7\"\nmetadata:\n  name: x\n  resourceVersion: \"206\"\n  uid: u\nspec: {}\n";
+
+        assert_eq!(
+            without_resource_version(yaml),
+            "kind: Event\ninvolvedObject:\n  resourceVersion: \"7\"\nmetadata:\n  name: x\n  uid: u\nspec: {}\n"
+        );
+    }
+
+    #[test]
+    fn the_temp_file_names_the_kubernetes_schema() {
+        let (host, written) = host_with_tee();
+
+        open_in_editor(&mut KubeExplorer::default(), &host);
+
+        assert!(written.borrow().starts_with("# yaml-language-server: $schema="));
+    }
+
+    #[test]
+    fn a_manifest_offers_to_add_its_schema() {
+        let doc = Document { path: "/project/pod.yaml".into(), language: "yaml".into(), version: 1, text: "apiVersion: v1\nkind: Pod\n".into() };
+
+        let actions = KubeExplorer::default().code_actions(&doc, Default::default());
+
+        assert_eq!(actions[0].edits[0].1[0].text.lines().next().unwrap(), format!("# yaml-language-server: $schema={}", schema::url("v1", "Pod").unwrap()));
+    }
+
+    #[test]
+    fn port_forward_asks_for_ports_then_opens_a_terminal() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Button("port-forward".into()), &host.invocation()).unwrap();
+        let form = kube.render(TREE, None, &host.invocation()).unwrap().body;
+        kube.handle(TREE, ViewEvent::Field("ports".into(), "8080:80".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Button("start-forward".into()), &host.invocation()).unwrap();
+
+        assert!(matches!(form, Body::Form(fields) if fields[0].value == FieldValue::Text("80:80 443:443".into())));
+        assert_eq!(host.terminals()[0].args, ["port-forward", "pods/web-1", "8080:80"]);
+    }
+
+    #[test]
+    fn workload_logs_follow_all_its_pods_and_pods_can_be_attached() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+
+        kube.handle(TREE, ViewEvent::Select("kind:deployments/web".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Button("logs".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Button("attach".into()), &host.invocation()).unwrap();
+
+        assert!(host.terminals()[0].args.starts_with(&["logs".into(), "-f".into(), "deployments/web".into(), "--all-pods=true".into()]));
+        assert_eq!(host.terminals()[1].args, ["attach", "-it", "web-1"]);
+    }
+
+    #[test]
+    fn deleting_a_manifests_resources_previews_them_first() {
+        let host = host();
+        host.open_editor("/project/web.yaml", "yaml", "kind: Deployment", &[]);
+        let mut kube = KubeExplorer::default();
+
+        kube.run_command("delete-manifest", &host.invocation(), None).unwrap();
+        let deletes = || host.process_runs().into_iter().filter(|r| r.args.contains(&"delete".to_owned())).collect::<Vec<_>>();
+        assert!(deletes()[0].args.contains(&"--dry-run=server".to_owned()));
+
+        kube.handle(TREE, ViewEvent::Button("confirm-delete-manifest".into()), &host.invocation()).unwrap();
+        assert!(deletes()[1].args.ends_with(&["delete".into(), "-f".into(), "-".into()]));
+    }
+
+    #[test]
+    fn kustomize_renders_the_directory_of_the_open_file() {
+        let host = host();
+        host.open_editor("/project/k/kustomization.yaml", "yaml", "resources: []", &[]);
+        let mut kube = KubeExplorer::default();
+
+        kube.run_command("kustomize-render", &host.invocation(), None).unwrap();
+
+        assert!(host.process_runs()[0].args.ends_with(&["kustomize".into(), "/project/k".into()]));
+        assert!(page(&mut kube, &host).contains("kind: ConfigMap"));
+    }
+
+    #[test]
+    fn helm_templates_the_chart_around_the_open_file() {
+        let host = host().with_capabilities(&["process:kubectl", "process:helm", "editor.read", "storage", "project.read"]);
+        host.on_process("helm", |_, _| ok("kind: Service\n"));
+        host.add_file("/project/charts/web/Chart.yaml", "name: web");
+        host.open_editor("/project/charts/web/templates/svc.yaml", "yaml", "kind: Service", &[]);
+        let mut kube = KubeExplorer::default();
+
+        kube.run_command("helm-template", &host.invocation(), None).unwrap();
+
+        assert_eq!(host.process_runs()[0].args, ["template", "web", "/project/charts/web"]);
+        assert!(page(&mut kube, &host).contains("kind: Service"));
+    }
+
+    #[test]
+    fn resources_carry_the_icon_of_their_kind() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+
+        kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
+        let Body::Tree(items) = kube.render(TREE, None, &host.invocation()).unwrap().body else {
+            panic!("not a tree");
+        };
+        let icon = |key: &str| items.iter().find(|i| i.key == key).and_then(|i| i.icon.clone());
+
+        assert_eq!(icon("ctx").as_deref(), Some(k8s!("cluster")));
+        assert_eq!(icon("kind:pods").as_deref(), Some(k8s!("pod")));
+        assert_eq!(icon("kind:pods/web-1").as_deref(), Some(k8s!("pod")));
+    }
+
+    #[test]
+    fn an_expanded_kind_without_resources_has_a_placeholder_child() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+
+        kube.handle(TREE, ViewEvent::Expand("kind:jobs".into()), &host.invocation()).unwrap();
+        let tree = keys(kube.render(TREE, None, &host.invocation()).unwrap());
+
+        assert!(tree.contains(&"kind:jobs!".to_owned()));
+    }
+
+    #[test]
+    fn delete_runs_only_after_confirmation() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Button("delete".into()), &host.invocation()).unwrap();
+        assert!(!host.process_runs().iter().any(|r| r.args.contains(&"delete".to_owned())));
+
+        kube.handle(TREE, ViewEvent::Button("delete".into()), &host.invocation()).unwrap();
+        assert!(host.process_runs().iter().any(|r| r.args.contains(&"delete".to_owned())));
+    }
+
+    #[test]
+    fn apply_sends_the_open_manifest() {
+        let host = host();
+        host.open_editor("/project/web.yaml", "yaml", "kind: Deployment", &[]);
+
+        KubeExplorer::default().run_command("apply", &host.invocation(), None).unwrap();
+
+        assert_eq!(host.notifications()[0].body, "minikube/(default): deployment.apps/web configured");
+    }
+}

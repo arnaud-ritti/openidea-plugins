@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "configFile": {
+      "type": "string",
+      "title": "Configuration file, relative to the project root (leave empty to use .devcontainer/devcontainer.json, then .devcontainer.json)",
+      "default": ""
+    }
+  }
+}

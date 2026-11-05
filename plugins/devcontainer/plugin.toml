@@ -1,0 +1,52 @@
+id = "aritti.devcontainer"
+name = "Dev Container CLI"
+version = "0.1.0"
+description = "Starts, rebuilds and stops the project's Dev Container (containers.dev) and opens a shell in it, using the devcontainer CLI. Adds a devcontainer.json template to the New menu. Requires the devcontainer CLI (npm i -g @devcontainers/cli) and Docker. The IDE itself keeps running on the host."
+authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.1.0: first release. Start, Rebuild, Open Shell and Stop commands, and a devcontainer.json template."
+categories = ["tools"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+
+[capabilities]
+required = ["project.read", "process:devcontainer"]
+optional = ["process:docker"]
+
+[[contributes.commands]]
+id = "up"
+title = "Dev Container: Start Container"
+category = "Dev Container"
+
+[[contributes.commands]]
+id = "rebuild"
+title = "Dev Container: Rebuild Container"
+category = "Dev Container"
+
+[[contributes.commands]]
+id = "shell"
+title = "Dev Container: Open Shell in Container"
+category = "Dev Container"
+
+[[contributes.commands]]
+id = "stop"
+title = "Dev Container: Stop Container"
+category = "Dev Container"
+
+[[contributes.menus]]
+menu = "tools"
+command = "up"
+
+[[contributes.menus]]
+menu = "tools"
+command = "shell"
+
+[[contributes.fileTemplates]]
+id = "devcontainer"
+name = "Dev Container Configuration"
+extension = "json"
+path = "templates/devcontainer.json"
+
+[contributes.settings]
+title = "Dev Container CLI"
+schema = "settings.schema.json"

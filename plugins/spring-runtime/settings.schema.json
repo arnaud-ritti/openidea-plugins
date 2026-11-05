@@ -1,0 +1,19 @@
+{
+  "properties": {
+    "actuatorUrl": {
+      "type": "string",
+      "title": "Actuator base URL (localhost or 127.0.0.1 only)",
+      "default": "http://localhost:8080/actuator"
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "title": "Timeout per Actuator request (ms)",
+      "default": 2000
+    },
+    "autoRefresh": {
+      "type": "boolean",
+      "title": "Refresh from Actuator every minute",
+      "default": false
+    }
+  }
+}

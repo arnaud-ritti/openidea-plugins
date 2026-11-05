@@ -1,0 +1,24 @@
+{
+  "properties": {
+    "diagnostics": {
+      "type": "boolean",
+      "title": "Report missing routes, templates, services and translation keys, and duplicate routes",
+      "default": true
+    },
+    "publicDirectory": {
+      "type": "string",
+      "title": "Public directory that asset() paths start from (project-relative)",
+      "default": "public"
+    },
+    "compiledContainers": {
+      "type": "string",
+      "title": "Extra compiled container XML files (project-relative, comma-separated)",
+      "default": ""
+    },
+    "compiledRoutes": {
+      "type": "string",
+      "title": "Extra compiled route files, like url_generating_routes.php (project-relative, comma-separated)",
+      "default": ""
+    }
+  }
+}

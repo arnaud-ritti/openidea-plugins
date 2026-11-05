@@ -1,0 +1,130 @@
+id = "aritti.tasks"
+name = "Tasks"
+version = "0.1.0"
+description = """\
+Work on one task at a time. Create local tasks or pick issues from GitHub, GitLab, Codeberg, YouTrack Cloud, \
+Jira Cloud and Trello. With git, each task can have its own branch and shelved changes. Switching back to a \
+task reopens its files. The plugin tracks the time spent on each task, closes tasks (optionally resolving the issue \
+and merging the branch), opens issues in the browser and copies the active task's commit message. \
+Port of the Issue Trackers plugin by JetBrains s.r.o. (com.intellij.tasks 263.7307.108, intellij-community tag \
+idea/263.7307.112: plugins/tasks, platform/tasks-platform-impl, the GitHub tracker of plugins/github and \
+GitTaskHandler of plugins/git4idea), Apache-2.0."""
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "JetBrains s.r.o. and contributors (original Issue Trackers plugin)"]
+homepage = "https://github.com/JetBrains/intellij-community/tree/master/plugins/tasks"
+license = "Apache-2.0"
+change-notes = """\
+0.1.0: first release, ported from com.intellij.tasks 263.7307.108 (intellij-community idea/263.7307.112). \
+Local tasks, task switching and time tracking. Issues from GitHub, gitlab.com, codeberg.org, *.youtrack.cloud, \
+*.atlassian.net and Trello, updated every 20 minutes. With git: a branch per task, shelving, and merging on close. \
+Closing a task can update the issue state; work time can be posted to YouTrack and Jira. Each task reopens its files. \
+The active task's commit message goes to the clipboard or to commit.template."""
+categories = ["tools", "vcs"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-view:tasks", "on-startup-finished", "on-schedule:1200", "on-event:file-opened"]
+
+[capabilities]
+required = ["project.read", "storage"]
+# vcs.read: the GitHub / GitLab / Codeberg project from the origin remote. clipboard: Copy Commit Message.
+# process:git: a branch per task, shelving, merge on close, commit.template. events: the files of each task.
+# net + secrets: issue trackers, each one works on its own.
+optional = [
+    "vcs.read",
+    "process:git",
+    "events",
+    "clipboard",
+    "secrets",
+    "net:api.github.com",
+    "net:gitlab.com",
+    "net:codeberg.org",
+    "net:*.youtrack.cloud",
+    "net:*.atlassian.net",
+    "net:api.trello.com",
+]
+
+[[contributes.secrets]]
+name = "github-token"
+label = "GitHub token"
+description = "A GitHub personal access token that can read the repository's issues. Closing issues also needs write access."
+
+[[contributes.secrets]]
+name = "gitlab-token"
+label = "GitLab token"
+description = "A gitlab.com personal access token with the read_api scope, or the api scope to close issues."
+
+[[contributes.secrets]]
+name = "forgejo-token"
+label = "Codeberg token"
+description = "A codeberg.org access token with read:issue, or write:issue to close issues."
+
+[[contributes.secrets]]
+name = "youtrack-token"
+label = "YouTrack token"
+description = "A YouTrack permanent token (it starts with perm:). Create one under your profile › Account Security."
+
+[[contributes.secrets]]
+name = "jira-token"
+label = "Jira credentials"
+description = "Your Atlassian account email and API token as email:api-token, encoded in Base64 (the value sent for Basic authentication)."
+
+[[contributes.secrets]]
+name = "trello-key"
+label = "Trello API key"
+description = "The API key of your Trello Power-Up (trello.com/power-ups/admin)."
+
+[[contributes.secrets]]
+name = "trello-token"
+label = "Trello token"
+description = "A Trello token generated for that API key."
+
+[[contributes.views]]
+id = "tasks"
+title = "Tasks"
+icon = "icons/tasks.svg"
+location = "left"
+
+[[contributes.statusBar]]
+id = "active-task"
+text = "Default task"
+tooltip = "Active task"
+command = "copy-commit-message"
+
+[[contributes.commands]]
+id = "close"
+title = "Tasks: Close Active Task"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "open-in-browser"
+title = "Tasks: Open Active Task in Browser"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "copy-commit-message"
+title = "Tasks: Copy Commit Message"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "refresh"
+title = "Tasks: Update Issues"
+category = "Tasks"
+
+[[contributes.keymaps]]
+command = "close"
+key = "Alt+Shift+W"
+
+[[contributes.keymaps]]
+command = "open-in-browser"
+key = "Alt+Shift+B"
+
+[[contributes.menus]]
+menu = "tools"
+command = "close"
+
+[[contributes.menus]]
+menu = "tools"
+command = "open-in-browser"
+
+[contributes.settings]
+title = "Tasks"
+schema = "settings.schema.json"

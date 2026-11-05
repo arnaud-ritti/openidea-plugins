@@ -1,0 +1,160 @@
+id = "aritti.kube-explorer"
+name = "Kube Explorer"
+version = "0.1.0"
+description = "Browse a Kubernetes cluster with kubectl. Switch context and namespace, list workloads, services, config, storage, events and nodes, then describe a resource, edit its YAML with schema completion (saving applies it), stream its logs, open a shell, attach, forward ports or delete it. Commands on the open file apply, validate (server dry run), diff or delete a manifest, render or apply a Kustomization, and run helm template, lint and dependency update. Never changes your kubeconfig."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT AND Apache-2.0"
+change-notes = "0.1.0: first release. Cluster tree; describe; YAML in an editor that applies on save, with the Kubernetes schema; logs (pods and workloads), shell, attach, port forward; delete; apply, dry run, diff and delete of the open manifest; Kustomize render and apply; Helm template, lint and dependency update."
+categories = ["tools"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-view:kube"]
+
+[capabilities]
+required = ["process:kubectl", "editor.read", "storage"]
+# Edit YAML in an editor: tee writes a temp file, saving it applies it.
+# Helm commands run helm; finding the chart around the open file reads the project.
+optional = ["process:tee", "events", "project.read", "process:helm"]
+
+[[contributes.views]]
+id = "kube"
+title = "Kube Explorer"
+icon = "icons/k8s/cluster.svg"
+location = "right"
+
+[[contributes.commands]]
+id = "apply"
+title = "Kube Explorer: Apply Manifest to Cluster"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "dry-run"
+title = "Kube Explorer: Validate Manifest (Server Dry Run)"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "diff"
+title = "Kube Explorer: Diff Manifest with Cluster"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "delete-manifest"
+title = "Kube Explorer: Delete Manifest Resources from Cluster…"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "kustomize-render"
+title = "Kube Explorer: Render Kustomization"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "kustomize-apply"
+title = "Kube Explorer: Apply Kustomization to Cluster"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "helm-template"
+title = "Kube Explorer: Preview Helm Template"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "helm-lint"
+title = "Kube Explorer: Lint Helm Chart"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "helm-dependency-update"
+title = "Kube Explorer: Update Helm Dependencies"
+category = "Kube Explorer"
+
+# ⌥⏎ on a manifest: add the Kubernetes schema for the YAML language server.
+[[contributes.providers]]
+kinds = ["code-actions"]
+languages = ["yaml"]
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "apply"
+
+[contributes.settings]
+title = "Kube Explorer"
+schema = "settings.schema.json"
+
+# Kubernetes icons for the tree: a tree item names an icon the IDE knows, and
+# a file icon is registered as `ext:fileIcon/<plugin id>/<id>`. The patterns
+# never match a real file.
+
+[[contributes.fileIcons]]
+id = "cluster"
+patterns = ["*.kube-explorer-cluster"]
+icon = "icons/k8s/cluster.svg"
+
+[[contributes.fileIcons]]
+id = "ns"
+patterns = ["*.kube-explorer-ns"]
+icon = "icons/k8s/ns.svg"
+
+[[contributes.fileIcons]]
+id = "pod"
+patterns = ["*.kube-explorer-pod"]
+icon = "icons/k8s/pod.svg"
+
+[[contributes.fileIcons]]
+id = "deploy"
+patterns = ["*.kube-explorer-deploy"]
+icon = "icons/k8s/deploy.svg"
+
+[[contributes.fileIcons]]
+id = "sts"
+patterns = ["*.kube-explorer-sts"]
+icon = "icons/k8s/sts.svg"
+
+[[contributes.fileIcons]]
+id = "ds"
+patterns = ["*.kube-explorer-ds"]
+icon = "icons/k8s/ds.svg"
+
+[[contributes.fileIcons]]
+id = "job"
+patterns = ["*.kube-explorer-job"]
+icon = "icons/k8s/job.svg"
+
+[[contributes.fileIcons]]
+id = "cronjob"
+patterns = ["*.kube-explorer-cronjob"]
+icon = "icons/k8s/cronjob.svg"
+
+[[contributes.fileIcons]]
+id = "svc"
+patterns = ["*.kube-explorer-svc"]
+icon = "icons/k8s/svc.svg"
+
+[[contributes.fileIcons]]
+id = "ing"
+patterns = ["*.kube-explorer-ing"]
+icon = "icons/k8s/ing.svg"
+
+[[contributes.fileIcons]]
+id = "cm"
+patterns = ["*.kube-explorer-cm"]
+icon = "icons/k8s/cm.svg"
+
+[[contributes.fileIcons]]
+id = "secret"
+patterns = ["*.kube-explorer-secret"]
+icon = "icons/k8s/secret.svg"
+
+[[contributes.fileIcons]]
+id = "pvc"
+patterns = ["*.kube-explorer-pvc"]
+icon = "icons/k8s/pvc.svg"
+
+[[contributes.fileIcons]]
+id = "pv"
+patterns = ["*.kube-explorer-pv"]
+icon = "icons/k8s/pv.svg"
+
+[[contributes.fileIcons]]
+id = "node"
+patterns = ["*.kube-explorer-node"]
+icon = "icons/k8s/node.svg"

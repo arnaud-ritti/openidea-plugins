@@ -1,0 +1,77 @@
+id = "aritti.jpa-assist"
+name = "JPA Assist"
+version = "0.2.0"
+description = "JPA and Spring Data support for Java and Kotlin. Checks entities and repositories and offers quick fixes, completes derived query methods, generates equals/hashCode and toString, copies an entity's DDL (PostgreSQL or MySQL) or DTO, copies an entity from a CREATE TABLE statement, lists entities in a JPA Structure tool window and adds New › JPA Entity and Spring Data Repository templates."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.2.0: derived query completion and checks in Spring Data repositories, a check of the repository id type, Generate equals() and hashCode() and Generate toString() actions, Copy DDL (current entity or all entities), Copy DTO, Copy Entity from CREATE TABLE and the JPA Structure tool window. 0.1.0: first release, with entity checks on open and save, quick fixes that make associations lazy, replace @Data and remove final from entity classes, and entity and repository templates."
+categories = ["frameworks", "linters"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-event:file-opened", "on-event:file-saved", "on-view:structure"]
+
+[capabilities]
+required = ["events", "project.read", "editor.read", "storage"]
+optional = ["clipboard"]
+
+[[contributes.providers]]
+kinds = ["completion", "code-actions"]
+languages = ["java", "kotlin"]
+
+[[contributes.views]]
+id = "structure"
+title = "JPA Structure"
+icon = "database"
+location = "left"
+
+[[contributes.commands]]
+id = "copy-ddl"
+title = "JPA: Copy DDL of Current Entity"
+category = "JPA Assist"
+
+[[contributes.commands]]
+id = "copy-ddl-all"
+title = "JPA: Copy DDL of All Entities"
+category = "JPA Assist"
+
+[[contributes.commands]]
+id = "copy-dto"
+title = "JPA: Copy DTO of Current Entity"
+category = "JPA Assist"
+
+[[contributes.commands]]
+id = "copy-entity"
+title = "JPA: Copy Entity from CREATE TABLE at Caret"
+category = "JPA Assist"
+
+[[contributes.menus]]
+menu = "tools"
+command = "copy-ddl-all"
+
+[contributes.settings]
+title = "JPA Assist"
+schema = "settings.schema.json"
+
+[[contributes.fileTemplates]]
+id = "entity-java"
+name = "JPA Entity"
+extension = "java"
+path = "templates/Entity.java"
+
+[[contributes.fileTemplates]]
+id = "repository-java"
+name = "Spring Data Repository"
+extension = "java"
+path = "templates/Repository.java"
+
+[[contributes.fileTemplates]]
+id = "entity-kotlin"
+name = "JPA Entity (Kotlin)"
+extension = "kt"
+path = "templates/Entity.kt"
+
+[[contributes.fileTemplates]]
+id = "repository-kotlin"
+name = "Spring Data Repository (Kotlin)"
+extension = "kt"
+path = "templates/Repository.kt"

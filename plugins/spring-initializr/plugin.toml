@@ -1,0 +1,25 @@
+id = "aritti.spring-initializr"
+name = "Spring Initializr Launcher"
+version = "0.1.0"
+description = "Starts a Spring Boot project from a tool window. Pick the build, language, Spring Boot and Java versions, coordinates, packaging and dependencies. Generate Project then downloads the project zip from a Spring Initializr server (start.spring.io or your own) in the browser, and Explore in Browser opens the server's web page with the same options. The plugin remembers the form. Independent implementation, not affiliated with JetBrains or Broadcom."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.1.0: first release, with the Spring Initializr tool window (Generate Project and Explore in Browser) and the Open start.spring.io command."
+categories = ["frameworks"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-view:initializr"]
+
+[capabilities]
+required = ["storage"]
+
+[[contributes.commands]]
+id = "open-start"
+title = "Spring Initializr: Open start.spring.io"
+category = "Spring Initializr"
+
+[[contributes.views]]
+id = "initializr"
+title = "Spring Initializr"
+icon = "spring-boot"
+location = "right"

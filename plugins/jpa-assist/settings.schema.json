@@ -1,0 +1,16 @@
+{
+  "properties": {
+    "ddlDialect": {
+      "type": "string",
+      "title": "SQL dialect for copied DDL",
+      "enum": ["postgresql", "mysql"],
+      "default": "postgresql"
+    },
+    "entityLanguage": {
+      "type": "string",
+      "title": "Language for entities copied from CREATE TABLE",
+      "enum": ["java", "kotlin"],
+      "default": "java"
+    }
+  }
+}

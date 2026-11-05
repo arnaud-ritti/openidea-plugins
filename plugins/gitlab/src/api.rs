@@ -1,0 +1,561 @@
+//! gitlab.com REST (and one GraphQL mutation) for the parts of the original
+//! plugin that OpenIDEA can host. The token never reaches the plugin: the IDE
+//! fills `{{secret:token}}` in the `Authorization` header.
+
+use openidea_plugin::{Error, HttpRequest, host};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
+
+// ponytail: gitlab.com only; a self-hosted server needs its own `net:<host>` capability in plugin.toml.
+pub const SERVER: &str = "https://gitlab.com";
+pub const SERVER_HOST: &str = "gitlab.com";
+pub const TOKEN: &str = "token";
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct User {
+    pub id: u64,
+    pub username: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Pipeline {
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Permissions {
+    pub can_merge: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct DiffRefs {
+    pub base_sha: String,
+    pub head_sha: String,
+    pub start_sha: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MergeRequest {
+    pub iid: u64,
+    pub source_project_id: u64,
+    pub target_project_id: u64,
+    pub diff_refs: Option<DiffRefs>,
+    pub title: String,
+    pub description: Option<String>,
+    pub state: String,
+    pub draft: bool,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub author: User,
+    pub reviewers: Vec<User>,
+    pub web_url: String,
+    pub sha: Option<String>,
+    pub detailed_merge_status: Option<String>,
+    pub head_pipeline: Option<Pipeline>,
+    pub force_remove_source_branch: Option<bool>,
+    pub squash: bool,
+    pub user: Option<Permissions>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Approver {
+    pub user: User,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Approvals {
+    pub approved_by: Vec<Approver>,
+    pub approvals_left: u32,
+    pub user_has_approved: bool,
+    pub user_can_approve: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct NotePosition {
+    pub new_path: Option<String>,
+    pub new_line: Option<u32>,
+    pub old_path: Option<String>,
+    pub old_line: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Note {
+    pub id: u64,
+    pub body: String,
+    pub author: User,
+    pub created_at: String,
+    pub system: bool,
+    pub resolvable: bool,
+    pub resolved: bool,
+    pub position: Option<NotePosition>,
+}
+
+impl NotePosition {
+    /// Repository-relative path and 1-based line; the new side wins for context lines.
+    pub fn location(&self) -> Option<(&str, u32)> {
+        match (&self.new_path, self.new_line, &self.old_path, self.old_line) {
+            (Some(path), Some(line), _, _) => Some((path, line)),
+            (_, _, Some(path), Some(line)) => Some((path, line)),
+            _ => None,
+        }
+    }
+
+    /// Whether this position is the diff line `old`/`new` of the file `old_path` → `new_path`.
+    pub fn is_at(&self, old_path: &str, new_path: &str, old: Option<u32>, new: Option<u32>) -> bool {
+        match (self.new_line, self.old_line) {
+            (Some(line), _) => self.new_path.as_deref() == Some(new_path) && new == Some(line),
+            (None, Some(line)) => self.old_path.as_deref() == Some(old_path) && old == Some(line) && new.is_none(),
+            (None, None) => false,
+        }
+    }
+}
+
+impl Note {
+    pub fn location(&self) -> Option<(&str, u32)> {
+        self.position.as_ref()?.location()
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Discussion {
+    pub id: String,
+    pub notes: Vec<Note>,
+}
+
+impl Discussion {
+    pub fn resolvable(&self) -> bool {
+        self.notes.iter().any(|n| n.resolvable)
+    }
+
+    pub fn resolved(&self) -> bool {
+        self.notes.iter().filter(|n| n.resolvable).all(|n| n.resolved)
+    }
+
+    /// GitLab's own events (state, label… changes) come as single system notes.
+    pub fn is_system(&self) -> bool {
+        self.notes.first().is_some_and(|n| n.system)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct DraftNote {
+    pub id: u64,
+    pub note: String,
+    pub discussion_id: Option<String>,
+    pub position: Option<NotePosition>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct FileDiff {
+    pub old_path: String,
+    pub new_path: String,
+    pub diff: String,
+    pub new_file: bool,
+    pub deleted_file: bool,
+    pub renamed_file: bool,
+}
+
+/// A state, label or milestone change of a merge request.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TimelineEvent {
+    pub created_at: String,
+    pub user: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ProjectInfo {
+    pub id: u64,
+    pub name: String,
+    pub path: String,
+    pub path_with_namespace: String,
+    pub name_with_namespace: String,
+    pub description: Option<String>,
+    pub default_branch: Option<String>,
+    pub web_url: String,
+    pub http_url_to_repo: String,
+    pub ssh_url_to_repo: String,
+}
+
+/// The `position` of a new diff comment on line `old`/`new` (1-based; both for a context line).
+pub fn diff_position(refs: &DiffRefs, old_path: &str, new_path: &str, old: Option<u32>, new: Option<u32>) -> Value {
+    json!({
+        "position_type": "text",
+        "base_sha": refs.base_sha,
+        "start_sha": refs.start_sha,
+        "head_sha": refs.head_sha,
+        "old_path": old_path,
+        "new_path": new_path,
+        "old_line": old,
+        "new_line": new,
+    })
+}
+
+/// Percent-encodes everything but RFC 3986 unreserved characters.
+pub fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// `group/sub/name` of a gitlab.com remote (`https://`, `ssh://` or `git@host:path`).
+pub fn project_path(remote: &str) -> Option<String> {
+    let (authority, path) = match remote.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?,
+        None => remote.split_once(':')?,
+    };
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    if !host.eq_ignore_ascii_case(SERVER_HOST) {
+        return None;
+    }
+
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = path.rsplit_once('/')?;
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+
+    Some(path.to_owned())
+}
+
+/// The web page of `path` (repository-relative) at `revision`, with an
+/// optional 0-based inclusive line range (`#L3-L5`).
+pub fn blob_url(project: &str, revision: &str, path: &str, lines: Option<(u32, u32)>) -> String {
+    let path: Vec<String> = path.split('/').map(encode).collect();
+    let url = format!("{SERVER}/{project}/-/blob/{revision}/{}", path.join("/"));
+
+    match lines {
+        Some((first, last)) if first != last => format!("{url}#L{}-L{}", first + 1, last + 1),
+        Some((first, _)) => format!("{url}#L{}", first + 1),
+        None => url,
+    }
+}
+
+pub fn new_merge_request_url(project: &str, source_branch: &str) -> String {
+    format!("{SERVER}/{project}/-/merge_requests/new?merge_request%5Bsource_branch%5D={}", encode(source_branch))
+}
+
+pub fn new_token_url() -> String {
+    format!("{SERVER}/-/user_settings/personal_access_tokens?name=OpenIDEA%20GitLab&scopes=api,read_user")
+}
+
+fn error_message(body: &str) -> String {
+    let Ok(json) = serde_json::from_str::<Value>(body) else {
+        return body.chars().take(200).collect();
+    };
+
+    match json.get("message").or_else(|| json.get("error")) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => json.to_string(),
+    }
+}
+
+fn send(method: &str, url: String, body: Option<Value>) -> Result<Value, Error> {
+    let mut request = HttpRequest {
+        method: method.into(),
+        url,
+        headers: vec![("Authorization".into(), format!("Bearer {{{{secret:{TOKEN}}}}}"))],
+        body: None,
+        timeout_ms: Some(20_000),
+    };
+
+    if let Some(body) = body {
+        request.headers.push(("Content-Type".into(), "application/json".into()));
+        request.body = Some(body.to_string().into_bytes());
+    }
+
+    let response = host::fetch(&request)?;
+    let text = response.text();
+
+    match response.status {
+        200..=299 if text.trim().is_empty() => Ok(Value::Null),
+        200..=299 => serde_json::from_str(&text).map_err(|e| Error::Failed(format!("Unexpected GitLab response: {e}"))),
+        401 => Err("GitLab rejected the access token. Check it in Settings › Plugins › GitLab.".into()),
+        status => Err(Error::Failed(format!("GitLab returned {status}: {}", error_message(&text)))),
+    }
+}
+
+fn parse<T: DeserializeOwned>(value: Value) -> Result<T, Error> {
+    serde_json::from_value(value).map_err(|e| Error::Failed(format!("Unexpected GitLab response: {e}")))
+}
+
+fn rest(method: &str, path: &str, body: Option<Value>) -> Result<Value, Error> {
+    send(method, format!("{SERVER}/api/v4{path}"), body)
+}
+
+pub fn current_user() -> Result<User, Error> {
+    parse(rest("GET", "/user", None)?)
+}
+
+pub fn create_snippet(title: &str, file_path: &str, content: &str) -> Result<String, Error> {
+    let body = json!({
+        "title": title,
+        "visibility": "private",
+        "files": [{ "file_path": file_path, "content": content }],
+    });
+    let snippet = rest("POST", "/snippets", Some(body))?;
+
+    snippet["web_url"].as_str().map(str::to_owned).ok_or_else(|| "GitLab returned no snippet URL.".into())
+}
+
+/// Projects the user is a member of, most recently active first.
+pub fn member_projects() -> Result<Vec<ProjectInfo>, Error> {
+    // ponytail: first 100 only; page when someone has more.
+    parse(rest("GET", "/projects?membership=true&simple=true&order_by=last_activity_at&per_page=100", None)?)
+}
+
+/// A private project in the user's own namespace (the original dialog's defaults).
+pub fn create_project(name: &str) -> Result<ProjectInfo, Error> {
+    parse(rest("POST", "/projects", Some(json!({ "name": name, "visibility": "private" })))?)
+}
+
+/// One GitLab project (`group/name`).
+pub struct Project<'a>(pub &'a str);
+
+impl Project<'_> {
+    fn path(&self, rest: &str) -> String {
+        format!("/projects/{}{rest}", encode(self.0))
+    }
+
+    fn mr(&self, iid: u64, rest: &str) -> String {
+        self.path(&format!("/merge_requests/{iid}{rest}"))
+    }
+
+    /// `query` is the filter part of the query string (`state=opened&scope=all`).
+    pub fn merge_requests(&self, query: &str) -> Result<Vec<MergeRequest>, Error> {
+        // ponytail: first page only (50, newest first); add paging when lists that long matter.
+        parse(rest("GET", &self.path(&format!("/merge_requests?{query}&per_page=50")), None)?)
+    }
+
+    pub fn merge_request(&self, iid: u64) -> Result<MergeRequest, Error> {
+        parse(rest("GET", &self.mr(iid, ""), None)?)
+    }
+
+    pub fn approvals(&self, iid: u64) -> Result<Approvals, Error> {
+        parse(rest("GET", &self.mr(iid, "/approvals"), None)?)
+    }
+
+    pub fn info(&self) -> Result<ProjectInfo, Error> {
+        parse(rest("GET", &self.path(""), None)?)
+    }
+
+    /// Threads, system notes included ([`Discussion::is_system`]).
+    pub fn discussions(&self, iid: u64) -> Result<Vec<Discussion>, Error> {
+        // ponytail: first 100 threads; page when reviews get longer.
+        parse(rest("GET", &self.mr(iid, "/discussions?per_page=100"), None)?)
+    }
+
+    /// The cumulative changes, every page.
+    pub fn diffs(&self, iid: u64) -> Result<Vec<FileDiff>, Error> {
+        let mut all = Vec::new();
+
+        for page in 1..=10 {
+            let files: Vec<FileDiff> = parse(rest("GET", &self.mr(iid, &format!("/diffs?per_page=100&page={page}")), None)?)?;
+            let last = files.len() < 100;
+            all.extend(files);
+            if last {
+                break;
+            }
+        }
+
+        Ok(all)
+    }
+
+    pub fn draft_notes(&self, iid: u64) -> Result<Vec<DraftNote>, Error> {
+        parse(rest("GET", &self.mr(iid, "/draft_notes"), None)?)
+    }
+
+    /// A pending review comment: on a diff line, as a reply, or on the merge request.
+    pub fn create_draft(&self, iid: u64, note: &str, position: Option<Value>, reply_to: Option<&str>) -> Result<(), Error> {
+        let mut body = json!({ "note": note });
+        if let Some(position) = position {
+            body["position"] = position;
+        }
+
+        if let Some(discussion) = reply_to {
+            body["in_reply_to_discussion_id"] = json!(discussion);
+        }
+
+        rest("POST", &self.mr(iid, "/draft_notes"), Some(body)).map(drop)
+    }
+
+    pub fn publish_drafts(&self, iid: u64) -> Result<(), Error> {
+        rest("POST", &self.mr(iid, "/draft_notes/bulk_publish"), None).map(drop)
+    }
+
+    /// State, label and milestone changes, oldest first.
+    pub fn events(&self, iid: u64) -> Result<Vec<TimelineEvent>, Error> {
+        let mut events = Vec::new();
+
+        for kind in ["state", "label", "milestone"] {
+            let list: Vec<Value> = parse(rest("GET", &self.mr(iid, &format!("/resource_{kind}_events?per_page=100")), None)?)?;
+            events.extend(list.iter().map(|e| timeline_event(kind, e)));
+        }
+
+        events.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+        Ok(events)
+    }
+
+    pub fn approve(&self, iid: u64) -> Result<(), Error> {
+        rest("POST", &self.mr(iid, "/approve"), None).map(drop)
+    }
+
+    pub fn unapprove(&self, iid: u64) -> Result<(), Error> {
+        rest("POST", &self.mr(iid, "/unapprove"), None).map(drop)
+    }
+
+    pub fn merge(&self, mr: &MergeRequest, remove_source_branch: bool, squash: bool) -> Result<(), Error> {
+        let body = json!({
+            "sha": mr.sha,
+            "should_remove_source_branch": remove_source_branch,
+            "squash": squash,
+        });
+
+        rest("PUT", &self.mr(mr.iid, "/merge"), Some(body)).map(drop)
+    }
+
+    pub fn rebase(&self, iid: u64) -> Result<(), Error> {
+        rest("PUT", &self.mr(iid, "/rebase"), None).map(drop)
+    }
+
+    /// `close` or `reopen`.
+    pub fn set_state(&self, iid: u64, event: &str) -> Result<(), Error> {
+        rest("PUT", &self.mr(iid, ""), Some(json!({ "state_event": event }))).map(drop)
+    }
+
+    pub fn set_reviewers(&self, iid: u64, ids: &[u64]) -> Result<(), Error> {
+        rest("PUT", &self.mr(iid, ""), Some(json!({ "reviewer_ids": ids }))).map(drop)
+    }
+
+    /// A new thread, on a diff line when `position` is set.
+    pub fn discuss(&self, iid: u64, body: &str, position: Option<Value>) -> Result<(), Error> {
+        let mut request = json!({ "body": body });
+        if let Some(position) = position {
+            request["position"] = position;
+        }
+
+        rest("POST", &self.mr(iid, "/discussions"), Some(request)).map(drop)
+    }
+
+    pub fn reply(&self, iid: u64, discussion: &str, body: &str) -> Result<(), Error> {
+        rest("POST", &self.mr(iid, &format!("/discussions/{discussion}/notes")), Some(json!({ "body": body }))).map(drop)
+    }
+
+    pub fn resolve(&self, iid: u64, discussion: &str, resolved: bool) -> Result<(), Error> {
+        let path = self.mr(iid, &format!("/discussions/{discussion}?resolved={resolved}"));
+
+        rest("PUT", &path, None).map(drop)
+    }
+
+    /// REST has no draft flag; the original uses this same mutation.
+    pub fn set_draft(&self, iid: u64, draft: bool) -> Result<(), Error> {
+        let body = json!({
+            "query": "mutation($projectPath: ID!, $iid: String!, $draft: Boolean!) { \
+                mergeRequestSetDraft(input: {projectPath: $projectPath, iid: $iid, draft: $draft}) { errors } }",
+            "variables": { "projectPath": self.0, "iid": iid.to_string(), "draft": draft },
+        });
+        let response = send("POST", format!("{SERVER}/api/graphql"), Some(body))?;
+
+        let errors = response["errors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["message"].as_str())
+            .chain(response["data"]["mergeRequestSetDraft"]["errors"].as_array().into_iter().flatten().filter_map(Value::as_str))
+            .collect::<Vec<_>>();
+        if !errors.is_empty() {
+            return Err(Error::Failed(errors.join("; ")));
+        }
+
+        Ok(())
+    }
+}
+
+fn timeline_event(kind: &str, event: &Value) -> TimelineEvent {
+    let action = event["action"].as_str().unwrap_or("");
+    let text = match kind {
+        "state" => event["state"].as_str().unwrap_or("changed").to_owned(),
+        "label" => format!("{} label {}", if action == "remove" { "removed" } else { "added" }, event["label"]["name"].as_str().unwrap_or("?")),
+        _ => {
+            let verb = if action == "remove" { "removed milestone" } else { "set milestone" };
+            format!("{verb} {}", event["milestone"]["title"].as_str().unwrap_or("?"))
+        }
+    };
+
+    TimelineEvent {
+        created_at: event["created_at"].as_str().unwrap_or("").to_owned(),
+        user: event["user"]["username"].as_str().unwrap_or("").to_owned(),
+        text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeline_events() {
+        let label = json!({"created_at": "t1", "user": {"username": "ann"}, "action": "add", "label": {"name": "bug"}});
+        let state = json!({"created_at": "t2", "user": {"username": "bob"}, "state": "merged"});
+
+        assert_eq!(timeline_event("label", &label).text, "added label bug");
+        assert_eq!(timeline_event("state", &state), TimelineEvent { created_at: "t2".into(), user: "bob".into(), text: "merged".into() });
+    }
+
+    #[test]
+    fn positions_match_diff_lines() {
+        let context = NotePosition { new_path: Some("b".into()), new_line: Some(4), old_path: Some("a".into()), old_line: Some(3) };
+        let removed = NotePosition { old_path: Some("a".into()), old_line: Some(3), ..NotePosition::default() };
+
+        assert!(context.is_at("a", "b", Some(3), Some(4)));
+        assert!(!context.is_at("a", "b", Some(3), None));
+        assert!(removed.is_at("a", "b", Some(3), None));
+        assert!(!removed.is_at("a", "b", Some(3), Some(4)));
+    }
+
+    #[test]
+    fn project_paths_from_remotes() {
+        assert_eq!(project_path("https://gitlab.com/group/sub/name.git").as_deref(), Some("group/sub/name"));
+        assert_eq!(project_path("https://user:pw@gitlab.com/group/name").as_deref(), Some("group/name"));
+        assert_eq!(project_path("git@gitlab.com:group/name.git").as_deref(), Some("group/name"));
+        assert_eq!(project_path("ssh://git@gitlab.com:22/group/name.git").as_deref(), Some("group/name"));
+        assert_eq!(project_path("git@github.com:group/name.git"), None);
+        assert_eq!(project_path("https://gitlab.com/name.git"), None);
+    }
+
+    #[test]
+    fn blob_urls() {
+        let base = "https://gitlab.com/g/p/-/blob/abc/src/a%20b.rs";
+        assert_eq!(blob_url("g/p", "abc", "src/a b.rs", None), base);
+        assert_eq!(blob_url("g/p", "abc", "src/a b.rs", Some((2, 2))), format!("{base}#L3"));
+        assert_eq!(blob_url("g/p", "abc", "src/a b.rs", Some((2, 4))), format!("{base}#L3-L5"));
+    }
+
+    #[test]
+    fn error_messages() {
+        assert_eq!(error_message(r#"{"message":"405 Method Not Allowed"}"#), "405 Method Not Allowed");
+        assert_eq!(error_message(r#"{"message":{"base":["nope"]}}"#), r#"{"base":["nope"]}"#);
+        assert_eq!(error_message("plain"), "plain");
+    }
+}

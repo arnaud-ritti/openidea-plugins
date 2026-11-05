@@ -1,0 +1,30 @@
+id = "aritti.spring-beans"
+name = "Spring Beans Navigator"
+version = "0.2.0"
+description = "Spring Framework beans for Java, Kotlin and XML configuration: finds stereotype classes, @Bean methods, Spring Data repositories and <bean> definitions; links injection points to the beans Spring would pick (by type through the project's type hierarchy, @Qualifier, @Primary, parameter name) and beans to where they are injected; navigates and completes bean names in qualifiers, XML references, SpEL @bean references and named pointcuts; completes SpEL #variables and pointcut designators; lists beans in a Spring Beans tool window, draws their dependencies in a Spring Bean Graph, and turns field injection into constructor injection. Independent implementation, not affiliated with JetBrains or Broadcom."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.2.0: Kotlin and XML bean configuration; bean names, aliases, @Qualifier, @Primary and @Profile; candidates through the whole type hierarchy; gutter icons from beans to their injection points; SpEL and AspectJ pointcut completion and navigation; Spring Bean Graph; Use constructor injection quick fix. 0.1.0 (first release): bean index, injection navigation, Spring Beans tool window, field injection warning."
+categories = ["frameworks"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-language:java", "on-language:kotlin", "on-language:xml"]
+
+[capabilities]
+required = ["project.read"]
+
+[[contributes.providers]]
+kinds = ["definition", "line-markers", "completion", "code-actions"]
+languages = ["java", "kotlin", "xml"]
+
+[[contributes.views]]
+id = "beans"
+title = "Spring Beans"
+icon = "spring-config"
+location = "left"
+
+[[contributes.views]]
+id = "bean-graph"
+title = "Spring Bean Graph"
+icon = "hierarchy"
+location = "bottom"

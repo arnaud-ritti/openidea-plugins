@@ -1,0 +1,11 @@
+{
+  "properties": {
+    "customPatterns": {
+      "type": "string",
+      "multiline": true,
+      "title": "Custom log formats and highlighting",
+      "description": "Paste <LogParsingPattern …/> and <LogHighlightingPattern …/> elements from an Ideolog settings export or the Ideolog custom log formats wiki (github.com/JetBrains/ideolog/wiki/Custom-Log-Formats). Colours map to the nearest theme colour; HIDE patterns are ignored. An open log picks up changes when it is edited or reopened.",
+      "default": ""
+    }
+  }
+}

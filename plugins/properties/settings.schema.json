@@ -1,0 +1,51 @@
+{
+  "properties": {
+    "codeStyle.keyValueDelimiter": {
+      "type": "string",
+      "title": "Code style: key/value delimiter",
+      "description": "Delimiter between a key and its value, for new properties, sorting and the delimiter inspection.",
+      "enum": ["=", ":", "space"],
+      "default": "="
+    },
+    "codeStyle.spacesAroundDelimiter": {
+      "type": "boolean",
+      "title": "Code style: spaces around the delimiter",
+      "description": "Reformat File puts one space on each side of the delimiter.",
+      "default": false
+    },
+    "codeStyle.alignDelimiters": {
+      "type": "boolean",
+      "title": "Code style: align delimiters",
+      "description": "Reformat File aligns the delimiters of the whole file.",
+      "default": false
+    },
+    "codeStyle.keepBlankLines": {
+      "type": "boolean",
+      "title": "Code style: keep blank lines",
+      "description": "Reformat File keeps the blank lines between properties.",
+      "default": false
+    },
+    "trailingSpaces.ignoreVisibleSpaces": {
+      "type": "boolean",
+      "title": "Trailing spaces: ignore visible spaces",
+      "description": "Report only raw spaces and tabs, not escaped ones such as \\t or \\u0020.",
+      "default": false
+    },
+    "incompleteProperty.ignoredSuffixes": {
+      "type": "string",
+      "title": "Missing translations: ignored locales",
+      "description": "Comma-separated locale suffixes (such as fr, de_CH) to skip when checking for missing translations.",
+      "default": ""
+    },
+    "inspections.useEllipsis": {
+      "type": "boolean",
+      "title": "Report three dots used instead of an ellipsis",
+      "default": false
+    },
+    "inspections.alphaUnsorted": {
+      "type": "boolean",
+      "title": "Report alphabetically unsorted files",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "spring-text"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Shared by the Spring plugins (path dependency); built inside each plugin.
+[workspace]
+
+[dependencies]
+openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.37" }

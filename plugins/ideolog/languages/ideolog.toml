@@ -1,0 +1,7 @@
+id = "ideolog"
+name = "Log (Ideolog)"
+extensions = []
+# A glob, not `extensions = ["log"]`: the built-in Log language keeps its
+# extensions, but file name globs are matched before extensions.
+filenames = ["*.log"]
+indent = { tab-size = 4, insert-spaces = true }

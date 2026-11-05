@@ -1,0 +1,133 @@
+<style>
+  /* Defaults for the IDE's theme variables, which the frame's (blocked) script would set: see LIMITATIONS.md. */
+  :root{--openidea-bg:Canvas;--openidea-bg-elevated:color-mix(in srgb,CanvasText 6%,Canvas);--openidea-bg-hover:color-mix(in srgb,CanvasText 12%,Canvas);--openidea-bg-selected:color-mix(in srgb,Highlight 35%,Canvas);--openidea-bg-input:Field;--openidea-fg:CanvasText;--openidea-fg-strong:CanvasText;--openidea-fg-muted:GrayText;--openidea-border:color-mix(in srgb,CanvasText 25%,Canvas);--openidea-focus-ring:Highlight;--openidea-link:LinkText;--openidea-accent:Highlight;--openidea-fg-on-accent:HighlightText;--openidea-danger:color-mix(in srgb,#db5c5c 75%,CanvasText);--openidea-warning:color-mix(in srgb,#d6ae58 75%,CanvasText);--openidea-success:color-mix(in srgb,#5fad65 75%,CanvasText);--openidea-info:color-mix(in srgb,#548af7 75%,CanvasText);--openidea-font-ui:system-ui,sans-serif;--openidea-font-mono:ui-monospace,Menlo,monospace;--openidea-font-size:13px}
+  html, body { height: 100%; margin: 0; }
+  #wrap { position: absolute; inset: 0; overflow: auto; }
+  #box { position: relative; display: inline-block; min-width: 100%; min-height: 100%; }
+  #hl, #src {
+    margin: 0; padding: 8px 10px; border: 0; box-sizing: border-box;
+    font-family: var(--openidea-font-mono, ui-monospace), ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; line-height: 1.5; white-space: pre; tab-size: 2;
+  }
+  /* #hl is highlighted by the plugin and sizes the box; the transparent textarea on top edits it. */
+  #hl { min-width: 100%; min-height: 100%; }
+  #src {
+    position: absolute; inset: 0; width: 100%; height: 100%; resize: none; overflow: hidden;
+    background: transparent; color: transparent; caret-color: var(--openidea-fg); outline: none;
+  }
+  /* The desktop IDE blocks scripts in plugin pages. Without the script, typing wouldn't update
+     the highlighting, so the page is read-only and the highlighted text is selected directly. */
+  html:not(.js) #src { visibility: hidden; }
+  #nojs {
+    position: fixed; left: 8px; right: 8px; bottom: 8px; padding: 6px 8px; font-size: 12px;
+    border: 1px solid var(--openidea-warning); border-radius: 4px; background: var(--openidea-bg-elevated);
+  }
+  .js #nojs { display: none; }
+  html:not(.js) body:has(#nojs) #wrap { bottom: 72px; }
+  #src::selection { background: color-mix(in srgb, var(--openidea-accent) 30%, transparent); }
+  .k { color: var(--openidea-link); }
+  .s { color: var(--openidea-success); }
+  .n { color: var(--openidea-warning); }
+  .m { color: var(--openidea-fg-muted); }
+  .add { color: var(--openidea-success); }
+  .del { color: var(--openidea-danger); }
+  .hunk { color: var(--openidea-info); }
+  #msg {
+    position: fixed; left: 8px; right: 8px; bottom: 8px; display: none; padding: 6px 8px;
+    border: 1px solid var(--openidea-danger); border-radius: 4px; background: var(--openidea-bg-elevated);
+    font-size: 12px; white-space: pre-wrap; cursor: pointer;
+  }
+  #msg.ok { border-color: var(--openidea-success); }
+</style>
+<div id="wrap"><div id="box"><pre id="hl">{{highlighted}}</pre><textarea id="src" spellcheck="false" data-lang="{{lang}}" data-name="{{name}}" {{readonly}}>{{text}}</textarea></div></div>
+<div id="msg"></div>
+{{nojs}}
+<script>
+  document.documentElement.classList.add("js");
+  // Reported to the IDE log: why this page would stay blank.
+  window.addEventListener("error", (e) => openidea.postMessage(`diag:${e.message} at ${e.lineno}:${e.colno}`));
+  const src = document.getElementById("src");
+  const hl = document.getElementById("hl");
+  const msg = document.getElementById("msg");
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const span = (cls, s) => (s ? `<span class="${cls}">${esc(s)}</span>` : "");
+
+  function value(v) {
+    const t = v.trim();
+    if (t.startsWith("#")) return span("m", v);
+    if (/^(["']).*\1$/.test(t)) return span("s", v);
+    if (/^(true|false|null|~|-?\d+(\.\d+)?)$/.test(t)) return span("n", v);
+    return esc(v);
+  }
+
+  function yamlLine(line) {
+    if (/^\s*#/.test(line)) return span("m", line);
+    const key = /^(\s*(?:-\s+)*)([^\s#"'-][^:#]*?|"[^"]*"|'[^']*')(:)(\s.*|)$/.exec(line);
+    if (key) return span("m", key[1]) + span("k", key[2]) + esc(key[3]) + value(key[4]);
+    const item = /^(\s*-\s+)(.*)$/.exec(line);
+    if (item) return span("m", item[1]) + value(item[2]);
+    return value(line);
+  }
+
+  function diffLine(line) {
+    if (line.startsWith("@@")) return span("hunk", line);
+    if (line.startsWith("+")) return span("add", line);
+    if (line.startsWith("-")) return span("del", line);
+    return esc(line);
+  }
+
+  function render() {
+    const lang = src.dataset.lang;
+    const highlight = lang === "diff" ? diffLine : lang === "text" ? esc : yamlLine;
+    // The extra line keeps a trailing newline as tall as in the textarea.
+    hl.innerHTML = src.value.split("\n").map(highlight).join("\n") + "\n ";
+  }
+
+  let hideTimer;
+  // It covers the last lines: successes go away on their own, errors stay until clicked or typing.
+  function show(text, ok) {
+    clearTimeout(hideTimer);
+    msg.textContent = text;
+    msg.className = ok ? "ok" : "";
+    msg.style.display = text ? "block" : "none";
+    if (text && ok) hideTimer = setTimeout(() => show(""), 4000);
+  }
+
+  msg.addEventListener("click", () => show(""));
+
+  const apply = () => openidea.postMessage("apply\n" + src.value);
+
+  function saveToFile() {
+    openidea
+      .saveFile({ name: `${src.dataset.name}.yaml`, data: src.value })
+      .then((path) => path && show(`Saved to ${path}`, true), (e) => show(String(e)));
+  }
+
+  openidea.onMessage((m) => {
+    if (m === "collect:apply") apply();
+    else if (m === "collect:save") saveToFile();
+    else if (m.startsWith("error:")) show(m.slice(6));
+  });
+
+  src.addEventListener("input", () => {
+    render();
+    show("");
+  });
+
+  src.addEventListener("keydown", (e) => {
+    if (src.readOnly) return;
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      e.preventDefault();
+      apply();
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      document.execCommand("insertText", false, "  ");
+    }
+  });
+
+  render();
+  if (!hl.offsetHeight || !innerHeight) {
+    openidea.postMessage(`diag:nothing visible (text ${src.value.length}, page ${innerWidth}x${innerHeight}, highlight ${hl.offsetHeight}px)`);
+  }
+</script>

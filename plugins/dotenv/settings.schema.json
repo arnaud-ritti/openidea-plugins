@@ -1,0 +1,14 @@
+{
+  "properties": {
+    "completion": {
+      "type": "boolean",
+      "title": "Complete environment variables in code",
+      "default": true
+    },
+    "showValues": {
+      "type": "boolean",
+      "title": "Show each key's value in completion",
+      "default": true
+    }
+  }
+}

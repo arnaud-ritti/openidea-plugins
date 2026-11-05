@@ -1,0 +1,28 @@
+id = "aritti.spring-batch"
+name = "Spring Batch Tools"
+version = "0.1.0"
+description = "Spring Batch job configuration: Go to Definition, completion and checks for XML jobs (step/flow/decision transitions, parent steps, tasklet/chunk/listener bean references), job names in spring.batch.job.name, and Spring Batch 5 migration hints in Java (deprecated JobBuilderFactory/StepBuilderFactory, @EnableBatchProcessing next to Spring Boot). Independent implementation, not affiliated with JetBrains or Broadcom."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.1.0 (first release): XML job navigation, completion and transition/bean checks, spring.batch.job.name navigation, Spring Batch 5 builder factory and @EnableBatchProcessing hints."
+categories = ["frameworks"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = [
+    "on-language:java",
+    "on-language:xml",
+    "on-file:**/application*.properties",
+    "on-file:**/application*.yml",
+    "on-file:**/application*.yaml",
+]
+
+[capabilities]
+required = ["project.read"]
+
+[[contributes.providers]]
+kinds = ["completion", "definition", "line-markers"]
+languages = ["xml", "properties", "yaml"]
+
+[[contributes.providers]]
+kinds = ["line-markers"]
+languages = ["java"]

@@ -1,0 +1,74 @@
+{
+  "properties": {
+    "commitMessageFormat": {
+      "type": "string",
+      "title": "Commit message format ({id} and {summary} are replaced; local tasks have no ID)",
+      "default": "{id} {summary}"
+    },
+    "fillCommitTemplate": {
+      "type": "boolean",
+      "title": "Write the active task's commit message to git's commit.template, which pre-fills the commit field (needs git; a template you set yourself is left alone)",
+      "default": false
+    },
+    "branchNameFormat": {
+      "type": "string",
+      "title": "Branch name format ({id} and {summary} are replaced; local tasks have no ID, so an empty name falls back to the first two words of the summary)",
+      "default": "{id}"
+    },
+    "updateIssuesAutomatically": {
+      "type": "boolean",
+      "title": "Update issues every 20 minutes",
+      "default": true
+    },
+    "githubRepository": {
+      "type": "string",
+      "title": "GitHub repository as owner/name (leave empty to use the github.com remote)",
+      "default": ""
+    },
+    "githubAssignedOnly": {
+      "type": "boolean",
+      "title": "GitHub: only issues assigned to me",
+      "default": false
+    },
+    "githubQuery": {
+      "type": "string",
+      "title": "GitHub: extra search qualifiers (label:bug, milestone:v2…)",
+      "default": ""
+    },
+    "gitlabProject": {
+      "type": "string",
+      "title": "GitLab project as group/name (leave empty to use the gitlab.com remote, or all your issues if there is none)",
+      "default": ""
+    },
+    "forgejoRepository": {
+      "type": "string",
+      "title": "Codeberg repository as owner/name (leave empty to use the codeberg.org remote)",
+      "default": ""
+    },
+    "youtrackHost": {
+      "type": "string",
+      "title": "YouTrack Cloud host, such as acme.youtrack.cloud",
+      "default": ""
+    },
+    "youtrackQuery": {
+      "type": "string",
+      "title": "YouTrack search query",
+      "default": "Assignee: me sort by: updated #Unresolved"
+    },
+    "youtrackCloseState": {
+      "type": "string",
+      "title": "YouTrack state to set when closing a task",
+      "default": "Fixed"
+    },
+    "jiraHost": {
+      "type": "string",
+      "title": "Jira Cloud host, such as acme.atlassian.net",
+      "default": ""
+    },
+    "jiraQuery": {
+      "type": "string",
+      "title": "Jira JQL query",
+      "default": "assignee = currentUser() and resolution = Unresolved order by updated"
+    }
+  }
+}

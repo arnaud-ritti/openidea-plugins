@@ -1,0 +1,6 @@
+id = "dotignore"
+name = "Ignore File (.ignore)"
+extensions = ["ignore"]
+filenames = [".boringignore", ".chefignore", ".cvsignore", ".deployignore", ".distignore", ".ebignore", ".eleventyignore", ".flooignore", ".jpmignore", ".jshintignore", ".mtn-ignore", ".nodemonignore", ".nuxtignore", ".openapi-generator-ignore", ".p4ignore", ".stylintignore", ".swagger-codegen-ignore", ".terraformignore", ".tfignore", ".tokeignore", ".upignore", ".vercelignore", ".yarnignore", "ignore-glob"]
+line-comment = "#"
+indent = { tab-size = 2, insert-spaces = true }

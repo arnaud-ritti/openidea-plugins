@@ -1,0 +1,15 @@
+Kube Explorer
+Copyright (c) 2026 Arnaud RITTI. Code licensed under the MIT License (LICENSE).
+
+The Kubernetes icons in icons/k8s/ are by The Kubernetes Authors, licensed
+under the Apache License 2.0 (icons/k8s/LICENSE):
+  - icons/k8s/cluster.svg: the Kubernetes logo, from
+    https://github.com/cncf/artwork (projects/kubernetes/icon/color)
+  - all other icons: the Kubernetes Icons Set, from
+    https://github.com/kubernetes/community (icons/svg, unlabeled)
+They were reduced to 16x16 and stripped of editor metadata; the logo's style
+classes were inlined as fill colours.
+
+Kubernetes is a registered trademark of The Linux Foundation. This plugin is
+not affiliated with or endorsed by The Linux Foundation or the Kubernetes
+project.

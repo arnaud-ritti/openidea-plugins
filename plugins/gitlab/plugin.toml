@@ -1,0 +1,130 @@
+id = "aritti.gitlab"
+name = "GitLab"
+version = "0.2.0"
+description = """\
+gitlab.com merge requests in the IDE. List them with the IntelliJ quick filters and follow their timeline. \
+Review the changes with comments on diff lines and pending reviews, then reply, resolve, approve, merge, rebase, \
+close, reopen or mark as draft or ready. The status bar shows the current branch's merge request and the editor shows \
+its unresolved threads. Also checks out merge request branches, clones and shares projects, opens or copies the \
+GitLab link to the current lines, and creates snippets. Port of the GitLab plugin by JetBrains s.r.o. \
+(org.jetbrains.plugins.gitlab 263.7307.200, intellij-community tag idea/263.7307.200, plugins/gitlab), Apache-2.0."""
+authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "JetBrains s.r.o. and contributors (original GitLab plugin)"]
+homepage = "https://github.com/JetBrains/intellij-community/tree/master/plugins/gitlab"
+license = "Apache-2.0"
+change-notes = """\
+0.2.0: Merge Request Changes tool window (diff, comments on lines, pending review, viewed files), Submit Review, \
+timeline events, the current branch's merge request in the status bar and the editor, Check Out Branch, and cloning \
+and sharing projects with git. \
+0.1.0: first release, ported from org.jetbrains.plugins.gitlab 263.7307.200 (intellij-community idea/263.7307.200). \
+gitlab.com with a personal access token: merge request list, threads and review actions, Open on GitLab and Copy Link \
+for files, Create Snippet."""
+categories = ["vcs"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = [
+    "on-view:merge-requests", "on-view:merge-request", "on-view:merge-request-changes", "on-view:gitlab-projects",
+    "on-event:vcs-changed", "on-event:file-opened",
+]
+
+[capabilities]
+required = ["vcs.read", "editor.read", "net:gitlab.com", "secrets", "storage"]
+# clipboard: Copy Link and the snippet URL. project.read: jump to a line, review threads in the editor.
+# events: the current branch's merge request. process:git: check out, clone, share.
+optional = ["clipboard", "project.read", "events", "process:git"]
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "GitLab"
+
+[[contributes.providers]]
+kinds = ["line-markers"]
+languages = ["*"]
+
+[[contributes.secrets]]
+name = "token"
+label = "GitLab personal access token"
+description = "A gitlab.com token with the api and read_user scopes. Run GitLab: Create Access Token to make one."
+
+[[contributes.views]]
+id = "merge-requests"
+title = "Merge Requests"
+icon = "icons/gitlab.svg"
+location = "left"
+
+[[contributes.views]]
+id = "merge-request"
+title = "Merge Request"
+icon = "icons/gitlab.svg"
+location = "right"
+
+[[contributes.views]]
+id = "merge-request-changes"
+title = "Merge Request Changes"
+icon = "icons/gitlab.svg"
+location = "bottom"
+
+[[contributes.views]]
+id = "gitlab-projects"
+title = "GitLab Projects"
+icon = "icons/gitlab.svg"
+location = "left"
+
+[[contributes.commands]]
+id = "open-in-browser"
+title = "GitLab: Open on GitLab"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "copy-link"
+title = "GitLab: Copy Link"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "create-snippet"
+title = "GitLab: Create Snippet"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "create-merge-request"
+title = "GitLab: Create Merge Request"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "share-project"
+title = "GitLab: Share Project"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "show-branch-merge-request"
+title = "GitLab: Show Current Branch's Merge Request"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "new-token"
+title = "GitLab: Create Access Token"
+category = "GitLab"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "open-in-browser"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "create-snippet"
+
+[[contributes.menus]]
+menu = "editorTab.context"
+command = "open-in-browser"
+
+[[contributes.menus]]
+menu = "editorTab.context"
+command = "create-snippet"
+
+[[contributes.menus]]
+menu = "tools"
+command = "create-merge-request"
+
+[[contributes.fileIcons]]
+id = "gitlab-ci"
+patterns = [".gitlab-ci.yml", ".gitlab-ci.yaml", "*.gitlab-ci.yml", "*.gitlab-ci.yaml", "*.gitlab-ci.*.yml", "*.gitlab-ci.*.yaml"]
+icon = "icons/gitlab.svg"

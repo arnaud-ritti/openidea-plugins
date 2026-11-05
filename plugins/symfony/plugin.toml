@@ -1,0 +1,55 @@
+id = "aritti.symfony"
+name = "Symfony"
+version = "0.1.0"
+description = """Symfony support in PHP, Twig, YAML and XML files. Completion and go to definition for routes, \
+Twig templates and blocks, services, classes, translation keys (per domain), assets, Encore and AssetMapper entries, \
+and roles, plus completion of the variables controllers pass to a Twig template. Reports missing routes, templates, \
+services and translation keys, and routes defined twice in a file, with a quick fix that adds a missing key. Gutter markers link controllers, templates, \
+parent blocks, classes and service definitions. A Symfony tool window lists routes, templates, services and \
+translations, and two commands run cache:warmup and cache:clear. \
+Partial port of the Symfony Plugin for IntelliJ by Daniel Espendiller and Adrien Brault (MIT). \
+Twig files need the aritti.twig plugin."""
+authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "Daniel Espendiller (original Symfony Plugin)", "Adrien Brault (original Symfony Plugin)"]
+homepage = "https://github.com/Haehnchen/idea-php-symfony2-plugin"
+license = "MIT"
+change-notes = """0.1.0: first release. Ported from the Symfony Plugin (fr.adrienbrault.idea.symfony2plugin) 2026.2.314, \
+source revision b6c1034f6669784d7a58de7535515b7da93db87e. This port works from a text index of the project, so the \
+features that need PhpStorm's PSI are missing (container type inference, Doctrine, forms, most inspections)."""
+categories = ["frameworks"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-language:php", "on-language:twig", "on-language:yaml", "on-language:xml"]
+
+[capabilities]
+required = ["project.read", "events"]
+# Cache: Warm Up / Clear run `php bin/console`; everything else works without it.
+optional = ["process:php"]
+
+[[contributes.commands]]
+id = "reindex"
+title = "Symfony: Reindex Project"
+category = "Symfony"
+
+[[contributes.commands]]
+id = "cache-warmup"
+title = "Symfony: Warm Up Cache"
+category = "Symfony"
+
+[[contributes.commands]]
+id = "cache-clear"
+title = "Symfony: Clear Cache"
+category = "Symfony"
+
+[[contributes.providers]]
+kinds = ["completion", "definition", "line-markers", "code-actions"]
+languages = ["php", "twig", "yaml", "xml"]
+
+[[contributes.views]]
+id = "symfony"
+title = "Symfony"
+icon = "file-php"
+location = "right"
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Symfony"

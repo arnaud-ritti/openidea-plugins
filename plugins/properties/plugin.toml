@@ -1,0 +1,65 @@
+id = "aritti.properties"
+name = "Properties"
+version = "0.1.0"
+description = "Inspections and editing tools for .properties files. Reports duplicate keys, broken \\u escapes, trailing spaces, delimiters that don't match the code style, translations missing from other locales and unused keys, with quick fixes. Also removes a key from every locale, sorts and reformats files, groups keys by prefix in a structure view, edits a resource bundle as a table (Open With › Resource Bundle), goes to declaration in the parent locale or from Java/Kotlin strings, completes keys in i18n calls and simplelogger.properties, and copies a property's key or value. Ported from JetBrains' Properties plugin (com.intellij.properties) by JetBrains s.r.o., Apache-2.0."
+authors = ["Arnaud Ritti", "JetBrains s.r.o. (original Properties plugin)"]
+license = "Apache-2.0"
+change-notes = "0.1.0: first release, with inspections and quick fixes, unused keys, reformat and sort, the structure view, the resource bundle editor, and navigation and completion from Java/Kotlin. Ported from com.intellij.properties 263.7307.108 (source: intellij-community tag idea/263.7307.112, ff0ce573f67655be431312bebb00fecda756960b)."
+categories = ["languages", "linters"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-event:file-opened", "on-event:file-saved"]
+
+[capabilities]
+required = ["project.read", "editor.read", "editor.write", "events"]
+optional = ["clipboard"]
+
+[[contributes.providers]]
+kinds = ["code-actions", "definition", "completion"]
+languages = ["properties"]
+
+[[contributes.providers]]
+kinds = ["definition", "completion"]
+languages = ["java", "kotlin"]
+
+[[contributes.views]]
+id = "structure"
+title = "Properties Structure"
+icon = "structure"
+location = "right"
+
+[[contributes.customEditors]]
+id = "bundle"
+title = "Resource Bundle"
+patterns = ["*.properties"]
+priority = "option"
+
+[[contributes.commands]]
+id = "copy-key"
+title = "Properties: Copy Property Key"
+category = "Properties"
+
+[[contributes.commands]]
+id = "copy-value"
+title = "Properties: Copy Property Value"
+category = "Properties"
+
+[[contributes.commands]]
+id = "reformat"
+title = "Properties: Reformat File"
+category = "Properties"
+
+[[contributes.commands]]
+id = "find-unused"
+title = "Properties: Find Unused Properties"
+category = "Properties"
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Properties"
+
+[[contributes.fileTemplates]]
+id = "xml-properties"
+name = "XML Properties File"
+extension = "xml"
+path = "templates/xml-properties.xml"

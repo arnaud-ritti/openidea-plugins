@@ -1,0 +1,19 @@
+{
+  "properties": {
+    "editorReview": {
+      "type": "boolean",
+      "title": "Show the current branch's unresolved merge request threads in the editor",
+      "default": true
+    },
+    "cloneUsingSsh": {
+      "type": "boolean",
+      "title": "Clone and share using SSH",
+      "default": false
+    },
+    "cloneDirectory": {
+      "type": "string",
+      "title": "Clone directory (leave empty to clone next to the current project)",
+      "default": ""
+    }
+  }
+}

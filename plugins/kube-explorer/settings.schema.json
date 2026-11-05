@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "kubeconfig": {
+      "type": "string",
+      "title": "Kubeconfig file (leave empty to use KUBECONFIG or ~/.kube/config)",
+      "default": ""
+    }
+  }
+}

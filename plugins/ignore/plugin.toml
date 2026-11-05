@@ -1,0 +1,52 @@
+id = "aritti.ignore"
+name = ".ignore"
+version = "0.1.0"
+description = "Support for ignore files (.gitignore, .dockerignore, .npmignore, .hgignore and 30 more). Reports duplicate, redundant, relative and malformed entries and invalid `syntax:` values, with quick fixes. Completes `syntax:` in .hgignore, opens the file an entry names on Ctrl-click and highlights ignore files the IDE does not recognise. A tool window adds github/gitignore and user templates. The status bar shows Ignored while you edit an ignored file, a notification warns about a Git project without a .gitignore, and any file gets an Add to .gitignore quick fix. Port of the .ignore plugin by Jakub Chrzanowski and JetBrains (mobi.hsz.idea.gitignore 4.5.7, Apache-2.0). Templates from github/gitignore (CC0-1.0)."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "Jakub Chrzanowski (original .ignore plugin)", "JetBrains s.r.o. (original .ignore plugin)"]
+homepage = "https://github.com/JetBrains/idea-gitignore"
+license = "Apache-2.0"
+change-notes = "0.1.0: first release, ported from .ignore 4.5.7 (JetBrains/idea-gitignore commit 860a6855) with github/gitignore templates at 53cf2971. Not ported because the plugin API has no equivalent: directory gutter markers, path completion, Close Ignored Editors, hiding ignored files in the Project view."
+categories = ["vcs", "linters"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-event:file-opened", "on-event:file-saved", "on-event:editor-focused"]
+
+[capabilities]
+required = ["project.read", "editor.read", "editor.write", "events", "storage"]
+
+# Ignore files the IDE doesn't know yet; .gitignore, .dockerignore, .npmignore…
+# are the built-in `ignore` language.
+[[contributes.languages]]
+path = "languages/dotignore.toml"
+
+[[contributes.providers]]
+kinds = ["completion", "definition"]
+languages = ["ignore", "dotignore"]
+
+# Quick fixes in ignore files, Add to .gitignore in every other file.
+[[contributes.providers]]
+kinds = ["code-actions"]
+languages = ["*"]
+
+[[contributes.views]]
+id = "templates"
+title = "Ignore Templates"
+icon = "file-ignored"
+location = "right"
+
+[contributes.settings]
+title = ".ignore"
+schema = "settings.schema.json"
+
+# The ignore files the IDE has no icon for (`.gitignore` and the like already have one).
+[[contributes.fileIcons]]
+id = "ignore"
+patterns = ["*.ignore", ".boringignore", ".chefignore", ".cvsignore", ".deployignore", ".distignore", ".ebignore", ".eleventyignore", ".flooignore", ".jpmignore", ".jshintignore", ".mtn-ignore", ".nodemonignore", ".nuxtignore", ".openapi-generator-ignore", ".p4ignore"]
+icon = "icons/ignored.svg"
+iconDark = "icons/ignored_dark.svg"
+
+[[contributes.fileIcons]]
+id = "ignore-more"
+patterns = [".stylintignore", ".swagger-codegen-ignore", ".terraformignore", ".tfignore", ".tokeignore", ".upignore", ".vercelignore", ".yarnignore", "ignore-glob"]
+icon = "icons/ignored.svg"
+iconDark = "icons/ignored_dark.svg"

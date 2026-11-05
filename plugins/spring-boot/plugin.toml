@@ -1,0 +1,30 @@
+id = "aritti.spring-boot"
+name = "Spring Boot Tools"
+version = "0.1.0"
+description = "Completion and checks for Spring Boot configuration files. Completes keys and values in application*.properties and application*.yml from the Spring Boot 3.5 metadata, the project's configuration metadata files and its @ConfigurationProperties classes. Warns about deprecated keys (with a quick fix) and unknown keys in known groups, and checks cron expressions in @Scheduled(cron) and *.cron keys. Independent implementation, not affiliated with JetBrains or Broadcom."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.1.0: first release, with key and value completion, warnings for deprecated and unknown keys, a quick fix for deprecated keys and cron validation. Bundled metadata from Spring Boot 3.5.16 (Apache-2.0)."
+categories = ["frameworks"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = [
+    "on-file:**/application*.properties",
+    "on-file:**/application*.yml",
+    "on-file:**/application*.yaml",
+    "on-file:**/bootstrap*.properties",
+    "on-file:**/bootstrap*.yml",
+    "on-file:**/bootstrap*.yaml",
+    "on-language:java",
+]
+
+[capabilities]
+required = ["project.read"]
+
+[[contributes.providers]]
+kinds = ["completion", "code-actions", "line-markers"]
+languages = ["properties", "yaml"]
+
+[[contributes.providers]]
+kinds = ["line-markers"]
+languages = ["java"]

@@ -1,0 +1,14 @@
+Spring OSGi for OpenIDEA
+Copyright 2026 Arnaud RITTI
+
+This product is a port of the Spring OSGi plugin for IntelliJ IDEA
+(Marketplace plugin com.intellij.spring.osgi, version 253.28294.218),
+Copyright 2000-2026 JetBrains s.r.o. and contributors, licensed under the
+Apache License, Version 2.0.
+
+Ported from https://github.com/JetBrains/intellij-obsolete-plugins,
+subdirectory spring-osgi, revision 07887c0596764e16977fd4570c2234bfc81dde49.
+
+Changes: rewritten in Rust for the OpenIDEA plugin API. The inspection
+messages and checks come from the original; they are evaluated on the XML
+text and the project's Java sources instead of the IntelliJ Spring model.

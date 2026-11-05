@@ -1,0 +1,32 @@
+id = "aritti.dotenv"
+name = ".env files"
+version = "0.1.0"
+description = ".env file support: highlighting, inspections with quick fixes and ${VARIABLE} completion. Environment variables in code (getenv, os.environ, process.env, ENV[…], env::var, PHPUnit <env>, …) get completion and go to declaration in .env files, Dockerfiles and docker-compose files. Go to declaration on a key in a .env file lists its usages, and after you rename a key a quick fix updates them. Port of the \".env files\" plugin by Adel Fayzrakhmanov and JetBrains."
+authors = ["Arnaud RITTI", "Adel Fayzrakhmanov (original plugin)", "JetBrains s.r.o. (original plugin)"]
+license = "MIT"
+change-notes = "0.1.0: first release. Port of ru.adelf.idea.dotenv 263.7307.209 (github.com/JetBrains/idea-php-dotenv-plugin, revision a1e60501; Docker, PHP, PHPUnit, Go, Ruby and Rust support from revision c1484553, before it was removed upstream). Includes highlighting, the 11 inspections and their quick fixes, ${VARIABLE} completion and navigation, environment variable completion, go to declaration and usages in code, keys from Dockerfiles and docker-compose files, and renaming the usages of an edited key."
+categories = ["languages", "linters"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-language:dotenv"]
+
+[capabilities]
+# project.read: read the project's .env files, publish problems. events: check .env files when opened or saved.
+required = ["project.read", "events"]
+
+# The IDE's own `dotenv` definition wins (detection, comments); this copy only
+# makes the plugin the language's owner, so its highlighting is used.
+[[contributes.languages]]
+path = "languages/dotenv.toml"
+
+[[contributes.providers]]
+kinds = ["completion", "definition", "code-actions"]
+languages = ["dotenv"]
+
+[[contributes.providers]]
+kinds = ["completion", "definition"]
+languages = ["php", "python", "java", "kotlin", "scala", "groovy", "javascript", "typescript", "javascriptreact", "typescriptreact", "vue", "svelte", "go", "ruby", "rust", "csharp", "xml"]
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = ".env files"
