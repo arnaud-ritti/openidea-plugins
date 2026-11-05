@@ -190,7 +190,7 @@ fn cached_queries() -> BTreeMap<String, CachedQuery> {
         .unwrap_or_default()
 }
 
-fn cached_advisory(id: &str) -> Option<Advisory> {
+pub(crate) fn cached_advisory(id: &str) -> Option<Advisory> {
     serde_json::from_str(&host::storage::get(&format!("v:{id}")).ok()??).ok()
 }
 

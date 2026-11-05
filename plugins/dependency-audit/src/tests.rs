@@ -350,7 +350,7 @@ fn scan_lists_vulnerable_dependencies_in_the_view() {
 
     assert_eq!(host.notifications()[0].body, "Vulnerable dependencies: 2 of 3 (3 files). See the Vulnerable Dependencies tool window.");
     assert!(host.refreshed_views().contains(&"vulnerabilities".to_string()));
-    assert_eq!(host.diagnostics().keys().collect::<Vec<_>>(), ["/project/pom.xml", "/project/web/package.json"]);
+    assert_eq!(host.diagnostics().keys().collect::<Vec<_>>(), ["/project/pom.xml", "/project/web/package-lock.json", "/project/web/package.json"]);
 
     let labels: Vec<String> = tree(&mut plugin, &host).into_iter().map(|i| i.label).collect();
     assert_eq!(labels.iter().filter(|l| l.starts_with("lodash")).count(), 1, "the lockfile adds no duplicate");
@@ -400,4 +400,30 @@ fn a_failed_scan_tells_the_user() {
     let error = DependencyAudit::default().run_command("scan", &host.invocation(), None).unwrap_err();
 
     assert!(error.to_string().contains("OSV answered 503"));
+}
+
+#[test]
+fn a_fresh_instance_opens_items_from_the_stored_rows() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    let mut first = scanned(&host);
+    let items = tree(&mut first, &host);
+    let key = items.iter().find(|i| i.label == "GHSA-57j2-w4cx-62h2").unwrap().key.clone();
+
+    DependencyAudit::default().handle("vulnerabilities", ViewEvent::Activate(key), &host.invocation()).unwrap();
+
+    assert_eq!(host.opened_urls(), ["https://osv.dev/vulnerability/GHSA-57j2-w4cx-62h2"]);
+}
+
+#[test]
+fn a_dependency_shared_by_two_manifests_is_marked_in_both_and_listed_once() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("a/pom.xml", POM);
+    host.add_file("b/pom.xml", POM);
+    let mut plugin = DependencyAudit::default();
+    plugin.run_command("scan", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.diagnostics().keys().collect::<Vec<_>>(), ["/project/a/pom.xml", "/project/b/pom.xml"]);
+    let jackson = tree(&mut plugin, &host).into_iter().filter(|i| i.label.starts_with("com.fasterxml")).count();
+    assert_eq!(jackson, 1);
 }

@@ -17,7 +17,7 @@ use spring_text::range;
 use spring_text::tree::Expansion;
 
 use manifest::{Dep, GLOBS, bumped, kind, lockfile, parse};
-use osv::{Advisory, Finding, audit, compare, level};
+use osv::{Finding, audit, cached_advisory, compare, level};
 
 #[derive(Default)]
 pub struct DependencyAudit {
@@ -37,7 +37,7 @@ struct Row {
     name: String,
     version: String,
     fix: Option<String>,
-    advisories: Vec<Advisory>,
+    advisories: Vec<String>,
 }
 
 fn now() -> u64 {
@@ -97,6 +97,7 @@ fn scan(project: &Project) -> Result<String, Error> {
     }
 
     let mut texts: HashMap<String, String> = HashMap::new();
+    let mut file_deps: Vec<(String, Vec<Dep>)> = Vec::new();
     let mut deps: Vec<Dep> = Vec::new();
     let mut seen = HashSet::new();
     for path in &files {
@@ -111,17 +112,24 @@ fn scan(project: &Project) -> Result<String, Error> {
                 continue;
             }
         };
-        for dep in found {
-            if seen.insert((dep.ecosystem, dep.name.clone(), dep.version.clone())) {
-                deps.push(dep);
+        for dep in &found {
+            if seen.insert(dep_key(dep)) {
+                deps.push(dep.clone());
             }
         }
         texts.insert(path.clone(), text);
+        file_deps.push((path.clone(), found));
     }
 
     let findings = audit(&deps, true, now())?;
-    for (path, text) in &texts {
-        let items: Vec<Diagnostic> = findings.iter().filter(|f| f.dep.path == *path).map(|f| diagnostic(f, text)).collect();
+    let by_dep: HashMap<_, &Finding> = findings.iter().map(|f| (dep_key(&f.dep), f)).collect();
+    for (path, found) in &file_deps {
+        let text = &texts[path];
+        let items: Vec<Diagnostic> = found
+            .iter()
+            .filter_map(|dep| by_dep.get(&dep_key(dep)).map(|f| Finding { dep: dep.clone(), advisories: f.advisories.clone() }))
+            .map(|f| diagnostic(&f, text))
+            .collect();
         if let Err(e) = host::publish_diagnostics(path, &items) {
             host::log(LogLevel::Warn, &format!("Diagnostics of {path}: {e}"));
         }
@@ -135,25 +143,73 @@ fn scan(project: &Project) -> Result<String, Error> {
             name: f.dep.name.clone(),
             version: f.dep.version.clone(),
             fix: f.fix(),
-            advisories: f.advisories.clone(),
+            advisories: f.advisories.iter().map(|a| a.id.clone()).collect(),
         })
         .collect();
     let stored = serde_json::to_string(&rows).map_err(|e| Error::Failed(e.to_string()))?;
-    if let Err(e) = host::storage::set(&rows_key(project)?, &stored) {
+    let key = rows_key(project)?;
+    let kept = host::storage::set(&key, &stored);
+    if let Err(e) = &kept {
+        let _ = host::storage::delete(&key);
         host::log(LogLevel::Warn, &format!("Scan results not stored: {e}"));
     }
     host::refresh_view("vulnerabilities");
 
-    if rows.is_empty() {
-        return Ok(format!("No known vulnerabilities in {} dependencies ({} files).", deps.len(), texts.len()));
+    let mut body = match rows.is_empty() {
+        true => format!("No known vulnerabilities in {} dependencies ({} files).", deps.len(), texts.len()),
+        false => format!(
+            "Vulnerable dependencies: {} of {} ({} files). See the Vulnerable Dependencies tool window.",
+            rows.len(),
+            deps.len(),
+            texts.len()
+        ),
+    };
+    if kept.is_err() {
+        body.push_str(" (Too many results to keep for the tool window.)");
     }
 
-    Ok(format!(
-        "Vulnerable dependencies: {} of {} ({} files). See the Vulnerable Dependencies tool window.",
-        rows.len(),
-        deps.len(),
-        texts.len()
-    ))
+    Ok(body)
+}
+
+fn dep_key(dep: &Dep) -> (manifest::Ecosystem, String, String) {
+    (dep.ecosystem, dep.name.clone(), dep.version.clone())
+}
+
+fn tree_of(root: &str, rows: &[Row]) -> (Vec<TreeItem>, HashMap<String, Target>) {
+    let root = format!("{root}/");
+    let mut items: Vec<TreeItem> = Vec::new();
+    let mut targets = HashMap::new();
+    for row in rows {
+        if !targets.contains_key(&row.path) {
+            let label = row.path.strip_prefix(&root).unwrap_or(&row.path);
+            items.push(TreeItem::new(&row.path, label).icon("file"));
+            targets.insert(row.path.clone(), Target::Location(row.path.clone(), 0));
+        }
+
+        let key = format!("{}|{} {}", row.path, row.name, row.version);
+        let detail = row.fix.as_ref().map_or("no fix".to_owned(), |fix| format!("fix: {fix}"));
+        items.push(TreeItem::new(&key, &format!("{} {}", row.name, row.version)).parent(&row.path).icon("package").detail(&detail));
+        targets.insert(key.clone(), Target::Location(row.path.clone(), row.line));
+
+        for id in &row.advisories {
+            let advisory_key = format!("{key}|{id}");
+            let item = TreeItem::new(&advisory_key, id).parent(&key);
+            items.push(match cached_advisory(id) {
+                Some(advisory) => {
+                    let icon = match level(advisory.severity.as_deref()) {
+                        Severity::Error => "error",
+                        Severity::Warning => "warning",
+                        _ => "info",
+                    };
+                    item.icon(icon).detail(&advisory.summary)
+                }
+                None => item.icon("warning"),
+            });
+            targets.insert(advisory_key, Target::Url(format!("https://osv.dev/vulnerability/{id}")));
+        }
+    }
+
+    (items, targets)
 }
 
 fn scan_and_notify(project: &Project) -> Result<(), Error> {
@@ -281,6 +337,21 @@ impl Providers for DependencyAudit {
     }
 }
 
+impl DependencyAudit {
+    fn rebuild_targets(&mut self, ctx: &Invocation) -> Result<(), Error> {
+        let Some(project) = ctx.project() else {
+            return Ok(());
+        };
+        let Some(rows) = stored_rows(&project)? else {
+            return Ok(());
+        };
+
+        self.targets = tree_of(&project.root()?, &rows).1;
+
+        Ok(())
+    }
+}
+
 impl Views for DependencyAudit {
     fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
         let Some(project) = ctx.project() else {
@@ -293,32 +364,7 @@ impl Views for DependencyAudit {
             return Ok(View::message("No known vulnerabilities found.").button(Button::new("scan", "Rescan")));
         }
 
-        let root = format!("{}/", project.root()?);
-        let mut items: Vec<TreeItem> = Vec::new();
-        let mut targets = HashMap::new();
-        for row in &rows {
-            if !targets.contains_key(&row.path) {
-                let label = row.path.strip_prefix(&root).unwrap_or(&row.path);
-                items.push(TreeItem::new(&row.path, label).icon("file"));
-                targets.insert(row.path.clone(), Target::Location(row.path.clone(), 0));
-            }
-
-            let key = format!("{}|{} {}", row.path, row.name, row.version);
-            let detail = row.fix.as_ref().map_or("no fix".to_owned(), |fix| format!("fix: {fix}"));
-            items.push(TreeItem::new(&key, &format!("{} {}", row.name, row.version)).parent(&row.path).icon("package").detail(&detail));
-            targets.insert(key.clone(), Target::Location(row.path.clone(), row.line));
-
-            for advisory in &row.advisories {
-                let advisory_key = format!("{key}|{}", advisory.id);
-                let icon = match level(advisory.severity.as_deref()) {
-                    Severity::Error => "error",
-                    Severity::Warning => "warning",
-                    _ => "info",
-                };
-                items.push(TreeItem::new(&advisory_key, &advisory.id).parent(&key).icon(icon).detail(&advisory.summary));
-                targets.insert(advisory_key, Target::Url(format!("https://osv.dev/vulnerability/{}", advisory.id)));
-            }
-        }
+        let (mut items, targets) = tree_of(&project.root()?, &rows);
         self.targets = targets;
         self.expansion.apply(&mut items);
 
@@ -337,11 +383,17 @@ impl Views for DependencyAudit {
                 let project = ctx.project().ok_or("Open a project first.")?;
                 scan_and_notify(&project)
             }
-            ViewEvent::Activate(key) => match self.targets.get(&key) {
-                Some(Target::Location(path, line)) => host::open_location(path, *line, 0),
-                Some(Target::Url(url)) => host::open_url(url),
-                None => Ok(()),
-            },
+            ViewEvent::Activate(key) => {
+                if !self.targets.contains_key(&key) {
+                    self.rebuild_targets(ctx)?;
+                }
+
+                match self.targets.get(&key) {
+                    Some(Target::Location(path, line)) => host::open_location(path, *line, 0),
+                    Some(Target::Url(url)) => host::open_url(url),
+                    None => Ok(()),
+                }
+            }
             _ => Ok(()),
         }
     }
