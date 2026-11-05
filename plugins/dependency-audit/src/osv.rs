@@ -34,7 +34,7 @@ pub fn parse_advisory(json: &str) -> Option<Advisory> {
             continue;
         };
         let versions = fixed.entry(format!("{ecosystem}:{name}")).or_default();
-        let events = package["ranges"].as_array().into_iter().flatten().flat_map(|r| r["events"].as_array().into_iter().flatten());
+        let events = package["ranges"].as_array().into_iter().flatten().filter(|r| r["type"].as_str() != Some("GIT")).flat_map(|r| r["events"].as_array().into_iter().flatten());
         versions.extend(events.filter_map(|e| text(&e["fixed"])));
     }
 
@@ -175,6 +175,26 @@ pub(crate) mod tests {
         assert_eq!(compare("99999999999999999999999999.0", "99999999999999999999999998.0"), Ordering::Greater);
         assert_eq!(compare("99999999999999999999999", "9"), Ordering::Greater);
         assert_eq!(compare("1.é", "1.e"), Ordering::Greater);
+    }
+
+    #[test]
+    fn git_ranges_and_incomplete_entries_add_no_fixed_versions() {
+        let mixed = parse_advisory(
+            r#"{"id": "PYSEC-1", "modified": "m", "affected": [{"package": {"ecosystem": "npm", "name": "x"},
+ "ranges": [{"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "0123456789abcdef0123456789abcdef01234567"}]},
+            {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1.2.3"}]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(mixed.fixed["npm:x"], ["1.2.3"]);
+
+        let last_affected = parse_advisory(
+            r#"{"id": "OSV-3", "modified": "m", "affected": [{"package": {"ecosystem": "npm", "name": "y"},
+ "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"last_affected": "1.0.0"}]}]}, {"ranges": []}]}"#,
+        )
+        .unwrap();
+        assert!(last_affected.fixed["npm:y"].is_empty());
+        assert_eq!(last_affected.fixed.len(), 1);
+        assert_eq!(level(Some("MODERATE")), Severity::Warning);
     }
 
     #[test]
