@@ -14,7 +14,20 @@ struct Parameter {
     declared_at: Option<(usize, usize)>,
 }
 
-pub fn check(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Option<String>) -> Vec<Diagnostic> {
+pub enum Fetched {
+    Text(String),
+    Missing,
+    /// The file exists but can't be read; nothing is reported about refs into it.
+    Unreadable,
+}
+
+enum Loaded {
+    Keys(Vec<Key>),
+    Missing,
+    Unreadable,
+}
+
+pub fn check(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Fetched) -> Vec<Diagnostic> {
     let ops = operations(text, &spec.keys);
     let mut found = unresolved_refs(text, spec, read);
     found.extend(duplicate_operation_ids(text, spec, &ops));
@@ -28,8 +41,8 @@ fn problem(text: &str, (at, end): (usize, usize), severity: Severity, code: &str
     diagnostic
 }
 
-fn unresolved_refs(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Option<String>) -> Vec<Diagnostic> {
-    let mut files: HashMap<String, Option<Vec<Key>>> = HashMap::new();
+fn unresolved_refs(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Fetched) -> Vec<Diagnostic> {
+    let mut files: HashMap<String, Loaded> = HashMap::new();
     let mut found = Vec::new();
 
     for r in refs(text) {
@@ -41,14 +54,19 @@ fn unresolved_refs(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Option<String
             let resolves = fragment.is_empty() || target(&spec.keys, fragment).is_some();
             (!resolves).then(|| format!("Cannot find `{}`", r.target))
         } else {
-            let keys = files.entry(file.to_owned()).or_insert_with(|| {
-                let content = read(file)?;
-                Some(if file.ends_with(".json") { Vec::new() } else { spring_text::config::yaml(&content) })
+            let loaded = files.entry(file.to_owned()).or_insert_with(|| match read(file) {
+                Fetched::Missing => Loaded::Missing,
+                Fetched::Unreadable => Loaded::Unreadable,
+                Fetched::Text(_) if file.ends_with(".json") => Loaded::Keys(Vec::new()),
+                Fetched::Text(content) => Loaded::Keys(spring_text::config::yaml(&content)),
             });
-            match keys {
-                None => Some(format!("Cannot find file `{file}`")),
-                Some(_) if file.ends_with(".json") || fragment.is_empty() => None,
-                Some(keys) => target(keys, fragment).is_none().then(|| format!("Cannot find `{}`", r.target)),
+            match loaded {
+                Loaded::Missing => Some(format!("Cannot find file `{file}`")),
+                Loaded::Unreadable => None,
+                Loaded::Keys(_) if file.ends_with(".json") || fragment.is_empty() => None,
+                Loaded::Keys(keys) => {
+                    target(keys, fragment).is_none().then(|| format!("Cannot find `{}`", r.target))
+                }
             }
         };
 
@@ -169,7 +187,11 @@ mod tests {
     const COMMON: &str = "Pet:\n  type: object\n";
 
     fn found(text: &str) -> Vec<(u32, Severity, String, String)> {
-        let read = |f: &str| (f == "common.yaml").then(|| COMMON.to_owned());
+        let read = |f: &str| match f {
+            "common.yaml" => Fetched::Text(COMMON.to_owned()),
+            "locked.yaml" => Fetched::Unreadable,
+            _ => Fetched::Missing,
+        };
         check(text, &parse(text).unwrap(), &read)
             .into_iter()
             .map(|d| (d.range.start.line, d.severity, d.code.unwrap(), d.message))
@@ -190,6 +212,12 @@ mod tests {
             e(7, "Cannot find `common.yaml#/Missing`"),
             e(11, "Cannot find file `nope.yaml`"),
         ]);
+    }
+
+    #[test]
+    fn a_ref_into_an_unreadable_file_is_not_reported() {
+        let text = "openapi: 3.0.0\npaths: {}\nx:\n  $ref: 'locked.yaml#/Pet'\ny:\n  $ref: 'locked.yaml'\n";
+        assert!(found(text).is_empty());
     }
 
     #[test]

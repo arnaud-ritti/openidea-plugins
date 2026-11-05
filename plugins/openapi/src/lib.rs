@@ -4,6 +4,7 @@ mod checks;
 #[allow(dead_code)]
 mod spec;
 
+use checks::Fetched;
 use openidea_plugin::{Diagnostic, Error, Event, Invocation, LogLevel, Plugin, Project, host, register_plugin};
 
 #[derive(Default)]
@@ -47,7 +48,12 @@ fn problems(path: &str) -> Result<Vec<Diagnostic>, Error> {
         return Ok(Vec::new());
     };
 
-    let read = |file: &str| project.read_file(&resolve_path(path, file)).ok();
+    // The host reports a missing file as `Invalid`, one that exists but can't be read as `Failed`.
+    let read = |file: &str| match project.read_file(&resolve_path(path, file)) {
+        Ok(content) => Fetched::Text(content),
+        Err(Error::NotFound(_) | Error::Invalid(_)) => Fetched::Missing,
+        Err(_) => Fetched::Unreadable,
+    };
 
     Ok(checks::check(&text, &spec, &read))
 }
