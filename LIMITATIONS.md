@@ -862,6 +862,39 @@ v0.1.37 and `main` (`f665beb`) on 2026-11-05.
 - **Why:** no extension point for console or terminal output, and no paged or streamed document.
 - **Would need:** a console filter provider (line in → ranges with kinds and link targets); a read-only paged document or a custom editor with streamed content.
 
+## aritti.flyway (clean-room, inspired by JetBrains' Flyway support)
+
+Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
+
+### Project-local wrappers can't be run
+
+- **Blocks:** Gradle Flyway tasks via `./gradlew`, and `./mvnw`.
+- **Why:** `process:` takes a program name or an absolute path; relative paths are refused (`crates/ide-extension/src/capability.rs:155-159`), and the absolute path differs per checkout.
+- **Workaround:** `flyway` or `mvn` from PATH (setting `runner`).
+- **Would need:** a `process:./gradlew`-style grant resolved against and pinned per project root.
+
+### No rename quick fix for misnamed migrations
+
+- **Blocks:** renaming a migration to the name the checks expect.
+- **Why:** same as *Code actions can't create, rename or delete files* in the Symfony section.
+
+### Providers are chosen by language id only
+
+- **Blocks:** completion limited to `flyway.conf` and `flyway.toml`.
+- **Why:** `flyway.conf` is the `ini` language, so the plugin is loaded for every `.ini`, `.conf` and `.cfg` file (and every `toml` file) and filters by file name.
+- **Would need:** `patterns` (file globs) on `[[contributes.providers]]`.
+
+### No confirmation dialog
+
+- **Blocks:** a "Drop all objects?" prompt before `clean`.
+- **Why:** same as *No popups, choosers or input dialogs* in the Symfony section.
+- **Workaround:** `clean` must be run twice within 30 seconds.
+
+### Problems only on open and save
+
+- **Why:** same as *Problems aren't re-checked while typing* in the Symfony section.
+- **Workaround:** for a rename done outside the IDE, run Flyway: Check Migrations.
+
 ## All plugins
 
 Checked against the host and frontend source of v0.1.37 on 2026-11-05.
