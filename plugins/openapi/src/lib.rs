@@ -216,8 +216,8 @@ fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
 }
 
 impl Views for OpenApi {
-    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, _ctx: &Invocation) -> Result<View, Error> {
-        let Some(project) = host::projects()?.into_iter().next() else {
+    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let Some(project) = ctx.project() else {
             return Ok(View::message("Open a project to list its endpoints."));
         };
 
