@@ -299,3 +299,28 @@ fn no_quick_fix_off_the_dependency_line_or_in_lockfiles() {
     assert!(plugin.code_actions(&document("/project/pom.xml", "xml", POM), line(2)).is_empty());
     assert!(plugin.code_actions(&document("/project/package-lock.json", "json", PACKAGE_LOCK), line(0)).is_empty());
 }
+
+#[test]
+fn deps_sharing_a_property_get_one_quick_fix_with_the_highest_fix() {
+    let other = r#"{"id": "GHSA-aaaa-bbbb-cccc", "modified": "2024-01-01T00:00:00Z", "summary": "Other",
+ "affected": [{"package": {"ecosystem": "Maven", "name": "com.example:other"}, "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.13.0"}]}]}]}"#;
+    let pom = "<project>\n<properties><jackson.version>2.12.3</jackson.version></properties>\n<dependencies>\n<dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>${jackson.version}</version></dependency>\n<dependency><groupId>com.example</groupId><artifactId>other</artifactId><version>${jackson.version}</version></dependency>\n</dependencies>\n</project>\n";
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(move |req| match (req.method.as_str(), req.url.as_str()) {
+        ("POST", _) => ok(json!({"results": [
+            {"vulns": [{"id": "GHSA-57j2-w4cx-62h2", "modified": "2024-03-15T05:00:00Z"}]},
+            {"vulns": [{"id": "GHSA-aaaa-bbbb-cccc", "modified": "2024-01-01T00:00:00Z"}]},
+        ]}).to_string()),
+        ("GET", "https://api.osv.dev/v1/vulns/GHSA-57j2-w4cx-62h2") => ok(JACKSON.into()),
+        _ => ok(other.into()),
+    });
+    host.add_file("pom.xml", pom);
+    opened(&host, "/project/pom.xml");
+
+    let selection = Range::new(Position::new(3, 0), Position::new(4, 0));
+    let actions = DependencyAudit::default().code_actions(&document("/project/pom.xml", "xml", pom), selection);
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "Upgrade jackson-databind to 2.13.0");
+    assert_eq!(actions[0].edits[0].1[0].text, "2.13.0");
+}

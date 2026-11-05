@@ -115,18 +115,30 @@ fn pom(path: &str, text: &str) -> Vec<Dep> {
         .filter_map(|e| inner_text(text, e).map(|(value, range)| (e.name.as_str(), value, range)))
         .collect();
 
+    let mut children: HashMap<usize, [Option<usize>; 3]> = HashMap::new();
+    for (child, el) in els.iter().enumerate() {
+        let Some(parent) = el.parent else {
+            continue;
+        };
+        let Some(slot) = ["groupId", "artifactId", "version"].iter().position(|n| *n == el.name) else {
+            continue;
+        };
+
+        children.entry(parent).or_default()[slot].get_or_insert(child);
+    }
+
     let mut deps = Vec::new();
     for (index, dependency) in els.iter().enumerate() {
         if dependency.name != "dependency" {
             continue;
         }
-        let read = |name: &str| {
-            els.iter()
-                .find(|e| e.parent == Some(index) && e.name == name)
-                .and_then(|e| inner_text(text, e))
+        let read = |slot: usize| {
+            let child = children.get(&index)?[slot]?;
+
+            inner_text(text, &els[child])
         };
         let (Some((group, _)), Some((artifact, at)), Some((declared, declared_at))) =
-            (read("groupId"), read("artifactId"), read("version"))
+            (read(0), read(1), read(2))
         else {
             continue;
         };

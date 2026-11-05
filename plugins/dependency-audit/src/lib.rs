@@ -3,6 +3,7 @@
 mod manifest;
 mod osv;
 
+use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use openidea_plugin::host;
@@ -13,7 +14,7 @@ use spring_text::index::project_of;
 use spring_text::range;
 
 use manifest::{Dep, bumped, kind, lockfile, parse};
-use osv::{Finding, audit};
+use osv::{Finding, audit, compare};
 
 #[derive(Default)]
 pub struct DependencyAudit;
@@ -59,29 +60,53 @@ fn is_single_constraint(spec: &str) -> bool {
     version.starts_with(|c: char| c.is_ascii_digit()) && !version.contains([' ', '|', ',', '*'])
 }
 
-fn upgrade_action(finding: &Finding, doc: &Document, selection: &Range) -> Option<CodeAction> {
-    let (from, to) = finding.dep.version_at?;
-    let fix = finding.fix()?;
-    let spec = doc.text.get(from..to)?;
+fn overlaps(dep: &Dep, text: &str, selection: &Range) -> bool {
+    let underlined = range(text, dep.at.0, dep.at.1);
 
-    if !is_single_constraint(spec) {
-        return None;
+    underlined.end.line >= selection.start.line && underlined.start.line <= selection.end.line
+}
+
+fn upgrade_actions(findings: &[Finding], doc: &Document) -> Vec<CodeAction> {
+    // Deps sharing a `${property}` share one range: one action, the highest fix.
+    let mut upgrades: Vec<((usize, usize), String, String)> = Vec::new();
+
+    for finding in findings {
+        let Some(at) = finding.dep.version_at else {
+            continue;
+        };
+        let Some(fix) = finding.fix() else {
+            continue;
+        };
+        if !doc.text.get(at.0..at.1).is_some_and(is_single_constraint) {
+            continue;
+        }
+
+        match upgrades.iter_mut().find(|(range_at, ..)| *range_at == at) {
+            Some((_, best, _)) => {
+                if compare(&fix, best) == Ordering::Greater {
+                    *best = fix;
+                }
+            }
+            None => {
+                let short = finding.dep.name.rsplit(':').next().unwrap_or(&finding.dep.name);
+                upgrades.push((at, fix, short.to_owned()));
+            }
+        }
     }
 
-    let underlined = range(&doc.text, finding.dep.at.0, finding.dep.at.1);
-    if underlined.end.line < selection.start.line || underlined.start.line > selection.end.line {
-        return None;
-    }
-
-    let short = finding.dep.name.rsplit(':').next().unwrap_or(&finding.dep.name);
-
-    Some(CodeAction {
-        title: format!("Upgrade {short} to {fix}"),
-        kind: Some("quickfix".into()),
-        preferred: true,
-        edits: vec![(doc.path.clone(), vec![TextEdit { range: range(&doc.text, from, to), text: bumped(spec, &fix) }])],
-        data: None,
-    })
+    upgrades
+        .into_iter()
+        .map(|((from, to), fix, short)| CodeAction {
+            title: format!("Upgrade {short} to {fix}"),
+            kind: Some("quickfix".into()),
+            preferred: true,
+            edits: vec![(
+                doc.path.clone(),
+                vec![TextEdit { range: range(&doc.text, from, to), text: bumped(&doc.text[from..to], &fix) }],
+            )],
+            data: None,
+        })
+        .collect()
 }
 
 impl Plugin for DependencyAudit {
@@ -120,12 +145,19 @@ impl Providers for DependencyAudit {
             return Vec::new();
         };
         let lock = lockfile(&doc.path).and_then(|lock| project.read_file(&lock).ok());
-        let deps = parse(&doc.path, &doc.text, lock.as_deref());
+        let deps: Vec<Dep> = parse(&doc.path, &doc.text, lock.as_deref())
+            .into_iter()
+            .filter(|dep| overlaps(dep, &doc.text, &selection))
+            .collect();
+        if deps.is_empty() {
+            return Vec::new();
+        }
+
         let Ok(findings) = audit(&deps, false, now()) else {
             return Vec::new();
         };
 
-        findings.iter().filter_map(|f| upgrade_action(f, doc, &selection)).collect()
+        upgrade_actions(&findings, doc)
     }
 }
 
