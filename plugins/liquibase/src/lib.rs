@@ -7,8 +7,9 @@ mod checks;
 
 use changelog::{Include, Target};
 use openidea_plugin::providers::{Document, LineMarker, Providers};
-use openidea_plugin::{Error, Invocation, Plugin, host, register_plugin};
+use openidea_plugin::{Error, Invocation, Plugin, Project, host, register_plugin};
 use spring_text::index::project_of;
+use std::cell::OnceCell;
 
 #[derive(Default)]
 pub struct Liquibase;
@@ -19,38 +20,62 @@ impl Plugin for Liquibase {
     }
 }
 
-/// Where `include`, written in `changelog`, points.
-fn target(changelog: &str, include: &Include) -> Target {
+/// Whether a probe saw the thing: `None` when the host failed for a reason other than it not existing.
+fn exists<T>(probe: Result<T, Error>, present: impl Fn(&T) -> bool) -> Option<bool> {
+    match probe {
+        Ok(value) => Some(present(&value)),
+        Err(Error::NotFound(_)) => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// Where `include`, written in `changelog` (inside `project`, rooted at `root`), points.
+fn target(project: &Project, root: &str, changelog: &str, include: &Include) -> Target {
     if include.path.is_empty() {
         return Target::Unknown;
     }
-    let Some(project) = project_of(changelog) else {
-        return Target::Unknown;
-    };
-    let Ok(root) = project.root() else {
-        return Target::Unknown;
-    };
-    let candidates = changelog::candidates(changelog, &root, include);
+    let candidates = changelog::candidates(changelog, root, include);
     if candidates.is_empty() {
         return Target::Unknown;
     }
+    let mut unsure = false;
     // ponytail: reads each included file to test it exists (no exists API); cap or cache if master changelogs with hundreds of includes miss the 50 ms budget
-    let found = candidates.into_iter().find(|candidate| {
-        if !include.dir {
-            return project.read_file(candidate).is_ok();
+    for candidate in candidates {
+        let seen = if include.dir {
+            let relative = candidate.strip_prefix(root.trim_end_matches('/')).unwrap_or(&candidate).trim_start_matches('/');
+            let glob = if relative.is_empty() { "**/*".to_owned() } else { format!("{relative}/**/*") };
+            exists(project.find_files(&glob, 1), |files| !files.is_empty())
+        } else {
+            exists(project.read_file(&candidate), |_| true)
+        };
+        match seen {
+            Some(true) => return Target::Found(candidate),
+            Some(false) => {}
+            None => unsure = true,
         }
-        let relative = candidate.strip_prefix(root.trim_end_matches('/')).unwrap_or(candidate).trim_start_matches('/');
-        let glob = if relative.is_empty() { "**/*".to_owned() } else { format!("{relative}/**/*") };
-        project.find_files(&glob, 1).is_ok_and(|files| !files.is_empty())
-    });
-    found.map_or(Target::Missing, Target::Found)
+    }
+    if unsure { Target::Unknown } else { Target::Missing }
 }
 
 impl Providers for Liquibase {
     /// Publishes the changelog's problems; there are no gutter markers.
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let problems = match changelog::parse(&doc.path, &doc.text) {
-            Some(log) => checks::problems(&doc.path, &doc.text, &log, &|include| target(&doc.path, include)),
+            Some(log) => {
+                let context = OnceCell::new();
+                let resolve = |include: &Include| {
+                    let context = context.get_or_init(|| {
+                        let project = project_of(&doc.path)?;
+                        let root = project.root().ok()?;
+                        Some((project, root))
+                    });
+                    match context {
+                        Some((project, root)) => target(project, root, &doc.path, include),
+                        None => Target::Unknown,
+                    }
+                };
+                checks::problems(&doc.path, &doc.text, &log, &resolve)
+            }
             None => Vec::new(),
         };
         let _ = host::publish_diagnostics(&doc.path, &problems);
@@ -187,8 +212,17 @@ mod tests {
     fn half_typed_include_is_unknown() {
         let host = host();
         let include = Include { path: String::new(), relative: false, dir: false, at: 0, end: 0 };
-        assert_eq!(target(MASTER, &include), Target::Unknown);
+        let project = project_of(MASTER).unwrap();
+        assert_eq!(target(&project, "/project", MASTER, &include), Target::Unknown);
         let text = "databaseChangeLog:\n  - include:\n      file: \n";
         assert!(checked(&host, MASTER, text).is_empty());
+    }
+
+    #[test]
+    fn only_not_found_counts_as_missing() {
+        assert_eq!(exists(Ok(String::new()), |_| true), Some(true));
+        assert_eq!(exists(Err::<String, _>(Error::NotFound("x".into())), |_| true), Some(false));
+        assert_eq!(exists(Err::<String, _>(Error::Invalid("binary".into())), |_| true), None);
+        assert_eq!(exists(Err::<String, _>(Error::Failed("too large".into())), |_| true), None);
     }
 }
