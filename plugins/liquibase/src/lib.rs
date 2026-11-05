@@ -20,11 +20,12 @@ impl Plugin for Liquibase {
     }
 }
 
-/// Whether a probe saw the thing: `None` when the host failed for a reason other than it not existing.
+/// Whether a probe saw the thing; `None` when the host failed for a reason other than absence.
+/// The host reports a missing file as `Invalid` (and the mock as `NotFound`); an unreadable one as `Failed`.
 fn exists<T>(probe: Result<T, Error>, present: impl Fn(&T) -> bool) -> Option<bool> {
     match probe {
         Ok(value) => Some(present(&value)),
-        Err(Error::NotFound(_)) => Some(false),
+        Err(Error::NotFound(_) | Error::Invalid(_)) => Some(false),
         Err(_) => None,
     }
 }
@@ -219,10 +220,10 @@ mod tests {
     }
 
     #[test]
-    fn only_not_found_counts_as_missing() {
+    fn classifies_read_errors_as_absent_or_unsure() {
         assert_eq!(exists(Ok(String::new()), |_| true), Some(true));
         assert_eq!(exists(Err::<String, _>(Error::NotFound("x".into())), |_| true), Some(false));
-        assert_eq!(exists(Err::<String, _>(Error::Invalid("binary".into())), |_| true), None);
+        assert_eq!(exists(Err::<String, _>(Error::Invalid("x: no such file".into())), |_| true), Some(false));
         assert_eq!(exists(Err::<String, _>(Error::Failed("too large".into())), |_| true), None);
     }
 }
