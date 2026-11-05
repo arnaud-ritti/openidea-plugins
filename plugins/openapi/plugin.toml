@@ -29,3 +29,18 @@ location = "right"
 id = "copy-http-requests"
 title = "OpenAPI: Copy Requests for the HTTP Client"
 category = "OpenAPI"
+
+[[contributes.customEditors]]
+id = "preview"
+title = "API Preview"
+patterns = ["openapi.{yaml,yml,json}", "swagger.{yaml,yml,json}", "*.openapi.{yaml,yml,json}", "*.swagger.{yaml,yml,json}"]
+priority = "default"
+layout = "split"
+web = "web/index.html"
+
+[[contributes.customEditors]]
+id = "preview-any"
+title = "API Preview"
+patterns = ["*.yaml", "*.yml", "*.json"]
+priority = "option"
+web = "web/index.html"
