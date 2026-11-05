@@ -1011,7 +1011,7 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 ### No metadata from libraries
 
 - **Blocks:** keys of Quarkus extensions beyond the bundled ones (42 extensions) and of dependency jars.
-- **Why:** same as *no classpath / jar reading* in the Spring plugins section. The bundled catalog covers a curated set, and the generator takes extra artifact ids.
+- **Why:** same as the row *Dependency jars and the classpath can't be read* under *Gaps that affect every Spring plugin* in the Spring plugins section. The bundled catalog covers a curated set, and the generator takes extra artifact ids.
 
 ### No project wizard
 
