@@ -951,6 +951,47 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 - The dark theme is a colour inversion.
 - A missing `$ref` file is told apart from an unreadable one by treating `NotFound` and `Invalid` as missing: see "Missing files are reported as `Invalid`" in the Liquibase section.
 
+## aritti.dependency-audit (clean-room, inspired by JetBrains' package vulnerability checks)
+
+Checks Maven, Gradle, npm and Composer dependencies against OSV.dev. Checked against v0.1.37 on 2026-11-05.
+
+### Missing API
+
+- **No build model**
+  - **Blocks:** versions managed by a BOM, a parent POM or a Gradle plugin, and `libs.versions.toml` aliases.
+  - **Why:** a plugin sees text, not the resolved dependency graph.
+  - **Workaround:** such dependencies are skipped; versioned ones are still checked.
+  - **Would need:** the IDE's Maven/Gradle model through WIT, or accepting `process:mvn`.
+- **Diagnostics can't link to the advisory**
+  - **Blocks:** a click from the squiggle to the advisory page.
+  - **Why:** `Diagnostic` has `code` but no URL (`sdk/rust/openidea-plugin/src/types.rs`, `Diagnostic`).
+  - **Workaround:** the Vulnerable Dependencies view links each id to osv.dev.
+  - **Would need:** LSP's `codeDescription.href`.
+- **No lockfile-changed event**
+  - **Blocks:** re-checking after `npm install` or `composer update` run outside the IDE.
+  - **Why:** only opened and saved files raise events.
+  - **Workaround:** reopen the file or run the scan.
+  - **Would need:** `files-changed` (see Symfony, "No file-change events").
+- **Every file open wakes the plugin**
+  - **Why:** events can't be filtered by glob; see Symfony, "Events can't be filtered, and providers get no project". The plugin drops other paths itself.
+- **Network is synchronous within the call budget**
+  - **Blocks:** a large first scan finishing reliably.
+  - **Why:** event handlers get 5 s, 60 s with a task; queries are cached for 24 h, so only the first scan of a big lockfile is slow.
+  - **Would need:** a background fetch or task API.
+- **Storage rewrites the whole file on each write**
+  - **Blocks:** per-entry caches.
+  - **Why:** `host::storage::set`/`delete` read, parse and rewrite the plugin's whole storage file (`crates/ide-host/src/plugins/api.rs:284-299,399-411`), so per-entry writes cost O(n²) I/O. The file is capped at 1 MiB, so a scan of a big project may not fit.
+  - **Workaround:** one JSON blob for the query cache, written once per run; the scan notification says when results were too big to keep.
+  - **Would need:** batched writes or a real key-value store.
+- **Missing files are reported as `Invalid`**: the lockfile lookup treats `NotFound` and `Invalid` as absent; see the Liquibase section.
+
+### Not done, but possible with the current API
+
+- `libs.versions.toml`, `yarn.lock` and `pnpm-lock.yaml`.
+- Cargo and PyPI.
+- An ignore list for accepted advisories.
+- CVSS scoring (severity comes from the advisory's labels).
+
 ## All plugins
 
 Checked against the host and frontend source of v0.1.37 on 2026-11-05.
