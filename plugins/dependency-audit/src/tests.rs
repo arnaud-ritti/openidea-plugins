@@ -2,6 +2,7 @@ use super::*;
 use crate::manifest::{Dep, Ecosystem};
 use crate::osv::tests::{JACKSON, dep};
 use openidea_plugin::mock::MockHost;
+use openidea_plugin::views::{Body, TreeItem, ViewEvent};
 use openidea_plugin::{Event, HttpRequest, HttpResponse, Position, Range, Severity};
 use serde_json::{Value, json};
 
@@ -323,4 +324,80 @@ fn deps_sharing_a_property_get_one_quick_fix_with_the_highest_fix() {
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0].title, "Upgrade jackson-databind to 2.13.0");
     assert_eq!(actions[0].edits[0].1[0].text, "2.13.0");
+}
+
+fn scanned(host: &MockHost) -> DependencyAudit {
+    host.on_fetch(osv);
+    host.add_file("pom.xml", POM);
+    host.add_file("web/package.json", PACKAGE);
+    host.add_file("web/package-lock.json", PACKAGE_LOCK);
+    let mut plugin = DependencyAudit::default();
+    plugin.run_command("scan", &host.invocation(), None).unwrap();
+    plugin
+}
+
+fn tree(plugin: &mut DependencyAudit, host: &MockHost) -> Vec<TreeItem> {
+    match plugin.render("vulnerabilities", None, &host.invocation()).unwrap().body {
+        Body::Tree(items) => items,
+        other => panic!("a tree, got {other:?}"),
+    }
+}
+
+#[test]
+fn scan_lists_vulnerable_dependencies_in_the_view() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    let mut plugin = scanned(&host);
+
+    assert_eq!(host.notifications()[0].body, "Vulnerable dependencies: 2 of 3 (3 files). See the Vulnerable Dependencies tool window.");
+    assert!(host.refreshed_views().contains(&"vulnerabilities".to_string()));
+    assert_eq!(host.diagnostics().keys().collect::<Vec<_>>(), ["/project/pom.xml", "/project/web/package.json"]);
+
+    let labels: Vec<String> = tree(&mut plugin, &host).into_iter().map(|i| i.label).collect();
+    assert_eq!(labels.iter().filter(|l| l.starts_with("lodash")).count(), 1, "the lockfile adds no duplicate");
+    assert!(labels.contains(&"com.fasterxml.jackson.core:jackson-databind 2.12.3".to_string()));
+    assert!(labels.contains(&"GHSA-35jh-r3h4-6jhm".to_string()));
+}
+
+#[test]
+fn the_view_survives_a_new_instance() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    let mut first = scanned(&host);
+    let before = tree(&mut first, &host);
+
+    assert_eq!(tree(&mut DependencyAudit::default(), &host), before);
+}
+
+#[test]
+fn activating_items_opens_the_line_or_osv_dev() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    let mut plugin = scanned(&host);
+    let items = tree(&mut plugin, &host);
+    let key = |label: &str| items.iter().find(|i| i.label == label).unwrap().key.clone();
+
+    plugin.handle("vulnerabilities", ViewEvent::Activate(key("GHSA-57j2-w4cx-62h2")), &host.invocation()).unwrap();
+    plugin.handle("vulnerabilities", ViewEvent::Activate(key("com.fasterxml.jackson.core:jackson-databind 2.12.3")), &host.invocation()).unwrap();
+
+    assert_eq!(host.opened_urls(), ["https://osv.dev/vulnerability/GHSA-57j2-w4cx-62h2"]);
+    assert_eq!(host.opened_locations(), [("/project/pom.xml".to_string(), 3, 0)]);
+}
+
+#[test]
+fn before_a_scan_the_view_offers_to_scan() {
+    let host = MockHost::install().with_capabilities(CAPS);
+
+    let view = DependencyAudit::default().render("vulnerabilities", None, &host.invocation()).unwrap();
+
+    assert!(matches!(view.body, Body::Message(_)));
+    assert_eq!(view.toolbar[0].id, "scan");
+}
+
+#[test]
+fn a_failed_scan_tells_the_user() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(|_| Ok(HttpResponse { status: 503, headers: vec![], body: vec![] }));
+    host.add_file("pom.xml", POM);
+
+    let error = DependencyAudit::default().run_command("scan", &host.invocation(), None).unwrap_err();
+
+    assert!(error.to_string().contains("OSV answered 503"));
 }

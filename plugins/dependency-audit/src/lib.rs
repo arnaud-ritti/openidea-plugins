@@ -4,20 +4,41 @@ mod manifest;
 mod osv;
 
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use openidea_plugin::host;
 use openidea_plugin::providers::{CodeAction, Document, Providers};
-use openidea_plugin::views::{View, Viewport, Views};
-use openidea_plugin::{Diagnostic, Error, Event, Invocation, LogLevel, Plugin, Project, Range, TextEdit, register_plugin};
+use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
+use openidea_plugin::{Diagnostic, Error, Event, Invocation, LogLevel, NotificationLevel, Plugin, Project, Range, Severity, TextEdit, register_plugin};
 use spring_text::index::project_of;
+use serde::{Deserialize, Serialize};
 use spring_text::range;
+use spring_text::tree::Expansion;
 
-use manifest::{Dep, bumped, kind, lockfile, parse};
-use osv::{Finding, audit, compare};
+use manifest::{Dep, GLOBS, bumped, kind, lockfile, parse};
+use osv::{Advisory, Finding, audit, compare, level};
 
 #[derive(Default)]
-pub struct DependencyAudit;
+pub struct DependencyAudit {
+    expansion: Expansion,
+    targets: HashMap<String, Target>,
+}
+
+enum Target {
+    Location(String, u32),
+    Url(String),
+}
+
+#[derive(Serialize, Deserialize)]
+struct Row {
+    path: String,
+    line: u32,
+    name: String,
+    version: String,
+    fix: Option<String>,
+    advisories: Vec<Advisory>,
+}
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
@@ -52,6 +73,98 @@ fn check(path: &str) -> Result<(), Error> {
     let items: Vec<Diagnostic> = findings.iter().map(|f| diagnostic(f, &text)).collect();
 
     host::publish_diagnostics(path, &items)
+}
+
+fn rows_key(project: &Project) -> Result<String, Error> {
+    Ok(format!("scan:{}", project.root()?))
+}
+
+fn stored_rows(project: &Project) -> Result<Option<Vec<Row>>, Error> {
+    let stored = host::storage::get(&rows_key(project)?)?;
+
+    Ok(stored.and_then(|json| serde_json::from_str(&json).ok()))
+}
+
+fn scan(project: &Project) -> Result<String, Error> {
+    let task = host::begin_task("Scanning dependencies", true);
+    let mut files: Vec<String> = Vec::new();
+    for glob in GLOBS {
+        for path in project.find_files(glob, 200)? {
+            if kind(&path).is_some() && !files.contains(&path) {
+                files.push(path);
+            }
+        }
+    }
+
+    let mut texts: HashMap<String, String> = HashMap::new();
+    let mut deps: Vec<Dep> = Vec::new();
+    let mut seen = HashSet::new();
+    for path in &files {
+        if task.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+
+        let (text, found) = match read_deps(project, path) {
+            Ok(read) => read,
+            Err(e) => {
+                host::log(LogLevel::Warn, &format!("Scan skipped {path}: {e}"));
+                continue;
+            }
+        };
+        for dep in found {
+            if seen.insert((dep.ecosystem, dep.name.clone(), dep.version.clone())) {
+                deps.push(dep);
+            }
+        }
+        texts.insert(path.clone(), text);
+    }
+
+    let findings = audit(&deps, true, now())?;
+    for (path, text) in &texts {
+        let items: Vec<Diagnostic> = findings.iter().filter(|f| f.dep.path == *path).map(|f| diagnostic(f, text)).collect();
+        if let Err(e) = host::publish_diagnostics(path, &items) {
+            host::log(LogLevel::Warn, &format!("Diagnostics of {path}: {e}"));
+        }
+    }
+
+    let rows: Vec<Row> = findings
+        .iter()
+        .map(|f| Row {
+            path: f.dep.path.clone(),
+            line: texts.get(&f.dep.path).map(|text| range(text, f.dep.at.0, f.dep.at.1).start.line).unwrap_or_default(),
+            name: f.dep.name.clone(),
+            version: f.dep.version.clone(),
+            fix: f.fix(),
+            advisories: f.advisories.clone(),
+        })
+        .collect();
+    let stored = serde_json::to_string(&rows).map_err(|e| Error::Failed(e.to_string()))?;
+    if let Err(e) = host::storage::set(&rows_key(project)?, &stored) {
+        host::log(LogLevel::Warn, &format!("Scan results not stored: {e}"));
+    }
+    host::refresh_view("vulnerabilities");
+
+    if rows.is_empty() {
+        return Ok(format!("No known vulnerabilities in {} dependencies ({} files).", deps.len(), texts.len()));
+    }
+
+    Ok(format!(
+        "Vulnerable dependencies: {} of {} ({} files). See the Vulnerable Dependencies tool window.",
+        rows.len(),
+        deps.len(),
+        texts.len()
+    ))
+}
+
+fn scan_and_notify(project: &Project) -> Result<(), Error> {
+    let body = scan(project)?;
+    host::notify(NotificationLevel::Info, "Dependency Audit", &body);
+
+    Ok(())
+}
+
+fn scan_button(label: &str) -> Button {
+    Button::new("scan", label).icon("refresh")
 }
 
 fn is_single_constraint(spec: &str) -> bool {
@@ -110,8 +223,15 @@ fn upgrade_actions(findings: &[Finding], doc: &Document) -> Vec<CodeAction> {
 }
 
 impl Plugin for DependencyAudit {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        if id != "scan" {
+            return Err(Error::NotFound(format!("command {id}")));
+        }
+
+        let project = ctx.project().ok_or("Open a project first.")?;
+        scan_and_notify(&project)?;
+
+        Ok(None)
     }
 
     fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
@@ -162,8 +282,68 @@ impl Providers for DependencyAudit {
 }
 
 impl Views for DependencyAudit {
-    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, _ctx: &Invocation) -> Result<View, Error> {
-        Ok(View::message("Run Dependency Audit: Scan Project to list vulnerable dependencies."))
+    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let Some(project) = ctx.project() else {
+            return Ok(View::message("Open a project first."));
+        };
+        let Some(rows) = stored_rows(&project)? else {
+            return Ok(View::message("Run Dependency Audit: Scan Project to check this project's dependencies against OSV.dev.").button(Button::new("scan", "Scan")));
+        };
+        if rows.is_empty() {
+            return Ok(View::message("No known vulnerabilities found.").button(Button::new("scan", "Rescan")));
+        }
+
+        let root = format!("{}/", project.root()?);
+        let mut items: Vec<TreeItem> = Vec::new();
+        let mut targets = HashMap::new();
+        for row in &rows {
+            if !targets.contains_key(&row.path) {
+                let label = row.path.strip_prefix(&root).unwrap_or(&row.path);
+                items.push(TreeItem::new(&row.path, label).icon("file"));
+                targets.insert(row.path.clone(), Target::Location(row.path.clone(), 0));
+            }
+
+            let key = format!("{}|{} {}", row.path, row.name, row.version);
+            let detail = row.fix.as_ref().map_or("no fix".to_owned(), |fix| format!("fix: {fix}"));
+            items.push(TreeItem::new(&key, &format!("{} {}", row.name, row.version)).parent(&row.path).icon("package").detail(&detail));
+            targets.insert(key.clone(), Target::Location(row.path.clone(), row.line));
+
+            for advisory in &row.advisories {
+                let advisory_key = format!("{key}|{}", advisory.id);
+                let icon = match level(advisory.severity.as_deref()) {
+                    Severity::Error => "error",
+                    Severity::Warning => "warning",
+                    _ => "info",
+                };
+                items.push(TreeItem::new(&advisory_key, &advisory.id).parent(&key).icon(icon).detail(&advisory.summary));
+                targets.insert(advisory_key, Target::Url(format!("https://osv.dev/vulnerability/{}", advisory.id)));
+            }
+        }
+        self.targets = targets;
+        self.expansion.apply(&mut items);
+
+        Ok(View::new(Body::Tree(items)).button(scan_button("Rescan")).status(&format!("{} vulnerable dependencies", rows.len())))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if self.expansion.handle(&event) {
+            host::refresh_view(view);
+
+            return Ok(());
+        }
+
+        match event {
+            ViewEvent::Button(id) if id == "scan" => {
+                let project = ctx.project().ok_or("Open a project first.")?;
+                scan_and_notify(&project)
+            }
+            ViewEvent::Activate(key) => match self.targets.get(&key) {
+                Some(Target::Location(path, line)) => host::open_location(path, *line, 0),
+                Some(Target::Url(url)) => host::open_url(url),
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        }
     }
 }
 
