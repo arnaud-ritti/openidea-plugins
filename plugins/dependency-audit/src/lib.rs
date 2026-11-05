@@ -1,20 +1,18 @@
 //! Dependency Audit for OpenIDEA: checks dependencies against OSV.dev.
 
-#[allow(dead_code)]
 mod manifest;
-#[allow(dead_code)]
 mod osv;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use openidea_plugin::host;
-use openidea_plugin::providers::Providers;
+use openidea_plugin::providers::{CodeAction, Document, Providers};
 use openidea_plugin::views::{View, Viewport, Views};
-use openidea_plugin::{Diagnostic, Error, Event, Invocation, LogLevel, Plugin, Project, register_plugin};
+use openidea_plugin::{Diagnostic, Error, Event, Invocation, LogLevel, Plugin, Project, Range, TextEdit, register_plugin};
 use spring_text::index::project_of;
 use spring_text::range;
 
-use manifest::{Dep, kind, lockfile, parse};
+use manifest::{Dep, bumped, kind, lockfile, parse};
 use osv::{Finding, audit};
 
 #[derive(Default)]
@@ -55,6 +53,37 @@ fn check(path: &str) -> Result<(), Error> {
     host::publish_diagnostics(path, &items)
 }
 
+fn is_single_constraint(spec: &str) -> bool {
+    let version = spec.trim_start_matches(['^', '~', '=', '>', '<', 'v']);
+
+    version.starts_with(|c: char| c.is_ascii_digit()) && !version.contains([' ', '|', ',', '*'])
+}
+
+fn upgrade_action(finding: &Finding, doc: &Document, selection: &Range) -> Option<CodeAction> {
+    let (from, to) = finding.dep.version_at?;
+    let fix = finding.fix()?;
+    let spec = doc.text.get(from..to)?;
+
+    if !is_single_constraint(spec) {
+        return None;
+    }
+
+    let underlined = range(&doc.text, finding.dep.at.0, finding.dep.at.1);
+    if underlined.end.line < selection.start.line || underlined.start.line > selection.end.line {
+        return None;
+    }
+
+    let short = finding.dep.name.rsplit(':').next().unwrap_or(&finding.dep.name);
+
+    Some(CodeAction {
+        title: format!("Upgrade {short} to {fix}"),
+        kind: Some("quickfix".into()),
+        preferred: true,
+        edits: vec![(doc.path.clone(), vec![TextEdit { range: range(&doc.text, from, to), text: bumped(spec, &fix) }])],
+        data: None,
+    })
+}
+
 impl Plugin for DependencyAudit {
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         Err(Error::NotFound(format!("command {id}")))
@@ -81,7 +110,24 @@ impl Plugin for DependencyAudit {
     }
 }
 
-impl Providers for DependencyAudit {}
+impl Providers for DependencyAudit {
+    fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        if kind(&doc.path).is_none() {
+            return Vec::new();
+        }
+
+        let Some(project) = project_of(&doc.path) else {
+            return Vec::new();
+        };
+        let lock = lockfile(&doc.path).and_then(|lock| project.read_file(&lock).ok());
+        let deps = parse(&doc.path, &doc.text, lock.as_deref());
+        let Ok(findings) = audit(&deps, false, now()) else {
+            return Vec::new();
+        };
+
+        findings.iter().filter_map(|f| upgrade_action(f, doc, &selection)).collect()
+    }
+}
 
 impl Views for DependencyAudit {
     fn render(&mut self, _view: &str, _viewport: Option<Viewport>, _ctx: &Invocation) -> Result<View, Error> {

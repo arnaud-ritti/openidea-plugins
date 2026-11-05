@@ -32,6 +32,7 @@ pub enum Kind {
     ComposerLock,
 }
 
+#[allow(dead_code)]
 pub const GLOBS: &[&str] = &[
     "**/pom.xml",
     "**/build.gradle",

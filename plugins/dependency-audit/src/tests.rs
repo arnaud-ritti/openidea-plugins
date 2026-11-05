@@ -2,7 +2,7 @@ use super::*;
 use crate::manifest::{Dep, Ecosystem};
 use crate::osv::tests::{JACKSON, dep};
 use openidea_plugin::mock::MockHost;
-use openidea_plugin::{Event, HttpRequest, HttpResponse, Severity};
+use openidea_plugin::{Event, HttpRequest, HttpResponse, Position, Range, Severity};
 use serde_json::{Value, json};
 
 pub const CAPS: &[&str] = &["project.read", "storage", "events", "net:api.osv.dev"];
@@ -217,4 +217,85 @@ fn an_osv_outage_logs_and_keeps_quiet() {
     assert!(host.diagnostics().is_empty());
     assert!(host.notifications().is_empty());
     assert!(host.logs().iter().any(|(_, line)| line.contains("OSV check of /project/pom.xml: offline")));
+}
+
+fn document(path: &str, language: &str, text: &str) -> openidea_plugin::providers::Document {
+    openidea_plugin::providers::Document { path: path.into(), language: language.into(), version: 1, text: text.into() }
+}
+
+fn line(n: u32) -> Range {
+    Range::new(Position::new(n, 0), Position::new(n, 0))
+}
+
+#[test]
+fn quick_fix_upgrades_to_the_nearest_fixed_version() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("pom.xml", POM);
+    opened(&host, "/project/pom.xml");
+    let sent = host.requests().len();
+
+    let actions = DependencyAudit::default().code_actions(&document("/project/pom.xml", "xml", POM), line(3));
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "Upgrade jackson-databind to 2.12.7.1");
+    assert_eq!(actions[0].kind.as_deref(), Some("quickfix"));
+    let (path, edits) = &actions[0].edits[0];
+    assert_eq!(path, "/project/pom.xml");
+    assert_eq!(edits[0].text, "2.12.7.1");
+    assert_eq!(edits[0].range.start, Position::new(3, 122));
+    assert_eq!(host.requests().len(), sent, "no network on the edit path");
+}
+
+#[test]
+fn quick_fix_keeps_the_npm_range_operator() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("package.json", PACKAGE);
+    host.add_file("package-lock.json", PACKAGE_LOCK);
+    opened(&host, "/project/package.json");
+
+    let actions = DependencyAudit::default().code_actions(&document("/project/package.json", "json", PACKAGE), line(2));
+
+    assert_eq!(actions[0].title, "Upgrade lodash to 4.17.21");
+    assert_eq!(actions[0].edits[0].1[0].text, "^4.17.21");
+}
+
+#[test]
+fn no_quick_fix_for_a_compound_range() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    let package = PACKAGE.replace("^4.17.15", ">=4.0.0 <5");
+    host.add_file("package.json", &package);
+    host.add_file("package-lock.json", PACKAGE_LOCK);
+    opened(&host, "/project/package.json");
+
+    let actions = DependencyAudit::default().code_actions(&document("/project/package.json", "json", &package), line(2));
+
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn no_quick_fix_without_a_cached_result() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+
+    let actions = DependencyAudit::default().code_actions(&document("/project/pom.xml", "xml", POM), line(3));
+
+    assert!(actions.is_empty());
+    assert!(host.requests().is_empty());
+}
+
+#[test]
+fn no_quick_fix_off_the_dependency_line_or_in_lockfiles() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("pom.xml", POM);
+    host.add_file("package-lock.json", PACKAGE_LOCK);
+    opened(&host, "/project/pom.xml");
+    opened(&host, "/project/package-lock.json");
+    let mut plugin = DependencyAudit::default();
+
+    assert!(plugin.code_actions(&document("/project/pom.xml", "xml", POM), line(2)).is_empty());
+    assert!(plugin.code_actions(&document("/project/package-lock.json", "json", PACKAGE_LOCK), line(0)).is_empty());
 }
