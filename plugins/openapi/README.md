@@ -11,11 +11,13 @@ SmartBear.
 
 ## `$ref` completion and definition
 
-Inside a `$ref` value, completion offers the pointers of the document
-(`#/components/schemas/Pet`, `#/paths/~1pets/get`, ...). A `$ref` still being
+Inside a `$ref` value, completion offers the reusable components of the document
+(`#/components/schemas/Pet`, or `#/definitions/Pet` in Swagger 2); in a file
+without an `openapi`/`swagger` key, its top-level keys. A `$ref` still being
 typed completes, with or without a closing quote, and only the value is
-replaced. Names with dots, slashes and braces are escaped as JSON pointers
-(`a/b` becomes `a~1b`).
+replaced. Slashes and tildes are escaped (`a/b` becomes `a~1b`). Go to
+Definition also resolves pointers into `paths`
+(`#/paths/~1pets/get`), and decodes `%7B`-style escapes.
 
 For a relative file (`../common.yaml#/Pet`) the pointers of that file are
 offered, resolved against the spec's directory. `https://` references are left
@@ -38,7 +40,8 @@ Checked when a file is opened or saved.
 A `$ref` into a file that exists but can't be read (a directory, too large, not
 UTF-8) is not flagged. Pointers into `.json` files aren't checked, only the
 file's existence. Path parameters are skipped when the parameter list can't be
-read reliably: flow style, or a `$ref` that isn't local.
+read reliably: flow style, a `$ref` that isn't local, or a local `$ref` that
+can't be resolved or lacks `name` or `in`.
 
 ## Schema modeline
 
