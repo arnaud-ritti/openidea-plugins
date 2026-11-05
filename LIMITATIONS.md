@@ -992,6 +992,32 @@ Checks Maven, Gradle, npm and Composer dependencies against OSV.dev. Checked aga
 - An ignore list for accepted advisories.
 - CVSS scoring (severity comes from the advisory's labels).
 
+## aritti.quarkus (port of com.redhat.devtools.intellij.quarkus)
+
+Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
+
+### Quarkus language servers can't be used
+
+- **Blocks:** running the original's LSP4MP (quarkus-ls) and qute-ls, so the plugin is text-based. Hover, go to definition, code lens, inlay hints, JAX-RS symbols, Java diagnostics and Qute support are dropped.
+- **Why:** those servers get every project fact (`microprofile/projectInfo`, `microprofile/propertyDefinition`, `qute/template/project`) by sending requests to the client. OpenIDEA's LSP client answers any request it doesn't know with `METHOD_NOT_FOUND` (`crates/ide-lsp/src/handler.rs:274-310`), and jdtls bundles are hard-wired to java-debug, the usages bundle and the Kotlin bridge (`crates/ide-host/src/project.rs:195-198`), so a plugin can't add `com.redhat.microprofile.jdt.core`. A plugin's `languages` can't take over the built-in `properties`, `yaml` or `html` ids either, so it couldn't attach a server to those files. Without `projectInfo`, quarkus-ls offers no property completion.
+- **Would need:** a way to answer server-to-client requests from the plugin, plugin-supplied jdtls bundles, and language servers attached to built-in language ids.
+
+### Dev Mode run detectors are fixed commands matched by file name
+
+- **Blocks:** `./mvnw quarkus:dev` and `./gradlew quarkusDev`; showing Dev Mode only in Quarkus projects; debugger auto-attach on port 5005.
+- **Why:** wrappers can't be run, same as *Project-local wrappers can't be run* in the Flyway section. A detector matches its `files` markers by name only (`crates/ide-host/src/plugins/run_detectors.rs`), so it can't look inside `pom.xml` for `io.quarkus`: the three configurations show in every Maven or Gradle project once `process:mvn|gradle|quarkus` is granted. The command is fixed and there is no debugger API.
+- **Would need:** a content predicate on detectors and the per-project wrapper grant from the Flyway section.
+
+### No metadata from libraries
+
+- **Blocks:** keys of Quarkus extensions beyond the bundled ones (42 extensions) and of dependency jars.
+- **Why:** same as *no classpath / jar reading* in the Spring plugins section. The bundled catalog covers a curated set, and the generator takes extra artifact ids.
+
+### No project wizard
+
+- **Blocks:** creating a Quarkus project in the IDE.
+- **Why:** same as *Code actions can't create, rename or delete files* in the Symfony section (a plugin can't create files). The command opens code.quarkus.io in the browser instead.
+
 ## All plugins
 
 Checked against the host and frontend source of v0.1.37 on 2026-11-05.

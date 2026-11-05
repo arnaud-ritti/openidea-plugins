@@ -167,7 +167,13 @@ impl Providers for QuarkusTools {
 
 impl Plugin for QuarkusTools {
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+        if id != "open-code-quarkus" {
+            return Err(Error::NotFound(format!("command {id}")));
+        }
+
+        host::open_url("https://code.quarkus.io")?;
+
+        Ok(None)
     }
 }
 
@@ -331,5 +337,13 @@ mod tests {
         assert!(lookup.values("quarkus.log.level").contains(&"DEBUG".to_owned()));
         assert!(lookup.prop("mp.jwt.verify.publickey").is_some());
         assert!(lookup.prop("quarkus.datasource.\"datasource-name\".db-kind").is_none());
+    }
+
+    #[test]
+    fn opens_code_quarkus_io() {
+        let host = MockHost::install();
+        QuarkusTools::default().run_command("open-code-quarkus", &host.invocation(), None).unwrap();
+        assert_eq!(host.opened_urls(), ["https://code.quarkus.io"]);
+        assert!(matches!(QuarkusTools::default().run_command("nope", &host.invocation(), None), Err(Error::NotFound(_))));
     }
 }

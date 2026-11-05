@@ -21,3 +21,30 @@ required = ["project.read"]
 [[contributes.providers]]
 kinds = ["completion", "line-markers"]
 languages = ["properties", "yaml"]
+
+[[contributes.commands]]
+id = "open-code-quarkus"
+title = "Quarkus: Open code.quarkus.io"
+category = "Quarkus"
+
+# Build-file markers: a detector can't look inside pom.xml, and ./mvnw can't be a process: program.
+[[contributes.runDetectors]]
+id = "dev-maven"
+name = "Quarkus Dev Mode (mvn)"
+files = ["pom.xml"]
+command = "mvn"
+args = ["quarkus:dev"]
+
+[[contributes.runDetectors]]
+id = "dev-gradle"
+name = "Quarkus Dev Mode (gradle)"
+files = ["build.gradle", "build.gradle.kts"]
+command = "gradle"
+args = ["quarkusDev"]
+
+[[contributes.runDetectors]]
+id = "dev-cli"
+name = "Quarkus Dev Mode (quarkus CLI)"
+files = ["pom.xml", "build.gradle", "build.gradle.kts"]
+command = "quarkus"
+args = ["dev"]
