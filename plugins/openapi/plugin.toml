@@ -12,7 +12,8 @@ wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved", "on-view:endpoints"]
 
 [capabilities]
-required = ["project.read", "events"]
+required = ["project.read", "editor.read", "events"]
+optional = ["clipboard"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "code-actions"]
@@ -23,3 +24,8 @@ id = "endpoints"
 title = "OpenAPI Endpoints"
 icon = "web"
 location = "right"
+
+[[contributes.commands]]
+id = "copy-http-requests"
+title = "OpenAPI: Copy Requests for the HTTP Client"
+category = "OpenAPI"

@@ -1,6 +1,7 @@
 //! OpenAPI: editing support for OpenAPI 3 and Swagger 2 files.
 
 mod checks;
+mod http;
 mod spec;
 
 use checks::Fetched;
@@ -8,8 +9,8 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, ListItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, Location, LogLevel, Plugin, Position, Project, Range, TextEdit, host,
-    register_plugin,
+    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Project, Range,
+    TextEdit, host, register_plugin,
 };
 use spring_text::config::yaml;
 
@@ -85,8 +86,31 @@ impl Plugin for OpenApi {
         }
     }
 
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        if id != "copy-http-requests" {
+            return Err(Error::NotFound(format!("command {id}")));
+        }
+
+        let editor = ctx.editor().ok_or("No file is open.")?;
+        let text = editor.document()?.text;
+        let spec = spec::parse(&text).ok_or("The current file is not an OpenAPI document.")?;
+        let requests = http::requests(&text, &spec);
+
+        match host::copy_to_clipboard(&requests) {
+            Ok(()) => host::notify(
+                NotificationLevel::Info,
+                "OpenAPI",
+                &format!("{} requests copied to the clipboard.", requests.matches("### ").count()),
+            ),
+            Err(Error::Denied(_)) => host::notify(
+                NotificationLevel::Warning,
+                "OpenAPI",
+                "Allow the clipboard for OpenAPI in Settings › Plugins to copy requests.",
+            ),
+            Err(e) => return Err(e),
+        }
+
+        Ok(None)
     }
 }
 
@@ -257,7 +281,7 @@ mod tests {
     use openidea_plugin::mock::MockHost;
     use openidea_plugin::providers::{CompletionKind, Document, Providers};
     use openidea_plugin::text::position;
-    use openidea_plugin::{Position, Range};
+    use openidea_plugin::{NotificationLevel, Position, Range};
     use spec::PETSTORE;
 
     fn doc(text: &str) -> Document {
@@ -266,6 +290,22 @@ mod tests {
 
     fn at(text: &str, needle: &str, plus: usize) -> Position {
         position(text, text.find(needle).unwrap() + plus)
+    }
+
+    #[test]
+    fn copies_the_requests_or_explains_without_clipboard() {
+        let host = MockHost::install();
+        host.open_editor("/project/api.yaml", "yaml", PETSTORE, &[(0, 0, 0, 0)]);
+        OpenApi.run_command("copy-http-requests", &host.invocation(), None).unwrap();
+        assert!(host.clipboard().unwrap().starts_with("### listPets\n"));
+
+        let host = MockHost::install().with_capabilities(&["editor.read"]);
+        host.open_editor("/project/api.yaml", "yaml", PETSTORE, &[(0, 0, 0, 0)]);
+        OpenApi.run_command("copy-http-requests", &host.invocation(), None).unwrap();
+        assert_eq!(host.notifications()[0].level, NotificationLevel::Warning);
+
+        host.open_editor("/project/k8s.yaml", "yaml", "kind: Pod\n", &[(0, 0, 0, 0)]);
+        assert!(OpenApi.run_command("copy-http-requests", &host.invocation(), None).is_err());
     }
 
     #[test]
