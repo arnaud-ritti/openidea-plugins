@@ -86,6 +86,10 @@ notice files are in `web/vendor/`; see `NOTICE.md`.
   completion, definition or problems.
 - Flow-style mappings are only seen for `$ref`.
 - Problems appear on open and save, not while typing.
+- Problems caused by another file's content refresh only when the spec itself
+  is opened or saved.
+- A component name containing dots can make a shorter wrong pointer resolve
+  (`#/components/schemas/com` when `com.acme.Error` exists).
 - No rename, find usages, hover or structure view.
 - The endpoints view re-scans the project on each render.
 - The schema modeline is YAML only; JSON specs get no schema validation.

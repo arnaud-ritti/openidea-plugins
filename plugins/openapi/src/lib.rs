@@ -48,6 +48,16 @@ pub fn resolve_path(from_file: &str, rel: &str) -> String {
     parts.join("/")
 }
 
+// The host reports a missing file as `Invalid("…: no such file")`, as it does a path outside the project.
+fn fetch(result: Result<String, Error>) -> Fetched {
+    match result {
+        Ok(content) => Fetched::Text(content),
+        Err(Error::NotFound(_)) => Fetched::Missing,
+        Err(Error::Invalid(message)) if message.ends_with("no such file") => Fetched::Missing,
+        Err(_) => Fetched::Unreadable,
+    }
+}
+
 fn problems(path: &str) -> Result<Vec<Diagnostic>, Error> {
     let project = project_for(path)?;
     let text = project.read_file(path)?;
@@ -55,12 +65,7 @@ fn problems(path: &str) -> Result<Vec<Diagnostic>, Error> {
         return Ok(Vec::new());
     };
 
-    // The host reports a missing file as `Invalid`, one that exists but can't be read as `Failed`.
-    let read = |file: &str| match project.read_file(&resolve_path(path, file)) {
-        Ok(content) => Fetched::Text(content),
-        Err(Error::NotFound(_) | Error::Invalid(_)) => Fetched::Missing,
-        Err(_) => Fetched::Unreadable,
-    };
+    let read = |file: &str| fetch(project.read_file(&resolve_path(path, file)));
 
     Ok(checks::check(&text, &spec, &read))
 }
@@ -92,15 +97,22 @@ impl Plugin for OpenApi {
         }
 
         let editor = ctx.editor().ok_or("No file is open.")?;
-        let text = editor.document()?.text;
-        let spec = spec::parse(&text).ok_or("The current file is not an OpenAPI document.")?;
+        let document = editor.document()?;
+        let text = document.text;
+        let spec = spec::parse(&text)
+            .filter(|_| is_yaml(&editor.path()))
+            .ok_or("The current file is not an OpenAPI document.")?;
+        let count = spec::operations(&text, &spec.keys).len();
+        if count == 0 {
+            return Err("The current file has no operations.".into());
+        }
         let requests = http::requests(&text, &spec);
 
         match host::copy_to_clipboard(&requests) {
             Ok(()) => host::notify(
                 NotificationLevel::Info,
                 "OpenAPI",
-                &format!("{} requests copied to the clipboard.", requests.matches("### ").count()),
+                &format!("{count} requests copied to the clipboard."),
             ),
             Err(Error::Denied(_)) => host::notify(
                 NotificationLevel::Warning,
@@ -125,18 +137,18 @@ fn read_sibling(doc: &Document, file: &str) -> Option<String> {
 
 impl Providers for OpenApi {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
-        if spec::parse(&doc.text).is_none() {
-            return Vec::new();
-        }
         let Some(typed) = ref_at(&doc.text, at) else {
             return Vec::new();
         };
         let Some((file, _)) = spec::split_ref(&typed.target) else {
             return Vec::new();
         };
+        let Some(spec) = spec::parse(&doc.text) else {
+            return Vec::new();
+        };
 
         let labels: Vec<String> = if file.is_empty() {
-            spec::ref_targets(&doc.text, &yaml(&doc.text))
+            spec::ref_targets(&doc.text, &spec.keys)
         } else {
             let Some(content) = read_sibling(doc, file) else {
                 return Vec::new();
@@ -145,11 +157,15 @@ impl Providers for OpenApi {
         };
 
         let replace = spring_text::range(&doc.text, typed.at, typed.end);
+        let quoted = typed.at > 0 && matches!(doc.text.as_bytes()[typed.at - 1], b'\'' | b'"');
         labels
             .into_iter()
             .map(|label| {
                 let mut item = CompletionItem::new(&label, CompletionKind::Reference);
                 item.replace = Some(replace);
+                if !quoted && label.starts_with('#') {
+                    item.insert_text = format!("'{label}'");
+                }
                 item.filter_text = Some(label);
                 item
             })
@@ -157,30 +173,30 @@ impl Providers for OpenApi {
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
-        if spec::parse(&doc.text).is_none() {
-            return Vec::new();
-        }
         let Some(typed) = ref_at(&doc.text, at) else {
             return Vec::new();
         };
         let Some((file, fragment)) = spec::split_ref(&typed.target) else {
             return Vec::new();
         };
+        let Some(spec) = spec::parse(&doc.text) else {
+            return Vec::new();
+        };
 
-        let (path, content) = if file.is_empty() {
-            (doc.path.clone(), doc.text.clone())
+        let (path, content, keys) = if file.is_empty() {
+            (doc.path.clone(), doc.text.clone(), spec.keys)
         } else {
             let Some(content) = read_sibling(doc, file) else {
                 return Vec::new();
             };
-            (resolve_path(&doc.path, file), content)
+            let keys = yaml(&content);
+            (resolve_path(&doc.path, file), content, keys)
         };
 
         if fragment.is_empty() {
             return vec![Location { path, range: Range::default() }];
         }
 
-        let keys = yaml(&content);
         spec::target(&keys, fragment)
             .map(|key| Location { path, range: spring_text::range(&content, key.at, key.end) })
             .into_iter()
@@ -425,5 +441,52 @@ mod tests {
         let host = MockHost::install();
         host.add_file("/project/k8s.yaml", "kind: Pod\n");
         assert!(matches!(OpenApi.render(ENDPOINTS, None, &host.invocation()).unwrap().body, Body::Message(_)));
+    }
+
+    #[test]
+    fn quotes_a_ref_completed_without_quotes() {
+        let _host = MockHost::install();
+        let block = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: {}\nx:\n  $ref: \n";
+        let items = OpenApi.completion(&doc(block), at(block, "$ref: ", 6), None);
+        assert_eq!(items[0].insert_text, "'#/components/schemas/Pet'");
+        assert_eq!(items[0].filter_text.as_deref(), Some("#/components/schemas/Pet"));
+
+        let flow = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: {}\nx: { $ref: }\n";
+        let items = OpenApi.completion(&doc(flow), at(flow, "$ref: ", 6), None);
+        assert_eq!(items[0].insert_text, "'#/components/schemas/Pet'");
+
+        let unquoted = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: {}\nx:\n  $ref: #/c\n";
+        let items = OpenApi.completion(&doc(unquoted), at(unquoted, "#/c\n", 3), None);
+        assert_eq!(items[0].insert_text, "'#/components/schemas/Pet'");
+
+        let quoted = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: {}\nx:\n  $ref: '#/comp\n";
+        let items = OpenApi.completion(&doc(quoted), at(quoted, "#/comp", 6), None);
+        assert_eq!(items[0].insert_text, "#/components/schemas/Pet");
+    }
+
+    #[test]
+    fn only_a_missing_file_is_reported_missing() {
+        let invalid = |m: &str| Err(Error::Invalid(m.into()));
+        assert!(matches!(fetch(invalid("/p/x.yaml: no such file")), Fetched::Missing));
+        assert!(matches!(fetch(Err(Error::NotFound("x".into()))), Fetched::Missing));
+        assert!(matches!(
+            fetch(invalid("/etc/x.yaml: access outside the project root is not allowed")),
+            Fetched::Unreadable
+        ));
+        assert!(matches!(fetch(Err(Error::Failed("boom".into()))), Fetched::Unreadable));
+        assert!(matches!(fetch(Ok("a: 1".into())), Fetched::Text(_)));
+    }
+
+    #[test]
+    fn leaves_the_clipboard_alone_without_operations() {
+        let host = MockHost::install();
+        host.open_editor("/project/empty.yaml", "yaml", "openapi: 3.0.0\npaths: {}\n", &[(0, 0, 0, 0)]);
+        let error = OpenApi.run_command("copy-http-requests", &host.invocation(), None).unwrap_err();
+        assert!(error.to_string().contains("no operations"));
+        assert!(host.clipboard().is_none());
+
+        host.open_editor("/project/api.json", "json", "openapi: 3.0.0\n", &[(0, 0, 0, 0)]);
+        assert!(OpenApi.run_command("copy-http-requests", &host.invocation(), None).is_err());
+        assert!(host.clipboard().is_none());
     }
 }

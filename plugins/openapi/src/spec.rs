@@ -88,8 +88,14 @@ pub fn refs(text: &str) -> Vec<Ref> {
     let mut found = Vec::new();
     let mut from = 0;
     while let Some(n) = text[from..].find("$ref") {
-        let mut i = from + n + 4;
+        let found_at = from + n;
+        let mut i = found_at + 4;
         from = i;
+        let line_start = text[..found_at].rfind(['\n', '\r']).map_or(0, |n| n + 1);
+        let before = &text[line_start..found_at];
+        if before.match_indices('#').any(|(j, _)| j == 0 || before.as_bytes()[j - 1].is_ascii_whitespace()) {
+            continue;
+        }
         if matches!(bytes.get(i), Some(b'"' | b'\'')) {
             i += 1;
         }
@@ -399,4 +405,11 @@ fn scanning_every_prefix_of_a_spec_never_panics() {
             target(&spec.keys, "/paths/~1pets/get");
         }
     }
+}
+
+#[test]
+fn commented_out_refs_are_not_refs() {
+    let text = "# $ref: '#/a'\nx:\n  # $ref: '#/b'\n  $ref: '#/c' # $ref: '#/d'\ny: { $ref: '#/e#f' }\n";
+    let found: Vec<_> = refs(text).into_iter().map(|r| r.target).collect();
+    assert_eq!(found, ["#/c", "#/e#f"]);
 }
