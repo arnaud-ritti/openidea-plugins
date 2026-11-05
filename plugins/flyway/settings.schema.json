@@ -1,0 +1,20 @@
+{
+  "properties": {
+    "locations": {
+      "type": "string",
+      "title": "Migration locations, comma-separated (classpath:db/migration, filesystem:sql). Empty: read flyway.toml, flyway.conf and spring.flyway.locations",
+      "default": ""
+    },
+    "runner": {
+      "type": "string",
+      "title": "Run Flyway commands with",
+      "enum": ["flyway", "mvn"],
+      "default": "flyway"
+    },
+    "arguments": {
+      "type": "string",
+      "title": "Extra arguments for Flyway commands (-environment=dev, -Dflyway.user=…)",
+      "default": ""
+    }
+  }
+}

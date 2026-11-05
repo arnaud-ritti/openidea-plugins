@@ -1,0 +1,60 @@
+id = "aritti.flyway"
+name = "Flyway Migrations"
+version = "0.1.0"
+description = "Flyway database migrations in OpenIDEA. Checks migration file names (V, U, R and B prefixes, version, separator, suffix, as configured in flyway.toml, flyway.conf or spring.flyway.*) and reports duplicate versions across migration locations. Copies the next migration version, runs Flyway info, validate, migrate, repair and clean (CLI or Maven) in a terminal, and completes ${…} placeholders in SQL and keys in flyway.conf and flyway.toml. Independent implementation, not affiliated with JetBrains or Redgate."
+authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.1.0: first release. Migration name and duplicate version checks on open and save and with Flyway: Check Migrations; Copy Next Migration Version; info, validate, migrate, repair and clean in a terminal (flyway or mvn); completion of placeholders in SQL and of keys in flyway.conf and flyway.toml."
+categories = ["frameworks", "linters"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-event:file-opened", "on-event:file-saved"]
+
+[capabilities]
+required = ["project.read", "events"]
+# clipboard: Copy Next Migration Version. process: the Flyway commands (setting `runner`).
+optional = ["clipboard", "process:flyway", "process:mvn"]
+
+# flyway.conf is the `ini` language, flyway.toml `toml`; the code filters by file name.
+[[contributes.providers]]
+kinds = ["completion"]
+languages = ["sql", "ini", "toml"]
+
+[[contributes.commands]]
+id = "check"
+title = "Flyway: Check Migrations"
+category = "Flyway"
+
+[[contributes.commands]]
+id = "copy-next-version"
+title = "Flyway: Copy Next Migration Version"
+category = "Flyway"
+
+[[contributes.commands]]
+id = "info"
+title = "Flyway: Info"
+category = "Flyway"
+
+[[contributes.commands]]
+id = "validate"
+title = "Flyway: Validate"
+category = "Flyway"
+
+[[contributes.commands]]
+id = "migrate"
+title = "Flyway: Migrate"
+category = "Flyway"
+
+[[contributes.commands]]
+id = "repair"
+title = "Flyway: Repair"
+category = "Flyway"
+
+[[contributes.commands]]
+id = "clean"
+title = "Flyway: Clean (Drops All Objects)…"
+category = "Flyway"
+
+[contributes.settings]
+title = "Flyway Migrations"
+schema = "settings.schema.json"
