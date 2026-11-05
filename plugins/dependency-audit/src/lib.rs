@@ -27,3 +27,6 @@ impl Views for DependencyAudit {
 }
 
 register_plugin!(DependencyAudit, providers, views);
+
+#[cfg(test)]
+mod tests;

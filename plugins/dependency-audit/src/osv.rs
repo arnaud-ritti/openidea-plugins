@@ -1,9 +1,9 @@
 //! OSV advisories: parsing, version comparison and per-dependency findings.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use openidea_plugin::Severity;
+use openidea_plugin::{Error, HttpRequest, Severity, host};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::Dep;
@@ -141,6 +141,175 @@ impl Finding {
 
         format!("{} {} has known vulnerabilities: {advisories}. {outcome}", self.dep.name, self.dep.version)
     }
+}
+
+pub const QUERY_TTL_SECS: u64 = 86_400;
+pub const BATCH: usize = 1000;
+
+const QUERY_URL: &str = "https://api.osv.dev/v1/querybatch";
+const VULN_URL: &str = "https://api.osv.dev/v1/vulns";
+const TIMEOUT_MS: u32 = 10_000;
+
+#[derive(Serialize, Deserialize)]
+struct CachedQuery {
+    at: u64,
+    vulns: Vec<(String, String)>,
+}
+
+#[derive(Deserialize)]
+struct BatchResponse {
+    results: Vec<BatchResult>,
+}
+
+#[derive(Deserialize)]
+struct BatchResult {
+    #[serde(default)]
+    vulns: Vec<BatchVuln>,
+}
+
+#[derive(Deserialize)]
+struct BatchVuln {
+    id: String,
+    #[serde(default)]
+    modified: String,
+}
+
+fn query_key(dep: &Dep) -> String {
+    format!("q:{}:{}@{}", dep.ecosystem.osv(), dep.name, dep.version)
+}
+
+fn cached_query(key: &str) -> Option<CachedQuery> {
+    serde_json::from_str(&host::storage::get(key).ok()??).ok()
+}
+
+fn cached_advisory(id: &str) -> Option<Advisory> {
+    serde_json::from_str(&host::storage::get(&format!("v:{id}")).ok()??).ok()
+}
+
+fn fetch(request: HttpRequest) -> Result<Vec<u8>, Error> {
+    let response = host::fetch(&HttpRequest { timeout_ms: Some(TIMEOUT_MS), ..request })?;
+
+    if response.status != 200 {
+        return Err(Error::Failed(format!("OSV answered {}", response.status)));
+    }
+
+    Ok(response.body)
+}
+
+fn query_batch(chunk: &[&Dep]) -> Result<Vec<BatchResult>, Error> {
+    let queries: Vec<serde_json::Value> = chunk
+        .iter()
+        .map(|dep| serde_json::json!({"package": {"ecosystem": dep.ecosystem.osv(), "name": dep.name}, "version": dep.version}))
+        .collect();
+    let body = serde_json::json!({"queries": queries}).to_string();
+    let request = HttpRequest::post(QUERY_URL, body).header("Content-Type", "application/json");
+    // ponytail: next_page_token ignored; OSV pages only past 1,000 vulns per query or 3,000 per batch
+    let response: BatchResponse = serde_json::from_slice(&fetch(request)?)
+        .map_err(|e| Error::Failed(format!("OSV sent an unreadable answer: {e}")))?;
+
+    if response.results.len() != chunk.len() {
+        return Err(Error::Failed("OSV answered a different number of results".into()));
+    }
+
+    Ok(response.results)
+}
+
+fn advisory(id: &str, modified: &str, online: bool, writer: &mut CacheWriter) -> Advisory {
+    if let Some(cached) = cached_advisory(id).filter(|a| a.modified == modified) {
+        return cached;
+    }
+
+    let fetched = online
+        .then(|| fetch(HttpRequest::get(&format!("{VULN_URL}/{id}"))).ok())
+        .flatten()
+        .and_then(|body| parse_advisory(&String::from_utf8_lossy(&body)));
+
+    match fetched {
+        Some(advisory) => {
+            writer.set(&format!("v:{id}"), &serde_json::to_string(&advisory).unwrap_or_default());
+            advisory
+        }
+        None => Advisory { id: id.into(), modified: modified.into(), ..Advisory::default() },
+    }
+}
+
+/// Writes to storage; when it is full, drops the whole cache once and retries.
+#[derive(Default)]
+struct CacheWriter {
+    dropped: bool,
+}
+
+impl CacheWriter {
+    fn set(&mut self, key: &str, value: &str) {
+        if host::storage::set(key, value).is_ok() {
+            return;
+        }
+
+        if self.dropped {
+            return;
+        }
+
+        self.dropped = true;
+        // ponytail: 1 MiB storage; the whole cache is dropped when it fills
+        for prefix in ["q:", "v:"] {
+            for stale in host::storage::keys(prefix).unwrap_or_default() {
+                let _ = host::storage::delete(&stale);
+            }
+        }
+
+        let _ = host::storage::set(key, value);
+    }
+}
+
+pub fn audit(deps: &[Dep], online: bool, now: u64) -> Result<Vec<Finding>, Error> {
+    let mut unique: Vec<&Dep> = Vec::new();
+    let mut vulns: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut missing: Vec<&Dep> = Vec::new();
+
+    for dep in deps {
+        let key = query_key(dep);
+
+        if vulns.contains_key(&key) {
+            continue;
+        }
+
+        unique.push(dep);
+        let cached = cached_query(&key);
+        let fresh = cached.as_ref().is_some_and(|c| now.saturating_sub(c.at) < QUERY_TTL_SECS);
+
+        if online && !fresh {
+            missing.push(dep);
+        }
+
+        vulns.insert(key, cached.map(|c| c.vulns).unwrap_or_default());
+    }
+
+    let mut writer = CacheWriter::default();
+
+    for chunk in missing.chunks(BATCH) {
+        for (dep, result) in chunk.iter().zip(query_batch(chunk)?) {
+            let found: Vec<(String, String)> = result.vulns.into_iter().map(|v| (v.id, v.modified)).collect();
+            let key = query_key(dep);
+            let entry = CachedQuery { at: now, vulns: found.clone() };
+            writer.set(&key, &serde_json::to_string(&entry).unwrap_or_default());
+            vulns.insert(key, found);
+        }
+    }
+
+    let mut findings = Vec::new();
+
+    for dep in unique {
+        let advisories: Vec<Advisory> = vulns[&query_key(dep)]
+            .iter()
+            .map(|(id, modified)| advisory(id, modified, online, &mut writer))
+            .collect();
+
+        if !advisories.is_empty() {
+            findings.push(Finding { dep: dep.clone(), advisories });
+        }
+    }
+
+    Ok(findings)
 }
 
 #[cfg(test)]
