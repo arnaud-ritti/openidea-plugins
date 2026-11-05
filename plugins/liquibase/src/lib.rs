@@ -1,12 +1,12 @@
 //! Liquibase Changelogs: an OpenIDEA plugin.
 
-#[allow(dead_code)]
 mod catalog;
 mod changelog;
 mod checks;
+mod complete;
 
 use changelog::{Include, Target};
-use openidea_plugin::providers::{Document, LineMarker, Providers};
+use openidea_plugin::providers::{CompletionItem, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Project, Range, host, register_plugin};
 use spring_text::index::project_of;
@@ -66,6 +66,20 @@ fn target(project: &Project, root: &str, changelog: &str, include: &Include) -> 
 }
 
 impl Providers for Liquibase {
+    fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        let Some(caret) = offset(&doc.text, at) else {
+            return Vec::new();
+        };
+        let changelog = changelog::parse(&doc.path, &doc.text).is_some();
+        if doc.path.ends_with(".sql") {
+            return complete::sql(&doc.text, caret, changelog);
+        }
+        if changelog && (doc.path.ends_with(".yaml") || doc.path.ends_with(".yml")) {
+            return complete::yaml(&doc.text, caret);
+        }
+        Vec::new()
+    }
+
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
         let Some(log) = changelog::parse(&doc.path, &doc.text) else {
             return Vec::new();
@@ -275,5 +289,84 @@ mod tests {
         assert_eq!(has_files(Ok(Vec::new())), Some(false));
         assert_eq!(has_files(Err(Error::Invalid("\"a[/**/*\": unclosed".into()))), None);
         assert_eq!(has_files(Err(Error::Failed("io".into()))), None);
+    }
+
+    fn complete_at_end(path: &str, text: &str) -> Vec<CompletionItem> {
+        Liquibase.completion(&doc(path, text), openidea_plugin::text::position(text, text.len()), None)
+    }
+
+    fn labels(items: &[CompletionItem]) -> Vec<&str> {
+        items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    fn item<'a>(items: &'a [CompletionItem], label: &str) -> &'a CompletionItem {
+        items.iter().find(|i| i.label == label).unwrap_or_else(|| panic!("no {label}"))
+    }
+
+    const SET: &str = "databaseChangeLog:\n  - changeSet:\n      id: 1\n      author: bob\n      changes:\n";
+
+    #[test]
+    fn completes_yaml_changelogs() {
+        let _host = MockHost::install();
+        let y = "/project/db/master.yaml";
+
+        let text = format!("{SET}        - creat");
+        let items = complete_at_end(y, &text);
+        assert!(labels(&items).contains(&"createTable") && labels(&items).contains(&"createIndex"));
+        assert!(!labels(&items).contains(&"createTrigger"), "Pro types are not offered");
+        assert_eq!(item(&items, "createTable").insert_text, "createTable:\n            ");
+        assert_eq!(item(&items, "createTable").replace, Some(spring_text::range(&text, text.len() - 5, text.len())));
+
+        let items = complete_at_end(y, &format!("{SET}        - createTable:\n            tab"));
+        assert_eq!(item(&items, "tableName").insert_text, "tableName: ");
+        assert_eq!(item(&items, "columns").insert_text, "columns:\n              - ");
+
+        let in_columns = format!("{SET}        - createTable:\n            columns:\n              - ");
+        assert_eq!(labels(&complete_at_end(y, &in_columns)), ["column"]);
+        let in_column = format!("{in_columns}column:\n                  ");
+        let items = complete_at_end(y, &in_column);
+        assert!(labels(&items).contains(&"type"));
+        assert_eq!(item(&items, "constraints").insert_text, "constraints:\n                    ");
+        assert!(labels(&complete_at_end(y, &format!("{in_column}constraints:\n                    "))).contains(&"primaryKey"));
+
+        let items = complete_at_end(y, "databaseChangeLog:\n  - changeSet:\n      ");
+        assert!(labels(&items).contains(&"runOnChange"));
+        assert_eq!(item(&items, "changes").insert_text, "changes:\n        - ");
+
+        let items = complete_at_end(y, "databaseChangeLog:\n  - ");
+        assert_eq!(item(&items, "changeSet").insert_text, "changeSet:\n      id: ${1:id}\n      author: ${2:author}\n      changes:\n        - $0");
+        assert!(item(&items, "changeSet").snippet);
+        assert!(labels(&items).contains(&"includeAll"));
+
+        assert!(complete_at_end(y, "databaseChangeLog:\n  - changeSet:\n      author: ").is_empty());
+        assert!(complete_at_end("/project/src/main/resources/application.yml", "spring:\n  ").is_empty());
+    }
+
+    #[test]
+    fn completes_formatted_sql_comments() {
+        let _host = MockHost::install();
+        assert_eq!(labels(&complete_at_end("/project/db/a.sql", "--")), ["--liquibase formatted sql"]);
+
+        let text = "--liquibase formatted sql\n\n--ch";
+        let items = complete_at_end("/project/db/a.sql", text);
+        assert_eq!(labels(&items), ["--changeset", "--rollback", "--comment"]);
+        assert_eq!(item(&items, "--changeset").insert_text, "--changeset ${1:author}:${2:id}\n$0");
+        assert_eq!(item(&items, "--changeset").replace, Some(spring_text::range(text, text.len() - 4, text.len())));
+
+        assert!(complete_at_end("/project/db/a.sql", "--liquibase formatted sql\nselect 1 -- ").is_empty());
+        assert!(complete_at_end("/project/schema.sql", "select 1;\n--").is_empty());
+    }
+
+    #[test]
+    fn completion_survives_every_prefix() {
+        let _host = MockHost::install();
+        let text = format!("{SET}        - createTable:\n            columns:\n              - column:\n                  constraints:\n                    nullable: false\n");
+        for end in (0..=text.len()).filter(|&e| text.is_char_boundary(e)) {
+            complete_at_end("/project/db/master.yaml", &text[..end]);
+        }
+        let sql = "--liquibase formatted sql\n--changeset a:1\n--rollback x\n";
+        for end in 0..=sql.len() {
+            complete_at_end("/project/db/a.sql", &sql[..end]);
+        }
     }
 }
