@@ -5,6 +5,8 @@
 
 #[allow(dead_code)] // the checks that call it arrive with the next modules
 mod naming;
+#[allow(dead_code)] // consumed by the next tasks
+mod config;
 
 use openidea_plugin::{Error, Invocation, Plugin, register_plugin};
 
