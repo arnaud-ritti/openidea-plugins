@@ -7,7 +7,8 @@ mod checks;
 
 use changelog::{Include, Target};
 use openidea_plugin::providers::{Document, LineMarker, Providers};
-use openidea_plugin::{Error, Invocation, Plugin, Project, host, register_plugin};
+use openidea_plugin::text::offset;
+use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Project, Range, host, register_plugin};
 use spring_text::index::project_of;
 use std::cell::OnceCell;
 
@@ -65,6 +66,28 @@ fn target(project: &Project, root: &str, changelog: &str, include: &Include) -> 
 }
 
 impl Providers for Liquibase {
+    fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        let Some(log) = changelog::parse(&doc.path, &doc.text) else {
+            return Vec::new();
+        };
+        let Some(caret) = offset(&doc.text, at) else {
+            return Vec::new();
+        };
+        let Some(include) = log.includes.iter().find(|i| !i.dir && i.at <= caret && caret <= i.end) else {
+            return Vec::new();
+        };
+        let Some(project) = project_of(&doc.path) else {
+            return Vec::new();
+        };
+        let Ok(root) = project.root() else {
+            return Vec::new();
+        };
+        match target(&project, &root, &doc.path, include) {
+            Target::Found(path) => vec![Location { path, range: Range::new(Position::new(0, 0), Position::new(0, 0)) }],
+            _ => Vec::new(),
+        }
+    }
+
     /// Publishes the changelog's problems; there are no gutter markers.
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let problems = match changelog::parse(&doc.path, &doc.text) {
@@ -147,6 +170,19 @@ mod tests {
         host.add_file("src/main/resources/db/changes/001.yaml", "databaseChangeLog: []\n");
         host.add_file("src/main/resources/db/changelog/changes/002.yaml", "databaseChangeLog: []\n");
         host
+    }
+
+    #[test]
+    fn goes_to_included_changelogs() {
+        let host = MockHost::install();
+        host.add_file("db/changes/001.xml", "<databaseChangeLog/>");
+        let text = "<databaseChangeLog>\n    <include file=\"changes/001.xml\" relativeToChangelogFile=\"true\"/>\n    <changeSet id=\"1\" author=\"a\"/>\n</databaseChangeLog>";
+        let d = doc("/project/db/master.xml", text);
+        let start = Position::new(0, 0);
+        assert_eq!(Liquibase.definition(&d, Position::new(1, 25)), [Location { path: "/project/db/changes/001.xml".into(), range: Range::new(start, start) }]);
+        assert!(Liquibase.definition(&d, Position::new(2, 8)).is_empty());
+        let yaml = "databaseChangeLog:\n  - include:\n      file: db/changes/001.xml\n";
+        assert_eq!(Liquibase.definition(&doc("/project/master.yaml", yaml), Position::new(2, 14)).len(), 1);
     }
 
     #[test]
