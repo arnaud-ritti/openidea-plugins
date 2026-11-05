@@ -104,3 +104,33 @@ fn a_failed_advisory_still_reports_its_id() {
     assert_eq!(findings[0].advisories[0].severity, None);
     assert!(!host.storage().contains_key("v:GHSA-57j2-w4cx-62h2"), "a failed advisory isn't cached");
 }
+
+#[test]
+fn a_large_audit_stores_all_queries_under_one_key() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    let deps: Vec<Dep> = (0..1500).map(|i| dep(Ecosystem::Npm, &format!("pkg{i}"), "1.0.0")).collect();
+
+    osv::audit(&deps, true, 0).unwrap();
+
+    let storage = host.storage();
+    let queries: Value = serde_json::from_str(&storage["queries"]).unwrap();
+    assert_eq!(queries.as_object().unwrap().len(), 1500);
+    assert!(storage.keys().all(|k| !k.starts_with("q:")));
+}
+
+#[test]
+fn a_hostile_advisory_id_is_never_fetched_or_stored() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(|r| {
+        if r.method == "POST" {
+            return ok(json!({"results": [{"vulns": [{"id": "../querybatch", "modified": "x"}]}]}).to_string());
+        }
+        osv(r)
+    });
+
+    let findings = osv::audit(&[jackson()], true, 0).unwrap();
+    assert_eq!(findings[0].advisories[0].id, "../querybatch");
+    assert!(host.requests().iter().all(|r| r.method == "POST"));
+    assert!(host.storage().keys().all(|k| !k.starts_with("v:")));
+}
