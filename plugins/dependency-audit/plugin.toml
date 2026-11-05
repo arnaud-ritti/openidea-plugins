@@ -1,0 +1,38 @@
+id = "aritti.dependency-audit"
+name = "Dependency Audit"
+version = "0.1.0"
+description = "Checks Maven, Gradle, npm and Composer dependencies against the OSV.dev vulnerability database. Vulnerable dependencies are marked in pom.xml, build.gradle, build.gradle.kts, package.json, composer.json and their lockfiles when you open or save them, with a quick fix that upgrades to the nearest fixed version. Dependency Audit: Scan Project lists the project's vulnerable dependencies in the Vulnerable Dependencies tool window. Privacy: package names and versions (never source code) are sent to api.osv.dev, a free service run by Google. Turn off Check on open and save under Settings › Plugins › Dependency Audit to contact it only when you run a scan."
+authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.1.0: first release. OSV.dev checks of pom.xml, build.gradle, build.gradle.kts, package.json, package-lock.json, composer.json and composer.lock on open and save, an upgrade quick fix, and Scan Project with the Vulnerable Dependencies tool window."
+categories = ["linters", "tools"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-event:file-opened", "on-event:file-saved", "on-view:vulnerabilities"]
+
+[capabilities]
+required = ["project.read", "storage", "net:api.osv.dev"]
+optional = ["events"]
+
+[[contributes.providers]]
+kinds = ["code-actions"]
+languages = ["xml", "groovy", "kotlin", "json"]
+
+[[contributes.commands]]
+id = "scan"
+title = "Dependency Audit: Scan Project"
+category = "Dependency Audit"
+
+[[contributes.menus]]
+menu = "tools"
+command = "scan"
+
+[[contributes.views]]
+id = "vulnerabilities"
+title = "Vulnerable Dependencies"
+icon = "warning"
+location = "bottom"
+
+[contributes.settings]
+title = "Dependency Audit"
+schema = "settings.schema.json"
