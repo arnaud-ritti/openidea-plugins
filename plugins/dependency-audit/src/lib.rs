@@ -1,5 +1,8 @@
 //! Dependency Audit for OpenIDEA: checks dependencies against OSV.dev.
 
+#[allow(dead_code)]
+mod manifest;
+
 use openidea_plugin::providers::Providers;
 use openidea_plugin::views::{View, Viewport, Views};
 use openidea_plugin::{Error, Invocation, Plugin, register_plugin};
