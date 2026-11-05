@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Instant;
 
 use openidea_plugin::{Error, HttpRequest, Severity, host};
 use serde::{Deserialize, Serialize};
@@ -134,9 +135,11 @@ impl Finding {
             })
             .collect::<Vec<_>>()
             .join("; ");
-        let outcome = match self.fix() {
-            Some(fix) => format!("Upgrade to {fix}."),
-            None => "No fixed version is known.".to_string(),
+        let undetailed = self.advisories.iter().all(|a| a.summary.is_empty() && a.fixed.is_empty());
+        let outcome = match (self.fix(), undetailed) {
+            (Some(fix), _) => format!("Upgrade to {fix}."),
+            (None, true) => "Details unavailable; check again later.".to_string(),
+            (None, false) => "No fixed version is known.".to_string(),
         };
 
         format!("{} {} has known vulnerabilities: {advisories}. {outcome}", self.dep.name, self.dep.version)
@@ -226,7 +229,8 @@ fn query_batch(chunk: &[&Dep]) -> Result<Vec<BatchResult>, Error> {
     Ok(response.results)
 }
 
-fn advisory(id: &str, modified: &str, online: bool, writer: &mut CacheWriter) -> Advisory {
+/// `online` turns false at the first failed fetch or once past the deadline.
+fn advisory(id: &str, modified: &str, online: &mut bool, deadline: Instant, writer: &mut CacheWriter) -> Advisory {
     let id_only = Advisory { id: id.into(), modified: modified.into(), ..Advisory::default() };
 
     if !is_safe_id(id) {
@@ -237,10 +241,14 @@ fn advisory(id: &str, modified: &str, online: bool, writer: &mut CacheWriter) ->
         return cached;
     }
 
-    let fetched = online
-        .then(|| fetch(HttpRequest::get(&format!("{VULN_URL}/{id}"))).ok())
-        .flatten()
-        .and_then(|body| parse_advisory(&String::from_utf8_lossy(&body)));
+    *online &= Instant::now() < deadline;
+    let fetched = if *online {
+        let body = fetch(HttpRequest::get(&format!("{VULN_URL}/{id}")));
+        *online = body.is_ok();
+        body.ok().and_then(|body| parse_advisory(&String::from_utf8_lossy(&body)))
+    } else {
+        None
+    };
 
     let Some(advisory) = fetched else {
         return id_only;
@@ -278,7 +286,7 @@ impl CacheWriter {
     }
 }
 
-pub fn audit(deps: &[Dep], online: bool, now: u64) -> Result<Vec<Finding>, Error> {
+pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<Vec<Finding>, Error> {
     let mut cache = cached_queries();
     let mut seen: HashSet<String> = HashSet::new();
     let mut unique: Vec<(&Dep, String)> = Vec::new();
@@ -303,6 +311,10 @@ pub fn audit(deps: &[Dep], online: bool, now: u64) -> Result<Vec<Finding>, Error
     let mut writer = CacheWriter::default();
 
     for chunk in missing.chunks(BATCH) {
+        if Instant::now() >= deadline {
+            return Err(Error::Failed("OSV check timed out".into()));
+        }
+
         for (dep, result) in chunk.iter().zip(query_batch(chunk)?) {
             let vulns = result.vulns.into_iter().map(|v| (v.id, v.modified)).collect();
             cache.insert(query_key(dep), CachedQuery { at: now, vulns });
@@ -310,6 +322,7 @@ pub fn audit(deps: &[Dep], online: bool, now: u64) -> Result<Vec<Finding>, Error
     }
 
     let mut advisories: HashMap<String, Advisory> = HashMap::new();
+    let mut online = online;
     let mut findings = Vec::new();
 
     for (dep, key) in unique {
@@ -321,7 +334,7 @@ pub fn audit(deps: &[Dep], online: bool, now: u64) -> Result<Vec<Finding>, Error
         for (id, modified) in &query.vulns {
             let advisory = advisories
                 .entry(id.clone())
-                .or_insert_with(|| advisory(id, modified, online, &mut writer));
+                .or_insert_with(|| advisory(id, modified, &mut online, deadline, &mut writer));
             found.push(advisory.clone());
         }
 
@@ -416,6 +429,14 @@ pub(crate) mod tests {
 
         let b = parse_advisory(r#"{"id": "OSV-2", "modified": "m", "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N"}]}"#).unwrap();
         assert_eq!((b.severity, level(None)), (None, Severity::Warning));
+    }
+
+    #[test]
+    fn a_finding_without_details_says_so_instead_of_claiming_no_fix() {
+        let undetailed = Advisory { id: "GHSA-x".into(), ..Advisory::default() };
+        let finding = Finding { dep: dep(Ecosystem::Npm, "lodash", "4.17.15"), advisories: vec![undetailed] };
+
+        assert_eq!(finding.message(), "lodash 4.17.15 has known vulnerabilities: GHSA-x. Details unavailable; check again later.");
     }
 
     #[test]

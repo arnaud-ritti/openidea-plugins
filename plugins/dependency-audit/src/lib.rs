@@ -5,7 +5,7 @@ mod osv;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use openidea_plugin::host;
 use openidea_plugin::providers::{CodeAction, Document, Providers};
@@ -16,13 +16,16 @@ use serde::{Deserialize, Serialize};
 use spring_text::range;
 use spring_text::tree::Expansion;
 
-use manifest::{Dep, GLOBS, bumped, kind, lockfile, parse};
+use manifest::{Dep, GLOBS, Kind, bumped, kind, lockfile, parse};
 use osv::{Finding, audit, cached_advisory, compare, level};
+
+type Display = HashMap<String, Option<(String, Option<String>)>>;
 
 #[derive(Default)]
 pub struct DependencyAudit {
     expansion: Expansion,
     targets: HashMap<String, Target>,
+    display: Display,
 }
 
 enum Target {
@@ -39,6 +42,8 @@ struct Row {
     fix: Option<String>,
     advisories: Vec<String>,
 }
+
+const CALL_BUDGET: Duration = Duration::from_secs(45);
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
@@ -65,11 +70,11 @@ fn diagnostic(finding: &Finding, text: &str) -> Diagnostic {
     }
 }
 
-fn check(path: &str) -> Result<(), Error> {
+fn check(path: &str, deadline: Instant) -> Result<(), Error> {
     let project = project_of(path).ok_or_else(|| Error::NotFound(format!("project of {path}")))?;
     let (text, deps) = read_deps(&project, path)?;
     let _task = host::begin_task("Checking dependencies with OSV.dev", false);
-    let findings = audit(&deps, true, now())?;
+    let findings = audit(&deps, true, now(), deadline)?;
     let items: Vec<Diagnostic> = findings.iter().map(|f| diagnostic(f, &text)).collect();
 
     host::publish_diagnostics(path, &items)
@@ -121,7 +126,7 @@ fn scan(project: &Project) -> Result<String, Error> {
         file_deps.push((path.clone(), found));
     }
 
-    let findings = audit(&deps, true, now())?;
+    let findings = audit(&deps, true, now(), Instant::now() + CALL_BUDGET)?;
     let by_dep: HashMap<_, &Finding> = findings.iter().map(|f| (dep_key(&f.dep), f)).collect();
     for (path, found) in &file_deps {
         let text = &texts[path];
@@ -175,7 +180,7 @@ fn dep_key(dep: &Dep) -> (manifest::Ecosystem, String, String) {
     (dep.ecosystem, dep.name.clone(), dep.version.clone())
 }
 
-fn tree_of(root: &str, rows: &[Row]) -> (Vec<TreeItem>, HashMap<String, Target>) {
+fn tree_of(root: &str, rows: &[Row], mut display: Option<&mut Display>) -> (Vec<TreeItem>, HashMap<String, Target>) {
     let root = format!("{root}/");
     let mut items: Vec<TreeItem> = Vec::new();
     let mut targets = HashMap::new();
@@ -194,16 +199,23 @@ fn tree_of(root: &str, rows: &[Row]) -> (Vec<TreeItem>, HashMap<String, Target>)
         for id in &row.advisories {
             let advisory_key = format!("{key}|{id}");
             let item = TreeItem::new(&advisory_key, id).parent(&key);
-            items.push(match cached_advisory(id) {
-                Some(advisory) => {
-                    let icon = match level(advisory.severity.as_deref()) {
+            let shown = display.as_deref_mut().map(|cache| {
+                cache
+                    .entry(id.clone())
+                    .or_insert_with(|| cached_advisory(id).map(|a| (a.summary, a.severity)))
+                    .clone()
+            });
+            items.push(match shown {
+                None => item,
+                Some(Some((summary, severity))) => {
+                    let icon = match level(severity.as_deref()) {
                         Severity::Error => "error",
                         Severity::Warning => "warning",
                         _ => "info",
                     };
-                    item.icon(icon).detail(&advisory.summary)
+                    item.icon(icon).detail(&summary)
                 }
-                None => item.icon("warning"),
+                Some(None) => item.icon("warning"),
             });
             targets.insert(advisory_key, Target::Url(format!("https://osv.dev/vulnerability/{id}")));
         }
@@ -285,6 +297,7 @@ impl Plugin for DependencyAudit {
         }
 
         let project = ctx.project().ok_or("Open a project first.")?;
+        self.display.clear();
         scan_and_notify(&project)?;
 
         Ok(None)
@@ -303,9 +316,12 @@ impl Plugin for DependencyAudit {
             }
         }
 
+        let deadline = Instant::now() + CALL_BUDGET;
         for path in paths {
-            if let Err(e) = check(path) {
+            if let Err(e) = check(path, deadline) {
                 host::log(LogLevel::Warn, &format!("OSV check of {path}: {e}"));
+
+                return;
             }
         }
     }
@@ -313,7 +329,7 @@ impl Plugin for DependencyAudit {
 
 impl Providers for DependencyAudit {
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
-        if kind(&doc.path).is_none() {
+        if !matches!(kind(&doc.path), Some(Kind::Pom | Kind::Gradle | Kind::PackageJson | Kind::ComposerJson)) {
             return Vec::new();
         }
 
@@ -323,13 +339,13 @@ impl Providers for DependencyAudit {
         let lock = lockfile(&doc.path).and_then(|lock| project.read_file(&lock).ok());
         let deps: Vec<Dep> = parse(&doc.path, &doc.text, lock.as_deref())
             .into_iter()
-            .filter(|dep| overlaps(dep, &doc.text, &selection))
+            .filter(|dep| dep.version_at.is_some() && overlaps(dep, &doc.text, &selection))
             .collect();
         if deps.is_empty() {
             return Vec::new();
         }
 
-        let Ok(findings) = audit(&deps, false, now()) else {
+        let Ok(findings) = audit(&deps, false, now(), Instant::now()) else {
             return Vec::new();
         };
 
@@ -346,7 +362,7 @@ impl DependencyAudit {
             return Ok(());
         };
 
-        self.targets = tree_of(&project.root()?, &rows).1;
+        self.targets = tree_of(&project.root()?, &rows, None).1;
 
         Ok(())
     }
@@ -364,7 +380,7 @@ impl Views for DependencyAudit {
             return Ok(View::message("No known vulnerabilities found.").button(Button::new("scan", "Rescan")));
         }
 
-        let (mut items, targets) = tree_of(&project.root()?, &rows);
+        let (mut items, targets) = tree_of(&project.root()?, &rows, Some(&mut self.display));
         self.targets = targets;
         self.expansion.apply(&mut items);
 
@@ -381,6 +397,7 @@ impl Views for DependencyAudit {
         match event {
             ViewEvent::Button(id) if id == "scan" => {
                 let project = ctx.project().ok_or("Open a project first.")?;
+                self.display.clear();
                 scan_and_notify(&project)
             }
             ViewEvent::Activate(key) => {

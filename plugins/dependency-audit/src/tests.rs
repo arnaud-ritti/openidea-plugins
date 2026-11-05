@@ -44,6 +44,10 @@ pub fn posts(host: &MockHost) -> usize {
     host.requests().iter().filter(|r| r.method == "POST").count()
 }
 
+fn soon() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(45)
+}
+
 fn jackson() -> Dep {
     dep(Ecosystem::Maven, "com.fasterxml.jackson.core:jackson-databind", "2.12.3")
 }
@@ -54,17 +58,17 @@ fn audit_queries_osv_and_caches_results() {
     host.on_fetch(osv);
     let deps = [jackson(), dep(Ecosystem::Maven, "org.yaml:snakeyaml", "2.2")];
 
-    let findings = osv::audit(&deps, true, 1_000).unwrap();
+    let findings = osv::audit(&deps, true, 1_000, soon()).unwrap();
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].dep.name, "com.fasterxml.jackson.core:jackson-databind");
     assert_eq!(findings[0].fix().as_deref(), Some("2.12.7.1"));
     assert_eq!(host.requests().len(), 2, "one batch, one advisory");
     assert_eq!(host.requests()[0].headers, [("Content-Type".to_string(), "application/json".to_string())]);
 
-    assert_eq!(osv::audit(&deps, true, 2_000).unwrap(), findings);
+    assert_eq!(osv::audit(&deps, true, 2_000, soon()).unwrap(), findings);
     assert_eq!(host.requests().len(), 2, "answered from the cache");
 
-    osv::audit(&deps, true, 1_000 + osv::QUERY_TTL_SECS + 1).unwrap();
+    osv::audit(&deps, true, 1_000 + osv::QUERY_TTL_SECS + 1, soon()).unwrap();
     assert_eq!(host.requests().len(), 3, "the query expired; the advisory is unchanged");
 }
 
@@ -72,7 +76,7 @@ fn audit_queries_osv_and_caches_results() {
 fn offline_audit_uses_only_the_cache() {
     let host = MockHost::install().with_capabilities(CAPS);
 
-    assert_eq!(osv::audit(&[jackson()], false, 0).unwrap(), vec![]);
+    assert_eq!(osv::audit(&[jackson()], false, 0, soon()).unwrap(), vec![]);
     assert!(host.requests().is_empty());
 }
 
@@ -82,7 +86,7 @@ fn audit_sends_at_most_1000_queries_per_request() {
     host.on_fetch(osv);
     let deps: Vec<Dep> = (0..1001).map(|i| dep(Ecosystem::Npm, &format!("pkg{i}"), "1.0.0")).collect();
 
-    osv::audit(&deps, true, 0).unwrap();
+    osv::audit(&deps, true, 0, soon()).unwrap();
     assert_eq!(posts(&host), 2);
 }
 
@@ -91,7 +95,7 @@ fn audit_reports_osv_errors() {
     let host = MockHost::install().with_capabilities(CAPS);
     host.on_fetch(|_| Ok(HttpResponse { status: 503, headers: vec![], body: vec![] }));
 
-    let error = osv::audit(&[jackson()], true, 0).unwrap_err();
+    let error = osv::audit(&[jackson()], true, 0, soon()).unwrap_err();
     assert!(error.to_string().contains("503"), "{error}");
 }
 
@@ -100,7 +104,7 @@ fn a_failed_advisory_still_reports_its_id() {
     let host = MockHost::install().with_capabilities(CAPS);
     host.on_fetch(|r| if r.method == "GET" { Err(Error::Failed("timed out".into())) } else { osv(r) });
 
-    let findings = osv::audit(&[jackson()], true, 0).unwrap();
+    let findings = osv::audit(&[jackson()], true, 0, soon()).unwrap();
     assert_eq!(findings[0].advisories[0].id, "GHSA-57j2-w4cx-62h2");
     assert_eq!(findings[0].advisories[0].severity, None);
     assert!(!host.storage().contains_key("v:GHSA-57j2-w4cx-62h2"), "a failed advisory isn't cached");
@@ -112,7 +116,7 @@ fn a_large_audit_stores_all_queries_under_one_key() {
     host.on_fetch(osv);
     let deps: Vec<Dep> = (0..1500).map(|i| dep(Ecosystem::Npm, &format!("pkg{i}"), "1.0.0")).collect();
 
-    osv::audit(&deps, true, 0).unwrap();
+    osv::audit(&deps, true, 0, soon()).unwrap();
 
     let storage = host.storage();
     let queries: Value = serde_json::from_str(&storage["queries"]).unwrap();
@@ -130,10 +134,41 @@ fn a_hostile_advisory_id_is_never_fetched_or_stored() {
         osv(r)
     });
 
-    let findings = osv::audit(&[jackson()], true, 0).unwrap();
+    let findings = osv::audit(&[jackson()], true, 0, soon()).unwrap();
     assert_eq!(findings[0].advisories[0].id, "../querybatch");
     assert!(host.requests().iter().all(|r| r.method == "POST"));
     assert!(host.storage().keys().all(|k| !k.starts_with("v:")));
+}
+
+#[test]
+fn audit_past_its_deadline_posts_nothing() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+
+    let error = osv::audit(&[jackson()], true, 0, std::time::Instant::now()).unwrap_err();
+
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert!(host.requests().is_empty());
+}
+
+#[test]
+fn after_a_failed_advisory_fetch_the_rest_are_not_attempted() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(|r| match r.method.as_str() {
+        "POST" => ok(json!({"results": [
+            {"vulns": [{"id": "GHSA-aaaa-1", "modified": "m"}]},
+            {"vulns": [{"id": "GHSA-aaaa-2", "modified": "m"}]},
+        ]}).to_string()),
+        _ => Err(Error::Failed("timed out".into())),
+    });
+    let deps = [jackson(), dep(Ecosystem::Maven, "com.example:other", "1.0")];
+
+    let findings = osv::audit(&deps, true, 0, soon()).unwrap();
+
+    assert_eq!(host.requests().iter().filter(|r| r.method == "GET").count(), 1);
+    assert_eq!(findings.len(), 2);
+    assert_eq!(findings[1].advisories[0].id, "GHSA-aaaa-2");
+    assert!(findings[1].advisories[0].summary.is_empty());
 }
 
 pub const POM: &str = "<project>\n  <dependencies>\n    <dependency><groupId>org.yaml</groupId><artifactId>snakeyaml</artifactId><version>2.2</version></dependency>\n    <dependency><!-- 😀 --><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>2.12.3</version></dependency>\n  </dependencies>\n</project>\n";
@@ -218,6 +253,23 @@ fn an_osv_outage_logs_and_keeps_quiet() {
     assert!(host.diagnostics().is_empty());
     assert!(host.notifications().is_empty());
     assert!(host.logs().iter().any(|(_, line)| line.contains("OSV check of /project/pom.xml: offline")));
+}
+
+#[test]
+fn an_event_batch_stops_at_the_first_osv_failure() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(|_| Err(Error::Failed("hung".into())));
+    let events: Vec<Event> = (0..7)
+        .map(|i| {
+            host.add_file(&format!("m{i}/pom.xml"), POM);
+            Event::FileOpened(format!("/project/m{i}/pom.xml"))
+        })
+        .collect();
+
+    DependencyAudit::default().handle_events(&events, &host.invocation());
+
+    assert_eq!(posts(&host), 1);
+    assert_eq!(host.logs().iter().filter(|(_, line)| line.contains("OSV check of")).count(), 1);
 }
 
 fn document(path: &str, language: &str, text: &str) -> openidea_plugin::providers::Document {
@@ -326,6 +378,20 @@ fn deps_sharing_a_property_get_one_quick_fix_with_the_highest_fix() {
     assert_eq!(actions[0].edits[0].1[0].text, "2.13.0");
 }
 
+#[test]
+fn code_actions_in_a_large_lockfile_return_fast() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    let packages: Vec<String> = (0..3000).map(|i| format!("    \"node_modules/pkg{i}\": {{\"version\": \"1.0.0\"}}")).collect();
+    let lock = format!("{{\"lockfileVersion\": 3, \"packages\": {{\n{}\n}}}}", packages.join(",\n"));
+    host.add_file("package-lock.json", &lock);
+    let started = std::time::Instant::now();
+
+    let actions = DependencyAudit::default().code_actions(&document("/project/package-lock.json", "json", &lock), line(1500));
+
+    assert!(actions.is_empty());
+    assert!(started.elapsed() < std::time::Duration::from_millis(100), "{:?}", started.elapsed());
+}
+
 fn scanned(host: &MockHost) -> DependencyAudit {
     host.on_fetch(osv);
     host.add_file("pom.xml", POM);
@@ -412,6 +478,20 @@ fn a_fresh_instance_opens_items_from_the_stored_rows() {
     DependencyAudit::default().handle("vulnerabilities", ViewEvent::Activate(key), &host.invocation()).unwrap();
 
     assert_eq!(host.opened_urls(), ["https://osv.dev/vulnerability/GHSA-57j2-w4cx-62h2"]);
+}
+
+#[test]
+fn rendering_again_reuses_the_advisory_details_it_already_read() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    let mut plugin = scanned(&host);
+    let detail = |items: Vec<TreeItem>| items.into_iter().find(|i| i.label == "GHSA-35jh-r3h4-6jhm").unwrap().detail;
+    let first = detail(tree(&mut plugin, &host));
+    for stale in host::storage::keys("v:").unwrap() {
+        host::storage::delete(&stale).unwrap();
+    }
+
+    assert_eq!(first.as_deref(), Some("Command injection in lodash"));
+    assert_eq!(detail(tree(&mut plugin, &host)), first);
 }
 
 #[test]

@@ -22,6 +22,8 @@ installed, not by the range.
 current one (a `^` or `~` in front stays). It is offered only for a single constraint, not for
 ranges like `>=1 <2`, and only once per Maven property shared by several dependencies, with
 the highest fix among them. Lockfile entries have no quick fix: update them with your package manager.
+After upgrading a range in `package.json` or `composer.json`, the underline stays until the lockfile
+follows: run `npm install` / `composer update`, then reopen the file.
 
 ## Command and view
 
