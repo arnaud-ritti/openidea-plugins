@@ -57,11 +57,11 @@ pub fn problems(path: &str, text: &str, log: &Changelog, target: &dyn Fn(&Includ
     }
 
     for include in &log.includes {
-        if target(include) != Target::Missing {
+        if include.optional || target(include) != Target::Missing {
             continue;
         }
         let message = if include.dir {
-            format!("No files under `{}`.", include.path)
+            format!("Cannot find directory `{}`.", include.path)
         } else {
             format!("Cannot find `{}`.", include.path)
         };

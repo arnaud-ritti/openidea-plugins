@@ -31,10 +31,14 @@ fn file_exists(read: Result<String, Error>) -> Option<bool> {
     }
 }
 
-/// Whether a directory glob matched a file; `None` on any error, since the host also
-/// answers `Invalid` when the glob doesn't compile (a directory named with `[` or `{`).
-fn has_files(found: Result<Vec<String>, Error>) -> Option<bool> {
-    found.ok().map(|files| !files.is_empty())
+/// Whether a directory exists, judged by reading it as a file: the host answers `Failed` ("not a file")
+/// for an existing directory and `Invalid` for a missing one; `None` for any other error.
+fn dir_exists(read: Result<String, Error>) -> Option<bool> {
+    match read {
+        Ok(_) | Err(Error::Failed(_)) => Some(true),
+        Err(Error::NotFound(_) | Error::Invalid(_)) => Some(false),
+        Err(_) => None,
+    }
 }
 
 /// Where `include`, written in `changelog` (inside `project`, rooted at `root`), points.
@@ -47,15 +51,10 @@ fn target(project: &Project, root: &str, changelog: &str, include: &Include) -> 
         return Target::Unknown;
     }
     let mut unsure = false;
-    // ponytail: reads each included file to test it exists (no exists API); cap or cache if master changelogs with hundreds of includes miss the 50 ms budget
+    // ponytail: reads or probes each include to test it exists (no exists API; a directory is probed by a failed read, so an empty one is not flagged); cap or cache if master changelogs with hundreds of includes miss the 50 ms budget
     for candidate in candidates {
-        let seen = if include.dir {
-            let relative = candidate.strip_prefix(root.trim_end_matches('/')).unwrap_or(&candidate).trim_start_matches('/');
-            let glob = if relative.is_empty() { "**/*".to_owned() } else { format!("{relative}/**/*") };
-            has_files(project.find_files(&glob, 1))
-        } else {
-            file_exists(project.read_file(&candidate))
-        };
+        let read = project.read_file(&candidate);
+        let seen = if include.dir { dir_exists(read) } else { file_exists(read) };
         match seen {
             Some(true) => return Target::Found(candidate),
             Some(false) => {}
@@ -146,6 +145,7 @@ mod tests {
   - includeAll:
       path: changes/
       relativeToChangelogFile: true
+      errorIfMissingOrEmpty: false
   - changeSet:
       id: \"1\"
       author: bob
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn half_typed_include_is_unknown() {
         let host = host();
-        let include = Include { path: String::new(), relative: false, dir: false, at: 0, end: 0 };
+        let include = Include { path: String::new(), relative: false, dir: false, optional: false, at: 0, end: 0 };
         let project = project_of(MASTER).unwrap();
         assert_eq!(target(&project, "/project", MASTER, &include), Target::Unknown);
         let text = "databaseChangeLog:\n  - include:\n      file: \n";
@@ -284,11 +284,22 @@ mod tests {
     }
 
     #[test]
-    fn directory_glob_errors_are_unsure() {
-        assert_eq!(has_files(Ok(vec!["a".into()])), Some(true));
-        assert_eq!(has_files(Ok(Vec::new())), Some(false));
-        assert_eq!(has_files(Err(Error::Invalid("\"a[/**/*\": unclosed".into()))), None);
-        assert_eq!(has_files(Err(Error::Failed("io".into()))), None);
+    fn classifies_directory_probes() {
+        assert_eq!(dir_exists(Err(Error::Failed("/p/changes: not a file".into()))), Some(true));
+        assert_eq!(dir_exists(Ok(String::new())), Some(true));
+        assert_eq!(dir_exists(Err(Error::Invalid("changes: no such file".into()))), Some(false));
+        assert_eq!(dir_exists(Err(Error::NotFound("x".into()))), Some(false));
+        assert_eq!(dir_exists(Err(Error::Denied("x".into()))), None);
+    }
+
+    #[test]
+    fn missing_include_all_directories_are_flagged_unless_optional() {
+        let host = host();
+        let text = "databaseChangeLog:\n  - includeAll:\n      path: nope/\n  - includeAll:\n      path: later/\n      errorIfMissingOrEmpty: false\n  - include:\n      file: gone.yaml\n      errorIfMissing: false\n";
+        assert_eq!(
+            checked(&host, MASTER, text),
+            [("unresolved-include".into(), "Cannot find directory `nope/`.".into())]
+        );
     }
 
     fn complete_at_end(path: &str, text: &str) -> Vec<CompletionItem> {

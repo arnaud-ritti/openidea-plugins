@@ -21,19 +21,22 @@ Changelogs are checked as you type, without saving.
 | `duplicate-changeset` | error | A changeset with the same id and author is already defined in the file. The first definition is linked. Ids compare as text, so `id: 1` and `id: "1"` are the same. |
 | `incomplete-changeset` | error | A changeset without an id, without an author, or without both. In SQL the message shows `--changeset author:id`. |
 | `unknown-change-type` | warning | A YAML entry under `changes:` that isn't a built-in Liquibase change type (`createTabel`). |
-| `unresolved-include` | error | An `include` file or an `includeAll` directory that can't be found. |
+| `unresolved-include` | error | An `include` file or an `includeAll` directory that can't be found. Not reported when `errorIfMissing` (`errorIfMissingOrEmpty` for `includeAll`) is `false`. |
 | `missing-header` | warning | A formatted SQL changelog whose first non-blank line isn't `--liquibase formatted sql`. |
 
 A quoted SQL author with spaces (`--changeset "Jane Doe":2`) is one author.
 
 Includes are resolved as the changelog's directory (with
 `relativeToChangelogFile`), or else against `src/main/resources` or
-`src/test/resources` when the changelog sits under one, then the project root.
+`src/test/resources` (and, from a test changelog, `src/main/resources` too) when the
+changelog sits under one, then the project root.
 `classpath:` is stripped first. An include is not flagged when:
 
 - its path contains a `${property}`;
 - its path leaves the project root;
 - its path is empty, because it is half-typed;
+- an `includeAll` directory exists but is empty (only a missing directory is reported);
+- it sets `errorIfMissing: false` (`errorIfMissingOrEmpty: false`);
 - the file exists but can't be read for any reason other than being missing.
 
 ## Completion
@@ -87,6 +90,7 @@ records, rather than paths relative to wherever the CLI runs.
 - Includes resolve against `src/main/resources`, `src/test/resources` or the
   project root. Other classpath layouts aren't modelled.
 - Only open files are checked.
+- After you create a missing included file, the master's "Cannot find" stays until the master is edited or reopened.
 - Unknown change types are reported in YAML only, under `changes:`.
 - Run configurations take fixed arguments, so `rollback-count` and per-changelog
   runs aren't offered.

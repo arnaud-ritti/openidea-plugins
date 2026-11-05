@@ -26,6 +26,8 @@ pub struct Include {
     pub path: String,
     pub relative: bool,
     pub dir: bool,
+    /// `errorIfMissing` (`errorIfMissingOrEmpty` for `includeAll`) is `false`.
+    pub optional: bool,
     pub at: usize,
     pub end: usize,
 }
@@ -98,7 +100,9 @@ fn parse_xml(text: &str) -> Option<Changelog> {
                     continue;
                 };
                 let relative = e.value("relativeToChangelogFile").is_some_and(|v| v.eq_ignore_ascii_case("true"));
-                log.includes.push(Include { path: attr.value.clone(), relative, dir, at: attr.value_at, end: attr.value_end });
+                let flag = if dir { "errorIfMissingOrEmpty" } else { "errorIfMissing" };
+                let optional = e.value(flag).is_some_and(|v| v.eq_ignore_ascii_case("false"));
+                log.includes.push(Include { path: attr.value.clone(), relative, dir, optional, at: attr.value_at, end: attr.value_end });
             }
             _ => {}
         }
@@ -133,7 +137,7 @@ fn parse_yaml(text: &str) -> Option<Changelog> {
             "include.file" | "includeAll.path" => {
                 let dir = rest.starts_with("includeAll");
                 include_of.push((n, dir));
-                log.includes.push(Include { path: key.value.clone(), relative: false, dir, at: key.value_at, end: key.value_end });
+                log.includes.push(Include { path: key.value.clone(), relative: false, dir, optional: false, at: key.value_at, end: key.value_end });
             }
             _ => {}
         }
@@ -146,10 +150,21 @@ fn parse_yaml(text: &str) -> Option<Changelog> {
         match (rest, set) {
             ("changeSet.id", Some(i)) => log.change_sets[i].id = non_empty(&key.value),
             ("changeSet.author", Some(i)) => log.change_sets[i].author = non_empty(&key.value),
-            ("include.relativeToChangelogFile" | "includeAll.relativeToChangelogFile", _) => {
+            (
+                "include.relativeToChangelogFile"
+                | "includeAll.relativeToChangelogFile"
+                | "include.errorIfMissing"
+                | "includeAll.errorIfMissingOrEmpty",
+                _,
+            ) => {
                 let dir = rest.starts_with("includeAll");
-                if let Some(i) = include_of.iter().position(|&(m, d)| m == n && d == dir) {
+                let Some(i) = include_of.iter().position(|&(m, d)| m == n && d == dir) else {
+                    continue;
+                };
+                if rest.ends_with("relativeToChangelogFile") {
                     log.includes[i].relative = key.value.eq_ignore_ascii_case("true");
+                } else {
+                    log.includes[i].optional = key.value.eq_ignore_ascii_case("false");
                 }
             }
             _ => {}
@@ -171,8 +186,9 @@ fn strip_comment(line: &str) -> &str {
 fn parse_sql(text: &str) -> Option<Changelog> {
     let mut log = empty(Format::Sql, false);
     let mut first = true;
-    let mut offset = 0;
-    for raw in text.split_inclusive('\n') {
+    let body = text.trim_start_matches('\u{feff}');
+    let mut offset = text.len() - body.len();
+    for raw in body.split_inclusive('\n') {
         let start = offset;
         offset += raw.len();
         let line = raw.trim_end();
@@ -226,11 +242,12 @@ pub fn candidates(changelog: &str, root: &str, include: &Include) -> Vec<String>
     if include.relative {
         bases.push(changelog.rsplit_once('/').map_or("", |(dir, _)| dir).to_owned());
     } else {
-        for marker in ["/src/main/resources/", "/src/test/resources/"] {
-            if let Some(i) = changelog.find(marker) {
-                bases.push(changelog[..i + marker.len() - 1].to_owned());
-                break;
-            }
+        if let Some(i) = changelog.find("/src/main/resources/") {
+            bases.push(changelog[..i + "/src/main/resources".len()].to_owned());
+        } else if let Some(i) = changelog.find("/src/test/resources/") {
+            let module = &changelog[..i];
+            bases.push(format!("{module}/src/test/resources"));
+            bases.push(format!("{module}/src/main/resources"));
         }
         bases.push(root.to_owned());
     }
@@ -258,7 +275,8 @@ fn normalise(path: &str) -> Option<String> {
             _ => parts.push(part),
         }
     }
-    Some(format!("/{}", parts.join("/")))
+    let lead = if path.starts_with('/') { "/" } else { "" };
+    Some(format!("{lead}{}", parts.join("/")))
 }
 
 #[cfg(test)]
@@ -348,7 +366,7 @@ mod tests {
 
     #[test]
     fn include_candidates() {
-        let inc = |path: &str, relative: bool| Include { path: path.into(), relative, dir: false, at: 0, end: 0 };
+        let inc = |path: &str, relative: bool| Include { path: path.into(), relative, dir: false, optional: false, at: 0, end: 0 };
         let log = "/project/src/main/resources/db/changelog/master.yaml";
         assert_eq!(candidates(log, "/project", &inc("changes/001.yaml", true)), ["/project/src/main/resources/db/changelog/changes/001.yaml"]);
         assert_eq!(candidates(log, "/project", &inc("../shared/x.yaml", true)), ["/project/src/main/resources/db/shared/x.yaml"]);
@@ -357,7 +375,46 @@ mod tests {
             ["/project/src/main/resources/db/changes/001.yaml", "/project/db/changes/001.yaml"]
         );
         assert_eq!(candidates("/project/db/master.xml", "/project", &inc("db/changes/001.xml", false)), ["/project/db/changes/001.xml"]);
+        assert_eq!(
+            candidates("C:/proj/db/master.xml", "C:/proj", &inc("changes/x.xml", true)),
+            ["C:/proj/db/changes/x.xml"]
+        );
+        assert_eq!(
+            candidates("C:/proj/db/master.xml", "C:/proj", &inc("db/x.xml", false)),
+            ["C:/proj/db/x.xml"]
+        );
+        assert_eq!(
+            candidates("/project/src/test/resources/db/t.yaml", "/project", &inc("db/main.yaml", false)),
+            [
+                "/project/src/test/resources/db/main.yaml",
+                "/project/src/main/resources/db/main.yaml",
+                "/project/db/main.yaml"
+            ]
+        );
         assert!(candidates(log, "/project", &inc("${base}/x.yaml", false)).is_empty());
         assert!(candidates(log, "/project", &inc("../../../../../../etc/passwd", true)).is_empty());
+    }
+
+    #[test]
+    fn reads_optional_includes() {
+        let xml = r#"<databaseChangeLog>
+    <include file="a.xml" errorIfMissing="FALSE"/>
+    <include file="b.xml" errorIfMissing="true"/>
+    <includeAll path="c/" errorIfMissingOrEmpty="false"/>
+    <include file="d.xml"/>
+</databaseChangeLog>"#;
+        let optional = |log: &Changelog| log.includes.iter().map(|i| i.optional).collect::<Vec<_>>();
+        assert_eq!(optional(&parse("/p/a.xml", xml).unwrap()), [true, false, true, false]);
+        let yaml = "databaseChangeLog:\n  - include:\n      file: a.yaml\n      errorIfMissing: false\n  - includeAll:\n      path: c/\n      errorIfMissingOrEmpty: False\n  - include:\n      file: b.yaml\n";
+        assert_eq!(optional(&parse("/p/a.yaml", yaml).unwrap()), [true, true, false]);
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_hide_the_sql_header() {
+        let text = "\u{feff}--liquibase formatted sql\n--changeset bob:1\n";
+        let log = parse("/p/a.sql", text).unwrap();
+        assert!(log.header);
+        let set = &log.change_sets[0];
+        assert_eq!(&text[set.at..set.end], "--changeset bob:1");
     }
 }
