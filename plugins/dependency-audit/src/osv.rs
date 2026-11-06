@@ -36,6 +36,10 @@ pub fn parse_advisory(json: &str) -> Option<Advisory> {
         let (Some(ecosystem), Some(name)) = (package["package"]["ecosystem"].as_str(), package["package"]["name"].as_str()) else {
             continue;
         };
+        let name = match ecosystem {
+            "PyPI" => crate::manifest::normalise_pypi(name),
+            _ => name.to_owned(),
+        };
         let versions = fixed.entry(format!("{ecosystem}:{name}")).or_default();
         let events = package["ranges"].as_array().into_iter().flatten().filter(|r| r["type"].as_str() != Some("GIT")).flat_map(|r| r["events"].as_array().into_iter().flatten());
         versions.extend(events.filter_map(|e| text(&e["fixed"])));
@@ -110,7 +114,7 @@ pub struct Finding {
 
 impl Finding {
     pub fn fix(&self) -> Option<String> {
-        let key = format!("{}:{}", self.dep.ecosystem.osv(), self.dep.name);
+        let key = format!("{}:{}", self.dep.ecosystem.osv(), self.dep.ecosystem.osv_name(&self.dep.name));
 
         self.advisories
             .iter()
@@ -185,7 +189,7 @@ struct BatchVuln {
 }
 
 fn query_key(dep: &Dep) -> String {
-    format!("{}:{}@{}", dep.ecosystem.osv(), dep.name, dep.version)
+    format!("{}:{}@{}", dep.ecosystem.osv(), dep.ecosystem.osv_name(&dep.name), dep.version)
 }
 
 fn cached_queries() -> BTreeMap<String, CachedQuery> {
@@ -217,7 +221,7 @@ fn fetch(request: HttpRequest) -> Result<Vec<u8>, Error> {
 fn query_batch(chunk: &[&Dep]) -> Result<Vec<BatchResult>, Error> {
     let queries: Vec<serde_json::Value> = chunk
         .iter()
-        .map(|dep| serde_json::json!({"package": {"ecosystem": dep.ecosystem.osv(), "name": dep.name}, "version": dep.version}))
+        .map(|dep| serde_json::json!({"package": {"ecosystem": dep.ecosystem.osv(), "name": dep.ecosystem.osv_name(&dep.name)}, "version": dep.version}))
         .collect();
     let body = serde_json::json!({"queries": queries}).to_string();
     let request = HttpRequest::post(QUERY_URL, body).header("Content-Type", "application/json");

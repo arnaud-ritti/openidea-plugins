@@ -590,3 +590,18 @@ fn old_cache_entry_without_aliases_is_refetched() {
     assert!(host.requests().iter().any(|r| r.url.ends_with("/GHSA-35jh-r3h4-6jhm")), "fetched again");
     assert!(host.storage().keys().all(|k| !k.starts_with("v:")), "the old key is dropped");
 }
+
+#[test]
+fn pypi_names_are_normalised() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    let upper = crate::manifest::parse("/p/requirements.txt", "Django==3.2\nmy_pkg.Name==1.0\n", None);
+    let lower = crate::manifest::parse("/p/other/requirements.txt", "django==3.2\n", None);
+    let deps: Vec<Dep> = upper.into_iter().chain(lower).collect();
+
+    osv::audit(&deps, true, 1_000, soon()).unwrap();
+
+    let body: Value = serde_json::from_slice(host.requests()[0].body.as_deref().unwrap()).unwrap();
+    let names: Vec<&str> = body["queries"].as_array().unwrap().iter().map(|q| q["package"]["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["django", "my-pkg-name"]);
+}

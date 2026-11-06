@@ -15,6 +15,13 @@ pub enum Ecosystem {
 }
 
 impl Ecosystem {
+    pub fn osv_name(self, name: &str) -> String {
+        match self {
+            Ecosystem::PyPI => normalise_pypi(name),
+            _ => name.to_owned(),
+        }
+    }
+
     pub fn osv(self) -> &'static str {
         match self {
             Ecosystem::Maven => "Maven",
@@ -57,6 +64,27 @@ pub const GLOBS: &[&str] = &[
     "**/poetry.lock",
     "**/requirements.txt",
 ];
+
+/// PyPI names compare case-insensitively with runs of `-`, `_` and `.` equal (PEP 503).
+pub fn normalise_pypi(name: &str) -> String {
+    let mut normalised = String::new();
+    let mut separator = false;
+
+    for c in name.chars() {
+        match "-_.".contains(c) {
+            true => separator = true,
+            false => {
+                if separator {
+                    normalised.push('-');
+                    separator = false;
+                }
+                normalised.push(c.to_ascii_lowercase());
+            }
+        }
+    }
+
+    normalised
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dep {
