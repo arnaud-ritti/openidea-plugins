@@ -546,7 +546,7 @@ fn path_pattern_problems(text: &str, code: &str, kotlin: bool) -> Vec<Problem> {
             let mut offset = from;
             for (n, segment) in segments.iter().enumerate() {
                 if *segment == "**" && n + 1 < segments.len() {
-                    let message = "A `**` before the last path segment is rejected by PathPatternParser, the default in Spring Security 6: `**` may only end a pattern.";
+                    let message = "A `**` before the last path segment is rejected by PathPatternParser, which Spring MVC request matching uses, and is not supported there: `**` may only end a pattern.";
                     let diagnostic = problem(text, offset, offset + 2, Severity::Warning, "obsolete-path-pattern", message.to_owned());
                     out.push(Problem { diagnostic, fix: None });
                 }
