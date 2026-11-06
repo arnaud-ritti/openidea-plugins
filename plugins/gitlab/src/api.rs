@@ -27,7 +27,20 @@ pub struct User {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Pipeline {
+    pub id: u64,
     pub status: String,
+    pub web_url: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Job {
+    pub id: u64,
+    pub name: String,
+    pub stage: String,
+    pub status: String,
+    pub web_url: String,
+    pub allow_failure: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -571,6 +584,27 @@ impl Project<'_> {
     /// Newest first, as GitLab lists them.
     pub fn mr_commits(&self, iid: u64) -> Result<Vec<Commit>, Error> {
         paged(&self.mr(iid, "/commits"), 100)
+    }
+
+    // ponytail: the newest 20 pipelines only; page further if older ones are ever needed.
+    pub fn mr_pipelines(&self, iid: u64) -> Result<Vec<Pipeline>, Error> {
+        parse(rest("GET", &self.mr(iid, "/pipelines?per_page=20"), None)?)
+    }
+
+    pub fn pipeline_jobs(&self, pipeline_id: u64) -> Result<Vec<Job>, Error> {
+        paged(&self.path(&format!("/pipelines/{pipeline_id}/jobs")), 100)
+    }
+
+    pub fn retry_job(&self, job_id: u64) -> Result<(), Error> {
+        rest("POST", &self.path(&format!("/jobs/{job_id}/retry")), None).map(drop)
+    }
+
+    pub fn retry_pipeline(&self, id: u64) -> Result<(), Error> {
+        rest("POST", &self.path(&format!("/pipelines/{id}/retry")), None).map(drop)
+    }
+
+    pub fn cancel_pipeline(&self, id: u64) -> Result<(), Error> {
+        rest("POST", &self.path(&format!("/pipelines/{id}/cancel")), None).map(drop)
     }
 
     pub fn commit_diff(&self, sha: &str) -> Result<Vec<FileDiff>, Error> {

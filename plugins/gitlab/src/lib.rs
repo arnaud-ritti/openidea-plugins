@@ -16,7 +16,7 @@ mod safe;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use api::{Approvals, Commit, Discussion, DraftNote, FileDiff, MergeRequest, Note, ProjectInfo, TimelineEvent, User};
+use api::{Approvals, Commit, Discussion, DraftNote, FileDiff, Job, MergeRequest, Note, Pipeline, ProjectInfo, TimelineEvent, User};
 use branch::BranchReview;
 use openidea_plugin::host::{self, storage};
 use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
@@ -33,6 +33,7 @@ const NEW_MR: &str = "new-merge-request";
 const NEW_SNIPPET: &str = "new-snippet";
 const SHARE: &str = "share-project-form";
 const COMMITS: &str = "merge-request-commits";
+const PIPELINES: &str = "merge-request-pipeline";
 
 const FILTER_KEY: &str = "filter";
 const SELECTED_KEY: &str = "selected";
@@ -196,7 +197,7 @@ fn date(timestamp: &str) -> &str {
 }
 
 /// Buttons that run only on a second click, relabelled "Confirm …" in between.
-const CONFIRMED: [&str; 3] = ["merge", "close", "delete-note"];
+const CONFIRMED: [&str; 4] = ["merge", "close", "delete-note", "cancel"];
 
 const NOTE_ACTIONS: [&str; 3] = ["edit-note", "delete-note", "react"];
 
@@ -235,6 +236,60 @@ impl<'a> Key<'a> {
             _ => None,
         }
     }
+}
+
+/// A key in the pipeline tree: `p:<id>`, `s:<pipeline>:<stage>`, `j:<id>`; anything but a `u64` id is no key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PipelineKey {
+    Pipeline(u64),
+    Stage(u64),
+    Job(u64),
+}
+
+impl PipelineKey {
+    fn parse(key: &str) -> Option<Self> {
+        let (kind, rest) = key.split_once(':')?;
+
+        match kind {
+            "p" => Some(Self::Pipeline(rest.parse().ok()?)),
+            "s" => Some(Self::Stage(rest.split_once(':')?.0.parse().ok()?)),
+            "j" => Some(Self::Job(rest.parse().ok()?)),
+            _ => None,
+        }
+    }
+}
+
+/// Most urgent first: a stage shows the first of these that one of its jobs is in.
+const STAGE_ORDER: [&str; 12] =
+    ["failed", "running", "pending", "preparing", "waiting_for_resource", "created", "scheduled", "canceled", "manual", "warning", "success", "skipped"];
+const RETRYABLE_JOB: [&str; 3] = ["failed", "canceled", "success"];
+const RETRYABLE_PIPELINE: [&str; 2] = ["failed", "canceled"];
+const ACTIVE_PIPELINE: [&str; 6] = ["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled"];
+
+/// A job's status, with an allowed failure as `warning`.
+fn job_state(job: &Job) -> &str {
+    match job.allow_failure && job.status == "failed" {
+        true => "warning",
+        false => &job.status,
+    }
+}
+
+fn status_icon(state: &str) -> &'static str {
+    match state {
+        "success" => "success",
+        "failed" => "error",
+        "warning" => "warning",
+        "running" => "run",
+        "canceled" => "stop",
+        "manual" => "pause",
+        "skipped" => "minus",
+        "created" | "pending" | "preparing" | "waiting_for_resource" | "scheduled" => "clock",
+        _ => "info",
+    }
+}
+
+fn pipelines_enabled() -> bool {
+    host::setting_bool("pipelineView").unwrap_or(true)
 }
 
 struct Details {
@@ -283,6 +338,15 @@ pub struct GitLab {
     commit: Option<String>,
     commits: Option<(u64, Vec<Commit>)>,
     commit_diff: Option<(String, Vec<FileDiff>)>,
+    /// The selected merge request's pipelines, newest first, and the jobs of the expanded ones.
+    pipelines: Option<(u64, Vec<Pipeline>)>,
+    jobs: BTreeMap<u64, Vec<Job>>,
+    /// Pipeline tree nodes the user expanded or collapsed; by default the newest pipeline and every stage are open.
+    pipeline_open: BTreeMap<String, bool>,
+    pipeline_selection: Option<PipelineKey>,
+    /// The pipeline the first Cancel click was for; the second click cancels only that one, still selected.
+    pipeline_confirm: Option<u64>,
+    pipeline_status: Option<String>,
 }
 
 impl GitLab {
@@ -526,8 +590,13 @@ impl GitLab {
                     self.details = None;
                     self.anchor = None;
                     self.commit = None;
+                    self.pipeline_selection = None;
+                    self.pipeline_confirm = None;
+                    self.pipeline_status = None;
+                    self.pipeline_open.clear();
                     host::refresh_view(CHANGES);
                     host::refresh_view(COMMITS);
+                    host::refresh_view(PIPELINES);
                 }
 
                 match thread {
@@ -1402,6 +1471,221 @@ impl GitLab {
         Ok(())
     }
 
+    /// The selected merge request's listed pipelines; none while another one's are loaded.
+    fn listed_pipelines(&self) -> &[Pipeline] {
+        match &self.pipelines {
+            Some((iid, pipelines)) if Self::selected() == Some(*iid) => pipelines,
+            _ => &[],
+        }
+    }
+
+    /// The selected pipeline, or the selected job and its pipeline, while they are listed.
+    fn pipeline_target(&self) -> (Option<Pipeline>, Option<Job>) {
+        let listed = self.listed_pipelines();
+
+        match self.pipeline_selection {
+            Some(PipelineKey::Pipeline(id)) => (listed.iter().find(|p| p.id == id).cloned(), None),
+            Some(PipelineKey::Job(id)) => listed
+                .iter()
+                .find_map(|p| Some((p.clone(), self.jobs.get(&p.id)?.iter().find(|j| j.id == id)?.clone())))
+                .map_or((None, None), |(p, j)| (Some(p), Some(j))),
+            _ => (None, None),
+        }
+    }
+
+    fn render_pipelines(&mut self, ctx: &Invocation) -> Result<View, Error> {
+        if !pipelines_enabled() {
+            return Ok(View::message("The pipeline view is off. Turn it on under Settings › Plugins › GitLab."));
+        }
+
+        let Some(iid) = Self::selected() else {
+            return Ok(View::message("Select a merge request in the Merge Requests tool window."));
+        };
+
+        let repo = gitlab_project(ctx)?;
+        let api = api::Project(&repo.path);
+        if self.pipelines.as_ref().map(|(i, _)| *i) != Some(iid) {
+            let _task = host::begin_task("Loading pipelines", false);
+            self.jobs.clear();
+            self.pipelines = Some((iid, api.mr_pipelines(iid)?));
+        }
+
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let pipelines = self.listed_pipelines().to_vec();
+        if pipelines.is_empty() {
+            return Ok(View::message(&format!("!{iid} has no pipelines.")).button(refresh));
+        }
+
+        let mut items = Vec::new();
+        for (n, pipeline) in pipelines.iter().enumerate() {
+            let key = format!("p:{}", pipeline.id);
+            let open = self.pipeline_open.get(&key).copied().unwrap_or(n == 0);
+            let label = format!("#{}", pipeline.id);
+            items.push(TreeItem::new(&key, &label).icon(status_icon(&pipeline.status)).detail(&pipeline_label(&pipeline.status)).expandable(open));
+            if !open {
+                continue;
+            }
+
+            if !self.jobs.contains_key(&pipeline.id) {
+                let _task = host::begin_task("Loading jobs", false);
+                self.jobs.insert(pipeline.id, api.pipeline_jobs(pipeline.id)?);
+            }
+
+            items.extend(self.job_items(pipeline.id, &key));
+        }
+
+        let (pipeline, job) = self.pipeline_target();
+        let retry = match (&pipeline, &job) {
+            (_, Some(j)) => Button::new("retry", "Retry Job").enabled(RETRYABLE_JOB.contains(&j.status.as_str())),
+            (Some(p), None) => Button::new("retry", "Retry Pipeline").enabled(RETRYABLE_PIPELINE.contains(&p.status.as_str())),
+            _ => Button::new("retry", "Retry").enabled(false),
+        };
+        let cancel = match self.pipeline_confirm.filter(|id| pipeline.as_ref().map(|p| p.id) == Some(*id)) {
+            Some(id) => format!("Confirm Cancel Pipeline #{id}"),
+            None => "Cancel Pipeline".into(),
+        };
+        let cancellable = pipeline.as_ref().is_some_and(|p| ACTIVE_PIPELINE.contains(&p.status.as_str()));
+        let status = match &self.pipeline_status {
+            Some(status) => status.clone(),
+            None => format!("!{iid} · select a pipeline or job"),
+        };
+
+        Ok(View::new(Body::Tree(items))
+            .button(retry.icon("rerun"))
+            .button(Button::new("cancel", &cancel).icon("stop").enabled(cancellable))
+            .button(Button::new("browser", "Open on GitLab").icon("external-link").enabled(pipeline.is_some()))
+            .button(refresh)
+            .status(&status))
+    }
+
+    /// Stages in the order their first job was created, an `info` row when there are no jobs.
+    fn job_items(&self, pipeline: u64, parent: &str) -> Vec<TreeItem> {
+        let mut jobs: Vec<&Job> = self.jobs.get(&pipeline).into_iter().flatten().collect();
+        if jobs.is_empty() {
+            return vec![TreeItem::new(&format!("i:{pipeline}"), "No jobs").parent(parent).icon("info")];
+        }
+
+        jobs.sort_by_key(|j| j.id);
+        let mut stages: Vec<&str> = Vec::new();
+        for job in &jobs {
+            if !stages.contains(&job.stage.as_str()) {
+                stages.push(&job.stage);
+            }
+        }
+
+        let mut items = Vec::new();
+        for stage in stages {
+            let key = format!("s:{pipeline}:{stage}");
+            let in_stage: Vec<&Job> = jobs.iter().copied().filter(|j| j.stage == stage).collect();
+            let state = STAGE_ORDER.into_iter().find(|s| in_stage.iter().any(|j| job_state(j) == *s)).unwrap_or_else(|| job_state(in_stage[0]));
+            let open = self.pipeline_open.get(&key).copied().unwrap_or(true);
+            items.push(TreeItem::new(&key, stage).parent(parent).icon(status_icon(state)).expandable(open));
+            if !open {
+                continue;
+            }
+
+            for job in in_stage {
+                let detail = match job_state(job) {
+                    "warning" => "Failed (allowed to fail)".to_owned(),
+                    _ => sentence(&job.status),
+                };
+                items.push(TreeItem::new(&format!("j:{}", job.id), &job.name).parent(&key).icon(status_icon(job_state(job))).detail(&detail));
+            }
+        }
+
+        items
+    }
+
+    /// Acts only on a listed pipeline or job; a stale or unparsable selection sends nothing.
+    fn handle_pipelines(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if !pipelines_enabled() {
+            return Ok(());
+        }
+
+        let pending = self.pipeline_confirm.take();
+        match event {
+            ViewEvent::Select(key) => {
+                let selection = PipelineKey::parse(&key);
+                if selection == self.pipeline_selection {
+                    self.pipeline_confirm = pending;
+                    return Ok(());
+                }
+
+                self.pipeline_selection = selection;
+                self.pipeline_status = None;
+            }
+            ViewEvent::Expand(key) | ViewEvent::Collapse(key) if PipelineKey::parse(&key).is_none() => self.pipeline_confirm = pending,
+            ViewEvent::Expand(key) => {
+                self.pipeline_open.insert(key, true);
+                self.pipeline_confirm = pending;
+            }
+            ViewEvent::Collapse(key) => {
+                self.pipeline_open.insert(key, false);
+                self.pipeline_confirm = pending;
+            }
+            ViewEvent::Button(id) if id == "refresh" => {
+                self.pipelines = None;
+                self.pipeline_status = None;
+            }
+            ViewEvent::Button(id) if id == "browser" => {
+                let (pipeline, job) = self.pipeline_target();
+                let url = job.map(|j| j.web_url).or(pipeline.map(|p| p.web_url));
+                let opened = match &url {
+                    Some(url) => safe::gitlab_url(url).and_then(host::open_url),
+                    None => Err("Select a pipeline or job first.".into()),
+                };
+                self.pipeline_status = opened.err().map(|e| e.to_string());
+            }
+            ViewEvent::Button(id) if id == "retry" || id == "cancel" => {
+                let (pipeline, job) = self.pipeline_target();
+                let cancellable = pipeline.as_ref().filter(|p| ACTIVE_PIPELINE.contains(&p.status.as_str())).map(|p| p.id);
+                if CONFIRMED.contains(&id.as_str()) && cancellable.is_some() && pending != cancellable {
+                    self.pipeline_confirm = cancellable;
+                    host::refresh_view(PIPELINES);
+                    return Ok(());
+                }
+
+                match Self::pipeline_action(&id, pipeline, job, ctx) {
+                    Ok(done) => {
+                        self.pipeline_status = Some(done);
+                        self.pipelines = None;
+                        if let Some(iid) = Self::selected() {
+                            self.loaded = None;
+                            self.reload_merge_request(iid);
+                        }
+                    }
+                    Err(e) => self.pipeline_status = Some(e.to_string()),
+                }
+            }
+            _ => {}
+        }
+
+        host::refresh_view(PIPELINES);
+
+        Ok(())
+    }
+
+    /// A selected job is retried itself, never its pipeline.
+    fn pipeline_action(button: &str, pipeline: Option<Pipeline>, job: Option<Job>, ctx: &Invocation) -> Result<String, Error> {
+        let selected_job = job.is_some();
+        let retryable_job = job.filter(|j| RETRYABLE_JOB.contains(&j.status.as_str()));
+        let pipeline = pipeline.filter(|p| match button {
+            "retry" => !selected_job && RETRYABLE_PIPELINE.contains(&p.status.as_str()),
+            _ => ACTIVE_PIPELINE.contains(&p.status.as_str()),
+        });
+        let repo = gitlab_project(ctx)?;
+        let api = api::Project(&repo.path);
+        let _task = host::begin_task("Updating pipeline", false);
+
+        match (button, retryable_job, pipeline) {
+            ("retry", Some(job), _) => api.retry_job(job.id).map(|_| "Job retried.".into()),
+            ("retry", None, Some(p)) => api.retry_pipeline(p.id).map(|_| "Pipeline retried.".into()),
+            ("retry", ..) => Err("Select a finished job or a failed pipeline first.".into()),
+            ("cancel", _, Some(p)) => api.cancel_pipeline(p.id).map(|_| "Pipeline canceled.".into()),
+            _ => Err("Select a running pipeline first.".into()),
+        }
+    }
+
     fn check_ci_files(&mut self, events: &[Event], ctx: &Invocation) {
         let Some(project) = ctx.project() else { return };
 
@@ -1487,6 +1771,7 @@ impl Views for GitLab {
             SHARE if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
             SHARE => self.render_share(),
             COMMITS => self.render_commits(ctx),
+            PIPELINES => self.render_pipelines(ctx),
             _ => return Err(Error::NotFound(format!("view {view}"))),
         };
 
@@ -1510,6 +1795,7 @@ impl Views for GitLab {
             NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
             SHARE if forms_enabled() => self.handle_share(event, ctx),
             COMMITS => self.handle_commits(event),
+            PIPELINES => self.handle_pipelines(event, ctx),
             _ => Ok(()),
         }
     }

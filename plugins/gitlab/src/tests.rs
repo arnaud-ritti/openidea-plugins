@@ -2687,3 +2687,253 @@ mod commit_tests {
         assert!(!html.contains('\r'));
     }
 }
+
+mod pipeline_tests {
+    use super::*;
+
+    const API: &str = "https://gitlab.com/api/v4/projects/g%2Fp";
+
+    const JOBS_41: &str = r#"[
+        {"id": 303, "name": "lint", "stage": "test", "status": "failed", "allow_failure": true, "web_url": "https://gitlab.com/g/p/-/jobs/303"},
+        {"id": 302, "name": "unit", "stage": "test", "status": "running", "web_url": "https://gitlab.com/g/p/-/jobs/302"},
+        {"id": 301, "name": "compile", "stage": "build", "status": "success", "web_url": "https://gitlab.com/g/p/-/jobs/301"}
+    ]"#;
+
+    fn pipelines(req: &HttpRequest) -> Result<HttpResponse, Error> {
+        let url = req.url.split('?').next().unwrap_or("");
+
+        match (req.method.as_str(), url.strip_prefix(API).unwrap_or("")) {
+            ("GET", "/merge_requests/7/pipelines") => ok(
+                r#"[{"id": 41, "status": "running", "web_url": "https://gitlab.com/g/p/-/pipelines/41"},
+                    {"id": 40, "status": "failed", "web_url": "https://gitlab.com/g/p/-/pipelines/40"}]"#,
+            ),
+            ("GET", "/pipelines/41/jobs") => ok(JOBS_41),
+            ("GET", "/pipelines/40/jobs") => ok(r#"[{"id": 300, "name": "unit", "stage": "test", "status": "failed", "web_url": "https://gitlab.com/g/p/-/jobs/300"}]"#),
+            _ => gitlab(req),
+        }
+    }
+
+    fn host() -> MockHost {
+        let host = setup();
+        host.on_fetch(pipelines);
+        host
+    }
+
+    fn on_mr(host: &MockHost) -> GitLab {
+        let mut plugin = selected(host);
+        plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        plugin
+    }
+
+    fn pick(plugin: &mut GitLab, host: &MockHost, key: &str) {
+        plugin.handle(PIPELINES, ViewEvent::Select(key.into()), &host.invocation()).unwrap();
+    }
+
+    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
+        plugin.handle(PIPELINES, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
+        plugin.render(PIPELINES, None, &host.invocation()).unwrap()
+    }
+
+    fn rows(view: &View) -> Vec<(&str, Option<&str>, &str, Option<&str>)> {
+        let Body::Tree(items) = &view.body else { panic!("{view:?}") };
+
+        items.iter().map(|i| (i.key.as_str(), i.parent.as_deref(), i.label.as_str(), i.icon.as_deref())).collect()
+    }
+
+    #[test]
+    fn shows_pipelines_with_jobs_grouped_by_stage_and_status_icons() {
+        let host = host();
+        let mut plugin = selected(&host);
+
+        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+
+        assert_eq!(
+            rows(&view),
+            [
+                ("p:41", None, "#41", Some("run")),
+                ("s:41:build", Some("p:41"), "build", Some("success")),
+                ("j:301", Some("s:41:build"), "compile", Some("success")),
+                ("s:41:test", Some("p:41"), "test", Some("run")),
+                ("j:302", Some("s:41:test"), "unit", Some("run")),
+                ("j:303", Some("s:41:test"), "lint", Some("warning")),
+                ("p:40", None, "#40", Some("error")),
+            ]
+        );
+        let Body::Tree(items) = &view.body else { unreachable!() };
+        assert!(items[0].expanded && items[6].expandable && !items[6].expanded);
+        assert_eq!(items[0].detail.as_deref(), Some("Pipeline running"));
+        assert_eq!(items[5].detail.as_deref(), Some("Failed (allowed to fail)"));
+        assert!(!host.requests().iter().any(|r| r.url.contains("/pipelines/40/jobs")), "a collapsed pipeline loads no jobs");
+
+        plugin.handle(PIPELINES, ViewEvent::Expand("p:40".into()), &host.invocation()).unwrap();
+        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+
+        assert!(rows(&view).contains(&("j:300", Some("s:40:test"), "unit", Some("error"))), "{view:?}");
+        assert!(host.refreshed_views().contains(&PIPELINES.to_owned()));
+    }
+
+    #[test]
+    fn retry_posts_to_the_selected_job() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "j:301");
+
+        let view = click(&mut plugin, &host, "retry");
+
+        assert_eq!(writes(&host), [("POST".to_owned(), format!("{API}/jobs/301/retry"), String::new())]);
+        assert_eq!(view.status.as_deref(), Some("Job retried."));
+        let reloads = host.requests().iter().filter(|r| r.url.contains("/merge_requests/7/pipelines")).count();
+        assert_eq!(reloads, 2, "the tree reloads after the action");
+    }
+
+    #[test]
+    fn retry_on_a_pipeline_posts_to_pipeline_retry() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "p:40");
+
+        let view = click(&mut plugin, &host, "retry");
+
+        assert_eq!(writes(&host), [("POST".to_owned(), format!("{API}/pipelines/40/retry"), String::new())]);
+        assert_eq!(view.status.as_deref(), Some("Pipeline retried."));
+    }
+
+    #[test]
+    fn cancel_needs_a_second_click() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "p:41");
+
+        let view = click(&mut plugin, &host, "cancel");
+        assert!(writes(&host).is_empty());
+        assert_eq!(label(&view, "cancel"), "Confirm Cancel Pipeline #41");
+
+        pick(&mut plugin, &host, "j:302");
+        pick(&mut plugin, &host, "p:41");
+        let view = click(&mut plugin, &host, "cancel");
+        assert!(writes(&host).is_empty(), "a selection change cancels the confirm");
+
+        click(&mut plugin, &host, "refresh");
+        pick(&mut plugin, &host, "p:41");
+        let view_after_other = click(&mut plugin, &host, "cancel");
+        assert!(writes(&host).is_empty(), "another action cancels the confirm");
+        assert_eq!(label(&view_after_other, "cancel"), "Confirm Cancel Pipeline #41");
+        assert_eq!(label(&view, "cancel"), "Confirm Cancel Pipeline #41");
+
+        let view = click(&mut plugin, &host, "cancel");
+
+        assert_eq!(writes(&host), [("POST".to_owned(), format!("{API}/pipelines/41/cancel"), String::new())]);
+        assert_eq!(view.status.as_deref(), Some("Pipeline canceled."));
+        assert_eq!(label(&view, "cancel"), "Cancel Pipeline");
+    }
+
+    #[test]
+    fn tree_keys_with_non_numeric_ids_send_no_request() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        let before = host.requests().len();
+
+        for key in ["j:1/../2", "p:1?x", "j:-1", "s:1/../2:test"] {
+            pick(&mut plugin, &host, key);
+            plugin.handle(PIPELINES, ViewEvent::Expand(key.into()), &host.invocation()).unwrap();
+            for button in ["retry", "cancel", "cancel", "browser"] {
+                plugin.handle(PIPELINES, ViewEvent::Button(button.into()), &host.invocation()).unwrap();
+            }
+        }
+
+        assert_eq!(host.requests().len(), before);
+        assert!(host.opened_urls().is_empty());
+        plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        assert!(host.requests()[before..].iter().all(|r| !r.url.contains("..") && !r.url.contains("?x") && !r.url.contains("/-1")));
+    }
+
+    #[test]
+    fn open_in_browser_refuses_a_job_url_on_another_host() {
+        let host = setup();
+        host.on_fetch(|req| match req.url.contains("/pipelines/41/jobs") {
+            true => ok(
+                r#"[{"id": 1, "name": "evil", "stage": "test", "status": "failed", "web_url": "https://evil.test/j/1"},
+                    {"id": 2, "name": "script", "stage": "test", "status": "failed", "web_url": "javascript:alert(1)"}]"#,
+            ),
+            false => pipelines(req),
+        });
+        let mut plugin = on_mr(&host);
+
+        for key in ["j:1", "j:2"] {
+            pick(&mut plugin, &host, key);
+            let view = click(&mut plugin, &host, "browser");
+            assert!(view.status.as_deref().unwrap_or("").contains("refusing the URL"), "{view:?}");
+        }
+        assert!(host.opened_urls().is_empty());
+
+        pick(&mut plugin, &host, "p:41");
+        click(&mut plugin, &host, "browser");
+
+        assert_eq!(host.opened_urls(), ["https://gitlab.com/g/p/-/pipelines/41"]);
+    }
+
+    #[test]
+    fn retry_is_disabled_for_a_running_job() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "j:302");
+
+        let view = click(&mut plugin, &host, "retry");
+
+        let retry = view.toolbar.iter().find(|b| b.id == "retry").unwrap();
+        assert_eq!(retry, &Button::new("retry", "Retry Job").icon("rerun").enabled(false));
+        assert!(writes(&host).is_empty());
+    }
+
+    #[test]
+    fn a_merge_request_without_pipelines_shows_a_message() {
+        let host = setup();
+        host.on_fetch(|req| match req.url.contains("/merge_requests/7/pipelines") {
+            true => ok("[]"),
+            false => gitlab(req),
+        });
+        let mut plugin = selected(&host);
+
+        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+
+        assert_eq!(view.body, Body::Message("!7 has no pipelines.".into()));
+    }
+
+    #[test]
+    fn a_failed_retry_reports_the_gitlab_error_without_the_token() {
+        let host = setup();
+        host.on_fetch(|req| match req.method == "POST" {
+            true => Ok(HttpResponse { status: 403, headers: vec![], body: br#"{"message":"403 Forbidden"}"#.to_vec() }),
+            false => pipelines(req),
+        });
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "j:301");
+
+        let view = click(&mut plugin, &host, "retry");
+
+        assert_eq!(view.status.as_deref(), Some("GitLab returned 403: 403 Forbidden"));
+        assert!(!format!("{view:?}").contains("glpat-x"));
+        assert!(host.notifications().iter().all(|n| !format!("{n:?}").contains("glpat-x")));
+        assert!(host.logs().iter().all(|(_, line)| !line.contains("glpat-x")));
+        assert!(host.requests().iter().all(|r| !r.url.contains("glpat-x")));
+    }
+
+    #[test]
+    fn the_view_is_quiet_when_the_setting_is_off() {
+        let host = host();
+        let mut plugin = selected(&host);
+        host.set_setting("pipelineView", "false");
+        let before = host.requests().len();
+
+        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        pick(&mut plugin, &host, "j:301");
+        plugin.handle(PIPELINES, ViewEvent::Expand("p:40".into()), &host.invocation()).unwrap();
+        for button in ["retry", "cancel", "cancel", "browser"] {
+            plugin.handle(PIPELINES, ViewEvent::Button(button.into()), &host.invocation()).unwrap();
+        }
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert_eq!(host.requests().len(), before);
+        assert!(host.opened_urls().is_empty());
+    }
+}

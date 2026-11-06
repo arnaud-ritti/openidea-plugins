@@ -40,6 +40,11 @@
       "title": "Show the commits of the selected merge request and each commit's changes",
       "default": true
     },
+    "pipelineView": {
+      "type": "boolean",
+      "title": "Show the pipelines and jobs of the selected merge request, with retry and cancel",
+      "default": true
+    },
     "cloneUsingSsh": {
       "type": "boolean",
       "title": "Clone and share using SSH",
