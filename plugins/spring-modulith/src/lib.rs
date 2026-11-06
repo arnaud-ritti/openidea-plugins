@@ -8,7 +8,7 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range, Severity, TextEdit, host,
 };
 use spring_text::diagram::{self, Edge, Node};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 const DIAGRAM_VIEW: &str = "diagram";
+const COPY_DOCS: &str = "copy-docs";
 const TITLE: &str = "Spring Modulith";
 const OPEN: &str = "type = ApplicationModule.Type.OPEN";
 
@@ -426,7 +427,7 @@ impl Views for ModulithTools {
         let index = self.indexes.get(&project, COMMAND_BUDGET);
         let complete = index.complete();
         if !complete {
-            host::refresh_view(view);
+            refresh(view);
         }
         let model = Model::build(index);
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
@@ -440,7 +441,7 @@ impl Views for ModulithTools {
             };
             return Ok(View::message(text).button(refresh));
         }
-        if view == DIAGRAM_VIEW {
+        if view == id(DIAGRAM_VIEW) {
             let (nodes, edges) = diagram_of(&model, index);
             let status = format!("{} modules · {} dependencies", nodes.len(), edges.len());
             return Ok(View::new(Body::Html(diagram::html(&nodes, &edges, "No application modules."))).button(refresh).status(&status));
@@ -480,7 +481,7 @@ impl Views for ModulithTools {
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         if self.expansion.handle(&event) {
-            host::refresh_view(view);
+            refresh(view);
             return Ok(());
         }
 
@@ -492,7 +493,7 @@ impl Views for ModulithTools {
                 {
                     self.indexes.reset();
                 }
-                host::refresh_view(view);
+                refresh(view);
             }
             ViewEvent::Activate(key) | ViewEvent::Message(key) => {
                 let Some(name) = key.strip_prefix("open:").and_then(|k| k.split('#').next()) else { return Ok(()) };
@@ -510,7 +511,7 @@ impl Views for ModulithTools {
 
 impl Plugin for ModulithTools {
     fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        if id != "copy-docs" {
+        if id != self::id(COPY_DOCS) {
             return Err(Error::NotFound(format!("command {id}")));
         }
         let project = ctx.project().ok_or_else(|| Error::Invalid("Open a project first.".into()))?;
@@ -533,7 +534,36 @@ impl Plugin for ModulithTools {
     }
 }
 
-register_plugin!(ModulithTools, providers, views);
+pub const WINDOW_SECTION: &str = "modulith";
+
+const OWNER_WINDOW: &str = "structure";
+
+fn window(view: &str) -> &str {
+    if cfg!(feature = "embedded") { OWNER_WINDOW } else { view }
+}
+
+fn id(name: &str) -> String {
+    if cfg!(feature = "embedded") { format!("{WINDOW_SECTION}.{name}") } else { name.to_owned() }
+}
+
+pub(crate) fn refresh(view: &str) {
+    host::refresh_view(window(view));
+}
+
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const DEPENDENCY_MARKERS: [&str; 4] = ["spring-modulith", "<module>", "include", "libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+#[cfg(not(feature = "embedded"))]
+openidea_plugin::register_plugin!(ModulithTools, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -713,7 +743,7 @@ class Shipper {}
         assert!(inventory.expandable && !inventory.expanded);
 
         tools.handle(VIEW, ViewEvent::Expand(inventory.key.clone()), &host.invocation()).unwrap();
-        assert_eq!(host.refreshed_views(), [VIEW]);
+        assert_eq!(host.refreshed_views(), [window(VIEW)]);
         assert!(module(&mut tools).expanded);
 
         tools.handle(VIEW, ViewEvent::Collapse(inventory.key), &host.invocation()).unwrap();
@@ -728,7 +758,7 @@ class Shipper {}
         tools.indexes.get(&project, Duration::ZERO).update(&format!("{SRC}shipping/Shipper.java"), SHIPPER);
         tools.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
         assert_eq!(tools.indexes.get(&project, Duration::ZERO).files().len(), 1, "not reset");
-        assert_eq!(host.refreshed_views(), [VIEW]);
+        assert_eq!(host.refreshed_views(), [window(VIEW)]);
 
         tools.indexes.get(&project, COMMAND_BUDGET);
         tools.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
@@ -754,7 +784,7 @@ class Shipper {}
             ("open:shipping#", "open:order#", Some("internal types"), true),
         ]);
 
-        let view = tools.render(DIAGRAM_VIEW, None, &host.invocation()).unwrap();
+        let view = tools.render(&id(DIAGRAM_VIEW), None, &host.invocation()).unwrap();
         let Body::Html(page) = view.body else { panic!("html expected") };
         assert!(page.contains("data-id=\"open:order#\""));
         assert_eq!(view.status.as_deref(), Some("3 modules · 2 dependencies"));
@@ -762,7 +792,7 @@ class Shipper {}
         assert_eq!(host.opened_locations(), [(format!("{SRC}order/package-info.java"), 0, 0)]);
 
         let empty = MockHost::install();
-        let view = ModulithTools::default().render(DIAGRAM_VIEW, None, &empty.invocation()).unwrap();
+        let view = ModulithTools::default().render(&id(DIAGRAM_VIEW), None, &empty.invocation()).unwrap();
         assert_eq!(view.body, Body::Message("No @SpringBootApplication or @Modulithic class found.".into()));
     }
 
@@ -770,13 +800,13 @@ class Shipper {}
     fn modulith_plantuml_text_lists_modules_and_dependencies() {
         let host = setup();
         let mut tools = ModulithTools::default();
-        tools.run_command("copy-docs", &host.invocation(), None).unwrap();
+        tools.run_command(&id(COPY_DOCS), &host.invocation(), None).unwrap();
         assert_eq!(host.clipboard().as_deref(), Some(PLANTUML));
 
         let denied = MockHost::install().with_capabilities(&["project.read"]);
         denied.add_file("src/main/java/com/acme/Application.java", "package com.acme;\n@SpringBootApplication\nclass Application {}\n");
         denied.add_file("src/main/java/com/acme/order/Order.java", "package com.acme.order;\nclass Order {}\n");
-        ModulithTools::default().run_command("copy-docs", &denied.invocation(), None).unwrap();
+        ModulithTools::default().run_command(&id(COPY_DOCS), &denied.invocation(), None).unwrap();
         assert_eq!(denied.clipboard(), None);
         assert!(denied.notifications().iter().any(|n| n.body.contains("Allow the clipboard")));
     }
@@ -789,4 +819,25 @@ component [shipping]
 [shipping] -[#red]-> [order] : internal types
 @enduml
 ";
+    #[test]
+    fn applies_follows_the_root_build_file() {
+        let host = MockHost::install();
+        let project = &host::projects().unwrap()[0];
+        assert!(!applies(project), "no build file");
+        host.add_file("pom.xml", "<project><artifactId>spring-boot-starter-web</artifactId></project>");
+        assert!(!applies(project));
+        host.add_file("pom.xml", "<project><artifactId>spring-modulith-core</artifactId></project>");
+        assert!(applies(project));
+        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        assert!(applies(project), "multi-module is unsure");
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn refresh_goes_to_the_owner_window_when_embedded() {
+        let host = MockHost::install();
+        refresh("diagram");
+        assert_eq!(host.refreshed_views(), ["structure"]);
+    }
+
 }

@@ -5,7 +5,7 @@
 
 use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
-use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
+use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host};
 use spring_text::diagram::{self, Edge, Node};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::java::{Annotation, Str};
@@ -372,7 +372,7 @@ impl Views for Integration {
         let index = self.indexes.get(&project, COMMAND_BUDGET);
         let complete = index.complete();
         if !complete {
-            host::refresh_view(VIEW);
+            self::refresh(VIEW);
         }
         let (nodes, edges) = diagram_of(index);
         let status = format!("{} nodes · {} links{}", nodes.len(), edges.len(), if complete { "" } else { " · scanning…" });
@@ -388,7 +388,7 @@ impl Views for Integration {
                 {
                     self.indexes.reset();
                 }
-                host::refresh_view(view);
+                refresh(view);
                 return Ok(());
             }
             ViewEvent::Activate(key) | ViewEvent::Message(key) => key,
@@ -408,7 +408,32 @@ impl Plugin for Integration {
     }
 }
 
-register_plugin!(Integration, providers, views);
+pub const WINDOW_SECTION: &str = "integration";
+
+const OWNER_WINDOW: &str = "structure";
+
+fn window(view: &str) -> &str {
+    if cfg!(feature = "embedded") { OWNER_WINDOW } else { view }
+}
+
+pub(crate) fn refresh(view: &str) {
+    host::refresh_view(window(view));
+}
+
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const DEPENDENCY_MARKERS: [&str; 5] = ["spring-integration", "starter-integration", "<module>", "include", "libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+#[cfg(not(feature = "embedded"))]
+openidea_plugin::register_plugin!(Integration, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -673,4 +698,25 @@ interface OrderGateway {
         assert!(p.line_markers(&doc("/project/src/main/resources/plain.xml", plain)).is_empty());
         assert!(p.completion(&doc("/project/src/main/resources/plain.xml", plain), Position::new(0, 70), None).is_empty());
     }
+    #[test]
+    fn applies_follows_the_root_build_file() {
+        let host = MockHost::install();
+        let project = &host::projects().unwrap()[0];
+        assert!(!applies(project), "no build file");
+        host.add_file("pom.xml", "<project><artifactId>spring-boot-starter-web</artifactId></project>");
+        assert!(!applies(project));
+        host.add_file("pom.xml", "<project><artifactId>spring-boot-starter-integration</artifactId></project>");
+        assert!(applies(project));
+        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        assert!(applies(project), "multi-module is unsure");
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn refresh_goes_to_the_owner_window_when_embedded() {
+        let host = MockHost::install();
+        refresh("diagram");
+        assert_eq!(host.refreshed_views(), ["structure"]);
+    }
+
 }
