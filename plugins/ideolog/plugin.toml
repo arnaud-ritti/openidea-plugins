@@ -1,6 +1,6 @@
 id = "aritti.ideolog"
 name = "Ideolog"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Log file viewer. Detects the log format (IntelliJ IDEA, TeamCity build log, Logcat, Loguru, pipe-separated, or your own Ideolog patterns), colours each event by level including its stack trace, folds multi-line events and lists errors and warnings in the structure view. Stack frames link to their source; F7 jumps to the source of an event and Shift+F7 to the next error. Port of JetBrains' Ideolog plugin (MIT, © 2017 JetBrains)."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "JetBrains (original Ideolog plugin)"]
 homepage = "https://github.com/JetBrains/ideolog"

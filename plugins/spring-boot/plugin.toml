@@ -1,6 +1,6 @@
 id = "aritti.spring-boot"
 name = "Spring Boot Tools"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Completion and checks for Spring Boot configuration files. Completes keys and values in application*.properties and application*.yml from the Spring Boot 3.5 metadata, the project's configuration metadata files and its @ConfigurationProperties classes. Warns about deprecated keys (with a quick fix) and unknown keys in known groups, and checks cron expressions in @Scheduled(cron) and *.cron keys. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

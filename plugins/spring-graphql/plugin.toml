@@ -1,6 +1,6 @@
 id = "aritti.spring-graphql"
 name = "Spring for GraphQL Tools"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Spring for GraphQL in Java and Kotlin projects: links @QueryMapping, @MutationMapping, @SubscriptionMapping, @SchemaMapping and @BatchMapping controller methods to their schema fields (.graphqls) both ways with gutter arrows and Go to Definition, completes type and field names in the annotations, flags handlers or @Argument names the schema doesn't declare, and follows the fields of client documents (graphql-documents/*.graphql, inline .document(...)) to the schema. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

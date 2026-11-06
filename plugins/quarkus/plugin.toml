@@ -1,6 +1,6 @@
 id = "aritti.quarkus"
 name = "Quarkus Tools"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Quarkus support for application.properties, application.yaml and microprofile-config.properties: completion of keys and values from the Quarkus 3.40 configuration metadata, MicroProfile Config and the project's @ConfigProperty and @ConfigMapping declarations, %dev/%test/%prod profiles, warnings for deprecated and unknown keys, Quarkus Dev Mode run configurations (mvn, gradle, quarkus CLI) and a shortcut to code.quarkus.io. Ported from Red Hat's Quarkus Tools for IntelliJ (com.redhat.devtools.intellij.quarkus), EPL-2.0."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "Red Hat, Inc. (original Quarkus Tools for IntelliJ)"]
 license = "EPL-2.0"

@@ -1,6 +1,6 @@
 id = "aritti.spring-ws"
 name = "Spring Web Services Tools"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Spring Web Services endpoints in Java and Kotlin projects. Links @PayloadRoot methods of @Endpoint classes to the top-level elements of the project's XML schemas (.xsd files and schemas inside .wsdl files) and back, completes element names in localPart, warns about elements missing from a schema and about ClassPathResource schema files missing from the resources, and shows where a DefaultWsdl11Definition bean is published. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

@@ -1,6 +1,6 @@
 id = "aritti.spring-runtime"
 name = "Spring Runtime Insight"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Reads the Actuator endpoints (beans, environment, conditions, health, mappings, configuration properties, scheduled tasks, loggers, caches) of a Spring Boot application running on localhost and shows them in a Spring Runtime tool window. Editor markers show which beans are loaded, and the runtime value and property source of @Value and configuration keys. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

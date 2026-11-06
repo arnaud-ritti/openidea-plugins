@@ -1,6 +1,6 @@
 id = "aritti.openapi"
 name = "OpenAPI"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Editing support for OpenAPI 3 and Swagger 2 files in YAML and JSON: $ref completion and navigation, problems for unresolved references, duplicate operationIds and path parameters, the official schema for validation, an endpoints tool window, a Swagger UI preview beside the text, and requests for the HTTP client. Independent implementation, not affiliated with JetBrains or SmartBear."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT AND Apache-2.0"

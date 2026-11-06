@@ -1,6 +1,6 @@
 id = "aritti.jpa-assist"
 name = "JPA Assist"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "JPA and Spring Data support for Java and Kotlin. Checks entities and repositories and offers quick fixes, completes derived query methods, generates equals/hashCode and toString, copies an entity's DDL (PostgreSQL or MySQL) or DTO, copies an entity from a CREATE TABLE statement, lists entities in a JPA Structure tool window and adds New › JPA Entity and Spring Data Repository templates."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

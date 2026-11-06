@@ -1,6 +1,6 @@
 id = "aritti.spring-messaging"
 name = "Spring Messaging Tools"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Kafka, RabbitMQ and JMS (ActiveMQ/Artemis) destinations in Spring Java and Kotlin projects: links @KafkaListener, @RabbitListener and @JmsListener consumers to the template sends, @SendTo replies and topic/queue/exchange declarations of the same destination with gutter arrows and Go to Definition, completes known destination names, and lists them all in a Messaging tool window. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

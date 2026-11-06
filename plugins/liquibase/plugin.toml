@@ -1,6 +1,6 @@
 id = "aritti.liquibase"
 name = "Liquibase Changelogs"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Liquibase changelog support for XML, YAML and formatted SQL. Flags duplicate and incomplete changesets, unknown change types, missing includes and missing formatted SQL headers while you type; completes change types and their attributes in YAML and changeset comments in SQL; Go to Definition on include; New › Liquibase Changelog templates; status, validate, update-sql and update run configurations for projects with a liquibase.properties. Independent implementation, not affiliated with Liquibase Inc. or JetBrains."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

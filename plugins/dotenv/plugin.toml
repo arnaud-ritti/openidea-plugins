@@ -1,6 +1,6 @@
 id = "aritti.dotenv"
 name = ".env files"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = ".env file support: highlighting, inspections with quick fixes and ${VARIABLE} completion. Environment variables in code (getenv, os.environ, process.env, ENV[…], env::var, PHPUnit <env>, …) get completion and go to declaration in .env files, Dockerfiles and docker-compose files. Go to declaration on a key in a .env file lists its usages, and after you rename a key a quick fix updates them. Port of the \".env files\" plugin by Adel Fayzrakhmanov and JetBrains."
 authors = ["Arnaud RITTI", "Adel Fayzrakhmanov (original plugin)", "JetBrains s.r.o. (original plugin)"]
 license = "MIT"
