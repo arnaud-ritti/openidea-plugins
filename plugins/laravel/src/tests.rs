@@ -1345,6 +1345,17 @@ fn env_with_a_leading_backslash_is_a_real_call() {
 }
 
 #[test]
+fn namespaced_env_functions_are_quiet() {
+    assert!(env_snippets("/project/app/A.php", "php", "<?php\n$a = Ns\\env('X');\n$b = \\Ns\\env('X');\n").is_empty());
+}
+
+#[test]
+fn heredoc_does_not_end_at_a_longer_identifier() {
+    let text = "<?php\n$h = <<<TXT\nTXTX env('A')\nTXT;\n$r = env('REAL');\n";
+    assert_eq!(env_snippets("/project/app/A.php", "php", text), [("env-outside-config", "env('REAL')".into())]);
+}
+
+#[test]
 fn nested_env_calls_report_only_the_outer_call() {
     let found = env_snippets("/project/app/A.php", "php", "<?php\n$a = env('A', env('B'));\n");
     assert_eq!(found, [("env-outside-config", "env('A', env('B'))".into())]);

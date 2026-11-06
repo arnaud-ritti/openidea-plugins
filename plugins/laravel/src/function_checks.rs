@@ -35,7 +35,11 @@ pub fn env_outside_config(path: &str, language: &str, text: &str) -> Vec<Finding
         }
 
         let before = &masked[..at];
-        let call_before = before.chars().next_back().is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '>' | ':'));
+        let is_identifier = |c: char| c.is_alphanumeric() || c == '_';
+        let call_before = match before.strip_suffix('\\') {
+            Some(namespace) => namespace.chars().next_back().is_some_and(is_identifier),
+            None => before.chars().next_back().is_some_and(|c| is_identifier(c) || matches!(c, '$' | '>' | ':')),
+        };
         let is_definition = before.trim_end().ends_with("function") && before.trim_end().len() < before.len();
         let rest = &masked[at + 3..];
         let open = at + 3 + (rest.len() - rest.trim_start().len());
@@ -64,13 +68,20 @@ fn heredoc_end(masked: &str, start: usize) -> usize {
     let after = &masked[start + 3..];
     let header_end = after.find('\n').unwrap_or(after.len());
     let label = after[..header_end].trim().trim_matches(|c| c == '\'' || c == '"');
-    let body_start = start + 3 + header_end;
     if label.is_empty() {
         return start + 3;
     }
 
-    masked[body_start..]
-        .match_indices('\n')
-        .find(|(at, _)| masked[body_start + at + 1..].trim_start().starts_with(label))
-        .map_or(masked.len(), |(at, _)| body_start + at + 1 + masked[body_start + at + 1..].find(label).unwrap_or(0) + label.len())
+    let mut line_start = start + 3 + header_end;
+    for line in masked[line_start..].split_inclusive('\n').skip(1) {
+        line_start += masked[line_start..].find('\n').map_or(0, |i| i + 1);
+        let indent = line.len() - line.trim_start().len();
+        let tail = &line[indent..];
+        let closes = tail.strip_prefix(label).is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'));
+        if closes {
+            return line_start + indent + label.len();
+        }
+    }
+
+    masked.len()
 }
