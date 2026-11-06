@@ -1,6 +1,7 @@
 //! `persistence.xml` and JPA mapping files (`orm.xml`): values the schema rules out, and classes that are not in the project.
 
 use openidea_plugin::Severity;
+use openidea_plugin::providers::{CompletionItem, CompletionKind};
 
 use crate::checks::Finding;
 
@@ -267,6 +268,77 @@ pub fn inspect(text: &str, orm_present: bool, lookup: &dyn Fn(&str) -> Lookup) -
     }
 
     findings
+}
+
+const PROPERTIES: &[(&str, &str)] = &[
+    ("schema-generation.database.action", "none, create, drop-and-create, drop"),
+    ("jdbc.driver", "JDBC driver class"),
+    ("jdbc.url", "JDBC URL"),
+    ("jdbc.user", "database user"),
+    ("jdbc.password", "database password"),
+    ("lock.timeout", "milliseconds"),
+    ("query.timeout", "milliseconds"),
+    ("sharedCache.mode", "ALL, NONE, ENABLE_SELECTIVE, DISABLE_SELECTIVE"),
+    ("validation.mode", "AUTO, CALLBACK, NONE"),
+];
+
+const HIBERNATE_PROPERTIES: &[(&str, &str)] = &[
+    ("hibernate.dialect", "SQL dialect class"),
+    ("hibernate.hbm2ddl.auto", "none, validate, update, create, create-drop"),
+    ("hibernate.show_sql", "true or false"),
+    ("hibernate.format_sql", "true or false"),
+    ("hibernate.default_schema", "schema name"),
+    ("hibernate.default_catalog", "catalog name"),
+    ("hibernate.jdbc.batch_size", "statements per batch"),
+    ("hibernate.order_inserts", "true or false"),
+    ("hibernate.order_updates", "true or false"),
+    ("hibernate.generate_statistics", "true or false"),
+    ("hibernate.use_sql_comments", "true or false"),
+    ("hibernate.cache.use_second_level_cache", "true or false"),
+    ("hibernate.cache.use_query_cache", "true or false"),
+    ("hibernate.connection.provider_class", "connection provider class"),
+];
+
+const PROPERTY_VALUES: &[(&str, &[&str])] = &[
+    ("hbm2ddl.auto", &["none", "validate", "update", "create", "create-drop"]),
+    ("schema-generation.database.action", &["none", "create", "drop-and-create", "drop"]),
+    ("sharedCache.mode", &["ALL", "NONE", "ENABLE_SELECTIVE", "DISABLE_SELECTIVE", "UNSPECIFIED"]),
+    ("validation.mode", &["AUTO", "CALLBACK", "NONE"]),
+];
+
+/// Names for `name="` and values for `value="` inside the `<property` tag being typed (`tag` is the text from its `<`).
+pub fn property_completion(tag: &str, file: &str) -> Vec<CompletionItem> {
+    let open_quote = |attribute: &str| -> Option<(usize, &str)> {
+        let at = tag.rfind(&format!("{attribute}=\""))? + attribute.len() + 2;
+        (!tag[at..].contains('"')).then_some((at, &tag[at..]))
+    };
+
+    if let Some((_, typed)) = open_quote("name") {
+        let prefix = if file.contains("jakarta.persistence") || !file.contains("javax.persistence") { "jakarta.persistence." } else { "javax.persistence." };
+        let jpa = PROPERTIES.iter().map(|(n, d)| (format!("{prefix}{n}"), *d));
+        let hibernate = HIBERNATE_PROPERTIES.iter().map(|(n, d)| (n.to_string(), *d));
+
+        return jpa
+            .chain(hibernate)
+            .filter(|(n, _)| n.starts_with(typed))
+            .map(|(n, d)| {
+                let mut item = CompletionItem::new(&n, CompletionKind::Property);
+                item.detail = Some(d.to_owned());
+                item
+            })
+            .collect();
+    }
+
+    let Some((_, typed)) = open_quote("value") else { return Vec::new() };
+    let Some(name) = tag.split("name=\"").nth(1).and_then(|r| r.split('"').next()) else { return Vec::new() };
+
+    PROPERTY_VALUES
+        .iter()
+        .filter(|(suffix, _)| name.ends_with(suffix))
+        .flat_map(|(_, values)| values.iter())
+        .filter(|v| v.starts_with(typed))
+        .map(|v| CompletionItem::new(v, CompletionKind::Value))
+        .collect()
 }
 
 #[cfg(test)]

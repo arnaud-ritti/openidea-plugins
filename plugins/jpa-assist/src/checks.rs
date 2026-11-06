@@ -428,6 +428,7 @@ pub fn inspect_attribute_signatures(text: &str, kotlin: bool) -> Vec<Finding> {
 
     if !kotlin && !all.iter().any(|a| a.name == "Access") {
         findings.extend(mixed_access(&masked, &all, &members));
+        findings.extend(missing_setters(&masked, &all, &members));
     }
 
     findings
@@ -467,6 +468,49 @@ fn mixed_access(masked: &str, all: &[Annotation], members: &[(usize, usize)]) ->
                 Severity::Warning,
                 "jpa-mixed-access",
                 format!("The @Id is on a {kept}, so access is by {kept} and this annotation on a {place} is ignored. Move it, or add @Access."),
+            )
+        })
+        .collect()
+}
+
+/// Annotated getters of an entity with property access (the `@Id` sits on a getter) that have no setter.
+fn missing_setters(masked: &str, all: &[Annotation], members: &[(usize, usize)]) -> Vec<Finding> {
+    let mut getters: Vec<(String, &Annotation)> = Vec::new();
+    let mut field_mapped = false;
+    let mut getter_id = false;
+
+    for &(start, end) in members {
+        let decl = without_annotations(masked, start, end);
+        let left = decl.split('=').next().unwrap_or(&decl);
+        let mapped = all.iter().filter(|a| a.start >= start && a.start < end && MAPPING_ANNOTATIONS.contains(&a.name));
+        let Some(paren) = left.find('(') else {
+            field_mapped |= mapped.clone().next().is_some();
+            continue;
+        };
+
+        let name: String = left[..paren].trim_end().bytes().rev().take_while(|&c| is_ident(c)).map(char::from).collect::<Vec<_>>().into_iter().rev().collect();
+        let property = name.strip_prefix("get").or_else(|| name.strip_prefix("is")).filter(|p| p.starts_with(|c: char| c.is_ascii_uppercase()));
+        let (Some(property), Some(first)) = (property, mapped.clone().next()) else { continue };
+        if left[paren + 1..].trim_start().starts_with(')') {
+            getter_id |= mapped.clone().any(|a| a.name == "Id");
+            getters.push((property.to_owned(), first));
+        }
+    }
+
+    if field_mapped || !getter_id {
+        return Vec::new();
+    }
+
+    getters
+        .into_iter()
+        .filter(|(property, _)| words(masked, &format!("set{property}")).next().is_none())
+        .map(|(property, first)| {
+            Finding::new(
+                first.start,
+                first.end(),
+                Severity::Info,
+                "jpa-missing-setter",
+                format!("Property access needs a setter for '{property}': add set{property}()."),
             )
         })
         .collect()
@@ -742,8 +786,17 @@ pub fn named_query_references(text: &str, kotlin: bool) -> Vec<(String, usize, u
         }
     }
 
-    for call in ["createNamedQuery", "createNamedStoredProcedureQuery"] {
-        for at in words(&masked, call) {
+    found.extend(call_literals(text, &masked, &["createNamedQuery", "createNamedStoredProcedureQuery"], kotlin));
+
+    found
+}
+
+/// The first string literal argument of each call to one of `calls`, as (value, start, end) of the literal's content.
+fn call_literals(text: &str, masked: &str, calls: &[&str], kotlin: bool) -> Vec<(String, usize, usize)> {
+    let mut found = Vec::new();
+
+    for call in calls {
+        for at in words(masked, call) {
             let open = at + call.len();
             if !masked[open..].trim_start().starts_with('(') {
                 continue;
@@ -761,6 +814,70 @@ pub fn named_query_references(text: &str, kotlin: bool) -> Vec<(String, usize, u
     }
 
     found
+}
+
+/// Names `@EntityGraph("...")` and `getEntityGraph("...")` refer to, as (name, start, end) of the literal's content.
+pub fn entity_graph_references(text: &str, kotlin: bool) -> Vec<(String, usize, usize)> {
+    let masked = mask(text);
+    let mut found = Vec::new();
+
+    for a in annotations(&masked).iter().filter(|a| a.name == "EntityGraph") {
+        if let Some((at, name)) = value_range(text, &masked, a, "value").and_then(|r| plain_literal(text, r, kotlin))
+            && !name.is_empty()
+        {
+            found.push((name.to_owned(), at, at + name.len()));
+        }
+    }
+
+    found.extend(call_literals(text, &masked, &["getEntityGraph"], kotlin));
+
+    found
+}
+
+/// The first segment of each `@EntityGraph(attributePaths = ...)` literal, judged against `entity`.
+pub fn entity_graph_paths(text: &str, kotlin: bool, entity: &str) -> Vec<NameReference> {
+    let masked = mask(text);
+    let mut found = Vec::new();
+
+    for a in annotations(&masked).iter().filter(|a| a.name == "EntityGraph") {
+        let Some((start, end)) = value_range(text, &masked, a, "attributePaths") else { continue };
+        let mut at = start;
+
+        while let Some(open) = text[at..end].find('"').map(|p| p + at) {
+            let Some(close) = text[open + 1..end].find('"').map(|p| p + open + 1) else { break };
+            at = close + 1;
+
+            if let Some((content_at, value)) = plain_literal(text, (open, close + 1), kotlin) {
+                found.push(NameReference {
+                    owner: entity.to_owned(),
+                    value: value.to_owned(),
+                    start: content_at,
+                    end: content_at + value.len(),
+                    code: "jpa-unknown-entity-graph-path",
+                    annotation: "@EntityGraph",
+                });
+            }
+        }
+    }
+
+    found
+}
+
+pub fn unknown_entity_graph(name: &str, start: usize, end: usize) -> Finding {
+    Finding::new(start, end, Severity::Warning, "jpa-unknown-entity-graph", format!("No @NamedEntityGraph named '{name}' in the project."))
+}
+
+/// Names declared by `@NamedEntityGraph` in `text`; `None` when one has no literal name.
+pub fn declared_entity_graphs(text: &str, kotlin: bool) -> Option<Vec<String>> {
+    let masked = mask(text);
+    let mut names = Vec::new();
+
+    for a in annotations(&masked).iter().filter(|a| a.name == "NamedEntityGraph") {
+        let (_, name) = value_range(text, &masked, a, "name").and_then(|r| plain_literal(text, r, kotlin))?;
+        names.push(name.to_owned());
+    }
+
+    Some(names)
 }
 
 pub fn unknown_named_query(name: &str, start: usize, end: usize) -> Finding {

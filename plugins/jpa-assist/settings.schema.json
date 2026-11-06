@@ -47,6 +47,11 @@
       "title": "Warn about @Query :parameters the method does not declare, and named queries that do not exist",
       "default": true
     },
+    "jpaAssist.checkEntityGraphs": {
+      "type": "boolean",
+      "title": "Warn about @EntityGraph names that no @NamedEntityGraph declares and attributePaths the repository entity does not have",
+      "default": true
+    },
     "jpaAssist.checkPersistenceXml": {
       "type": "boolean",
       "title": "Check persistence.xml and JPA mapping files for invalid values and classes that are not in the project",

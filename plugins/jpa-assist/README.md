@@ -23,6 +23,9 @@ Entities and repositories are checked when they open and when they are saved.
 | `FetchType.EAGER` on any association | warning | Fetch lazily |
 | `@ManyToOne` / `@OneToOne` relying on the eager default | info | Fetch lazily (adds the `FetchType` import) |
 | Attribute with two associations, an association on a basic or collection type, `@Id` with `@EmbeddedId`, `@Id` on a field with mapping annotations on getters or the reverse (`jpa-attribute-multiple-relations`, `jpa-relationship-type`, `jpa-multiple-id-kinds`, `jpa-mixed-access`; quiet with `@Access`) | warning | |
+| Entity with property access (`@Id` on a getter, no mapping annotation on fields) whose annotated getter has no setter (`jpa-missing-setter`) | info | |
+| Association whose target class is in the project but is an `@Embeddable`, a `@MappedSuperclass` or has no `@Entity` (`jpa-relationship-target`; quiet with `orm.xml`, for classes found twice or outside the project) | info | |
+| `@EntityGraph("x")`, `@EntityGraph(value = "x")` or `getEntityGraph("x")` naming no `@NamedEntityGraph`; `@EntityGraph(attributePaths = …)` whose first segment is not a property of the repository entity (`jpa-unknown-entity-graph`, `jpa-unknown-entity-graph-path`; quiet with `orm.xml`, a non-literal graph name or a library superclass; setting `jpaAssist.checkEntityGraphs`) | warning | |
 | Listener class with constructors but none public without arguments (`jpa-listener-constructor`; Spring-managed listeners are exempt) | info | |
 | Kotlin entity with no no-arg constructor while the build names no `kotlin-jpa` plugin (`jpa-kotlin-plugin-missing`; read from `build.gradle(.kts)` and `pom.xml` up to the project root, quiet for version catalogs, convention plugins and `noArg`) | info | Add the plugin to the Gradle build (copies the Kotlin version) |
 | Redundant `constructor()` when the build applies `kotlin-jpa`; redundant `open` when `allOpen` names `jakarta.persistence.Entity` | info | Remove it |
@@ -43,7 +46,11 @@ effect there without bytecode enhancement. Methods with `@Query` aren't parsed.
 
 ## Repositories
 
-In a `persistence.xml`, typing inside `<class>` completes class names of the project's sources.
+In a `persistence.xml`, typing inside `<class>` completes class names of the project's sources, and typing
+inside `<property name="…">` completes the standard `jakarta.persistence.*` (or `javax.persistence.*`, when the
+file uses that namespace) and common Hibernate property names; `value="…"` completes the values of
+`hibernate.hbm2ddl.auto`, schema generation, shared cache and validation mode. Unverified in the IDE: how the host
+replaces a name containing dots.
 
 In an interface extending `JpaRepository<Entity, Id>` (or any `…Repository`),
 completion builds derived query names: `findBy`, `countBy`, `existsBy`…, the
@@ -104,7 +111,9 @@ the caret on the repository's entity type.
   added to the subclass's table.
 - Classes sharing a simple name in different packages are told apart only by
   being next to the file that uses them.
-- Plugins can't create files, so generated code goes to the clipboard.
+- Generated code goes to the clipboard. **JPA: New Entity** also writes `<Name>.java` or `.kt` next to the focused
+  file (same package, inside the project, never over an existing file) when `process:tee` is allowed, and fills the
+  focused file instead when it is empty. Other generators only use the clipboard.
 - Only classes are read as entities: one on an interface or enum is missing from JPA Structure
   and the generators.
 
