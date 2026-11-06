@@ -3,6 +3,7 @@
 //! `${...}` expressions that name nothing. Written from the Quarkus configuration
 //! reference and the MicroProfile Config specification.
 
+use openidea_plugin::Severity;
 use spring_text::finding::Finding;
 use spring_text::config::{self, Key};
 use spring_text::metadata::{Catalog, Lookup, Prop, strip_profile};
@@ -38,7 +39,7 @@ pub fn check(text: &str, yaml: bool, lookup: &Lookup, groups: Groups) -> Vec<Fin
     let keys = if yaml { config::yaml(text) } else { config::properties(text) };
     let mut out = Vec::new();
     if groups.syntax {
-        duplicates(&keys, &mut out);
+        duplicates(text, yaml, &keys, &mut out);
         if !yaml {
             missing_separators(text, &keys, &mut out);
         }
@@ -50,8 +51,11 @@ pub fn check(text: &str, yaml: bool, lookup: &Lookup, groups: Groups) -> Vec<Fin
         }
         let base = strip_profile(&k.key);
         let prop = known(lookup, base);
-        if groups.syntax && k.value.is_empty() && has_separator(text, k, yaml) && needs_value(prop) {
-            out.push(Finding::new(k.at, k.end, "unassigned-value", format!("`{base}` has no value.")));
+        if groups.syntax && k.value.is_empty() && has_separator(text, k, yaml) {
+            if let Some(prop) = prop.filter(|p| !p.open() && !p.default.is_empty()) {
+                let message = format!("`{base}` is empty, so Quarkus treats it as unset and uses the default `{}`.", prop.default);
+                out.push(Finding::new(k.at, k.end, "unassigned-value", message).with_severity(Severity::Hint));
+            }
         }
         if k.value.is_empty() {
             continue;
@@ -93,19 +97,11 @@ fn has_separator(text: &str, k: &Key, yaml: bool) -> bool {
     yaml || text[k.end..].trim_start_matches([' ', '\t']).starts_with(['=', ':'])
 }
 
-/// An empty value is fine for a free-text property that has no default: it is how it is left unset.
-fn needs_value(prop: Option<&Prop>) -> bool {
-    let Some(prop) = prop else { return false };
-    if prop.open() {
-        return false;
-    }
-    !prop.default.is_empty() || !matches!(prop.ty.as_str(), "string" | "String" | "path" | "")
-}
-
-fn duplicates(keys: &[Key], out: &mut Vec<Finding>) {
+fn duplicates(text: &str, yaml: bool, keys: &[Key], out: &mut Vec<Finding>) {
     let mut seen = BTreeSet::new();
     for k in keys {
-        if k.key.is_empty() || seen.insert(k.key.as_str()) {
+        let document = if yaml { text[..k.at].lines().filter(|l| l.starts_with("---")).count() } else { 0 };
+        if k.key.is_empty() || seen.insert((document, k.key.as_str())) {
             continue;
         }
         out.push(Finding::new(k.at, k.end, "duplicate-key", format!("`{}` is already set in this file.", k.key)));
@@ -121,6 +117,9 @@ fn missing_separators(text: &str, keys: &[Key], out: &mut Vec<Finding>) {
     }
 }
 
+/// Only a typo candidate is reported: a name that is not defined but is one or two edits away from a
+/// key defined in the same file. Anything else may come from another config file, `.env`,
+/// an environment variable or `-D`.
 fn expressions(k: &Key, defined: &BTreeSet<&str>, lookup: &Lookup, out: &mut Vec<Finding>) {
     let value = k.value.as_str();
     let mut from = 0;
@@ -138,11 +137,30 @@ fn expressions(k: &Key, defined: &BTreeSet<&str>, lookup: &Lookup, out: &mut Vec
         let name = inner.trim();
         let env = name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
         let system = SYSTEM_PREFIXES.iter().any(|p| name.starts_with(p));
-        if env || system || defined.contains(name) || lookup.prop(name).is_some() {
+        if env || system || defined.contains(name) || lookup.prop(name).is_some() || name.len() < 6 {
             continue;
         }
-        out.push(Finding::new(k.value_at + open, k.value_at + close + 1, "undefined-expression", format!("`{name}` is not defined in this file, as a property or as an environment variable.")));
+        let Some(near) = defined.iter().find(|d| edit_distance(d, name) <= 2) else { continue };
+        out.push(Finding::new(k.value_at + open, k.value_at + close + 1, "undefined-expression", format!("`{name}` is not defined in this file. Did you mean `{near}`?")));
     }
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 2 {
+        return 3;
+    }
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ca != cb)).min(above + 1).min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// The `}` that closes the expression whose body starts at `from`.
@@ -163,19 +181,25 @@ fn closing(value: &str, from: usize) -> Option<usize> {
     None
 }
 
+const JUL_LEVELS: [&str; 14] = ["ALL", "OFF", "WARNING", "SEVERE", "CONFIG", "FINE", "FINER", "FINEST", "FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"];
+
+/// Booleans are never reported: SmallRye reads anything that is not true/yes/y/1/on as false.
+/// Enums are checked only when the type is a closed enum of the metadata (not a level: levels also
+/// take the JUL names and numbers), ignoring case, `-` and `_`; the property's own default is always valid.
 fn invalid(lookup: &Lookup, key: &str, prop: Option<&Prop>, value: &str) -> Option<String> {
     let prop = prop?;
     let value = value.trim();
-    if value.contains('\\') || prop.open() {
+    if value.contains('\\') || prop.open() || same_word(&prop.default, value) {
         return None;
     }
+    let level = prop.ty == "Level" || key.ends_with(".level") || key.ends_with("min-level");
     let ok = match prop.ty.as_str() {
-        "boolean" | "Boolean" => matches!(value.to_ascii_lowercase().as_str(), "true" | "false"),
         "int" | "Integer" | "long" | "Long" | "short" | "Short" => value.parse::<i64>().is_ok(),
         "double" | "Double" | "float" | "Float" => value.parse::<f64>().is_ok(),
         "Duration" => duration(value),
         "MemorySize" => memory_size(value),
-        "string" | "String" | "path" | "Path" | "" => true,
+        _ if level => value.parse::<i32>().is_ok() || JUL_LEVELS.iter().any(|l| l.eq_ignore_ascii_case(value)),
+        "boolean" | "Boolean" | "string" | "String" | "path" | "Path" | "" => true,
         ty if ty.contains('<') => true,
         _ => {
             let values = lookup.values(key);
@@ -193,7 +217,8 @@ fn same_word(a: &str, b: &str) -> bool {
     clean(a) == clean(b)
 }
 
-/// Seconds as a number, `30s`, `1h 30m`, or an ISO-8601 `PT1M`.
+/// A number (milliseconds), an ISO-8601 `PT1H30M`, or a run of `<number><unit>` pairs
+/// (`30s`, `1h30m`, `1.5s`, `2d`; units ms, s, m, h, d) separated by optional blanks.
 fn duration(value: &str) -> bool {
     if value.chars().all(|c| c.is_ascii_digit()) {
         return true;
@@ -201,11 +226,20 @@ fn duration(value: &str) -> bool {
     if value.starts_with(['P', 'p']) {
         return value.len() > 2 && value[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
     }
-    value.split_whitespace().all(|part| {
-        let digits = part.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-        let unit = &part[digits.len()..];
-        !digits.is_empty() && digits.parse::<f64>().is_ok() && matches!(unit.to_ascii_lowercase().as_str(), "ms" | "s" | "m" | "h" | "d")
-    })
+    let mut rest = value.trim();
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(rest.len());
+        if digits == 0 || rest[..digits].parse::<f64>().is_err() {
+            return false;
+        }
+        let after = &rest[digits..];
+        let unit = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
+        if !["ms", "s", "m", "h", "d"].iter().any(|u| u.eq_ignore_ascii_case(&after[..unit])) {
+            return false;
+        }
+        rest = after[unit..].trim_start();
+    }
+    true
 }
 
 /// `512`, `10M`, `1G`, `10240K`, `1GiB`.
@@ -253,25 +287,36 @@ mod tests {
     }
 
     #[test]
-    fn empty_value_warns_unless_optional_in_metadata() {
-        let found = run("quarkus.http.port=\nquarkus.http.root-path=\nquarkus.datasource.password=\napp.free=\nquarkus.log.level:\n");
-        assert_eq!(codes(&found), ["unassigned-value", "unassigned-value", "unassigned-value"]);
-        assert_eq!(found[0].1, "quarkus.http.port");
-        assert_eq!(found[2].1, "quarkus.log.level");
+    fn empty_value_hints_only_when_metadata_has_a_default() {
+        let text = "quarkus.http.port=\nquarkus.datasource.password=\napp.free=\nquarkus.http.root-path:\nquarkus.http.read-timeout=\n";
+        let found = check_properties(text, bundled());
+        let hinted: Vec<_> = found.iter().map(|f| (f.code, f.severity, &text[f.start..f.end])).collect();
+        assert_eq!(hinted, [
+            ("unassigned-value", Severity::Hint, "quarkus.http.port"),
+            ("unassigned-value", Severity::Hint, "quarkus.http.root-path"),
+            ("unassigned-value", Severity::Hint, "quarkus.http.read-timeout"),
+        ]);
     }
 
     #[test]
     fn enum_value_not_in_metadata_warns() {
-        let found = run("quarkus.log.level=LOUD\nquarkus.log.level=DEBUG\nquarkus.http.port=abc\nquarkus.http.cors.enabled=yes\nquarkus.http.ssl.client-auth=sometimes\nquarkus.http.ssl.client-auth=Required\n");
+        let found = run("quarkus.http.ssl.client-auth=sometimes\nquarkus.http.ssl.client-auth=Required\nquarkus.http.ssl.client-auth=none\nquarkus.http.port=abc\nquarkus.http.cors.enabled=yes\nquarkus.http.cors.enabled=whatever\n");
         let invalid: Vec<_> = found.iter().filter(|(c, _)| *c == "invalid-value").map(|(_, t)| t.as_str()).collect();
-        assert_eq!(invalid, ["LOUD", "abc", "yes", "sometimes"]);
+        assert_eq!(invalid, ["sometimes", "abc"]);
+    }
+
+    #[test]
+    fn log_levels_take_the_jul_names_and_defaults() {
+        let ok = "quarkus.log.level=WARNING\nquarkus.log.console.level=ALL\nquarkus.log.console.level=OFF\nquarkus.log.min-level=finest\nquarkus.log.file.level=SEVERE\nquarkus.log.category.\"a.b\".level=700\n";
+        assert!(!run(ok).iter().any(|(c, _)| *c == "invalid-value"), "{:?}", run(ok));
+        assert_eq!(run("quarkus.log.level=LOUD\n"), [("invalid-value", "LOUD".into())]);
     }
 
     #[test]
     fn duration_and_memory_size_values_are_accepted() {
-        let text = "quarkus.http.read-timeout=30s\nquarkus.http.idle-timeout=PT1M\nquarkus.http.so-linger=1h\nquarkus.http.limits.max-body-size=10M\nquarkus.http.limits.max-form-attribute-size=512K\nquarkus.http.limits.max-chunk-size=1G\n";
+        let text = "%a.quarkus.http.read-timeout=1h30m\n%b.quarkus.http.read-timeout=1.5s\n%c.quarkus.http.read-timeout=2d\n%d.quarkus.http.read-timeout=500\n%e.quarkus.http.read-timeout=PT1H30M\n%f.quarkus.http.read-timeout=30s\n%g.quarkus.http.read-timeout=PT1M\n%h.quarkus.http.read-timeout=1h\nquarkus.http.limits.max-body-size=10M\nquarkus.http.limits.max-form-attribute-size=512K\nquarkus.http.limits.max-chunk-size=1G\n";
         assert!(run(text).is_empty(), "{:?}", run(text));
-        assert_eq!(codes(&run("quarkus.http.read-timeout=soon\nquarkus.http.limits.max-body-size=big\n")), ["invalid-value", "invalid-value"]);
+        assert_eq!(codes(&run("quarkus.http.read-timeout=abc\nquarkus.http.limits.max-body-size=big\n")), ["invalid-value", "invalid-value"]);
     }
 
     #[test]
@@ -281,28 +326,33 @@ mod tests {
 
     #[test]
     fn unresolved_expression_warns_unless_env_or_system_property() {
-        let text = "app.a=${nowhere}\napp.b=${HOME}\napp.c=${user.home}/x\napp.d=${missing:fallback}\napp.e=${app.b}\napp.f=${quarkus.http.port}\napp.g=${java.io.tmpdir}\napp.h=${other.missing}\n";
-        assert_eq!(run(text), [("undefined-expression", "${nowhere}".into()), ("undefined-expression", "${other.missing}".into())]);
+        let text = "app.greeting=hi\napp.a=${app.greting}\napp.b=${HOSTNAME}\napp.c=${user.home}/x\napp.d=${missing:fallback}\napp.e=${app.greeting}\napp.f=${quarkus.http.port}\napp.g=${app.name}\n";
+        assert_eq!(run(text), [("undefined-expression", "${app.greting}".into())]);
+    }
+
+    #[test]
+    fn duplicates_across_yaml_documents_are_quiet() {
+        assert!(run_yaml("a:\n  b: 1\n---\na:\n  b: 2\n").is_empty());
     }
 
     #[test]
     fn yaml_files_are_checked_the_same_way() {
-        let text = "quarkus:\n  http:\n    port: abc\n    cors:\n      enabled: true\n  log:\n    level: DEBUG\napp:\n  a: ${nowhere}\n  b:\n";
-        assert_eq!(run_yaml(text), [("invalid-value", "abc".into()), ("undefined-expression", "${nowhere}".into())]);
+        let text = "quarkus:\n  http:\n    port: abc\n    cors:\n      enabled: true\n  log:\n    level: DEBUG\napp:\n  name1: x\n  a: ${app.nme1}\n  b:\n";
+        assert_eq!(run_yaml(text), [("invalid-value", "abc".into()), ("undefined-expression", "${app.nme1}".into())]);
         assert_eq!(codes(&run_yaml("a:\n  b: 1\n  b: 2\n")), ["duplicate-key"]);
     }
 
     #[test]
     fn ranges_survive_comments_continuations_escapes_and_multibyte_text() {
-        let text = "# é😀\r\nlong=a\\\r\n  b\r\nke\\:y=${gone}\r\nquarkus.http.port=zz\r\n";
+        let text = "# é😀\r\nlong=a\\\r\n  b\r\nlonger.key=1\r\nke\\:y=${longer.kez}\r\nquarkus.http.port=zz\r\n";
         let found = check_properties(text, bundled());
         let d: Vec<_> = found.iter().map(|f| f.diagnostic(text)).collect();
         assert_eq!(d.len(), 2);
-        assert_eq!((d[0].range.start.line, d[0].range.start.character), (3, 6));
-        assert_eq!((d[1].range.start.line, d[1].range.start.character, d[1].range.end.character), (4, 18, 20));
-        let emoji = "app.é😀=${gone}\n";
+        assert_eq!((d[0].range.start.line, d[0].range.start.character), (4, 6));
+        assert_eq!((d[1].range.start.line, d[1].range.start.character, d[1].range.end.character), (5, 18, 20));
+        let emoji = "app.é😀=1\napp.é😀x=${app.é😀y}\n";
         let d = check_properties(emoji, bundled())[0].diagnostic(emoji);
-        assert_eq!(d.range.start.character, 8);
+        assert_eq!((d.range.start.line, d.range.start.character), (1, 9));
     }
 
     #[test]

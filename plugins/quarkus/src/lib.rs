@@ -106,6 +106,12 @@ fn profile_items(text: &str, at: usize) -> Vec<CompletionItem> {
         .collect()
 }
 
+/// Expressions are checked only in `application.properties|yaml|yml`: profile files and
+/// `microprofile-config.properties` lean on the base file, `.env`, the environment and `-D`.
+fn is_base_file(path: &str) -> bool {
+    matches!(path.rsplit(['/', '\\']).next(), Some("application.properties" | "application.yaml" | "application.yml"))
+}
+
 fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool) -> Vec<Diagnostic> {
     let keys = config::keys(path, text);
     let mut out = Vec::new();
@@ -135,7 +141,7 @@ fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool) -> Vec<Diag
     let groups = checks::Groups {
         syntax: host::setting_bool("quarkus.checkSyntax").unwrap_or(true),
         values: host::setting_bool("quarkus.checkValues").unwrap_or(true),
-        expressions: host::setting_bool("quarkus.checkExpressions").unwrap_or(true),
+        expressions: host::setting_bool("quarkus.checkExpressions").unwrap_or(true) && is_base_file(path),
     };
     let yaml = !path.ends_with(".properties");
     out.extend(checks::check(text, yaml, lookup, groups).iter().map(|f| f.diagnostic(text)));
@@ -371,6 +377,17 @@ mod tests {
         host.set_setting("quarkus.checkValues", "true");
         tools.line_markers(&doc(YAML, yaml));
         assert_eq!(codes(yaml, &host.diagnostics()[YAML]), [("invalid-value", "abc")]);
+    }
+
+    #[test]
+    fn expressions_are_checked_only_in_the_base_file() {
+        let host = quarkus_project();
+        let text = "app.greeting=hi\napp.a=${app.greting}\n";
+        let mut tools = QuarkusTools::default();
+        tools.line_markers(&doc("/project/src/main/resources/application-dev.properties", text));
+        assert!(host.diagnostics().get("/project/src/main/resources/application-dev.properties").is_none_or(|d| d.is_empty()));
+        tools.line_markers(&doc(PROPS, text));
+        assert_eq!(codes(text, &host.diagnostics()[PROPS]), [("undefined-expression", "${app.greting}")]);
     }
 
     #[test]
