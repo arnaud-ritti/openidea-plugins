@@ -9,9 +9,9 @@ use openidea_plugin::host::{self, storage};
 use openidea_plugin::views::{Body, Button, View};
 use serde_json::Value;
 
-use crate::api::{self, DiffRefs, Discussion, DraftNote, FileDiff};
+use crate::api::{self, Commit, DiffRefs, Discussion, DraftNote, FileDiff};
 use crate::branch::git_ok;
-use crate::{CHANGES, DETAILS, GitLab, LIST, gitlab_project, safe};
+use crate::{CHANGES, DETAILS, GitLab, LIST, first_line, gitlab_project, safe};
 
 #[derive(Debug, PartialEq)]
 pub struct Line {
@@ -157,6 +157,8 @@ pub struct Page<'a> {
     pub drafts: &'a [DraftNote],
     pub viewed: &'a BTreeMap<String, String>,
     pub anchor: Option<&'a str>,
+    /// The short id of a single commit shown read-only: no viewed marks, no new comments.
+    pub commit: Option<&'a str>,
 }
 
 fn summary(iid: u64, files: usize) -> String {
@@ -167,13 +169,29 @@ fn summary(iid: u64, files: usize) -> String {
     }
 }
 
+fn commit_summary(iid: u64, commit: &str, files: usize) -> String {
+    let files = match files {
+        1 => "1 file changed".to_owned(),
+        n => format!("{n} files changed"),
+    };
+
+    format!("Commit {} of !{iid} · {files} · read-only", escape(commit))
+}
+
 pub fn render_html(page: &Page) -> String {
-    let mut html = format!("<style>{THEME_DEFAULTS}{CONTROLS}{STYLE}</style><body data-anchor=\"{}\">", escape(page.anchor.unwrap_or("")));
-    html.push_str(&format!("<p class=\"summary\">{}</p><p id=\"error\" class=\"error\" role=\"alert\" hidden></p>", summary(page.iid, page.diffs.len())));
-    html.push_str(NO_SCRIPTS);
+    let read_only = if page.commit.is_some() { " data-read-only" } else { "" };
+    let mut html = format!("<style>{THEME_DEFAULTS}{CONTROLS}{STYLE}</style><body data-anchor=\"{}\"{read_only}>", escape(page.anchor.unwrap_or("")));
+    let summary = match page.commit {
+        Some(commit) => commit_summary(page.iid, commit, page.diffs.len()),
+        None => summary(page.iid, page.diffs.len()),
+    };
+    html.push_str(&format!("<p class=\"summary\">{summary}</p><p id=\"error\" class=\"error\" role=\"alert\" hidden></p>"));
+    if page.commit.is_none() {
+        html.push_str(NO_SCRIPTS);
+    }
 
     for (index, file) in page.diffs.iter().enumerate() {
-        let is_viewed = page.viewed.get(&file.new_path).is_some_and(|sha| sha == version(page.last_commits, &file.new_path, page.head_sha));
+        let is_viewed = page.commit.is_none() && page.viewed.get(&file.new_path).is_some_and(|sha| sha == version(page.last_commits, &file.new_path, page.head_sha));
         let lines = parse_diff(&file.diff);
         let added = lines.iter().filter(|l| l.kind == '+').count();
         let removed = lines.iter().filter(|l| l.kind == '-').count();
@@ -189,12 +207,15 @@ pub fn render_html(page: &Page) -> String {
 
         html.push_str(&format!(
             "<div class=\"file{}\" id=\"f{index}\" data-old-path=\"{}\" data-new-path=\"{}\">\
-             <div class=\"header\" tabindex=\"0\"><label><input type=\"checkbox\" class=\"viewed\"{}> Viewed</label> \
-             <a href=\"#\" class=\"open\" data-line=\"1\">{}</a>{status} <span class=\"stat\">+{added} −{removed}</span></div><table>",
+             <div class=\"header\" tabindex=\"0\">{}<a href=\"#\" class=\"open\" data-line=\"1\">{}</a>{status} <span class=\"stat\">+{added} −{removed}</span></div><table>",
             if is_viewed { " collapsed" } else { "" },
             escape(&file.old_path),
             escape(&file.new_path),
-            if is_viewed { " checked" } else { "" },
+            match (page.commit, is_viewed) {
+                (Some(_), _) => "",
+                (None, true) => "<label><input type=\"checkbox\" class=\"viewed\" checked> Viewed</label> ",
+                (None, false) => "<label><input type=\"checkbox\" class=\"viewed\"> Viewed</label> ",
+            },
             escape(&name),
         ));
 
@@ -340,7 +361,7 @@ document.addEventListener('click', (e) => {
   const t = e.target;
   if (t.classList.contains('ln')) {
     const tr = t.closest('tr');
-    if (tr.classList.contains('hunk')) return;
+    if (tr.classList.contains('hunk') || document.body.dataset.readOnly !== undefined) return;
     const file = fileOf(tr);
     editor(tr, (body, draft, anchor) => send({ type: 'comment', oldPath: file.dataset.oldPath, newPath: file.dataset.newPath, ...lineOf(tr), body, draft, anchor }));
   } else if (t.dataset.reply) {
@@ -378,6 +399,10 @@ impl GitLab {
             self.diffs = Some((iid, api::Project(&project).diffs(iid)?));
         }
 
+        if let Some(commit) = self.active_commit().cloned() {
+            return self.render_commit_changes(&project, iid, &commit);
+        }
+
         let details = self.details.as_ref().ok_or("The merge request is not loaded; refresh it.")?;
         let threads: Vec<Discussion> = self.threads.get(&iid).into_iter().flatten().filter(|d| !d.is_system()).cloned().collect();
         let head_sha = details.mr.diff_refs.as_ref().map(|r| r.head_sha.as_str()).unwrap_or("");
@@ -392,6 +417,7 @@ impl GitLab {
             drafts: &details.drafts,
             viewed: &viewed,
             anchor: self.anchor.as_deref(),
+            commit: None,
         };
 
         let mut view = View::new(Body::Html(render_html(&page))).button(Button::new("refresh", "Refresh").icon("refresh"));
@@ -406,8 +432,40 @@ impl GitLab {
         })
     }
 
+    /// One commit's diff, read-only: its threads need the merge request's diff refs, so none are shown.
+    fn render_commit_changes(&mut self, project: &str, iid: u64, commit: &Commit) -> Result<View, Error> {
+        if self.commit_diff.as_ref().map(|(sha, _)| sha) != Some(&commit.id) {
+            let _task = host::begin_task("Loading commit", false);
+            self.commit_diff = Some((commit.id.clone(), api::Project(project).commit_diff(&commit.id)?));
+        }
+
+        let none = BTreeMap::new();
+        let page = Page {
+            iid,
+            head_sha: "",
+            last_commits: &none,
+            diffs: self.commit_diff.as_ref().map(|(_, d)| d.as_slice()).unwrap_or_default(),
+            threads: &[],
+            drafts: &[],
+            viewed: &none,
+            anchor: None,
+            commit: Some(&commit.short_id),
+        };
+
+        Ok(View::new(Body::Html(render_html(&page)))
+            .button(Button::new("refresh", "Refresh").icon("refresh"))
+            .button(Button::new("all-changes", "All Changes").icon("arrow-left"))
+            .button(Button::new("browser", "Open on GitLab").icon("external-link"))
+            .status(&format!("Commit {} {} · read-only", commit.short_id, first_line(&commit.title))))
+    }
+
     pub(crate) fn handle_changes_message(&mut self, message: &str, ctx: &openidea_plugin::Invocation) -> Result<(), Error> {
         let message: Value = serde_json::from_str(message).map_err(|e| Error::Invalid(e.to_string()))?;
+        if self.active_commit().is_some() && message["type"] != "open" {
+            let error = serde_json::json!({ "type": "error", "message": "A commit's changes are read-only. Click All Changes to comment." });
+            return host::post_view_message(CHANGES, &error.to_string());
+        }
+
         let repo = gitlab_project(ctx)?;
         let (status, project) = (repo.status, repo.path);
         if let Some(iid) = Self::selected() {

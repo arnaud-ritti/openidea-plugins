@@ -8,7 +8,7 @@ use openidea_plugin::providers::{CodeAction, Document, LineMarker};
 use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem, TextEdit};
 
 use crate::api::{self, Discussion, MergeRequest};
-use crate::{GitLab, SELECTED_KEY, first_line, relative_path, review, safe};
+use crate::{COMMITS, GitLab, SELECTED_KEY, first_line, relative_path, review, safe};
 
 pub const STATUS_ITEM: &str = "merge-request";
 const RECHECK_SECS: u64 = 300;
@@ -416,7 +416,9 @@ impl GitLab {
         let iid = mr.iid;
 
         storage::set(SELECTED_KEY, &iid.to_string())?;
+        self.commit = None;
         self.reload_merge_request(iid);
+        host::refresh_view(COMMITS);
 
         Ok(Some(format!("!{iid} is open in the Merge Request and Merge Request Changes tool windows.")))
     }

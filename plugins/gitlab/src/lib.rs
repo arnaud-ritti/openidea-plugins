@@ -16,7 +16,7 @@ mod safe;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use api::{Approvals, Discussion, DraftNote, FileDiff, MergeRequest, Note, ProjectInfo, TimelineEvent, User};
+use api::{Approvals, Commit, Discussion, DraftNote, FileDiff, MergeRequest, Note, ProjectInfo, TimelineEvent, User};
 use branch::BranchReview;
 use openidea_plugin::host::{self, storage};
 use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
@@ -32,6 +32,7 @@ const PROJECTS: &str = "gitlab-projects";
 const NEW_MR: &str = "new-merge-request";
 const NEW_SNIPPET: &str = "new-snippet";
 const SHARE: &str = "share-project-form";
+const COMMITS: &str = "merge-request-commits";
 
 const FILTER_KEY: &str = "filter";
 const SELECTED_KEY: &str = "selected";
@@ -278,6 +279,10 @@ pub struct GitLab {
     namespaces: Option<Vec<api::Namespace>>,
     /// The reaction picked in the details form, checked against `safe::EMOJIS` when used.
     emoji: Option<String>,
+    /// The commit whose diff the changes view shows instead of the merge request's; see [`GitLab::active_commit`].
+    commit: Option<String>,
+    commits: Option<(u64, Vec<Commit>)>,
+    commit_diff: Option<(String, Vec<FileDiff>)>,
 }
 
 impl GitLab {
@@ -520,7 +525,9 @@ impl GitLab {
                     storage::delete(COMMENT_KEY)?;
                     self.details = None;
                     self.anchor = None;
+                    self.commit = None;
                     host::refresh_view(CHANGES);
+                    host::refresh_view(COMMITS);
                 }
 
                 match thread {
@@ -861,6 +868,7 @@ impl GitLab {
             ViewEvent::Message(message) => self.handle_changes_message(&message, ctx),
             ViewEvent::Button(id) if id == "refresh" => {
                 self.diffs = None;
+                self.commit_diff = None;
                 self.status = None;
                 match Self::selected() {
                     Some(iid) => self.reload_merge_request(iid),
@@ -869,6 +877,7 @@ impl GitLab {
                 Ok(())
             }
             ViewEvent::Button(id) if id == "submit" || id == "browser" => self.handle_details(ViewEvent::Button(id), ctx),
+            ViewEvent::Button(id) if id == "all-changes" => self.handle_commits(ViewEvent::Button(id)),
             _ => Ok(()),
         }
     }
@@ -937,6 +946,10 @@ fn is_own(note: &Note, me: &User) -> bool {
 
 fn note_actions_enabled() -> bool {
     host::setting_bool("noteActions").unwrap_or(true)
+}
+
+fn commits_enabled() -> bool {
+    host::setting_bool("commitsView").unwrap_or(true)
 }
 
 fn forms_enabled() -> bool {
@@ -1315,6 +1328,80 @@ impl GitLab {
         Ok(())
     }
 
+    /// The picked commit while it belongs to the selected merge request and the view is on.
+    fn active_commit(&self) -> Option<&Commit> {
+        let sha = self.commit.as_deref().filter(|_| commits_enabled())?;
+        let (iid, commits) = self.commits.as_ref()?;
+        if Self::selected() != Some(*iid) {
+            return None;
+        }
+
+        commits.iter().find(|c| c.id == sha)
+    }
+
+    fn render_commits(&mut self, ctx: &Invocation) -> Result<View, Error> {
+        if !commits_enabled() {
+            return Ok(View::message("The commit list is off. Turn it on under Settings › Plugins › GitLab."));
+        }
+
+        let Some(iid) = Self::selected() else {
+            return Ok(View::message("Select a merge request in the Merge Requests tool window."));
+        };
+
+        if self.commits.as_ref().map(|(i, _)| *i) != Some(iid) {
+            let repo = gitlab_project(ctx)?;
+            let _task = host::begin_task("Loading commits", false);
+            self.commits = Some((iid, api::Project(&repo.path).mr_commits(iid)?));
+        }
+
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let commits = self.commits.as_ref().map(|(_, c)| c.as_slice()).unwrap_or_default();
+        if commits.is_empty() {
+            return Ok(View::message(&format!("!{iid} has no commits.")).button(refresh));
+        }
+
+        let items = commits
+            .iter()
+            .map(|c| TreeItem::new(&c.id, &format!("{} {}", c.short_id, first_line(&c.title))).icon("commit").detail(&c.author_name))
+            .collect();
+        let view = View::new(Body::Tree(items)).button(refresh);
+
+        Ok(match self.active_commit() {
+            Some(c) => view
+                .button(Button::new("all-changes", "All Changes").icon("arrow-left"))
+                .status(&format!("Showing {} {} in Merge Request Changes", c.short_id, first_line(&c.title))),
+            None => view.status(&format!("!{iid} · double-click a commit to see its changes")),
+        })
+    }
+
+    /// Only a hex SHA listed for the selected merge request is ever picked, so a row key never reaches a URL unchecked.
+    fn handle_commits(&mut self, event: ViewEvent) -> Result<(), Error> {
+        if !commits_enabled() {
+            return Ok(());
+        }
+
+        match event {
+            ViewEvent::Activate(key) => {
+                let Ok(sha) = safe::hex_sha(&key) else { return Ok(()) };
+                let listed = self.commits.as_ref().is_some_and(|(iid, commits)| Self::selected() == Some(*iid) && commits.iter().any(|c| c.id == sha));
+                if !listed {
+                    return Ok(());
+                }
+
+                self.commit = Some(sha.to_owned());
+            }
+            ViewEvent::Button(id) if id == "all-changes" => self.commit = None,
+            ViewEvent::Button(id) if id == "refresh" => self.commits = None,
+            _ => return Ok(()),
+        }
+
+        self.anchor = None;
+        host::refresh_view(COMMITS);
+        host::refresh_view(CHANGES);
+
+        Ok(())
+    }
+
     fn check_ci_files(&mut self, events: &[Event], ctx: &Invocation) {
         let Some(project) = ctx.project() else { return };
 
@@ -1399,6 +1486,7 @@ impl Views for GitLab {
             NEW_SNIPPET => Ok(self.new_snippet.render(&snippet_scopes(ctx))),
             SHARE if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
             SHARE => self.render_share(),
+            COMMITS => self.render_commits(ctx),
             _ => return Err(Error::NotFound(format!("view {view}"))),
         };
 
@@ -1421,6 +1509,7 @@ impl Views for GitLab {
             NEW_MR if forms_enabled() => self.handle_new_merge_request(event, ctx),
             NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
             SHARE if forms_enabled() => self.handle_share(event, ctx),
+            COMMITS => self.handle_commits(event),
             _ => Ok(()),
         }
     }

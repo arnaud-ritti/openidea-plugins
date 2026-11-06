@@ -2484,3 +2484,206 @@ mod note_action_tests {
         assert!(view.status.as_deref().unwrap().starts_with("Write the new text"), "{view:?}");
     }
 }
+
+mod commit_tests {
+    use super::*;
+
+    const SHA1: &str = "aaaaaaa1111111111111111111111111111111aa";
+    const SHA2: &str = "bbbbbbb2222222222222222222222222222222bb";
+    const MR_URL: &str = "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7";
+    const REPO_URL: &str = "https://gitlab.com/api/v4/projects/g%2Fp/repository";
+
+    fn commits(req: &HttpRequest) -> Result<HttpResponse, Error> {
+        let url = req.url.split('?').next().unwrap_or("");
+
+        match url {
+            u if u == format!("{MR_URL}/commits") => ok(&format!(
+                r#"[{{"id": "{SHA2}", "short_id": "bbbbbbb2", "title": "Second <b>", "author_name": "Ann"}},
+                    {{"id": "{SHA1}", "short_id": "aaaaaaa1", "title": "First", "author_name": "Bob"}}]"#
+            )),
+            u if u == format!("{REPO_URL}/commits/{SHA1}/diff") => ok(
+                r#"[{"old_path": "src/b.rs", "new_path": "src/b.rs", "diff": "@@ -1,2 +1,2 @@\r\n é\r\n-ü😀<script>\r\n+ü😀x</td>\r\n z\r\n"}]"#,
+            ),
+            _ => gitlab(req),
+        }
+    }
+
+    fn host() -> MockHost {
+        let host = setup();
+        host.on_fetch(commits);
+        host
+    }
+
+    fn on_mr(host: &MockHost) -> GitLab {
+        let mut plugin = selected(host);
+        plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        plugin
+    }
+
+    fn pick(plugin: &mut GitLab, host: &MockHost, key: &str) {
+        plugin.handle(COMMITS, ViewEvent::Activate(key.into()), &host.invocation()).unwrap();
+    }
+
+    fn commit_requests(host: &MockHost) -> Vec<String> {
+        host.requests().into_iter().map(|r| r.url).filter(|u| u.contains("/repository/commits/")).collect()
+    }
+
+    #[test]
+    fn lists_the_commits_of_the_selected_merge_request() {
+        let host = host();
+        let mut plugin = selected(&host);
+
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+
+        let Body::Tree(items) = &view.body else { panic!("{view:?}") };
+        let rows: Vec<(&str, &str)> = items.iter().map(|i| (i.key.as_str(), i.label.as_str())).collect();
+        assert_eq!(rows, [(SHA2, "bbbbbbb2 Second <b>"), (SHA1, "aaaaaaa1 First")]);
+        assert_eq!(items[1].detail.as_deref(), Some("Bob"));
+        assert!(host.requests().iter().any(|r| r.url.starts_with(&format!("{MR_URL}/commits?per_page="))));
+    }
+
+    #[test]
+    fn activating_a_commit_shows_its_diff_in_the_changes_view_without_comment_threads() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        assert!(changes_html(&mut plugin, &host).contains("Why?"), "the merge request diff shows its threads");
+
+        pick(&mut plugin, &host, SHA1);
+
+        assert_eq!(plugin.commit.as_deref(), Some(SHA1));
+        assert!(host.refreshed_views().contains(&CHANGES.to_owned()));
+        let html = changes_html(&mut plugin, &host);
+        assert!(html.contains("src/b.rs") && !html.contains("src/a.rs"), "{html}");
+        assert!(!html.contains("Why?") && !html.contains("data-reply"), "no comment threads in commit mode");
+        assert!(html.contains("aaaaaaa1"), "{html}");
+        assert_eq!(commit_requests(&host), [format!("{REPO_URL}/commits/{SHA1}/diff?per_page=100&page=1")]);
+
+        let comment = r#"{"type":"comment","oldPath":"src/b.rs","newPath":"src/b.rs","old":null,"new":2,"body":"x","draft":false}"#;
+        plugin.handle(CHANGES, ViewEvent::Message(comment.into()), &host.invocation()).unwrap();
+        assert!(writes(&host).is_empty(), "commit diffs are read-only");
+    }
+
+    #[test]
+    fn all_changes_returns_to_the_merge_request_diff() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        assert!(buttons(&view).contains(&"all-changes"), "{view:?}");
+
+        plugin.handle(COMMITS, ViewEvent::Button("all-changes".into()), &host.invocation()).unwrap();
+
+        assert_eq!(plugin.commit, None);
+        let html = changes_html(&mut plugin, &host);
+        assert!(html.contains("src/a.rs") && html.contains("Why?"), "{html}");
+    }
+
+    #[test]
+    fn selecting_another_merge_request_clears_the_commit() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+
+        plugin.handle(LIST, ViewEvent::Select("mr:8".into()), &host.invocation()).unwrap();
+
+        assert_eq!(plugin.commit, None);
+        assert!(host.refreshed_views().contains(&COMMITS.to_owned()));
+    }
+
+    #[test]
+    fn a_non_hex_commit_key_sends_no_request() {
+        let host = setup();
+        host.on_fetch(|req| match req.url.contains("/merge_requests/7/commits") {
+            true => ok(r#"[{"id": "abc/../x", "short_id": "a"}, {"id": "HEAD", "short_id": "h"}, {"id": "abcdef1?x", "short_id": "q"}]"#),
+            false => gitlab(req),
+        });
+        let mut plugin = on_mr(&host);
+        let before = host.requests().len();
+
+        for key in ["abc/../x", "HEAD", "abcdef1?x"] {
+            pick(&mut plugin, &host, key);
+            plugin.handle(COMMITS, ViewEvent::Select(key.into()), &host.invocation()).unwrap();
+            assert_eq!(plugin.commit, None, "{key}");
+            changes_html(&mut plugin, &host);
+        }
+
+        assert!(commit_requests(&host).is_empty(), "{:?}", commit_requests(&host));
+        assert!(host.requests()[before..].iter().all(|r| !r.url.contains("..") && !r.url.contains("HEAD")));
+    }
+
+    #[test]
+    fn an_empty_commit_list_shows_a_message_not_a_blank_list() {
+        let host = setup();
+        host.on_fetch(|req| match req.url.contains("/merge_requests/7/commits") {
+            true => ok("[]"),
+            false => gitlab(req),
+        });
+        let mut plugin = selected(&host);
+
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+
+        assert_eq!(view.body, Body::Message("!7 has no commits.".into()));
+    }
+
+    #[test]
+    fn the_view_is_quiet_without_a_selected_merge_request() {
+        let host = host();
+        let mut plugin = GitLab::default();
+
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        plugin.handle(COMMITS, ViewEvent::Activate(SHA1.into()), &host.invocation()).unwrap();
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert_eq!(plugin.commit, None);
+        assert!(host.requests().is_empty());
+    }
+
+    #[test]
+    fn the_view_is_quiet_when_the_setting_is_off() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+        host.set_setting("commitsView", "false");
+        let before = host.requests().len();
+
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        pick(&mut plugin, &host, SHA2);
+        let html = changes_html(&mut plugin, &host);
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert!(html.contains("src/a.rs") && html.contains("Why?"), "the merge request diff, not the commit");
+        assert!(host.requests()[before..].iter().all(|r| !r.url.contains("commits")));
+    }
+
+    #[test]
+    fn diff_text_with_html_is_escaped_in_commit_mode() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+
+        let html = changes_html(&mut plugin, &host);
+
+        assert!(html.contains("<td class=\"code\">ü😀&lt;script&gt;</td>"), "{html}");
+        assert!(html.contains("<td class=\"code\">ü😀x&lt;/td&gt;</td>"), "{html}");
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        assert!(view.status.as_deref().unwrap_or("").contains("aaaaaaa1"), "{view:?}");
+    }
+
+    #[test]
+    fn crlf_and_multibyte_diff_lines_keep_their_numbers() {
+        let lines = review::parse_diff("@@ -1,2 +1,2 @@\r\n é\r\n-ü😀\r\n+ü😀x\r\n z\r\n");
+
+        let numbers: Vec<(char, Option<u32>, Option<u32>, &str)> = lines.iter().map(|l| (l.kind, l.old, l.new, l.text.as_str())).collect();
+        assert_eq!(
+            numbers,
+            [('@', None, None, "@@ -1,2 +1,2 @@"), (' ', Some(1), Some(1), "é"), ('-', Some(2), None, "ü😀"), ('+', None, Some(2), "ü😀x"), (' ', Some(3), Some(3), "z")]
+        );
+
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+        let html = changes_html(&mut plugin, &host);
+        assert!(html.contains("id=\"f0-2-\"") && html.contains("id=\"f0--2\"") && html.contains("id=\"f0-3-3\""), "{html}");
+        assert!(!html.contains('\r'));
+    }
+}

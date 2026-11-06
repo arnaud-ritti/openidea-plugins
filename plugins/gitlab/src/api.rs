@@ -188,6 +188,15 @@ pub struct FileDiff {
     pub renamed_file: bool,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Commit {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub author_name: String,
+}
+
 /// A state, label or milestone change of a merge request.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TimelineEvent {
@@ -557,6 +566,15 @@ impl Project<'_> {
     /// The cumulative changes, every page.
     pub fn diffs(&self, iid: u64) -> Result<Vec<FileDiff>, Error> {
         paged(&self.mr(iid, "/diffs"), 100)
+    }
+
+    /// Newest first, as GitLab lists them.
+    pub fn mr_commits(&self, iid: u64) -> Result<Vec<Commit>, Error> {
+        paged(&self.mr(iid, "/commits"), 100)
+    }
+
+    pub fn commit_diff(&self, sha: &str) -> Result<Vec<FileDiff>, Error> {
+        paged(&self.path(&format!("/repository/commits/{}/diff", encode(safe::hex_sha(sha)?))), 100)
     }
 
     pub fn draft_notes(&self, iid: u64) -> Result<Vec<DraftNote>, Error> {

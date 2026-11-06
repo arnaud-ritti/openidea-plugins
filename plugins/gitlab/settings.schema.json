@@ -35,6 +35,11 @@
       "title": "Edit and delete your own comments and react with emoji in the merge request details",
       "default": true
     },
+    "commitsView": {
+      "type": "boolean",
+      "title": "Show the commits of the selected merge request and each commit's changes",
+      "default": true
+    },
     "cloneUsingSsh": {
       "type": "boolean",
       "title": "Clone and share using SSH",
