@@ -6,7 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0 (first release): Kafka/RabbitMQ/JMS destination index, consumer ↔ producer navigation, destination completion, Messaging tool window."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:java", "on-language:kotlin", "on-language:xml", "on-view:messaging"]
 
@@ -20,5 +20,5 @@ languages = ["java", "kotlin", "xml"]
 [[contributes.views]]
 id = "messaging"
 title = "Messaging"
-icon = "send"
+icon = "icons/spring.svg"
 location = "left"
