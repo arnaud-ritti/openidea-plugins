@@ -8,7 +8,7 @@ change-notes = "0.1.0 (first release): path variable checks with a quick fix, vi
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-language:kotlin"]
+activation = ["on-language:java", "on-language:kotlin", "on-view:endpoints"]
 
 [capabilities]
 required = ["project.read"]
@@ -20,3 +20,9 @@ languages = ["java", "kotlin"]
 [contributes.settings]
 schema = "settings.schema.json"
 title = "Spring Web"
+
+[[contributes.views]]
+id = "endpoints"
+title = "Endpoints"
+icon = "send"
+location = "left"

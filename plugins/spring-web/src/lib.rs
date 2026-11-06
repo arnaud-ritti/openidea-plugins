@@ -6,11 +6,13 @@
 use endpoints::{FileInfo, Handler};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
+use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, TextEdit, host, register_plugin,
 };
-use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
+use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, JavaFile, Param, Str};
+use spring_text::tree::Expansion;
 use spring_text::{SOURCE_GLOBS, config, contains, is_kotlin, range};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -307,6 +309,7 @@ pub struct WebTools {
     endpoints: Indexes<FileInfo>,
     settings: Indexes<Vec<(String, String)>>,
     versioning: Indexes<checks::Versioning>,
+    expansion: Expansion,
     /// Glob → when listed and the files.
     listings: BTreeMap<String, (Instant, Vec<String>)>,
 }
@@ -317,6 +320,7 @@ impl Default for WebTools {
             endpoints: Indexes::new(SOURCE_GLOBS, endpoints::file_info),
             settings: Indexes::new(CONFIG_GLOBS, view_settings),
             versioning: Indexes::new(VERSIONING_GLOBS, checks::versioning),
+            expansion: Expansion::default(),
             listings: BTreeMap::new(),
         }
     }
@@ -526,13 +530,102 @@ impl Providers for WebTools {
     }
 }
 
+impl WebTools {
+    fn endpoints_view(&mut self, view: &str, project: &Project, budget: Duration) -> View {
+        let index = self.endpoints.get(project, budget);
+        let complete = index.complete();
+        if !complete {
+            host::refresh_view(view);
+        }
+
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let mut files: Vec<(&str, Vec<&endpoints::Endpoint>)> = index
+            .iter()
+            .filter(|(_, info)| !info.endpoints.is_empty())
+            .map(|(path, info)| {
+                let mut endpoints: Vec<_> = info.endpoints.iter().collect();
+                endpoints.sort_by(|a, b| (&a.path, &a.verb).cmp(&(&b.path, &b.verb)));
+                (path, endpoints)
+            })
+            .collect();
+        files.sort_by_key(|(path, _)| *path);
+
+        if files.is_empty() {
+            let text = if complete { "No Spring endpoints found." } else { "Scanning…" };
+            return View::message(text).button(refresh);
+        }
+
+        let mut items = Vec::new();
+        let mut total = 0;
+        for (path, endpoints) in files {
+            let file_key = format!("f:{path}");
+            total += endpoints.len();
+            items.push(TreeItem::new(&file_key, file_name(path)).detail(&endpoints.len().to_string()).icon("file"));
+            for e in endpoints {
+                let key = format!("e:{}:{}:{path}", e.range.start.line, e.range.start.character);
+                let verb = if e.verb.is_empty() { "ANY" } else { e.verb.as_str() };
+                let detail = format!("{}:{}", file_name(path), e.range.start.line + 1);
+                items.push(TreeItem::new(&key, &format!("{verb} {}", e.path)).parent(&file_key).detail(&detail).icon("send"));
+            }
+        }
+        self.expansion.apply(&mut items);
+
+        let status = if complete { format!("{total} endpoints") } else { format!("{total} endpoints · scanning…") };
+        View::new(Body::Tree(items)).button(refresh).status(&status)
+    }
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+impl Views for WebTools {
+    fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let Some(project) = ctx.project() else {
+            return Ok(View::message("Open a project to see its endpoints."));
+        };
+
+        Ok(self.endpoints_view(view, &project, COMMAND_BUDGET))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if self.expansion.handle(&event) {
+            host::refresh_view(view);
+            return Ok(());
+        }
+
+        match event {
+            ViewEvent::Button(b) if b == "refresh" => {
+                if let Some(project) = ctx.project()
+                    && self.endpoints.get(&project, Duration::ZERO).complete()
+                {
+                    self.endpoints.reset();
+                }
+                host::refresh_view(view);
+            }
+            ViewEvent::Activate(key) => {
+                let mut parts = key.splitn(4, ':');
+                if let (Some("e"), Some(line), Some(column), Some(path)) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                    && let (Ok(line), Ok(column)) = (line.parse(), column.parse())
+                {
+                    host::open_location(path, line, column)?;
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
 impl Plugin for WebTools {
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         Err(Error::NotFound(format!("command {id}")))
     }
 }
 
-register_plugin!(WebTools, providers);
+register_plugin!(WebTools, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -825,5 +918,142 @@ class UserApiTests {
         let fixed = broken.replace(", version = \"2\"", "").replace("String b(", "void b(").replace("return \"\"; }\n}", "}\n}");
         tools.line_markers(&doc(path, &fixed));
         assert!(host.diagnostics().get(&key).is_none_or(|d| d.is_empty()));
+    }
+
+    const ENDPOINT_VIEW: &str = "endpoints";
+
+    const API_CONTROLLER: &str = r#"package com.acme;
+
+@RestController
+@RequestMapping("/api")
+class Users {
+    @PostMapping("/users")
+    void create() {}
+
+    @GetMapping("/users")
+    void list() {}
+
+    @RequestMapping("/any")
+    void any() {}
+
+    @GetMapping(PATH)
+    void constant() {}
+
+    @GetMapping("/odd:name/{id}")
+    void odd() {}
+}
+"#;
+
+    fn tree(view: View) -> Vec<TreeItem> {
+        match view.body {
+            Body::Tree(items) => items,
+            _ => panic!("not a tree"),
+        }
+    }
+
+    fn message(view: &View) -> &str {
+        match &view.body {
+            Body::Message(text) => text,
+            _ => panic!("not a message"),
+        }
+    }
+
+    #[test]
+    fn view_lists_annotated_and_functional_endpoints() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        host.add_file("src/main/java/com/acme/Routes.java", JAVA_ROUTES);
+        let mut tools = WebTools::default();
+        let view = tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap();
+        assert_eq!(view.status.as_deref(), Some("6 endpoints"));
+        let items = tree(view);
+        let labels: Vec<_> = items.iter().map(|i| (i.key.as_str(), i.label.as_str(), i.detail.as_deref())).collect();
+        assert_eq!(labels[0], ("f:/project/src/main/java/com/acme/Routes.java", "Routes.java", Some("2")));
+        assert_eq!(labels[1].1, "GET /api/users");
+        assert_eq!(labels[1].2, Some("Routes.java:8"));
+        assert!(labels.iter().any(|l| l.1 == "ANY /api/any" && l.2 == Some("Users.java:13")));
+        let users: Vec<_> = items.iter().filter(|i| i.parent.as_deref() == Some("f:/project/src/main/java/com/acme/Users.java")).map(|i| i.label.as_str()).collect();
+        assert_eq!(users, ["ANY /api/any", "GET /api/odd:name/{id}", "GET /api/users", "POST /api/users"]);
+    }
+
+    #[test]
+    fn view_is_a_message_while_scanning() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        let mut tools = WebTools::default();
+        let project = host.invocation().project().unwrap();
+        let view = tools.endpoints_view(ENDPOINT_VIEW, &project, Duration::ZERO);
+        assert_eq!(message(&view), "Scanning…");
+        assert_eq!(host.refreshed_views(), [ENDPOINT_VIEW]);
+    }
+
+    #[test]
+    fn view_without_endpoints_is_a_message() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Plain.java", "class Plain {}");
+        let mut tools = WebTools::default();
+        let view = tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap();
+        assert_eq!(message(&view), "No Spring endpoints found.");
+    }
+
+    #[test]
+    fn activating_an_endpoint_opens_its_location() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        let mut tools = WebTools::default();
+        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
+        let create = items.iter().find(|i| i.label == "POST /api/users").unwrap();
+        tools.handle(ENDPOINT_VIEW, ViewEvent::Activate(create.key.clone()), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations().len(), 1);
+        assert_eq!(host.opened_locations()[0].0, "/project/src/main/java/com/acme/Users.java");
+        assert_eq!(host.opened_locations()[0].1, 6);
+    }
+
+    #[test]
+    fn malformed_key_is_ignored() {
+        let host = MockHost::install();
+        let mut tools = WebTools::default();
+        for key in ["e:x:y:/a.java", "e:1", "f:/a.java", "", "e:1:2"] {
+            tools.handle(ENDPOINT_VIEW, ViewEvent::Activate(key.into()), &host.invocation()).unwrap();
+        }
+        assert!(host.opened_locations().is_empty());
+    }
+
+    #[test]
+    fn refresh_keeps_a_scan_in_progress() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Other.java", "class Other {}");
+        let mut tools = WebTools::default();
+        let project = host.invocation().project().unwrap();
+        tools.endpoints.get(&project, Duration::ZERO).update("/project/src/main/java/com/acme/Users.java", API_CONTROLLER);
+        tools.handle(ENDPOINT_VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert_eq!(tools.endpoints.get(&project, Duration::ZERO).files().len(), 1, "not reset");
+        assert_eq!(host.refreshed_views(), [ENDPOINT_VIEW]);
+
+        tools.endpoints.get(&project, COMMAND_BUDGET);
+        tools.handle(ENDPOINT_VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert!(tools.endpoints.get(&project, Duration::ZERO).files().is_empty(), "a complete index starts over");
+    }
+
+    #[test]
+    fn view_ignores_dynamic_and_non_literal_mappings() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        let mut tools = WebTools::default();
+        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
+        assert!(items.iter().all(|i| !i.label.contains("PATH")));
+        assert_eq!(items.iter().filter(|i| i.key.starts_with("e:")).count(), 4);
+    }
+
+    #[test]
+    fn paths_with_colons_survive_the_key() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        let mut tools = WebTools::default();
+        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
+        let odd = items.iter().find(|i| i.label == "GET /api/odd:name/{id}").unwrap();
+        assert!(odd.key.ends_with(":/project/src/main/java/com/acme/Users.java"));
+        tools.handle(ENDPOINT_VIEW, ViewEvent::Activate(odd.key.clone()), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations()[0].0, "/project/src/main/java/com/acme/Users.java");
     }
 }
