@@ -1,27 +1,48 @@
 id = "aritti.spring-web"
-name = "Spring Web Tools"
+name = "Spring Endpoints Tools"
 version = "0.1.0" # x-release-please-version
-description = "Spring MVC helpers for Java controllers. Checks @PathVariable parameters against the URI templates of their request mappings, with a quick fix for a misnamed variable, and links the view names a @Controller returns to their template files (Thymeleaf, FreeMarker, Mustache, Pebble, JTE, JSP) with gutter arrows, Go to Definition and completion, and links functional routes (RouterFunctions, Kotlin router DSL) and test URLs to their handlers. Checks the format of API version values, offers actions that add a @RequestMapping or @ExceptionHandler method, and lists every endpoint of the project in an Endpoints tool window. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "Spring Endpoints window and editor support for Spring MVC, WebSocket, messaging, GraphQL, Web Flow and Spring Cloud. Web: checks @PathVariable parameters against the URI templates of their request mappings with a quick fix, links the view names a @Controller returns to their template files, links functional routes and test URLs to their handlers, checks API version values, and offers actions that add a @RequestMapping or @ExceptionHandler method. WebSocket: STOMP destinations linked between handlers, sends and JavaScript/TypeScript clients. Messaging: Kafka, RabbitMQ and JMS destinations. GraphQL: controller methods linked to schema fields. Web Flow: flow definitions with a state diagram. Cloud: OpenFeign clients, Stream function bindings and Gateway predicates. One Spring Endpoints tool window switches between the HTTP route list, WebSocket destinations, messaging destinations, GraphQL endpoints, the Web Flow diagram and Feign clients; modules whose dependency the build files do not mention stay idle. Replaces aritti.spring-websocket, aritti.spring-messaging, aritti.spring-graphql, aritti.spring-webflow and aritti.spring-cloud: uninstall them to avoid duplicate windows and completions. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "Unreleased: URL gutter markers on request mappings, mapping URL completion in test URL literals, Go to Definition from static resource literals, getm/postm/putm/delm/patm/reqm snippets, Controller/REST Controller/Controller Advice file templates (Java, Kotlin), path variable checks for Kotlin controllers, opt-in hint for unresolved view names, <mvc:...> attribute checks, hint for apiVersion() in tests without an ApiVersionInserter. Endpoints now list as flat routes (method icon, path, [GET] controller) with a controller filter and a Flat/Tree toggle; Copy as curl on the Endpoints context menu (needs the optional clipboard capability). Create HTTP Request File for Endpoint writes http/<verb>-<path>.http under the project root (optional process:tee, clipboard fallback); the unresolved-view hint is now on by default but quiet when a source defines its own ViewResolver; controller, REST controller, advice, exception handler, init binder and router snippets; the generate actions, the api-version and @InitBinder checks also run on Kotlin controllers; more <mvc:...> attribute checks. 0.1.0 (first release): path variable checks with a quick fix, view name navigation and completion, API version format check, generate actions for request mapping and exception handler methods, Endpoints tool window."
+change-notes = "Unreleased: absorbs aritti.spring-websocket, aritti.spring-messaging, aritti.spring-graphql, aritti.spring-webflow and aritti.spring-cloud into one Spring Endpoints window with HTTP, WebSocket, Messaging, GraphQL, Web Flow and Feign sections; uninstall those five ids, they are no longer maintained and would show duplicate windows and completions. Settings of the absorbed plugins keep their keys but their old values are not migrated. URL gutter markers on request mappings, mapping URL completion in test URL literals, Go to Definition from static resource literals, getm/postm/putm/delm/patm/reqm snippets, Controller/REST Controller/Controller Advice file templates (Java, Kotlin), path variable checks for Kotlin controllers, opt-in hint for unresolved view names, <mvc:...> attribute checks, hint for apiVersion() in tests without an ApiVersionInserter. Endpoints now list as flat routes (method icon, path, [GET] controller) with a controller filter and a Flat/Tree toggle; Copy as curl on the Endpoints context menu (needs the optional clipboard capability). Create HTTP Request File for Endpoint writes http/<verb>-<path>.http under the project root (optional process:tee, clipboard fallback); the unresolved-view hint is now on by default but quiet when a source defines its own ViewResolver; controller, REST controller, advice, exception handler, init binder and router snippets; the generate actions, the api-version and @InitBinder checks also run on Kotlin controllers; more <mvc:...> attribute checks. 0.1.0 (first release): path variable checks with a quick fix, view name navigation and completion, API version format check, generate actions for request mapping and exception handler methods, Endpoints tool window."
 categories = ["frameworks"]
 icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-language:kotlin", "on-language:xml", "on-view:endpoints"]
+activation = [
+    "on-language:java",
+    "on-language:kotlin",
+    "on-language:xml",
+    "on-language:javascript",
+    "on-language:javascriptreact",
+    "on-language:typescript",
+    "on-language:typescriptreact",
+    "on-language:vue",
+    "on-language:graphql",
+    "on-file:**/application*.yml",
+    "on-file:**/application*.yaml",
+    "on-file:**/application*.properties",
+    "on-file:**/bootstrap*.yml",
+    "on-file:**/bootstrap*.yaml",
+    "on-file:**/bootstrap*.properties",
+    "on-view:endpoints",
+]
 
 [capabilities]
 required = ["project.read"]
-optional = ["clipboard", "process:tee"]
+optional = ["clipboard", "process:tee", "editor.read", "events"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers", "code-actions"]
 languages = ["java", "kotlin"]
 
 [[contributes.providers]]
-kinds = ["line-markers"]
-languages = ["xml"]
+kinds = ["completion", "definition", "line-markers"]
+languages = ["xml", "javascript", "javascriptreact", "typescript", "typescriptreact", "vue", "yaml", "properties"]
+
+[[contributes.providers]]
+kinds = ["definition", "line-markers"]
+languages = ["graphql"]
 
 [[contributes.fileTemplates]]
 id = "spring-controller-java"
@@ -61,13 +82,13 @@ path = "templates/ControllerAdvice.kt"
 
 [contributes.settings]
 schema = "settings.schema.json"
-title = "Spring Web"
+title = "Spring Endpoints"
 
 [[contributes.views]]
 id = "endpoints"
-title = "Endpoints"
+title = "Spring Endpoints"
 icon = "icons/spring.svg"
-location = "left"
+location = "right"
 
 [[contributes.fileIcons]]
 id = "route-get"

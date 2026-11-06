@@ -103,12 +103,57 @@ dependencies = [
 ]
 
 [[package]]
-name = "openidea-plugin-aritti-spring-web"
+name = "openidea-plugin-aritti-spring-cloud"
 version = "0.1.0"
 dependencies = [
  "openidea-plugin",
  "spring-text",
+]
+
+[[package]]
+name = "openidea-plugin-aritti-spring-graphql"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
+ "spring-text",
+]
+
+[[package]]
+name = "openidea-plugin-aritti-spring-messaging"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
+ "spring-text",
+]
+
+[[package]]
+name = "openidea-plugin-aritti-spring-web"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
+ "openidea-plugin-aritti-spring-cloud",
+ "openidea-plugin-aritti-spring-graphql",
+ "openidea-plugin-aritti-spring-messaging",
+ "openidea-plugin-aritti-spring-webflow",
+ "openidea-plugin-aritti-spring-websocket",
+ "spring-text",
  "ui-kit",
+]
+
+[[package]]
+name = "openidea-plugin-aritti-spring-webflow"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
+ "spring-text",
+]
+
+[[package]]
+name = "openidea-plugin-aritti-spring-websocket"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
+ "spring-text",
 ]
 
 [[package]]

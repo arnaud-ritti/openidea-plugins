@@ -1,0 +1,12 @@
+[package]
+name = "openidea-plugin-aritti-spring-graphql"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+embedded = []
+
+[dependencies]
+openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.38" }
+spring-text = { path = "../../../../crates/spring-text" }

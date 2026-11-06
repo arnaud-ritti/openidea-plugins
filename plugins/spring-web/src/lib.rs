@@ -8,7 +8,7 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range, Severity, TextEdit, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range, Severity, TextEdit, host,
 };
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, JavaFile, Param, Str};
@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 mod checks;
 mod endpoints;
 mod generate;
+mod window;
 mod xml_checks;
 
 pub(crate) const MAPPINGS: [&str; 6] =
@@ -691,14 +692,14 @@ impl Providers for WebTools {
         if is_xml(doc) {
             let found = xml_checks::check(&doc.text);
             let diagnostics: Vec<_> = found.iter().map(|f| f.diagnostic(&doc.text)).collect();
-            let _ = host::publish_diagnostics(&doc.path, &diagnostics);
+            publish(&doc.path, &diagnostics);
             return Vec::new();
         }
         let mut diagnostics: Vec<Diagnostic> = problems(doc).into_iter().map(|p| p.diagnostic).collect();
         diagnostics.extend(self.checked(doc));
         diagnostics.extend(self.unresolved_views(doc));
         diagnostics.extend(self.api_version_hints(doc));
-        let _ = host::publish_diagnostics(&doc.path, &diagnostics);
+        publish(&doc.path, &diagnostics);
         let links = self.links(doc).into_iter().map(|l| {
             let others = if l.targets.len() > 1 { format!(" (+{} more)", l.targets.len() - 1) } else { String::new() };
             LineMarker {
@@ -824,7 +825,7 @@ impl WebTools {
     fn endpoints_view(&mut self, view: &str, project: &Project, budget: Duration) -> View {
         let (routes, complete) = self.routes(project, budget);
         if !complete {
-            host::refresh_view(view);
+            refresh(view);
         }
 
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
@@ -863,12 +864,12 @@ impl Views for WebTools {
             {
                 self.endpoints.reset();
             }
-            host::refresh_view(view);
+            refresh(view);
             return Ok(());
         }
 
         match self.route_list().handle(&event) {
-            RouteEvent::Changed => host::refresh_view(view),
+            RouteEvent::Changed => refresh(view),
             RouteEvent::Open(route) => {
                 if let Some(location) = route.location {
                     let start = location.range.start;
@@ -904,7 +905,40 @@ impl Plugin for WebTools {
     }
 }
 
-register_plugin!(WebTools, providers, views);
+pub const WINDOW_SECTION: &str = "web";
+
+pub const OWNER_WINDOW: &str = "endpoints";
+
+pub(crate) fn refresh(_view: &str) {
+    host::refresh_view(OWNER_WINDOW);
+}
+
+thread_local! {
+    static PROBLEMS: std::cell::RefCell<Vec<Diagnostic>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(_path: &str, problems: &[Diagnostic]) {
+    PROBLEMS.set(problems.to_vec());
+}
+
+pub fn take_problems() -> Vec<Diagnostic> {
+    PROBLEMS.take()
+}
+
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const DEPENDENCY_MARKERS: [&str; 7] = ["spring", "<module>", "include(", "include '", "include \"", "(libs.", " libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &openidea_plugin::Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+openidea_plugin::register_plugin!(window::Endpoints, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -966,11 +1000,11 @@ class PetApi {
 
     #[test]
     fn checks_path_variables_and_fixes_the_name() {
-        let host = MockHost::install();
+        let _host = MockHost::install();
         let mut tools = WebTools::default();
         let d = doc("src/main/java/com/acme/web/PetApi.java", API);
         tools.line_markers(&d);
-        let problems = &host.diagnostics()["/project/src/main/java/com/acme/web/PetApi.java"];
+        let problems = &take_problems();
         let found: Vec<_> =
             problems.iter().map(|p| (p.code.as_deref().unwrap(), p.range.start.line, p.message.as_str())).collect();
         assert_eq!(
@@ -1255,19 +1289,15 @@ class UserApiTests {
         let mut tools = WebTools::default();
         let src = CONTROLLER.replace("return \"home\";", "return \"nowhere\";");
         let d = doc("src/main/java/com/acme/web/UserController.java", &src);
-        let path = "/project/src/main/java/com/acme/web/UserController.java";
-        let unresolved = |host: &MockHost| {
-            host.diagnostics().get(path).map_or(0, |d| d.iter().filter(|p| p.code.as_deref() == Some("unresolved-view")).count())
-        };
         tools.line_markers(&d);
-        let hints: Vec<_> = host.diagnostics()[path].iter().filter(|p| p.code.as_deref() == Some("unresolved-view")).cloned().collect();
+        let hints: Vec<_> = take_problems().into_iter().filter(|p| p.code.as_deref() == Some("unresolved-view")).collect();
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].severity, Severity::Hint);
         assert!(hints[0].message.contains("nowhere"));
 
         host.set_setting("springWeb.reportUnresolvedViews", "false");
         tools.line_markers(&d);
-        assert_eq!(unresolved(&host), 0);
+        assert!(take_problems().iter().all(|p| p.code.as_deref() != Some("unresolved-view")));
     }
 
     #[test]
@@ -1278,27 +1308,26 @@ class UserApiTests {
         let src = CONTROLLER.replace("return \"home\";", "return \"nowhere\";");
         let d = doc("src/main/java/com/acme/web/UserController.java", &src);
         tools.line_markers(&d);
-        let path = "/project/src/main/java/com/acme/web/UserController.java";
-        assert!(host.diagnostics().get(path).is_none_or(|d| d.iter().all(|p| p.code.as_deref() != Some("unresolved-view"))));
+        assert!(take_problems().iter().all(|p| p.code.as_deref() != Some("unresolved-view")));
     }
 
     #[test]
     fn kotlin_controllers_get_path_variable_checks() {
-        let host = MockHost::install();
+        let _host = MockHost::install();
         let src = "@RestController\nclass A {\n    @GetMapping(\"/u/{id}\")\n    fun get(@PathVariable(\"uid\") id: Long): String = \"\"\n}\n";
         let d = Document { path: "/project/src/main/kotlin/A.kt".into(), language: "kotlin".into(), version: 1, text: src.into() };
         WebTools::default().line_markers(&d);
-        let codes: Vec<_> = host.diagnostics()[&d.path].iter().map(|p| p.code.clone().unwrap()).collect();
+        let codes: Vec<_> = take_problems().iter().map(|p| p.code.clone().unwrap()).collect();
         assert!(codes.contains(&"unknown-path-variable".to_owned()), "{codes:?}");
     }
 
     #[test]
     fn mvc_xml_is_checked() {
-        let host = MockHost::install();
+        let _host = MockHost::install();
         let text = r#"<beans xmlns:mvc="http://www.springframework.org/schema/mvc"><mvc:resources mapping="/x/**"/></beans>"#;
         let d = Document { path: "/project/mvc.xml".into(), language: "xml".into(), version: 1, text: text.into() };
         assert!(WebTools::default().line_markers(&d).is_empty());
-        assert_eq!(host.diagnostics()[&d.path][0].code.as_deref(), Some("missing-attribute"));
+        assert_eq!(take_problems()[0].code.as_deref(), Some("missing-attribute"));
     }
 
     #[test]
@@ -1308,14 +1337,15 @@ class UserApiTests {
         let test = "class T { void t() { client.get().uri(\"/x\").apiVersion(\"1.1\").exchange(); } }";
         let d = doc("src/test/java/T.java", test);
         let mut tools = WebTools::default();
-        tools.line_markers(&d);
-        let hints = |host: &MockHost| host.diagnostics().get(&d.path).map_or(0, |v| v.iter().filter(|p| p.code.as_deref() == Some("api-version-without-inserter")).count());
-        assert_eq!(hints(&host), 1);
+        let hints = |tools: &mut WebTools| {
+            tools.line_markers(&d);
+            take_problems().iter().filter(|p| p.code.as_deref() == Some("api-version-without-inserter")).count()
+        };
+        assert_eq!(hints(&mut tools), 1);
 
         host.add_file("src/main/java/Cfg.java", "class Cfg { ApiVersionInserter i; }");
         let mut tools = WebTools::default();
-        tools.line_markers(&d);
-        assert_eq!(hints(&host), 0);
+        assert_eq!(hints(&mut tools), 0);
     }
 
     #[test]
@@ -1333,14 +1363,13 @@ class UserApiTests {
 
     #[test]
     fn fixed_file_publishes_empty_list() {
-        let host = MockHost::install();
-        host.add_file("src/main/resources/application.properties", "server.port=1\n");
+        let _host = MockHost::install();
+        _host.add_file("src/main/resources/application.properties", "server.port=1\n");
         let path = "src/main/java/com/acme/web/Api.java";
         let broken = "package a;\nimport org.springframework.web.bind.annotation.*;\n@RestController\nclass Api {\n    @GetMapping(path = \"/é😀\", version = \"2\")\n    String a() { return \"\"; }\n    @InitBinder\n    String b(WebDataBinder d) { return \"\"; }\n}\n";
         let mut tools = WebTools::default();
         tools.line_markers(&doc(path, broken));
-        let key = format!("/project/{path}");
-        let found = &host.diagnostics()[&key];
+        let found = &take_problems();
         let codes: Vec<_> = found.iter().filter_map(|d| d.code.as_deref()).collect();
         assert_eq!(codes, ["api-version-mismatch", "init-binder-signature"]);
         assert_eq!(found[0].range.start.line, 4);
@@ -1348,7 +1377,7 @@ class UserApiTests {
 
         let fixed = broken.replace(", version = \"2\"", "").replace("String b(", "void b(").replace("return \"\"; }\n}", "}\n}");
         tools.line_markers(&doc(path, &fixed));
-        assert!(host.diagnostics().get(&key).is_none_or(|d| d.is_empty()));
+        assert!(take_problems().is_empty());
     }
 
     const ENDPOINT_VIEW: &str = "endpoints";

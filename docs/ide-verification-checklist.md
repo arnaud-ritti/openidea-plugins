@@ -9,7 +9,7 @@ Known mock/host differences: `read_file` of a missing file is `Error::Invalid` i
 1. File template placeholders `$NAME$`, `$END$` and `$PACKAGE$` (empty package drops its line), and the name prompt: spring-beans, spring-boot, spring-data, spring-web, jpa-assist, flyway, symfony, laravel.
 2. Snippet tab stops (`$1`, `${1:x}`, `$0`) in completion items: twig, kube-explorer, laravel, openapi, symfony, spring-web.
 3. Completion inside string literals, on `@` and inside tag names (`<osgix:`, `<x-comp `).
-4. Activation of the `json`, `xml` and `yaml` providers and `on-language:*` events (spring-boot metadata, spring-websocket, spring-messaging, jpa-assist persistence.xml, liquibase, openapi, quarkus on java).
+4. Activation of the `json`, `xml` and `yaml` providers and `on-language:*` events (spring-boot metadata, spring-web (websocket, messaging), jpa-assist persistence.xml, liquibase, openapi, quarkus on java).
 5. Document indexers: Go to Declaration, gutter icons, the chooser for several targets, a marker whose key has no definition (spring-beans, symfony, laravel, quarkus, kube-explorer, liquibase, flyway); alias direction in spring-beans; hand-combined `register_plugin!` exports load (ideolog, twig, symfony, laravel, kube-explorer, spring-beans, liquibase, flyway).
 6. Code actions whose edits touch a second file (symfony SY6/9/10, laravel LA4, jpa-assist JPA-1/5, spring-boot metadata fix), several edits at the same offset, and whether `read_file` returns unsaved buffers.
 7. `pick`/`input` from a view button (gitlab edit attributes and filters, kube-explorer log viewer, ideolog patterns) and from Form buttons.
