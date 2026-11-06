@@ -907,13 +907,36 @@ fn create_snippet(ctx: &Invocation) -> Result<Option<String>, Error> {
 }
 
 /// Unverified that the host sets `ctx.editor()` while a view button is clicked; without it the form says so.
-fn create_snippet_from_form(form: &forms::SnippetForm, ctx: &Invocation) -> Result<(), Error> {
+fn focused_snippet(ctx: &Invocation) -> Result<(String, String), Error> {
     if ctx.editor().is_none() {
         return Err("Focus a file first.".into());
     }
 
-    let (path, content) = snippet_content(ctx)?;
-    post_snippet(&form.draft(path, content, &snippet_scopes(ctx))?)
+    snippet_content(ctx)
+}
+
+/// Posts and returns `None`, or returns why it waits or refused. A public snippet posts only on a confirm
+/// of the same file and content its warning named, so a focus change between the clicks publishes nothing.
+fn snippet_click(form: &mut forms::SnippetForm, confirming: Option<(String, String)>, ctx: &Invocation) -> Result<Option<String>, Error> {
+    let focused = focused_snippet(ctx)?;
+    if form.visibility == "public" {
+        match confirming {
+            None => {
+                let warning = format!("Publish {} publicly? Anyone can see a public snippet, signed in or not. Click Confirm public.", focused.0);
+                form.confirm_public = Some(focused);
+                return Ok(Some(warning));
+            }
+            Some(shown) if shown != focused => {
+                return Ok(Some("The focused file or selection changed since the warning. Nothing was published; click Create Snippet again.".into()));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let (path, content) = focused;
+    post_snippet(&form.draft(path, content, &snippet_scopes(ctx))?)?;
+
+    Ok(None)
 }
 
 /// `Personal`, and `Project <group/name>` when the repository has a gitlab.com remote.
@@ -1092,29 +1115,31 @@ impl GitLab {
 
     fn handle_new_snippet(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         let form = &mut self.new_snippet;
-        let pending = form.confirm_public;
+        let pending = form.confirm_public.take();
         match event {
             ViewEvent::Field(key, value) => {
+                let was_pending = pending.is_some();
+                form.confirm_public = pending;
                 if key != "scope" || snippet_scopes(ctx).contains(&value) {
                     form.field(&key, &value);
                 }
-                if pending == form.confirm_public {
+                if form.confirm_public.is_some() || !was_pending {
                     return Ok(());
                 }
                 form.status = None;
             }
-            ViewEvent::Button(id) if id == "create" && form.visibility == "public" => {
-                form.confirm_public = true;
-                form.status = Some("Public snippets are visible to everyone, signed in or not. Click Confirm public to create it.".into());
-            }
-            ViewEvent::Button(id) if id == "create" || (id == "confirm-public" && pending) => {
-                form.confirm_public = false;
-                match create_snippet_from_form(form, ctx) {
-                    Ok(()) => self.new_snippet = forms::SnippetForm::default(),
+            ViewEvent::Button(id) if id == "create" || (id == "confirm-public" && pending.is_some()) => {
+                let confirming = pending.filter(|_| id == "confirm-public");
+                match snippet_click(form, confirming, ctx) {
+                    Ok(None) => self.new_snippet = forms::SnippetForm::default(),
+                    Ok(Some(text)) => form.status = Some(text),
                     Err(e) => form.status = Some(e.to_string()),
                 }
             }
-            _ => return Ok(()),
+            _ => {
+                form.confirm_public = pending;
+                return Ok(());
+            }
         }
 
         host::refresh_view(NEW_SNIPPET);

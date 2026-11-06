@@ -114,8 +114,8 @@ pub struct SnippetForm {
     /// `Personal` or `Project <group/name>`, one of the listed scopes.
     pub scope: String,
     pub file_path: String,
-    /// Create was clicked on a public snippet; only `confirm-public` posts it.
-    pub confirm_public: bool,
+    /// The `(path, content)` a public create warned about; only `confirm-public` posts it, and only unchanged.
+    pub confirm_public: Option<(String, String)>,
     pub status: Option<String>,
 }
 
@@ -127,7 +127,7 @@ impl Default for SnippetForm {
             visibility: "private".into(),
             scope: PERSONAL.into(),
             file_path: String::new(),
-            confirm_public: false,
+            confirm_public: None,
             status: None,
         }
     }
@@ -144,7 +144,7 @@ impl SnippetForm {
             Field::new("file-path", "File name (empty: the focused file's path)", FieldValue::Text(self.file_path.clone())),
         ];
 
-        let create = match self.confirm_public {
+        let create = match self.confirm_public.is_some() {
             true => Button::new("confirm-public", "Confirm public").icon("warning"),
             false => Button::new("create", "Create Snippet").icon("plus"),
         };
@@ -167,7 +167,7 @@ impl SnippetForm {
             _ => return,
         }
 
-        self.confirm_public = false;
+        self.confirm_public = None;
     }
 
     /// `path` is the focused file's repository path, or its name outside the repository.

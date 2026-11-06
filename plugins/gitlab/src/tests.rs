@@ -1793,6 +1793,28 @@ mod snippet_form_tests {
     }
 
     #[test]
+    fn a_focus_change_after_the_public_warning_publishes_nothing() {
+        let host = with_file("a\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("visibility", "public")]);
+        let warned = click(&mut plugin, &host, "create");
+        assert!(warned.status.as_deref().unwrap().contains("src/a.rs"), "{warned:?}");
+
+        host.open_editor("/project/.env", "dotenv", "TOKEN=secret\n", &[(0, 0, 0, 0)]);
+        let view = click(&mut plugin, &host, "confirm-public");
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(buttons(&view), ["create"]);
+        assert!(view.status.as_deref().unwrap().contains("changed"), "{view:?}");
+
+        click(&mut plugin, &host, "create");
+        click(&mut plugin, &host, "confirm-public");
+        let posted = posted(&host);
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].1["files"][0]["file_path"], ".env");
+    }
+
+    #[test]
     fn changing_any_field_cancels_the_pending_public_confirm() {
         let host = with_file("x\n", (0, 0, 0, 0));
         let (mut plugin, _) = open(&host);
