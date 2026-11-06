@@ -83,7 +83,19 @@ fn slot_at(text: &str, start: usize) -> Option<Slot> {
     }
 }
 
+#[derive(Default)]
+pub struct Extra<'a> {
+    pub filters: Vec<&'a str>,
+    pub functions: Vec<&'a str>,
+    pub tests: Vec<&'a str>,
+}
+
+#[cfg(test)]
 pub fn items(text: &str, offset: usize, with_names: bool) -> Vec<CompletionItem> {
+    items_with(text, offset, with_names, &Extra::default())
+}
+
+pub fn items_with(text: &str, offset: usize, with_names: bool, extra: &Extra) -> Vec<CompletionItem> {
     let start = (0..offset).rev().take_while(|&i| is_identifier(text.as_bytes()[i])).last().unwrap_or(offset);
     let end = (offset..text.len()).take_while(|&i| is_identifier(text.as_bytes()[i])).last().map_or(offset, |i| i + 1);
     if text.as_bytes().get(start).is_some_and(u8::is_ascii_digit) {
@@ -93,17 +105,18 @@ pub fn items(text: &str, offset: usize, with_names: bool) -> Vec<CompletionItem>
     let Some(slot) = slot_at(text, start) else { return Vec::new() };
     let replace = Range::new(position(text, start), position(text, end));
 
-    let (names, kind) = match slot {
+    let (names, kind, project): (&[&str], _, &[&str]) = match slot {
         Slot::Html => return snippets(replace, start == end),
         _ if !with_names => return Vec::new(),
-        Slot::Tag => (TAGS, CompletionKind::Keyword),
-        Slot::Filter => (FILTERS, CompletionKind::Function),
-        Slot::Function => (FUNCTIONS, CompletionKind::Function),
-        Slot::Test => (TESTS, CompletionKind::Keyword),
+        Slot::Tag => (TAGS, CompletionKind::Keyword, &[]),
+        Slot::Filter => (FILTERS, CompletionKind::Function, &extra.filters),
+        Slot::Function => (FUNCTIONS, CompletionKind::Function, &extra.functions),
+        Slot::Test => (TESTS, CompletionKind::Keyword, &extra.tests),
     };
 
     names
         .iter()
+        .chain(project.iter().filter(|name| !names.contains(name)))
         .map(|name| {
             let mut item = CompletionItem::new(name, kind);
             item.replace = Some(replace);
