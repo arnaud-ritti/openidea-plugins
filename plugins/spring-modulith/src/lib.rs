@@ -4,11 +4,14 @@
 //! modules a module doesn't allow, and lists the modules in a tool window.
 //! Text-based, Java only: imports are what counts, not fully qualified uses.
 
-use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
+use openidea_plugin::providers::{
+    CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers,
+};
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range, Severity, TextEdit, host,
+    Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range,
+    Severity, TextEdit, host,
 };
 use spring_text::diagram::{self, Edge, Node};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
@@ -60,21 +63,35 @@ fn last_segment(package: &str) -> &str {
 
 /// A `@NamedInterface`'s name: its value, else the package's last segment.
 fn interface_name(a: &Annotation, package: &str) -> String {
-    a.strings(&["value", "name"]).first().map_or_else(|| last_segment(package).to_owned(), |s| s.value.clone())
+    a.strings(&["value", "name"])
+        .first()
+        .map_or_else(|| last_segment(package).to_owned(), |s| s.value.clone())
 }
 
 fn module_decl(a: &Annotation, text: &str) -> ModuleDecl {
     let open_fix = a.arg("type").is_none().then(|| {
         let (at, insert) = if text[..a.end].ends_with(')') {
-            (a.end - 1, if a.args.is_empty() { OPEN.to_owned() } else { format!(", {OPEN}") })
+            (
+                a.end - 1,
+                if a.args.is_empty() {
+                    OPEN.to_owned()
+                } else {
+                    format!(", {OPEN}")
+                },
+            )
         } else {
             (a.end, format!("({OPEN})"))
         };
-        TextEdit { range: range(text, at, at), text: insert }
+        TextEdit {
+            range: range(text, at, at),
+            text: insert,
+        }
     });
     ModuleDecl {
         display_name: a.strings(&["displayName"]).first().map(|s| s.value.clone()),
-        allowed: a.arg("allowedDependencies").map(|arg| arg.strings.iter().map(|s| s.value.clone()).collect()),
+        allowed: a
+            .arg("allowedDependencies")
+            .map(|arg| arg.strings.iter().map(|s| s.value.clone()).collect()),
         open: a.arg("type").is_some_and(|t| t.text.ends_with("OPEN")),
         range: range(text, a.at, a.end),
         open_fix,
@@ -91,22 +108,49 @@ pub fn scan(path: &str, text: &str) -> Option<Unit> {
         .iter()
         .filter(|t| t.outer.is_none())
         .map(|t| {
-            let named = t.annotation("NamedInterface").map(|a| interface_name(a, &f.package));
-            (t.name.clone(), range(text, t.at, t.at + t.name.len()), named)
+            let named = t
+                .annotation("NamedInterface")
+                .map(|a| interface_name(a, &f.package));
+            (
+                t.name.clone(),
+                range(text, t.at, t.at + t.name.len()),
+                named,
+            )
         })
         .collect();
     let mut roots = Vec::new();
-    for t in f.types.iter().filter(|t| t.has(&["SpringBootApplication", "Modulithic"])) {
+    for t in f
+        .types
+        .iter()
+        .filter(|t| t.has(&["SpringBootApplication", "Modulithic"]))
+    {
         roots.push(f.package.clone());
-        let more = t.annotation("Modulithic").map(|a| a.strings(&["additionalPackages"])).unwrap_or_default();
+        let more = t
+            .annotation("Modulithic")
+            .map(|a| a.strings(&["additionalPackages"]))
+            .unwrap_or_default();
         roots.extend(more.into_iter().map(|s| s.value.clone()));
     }
     let info = path.ends_with("package-info.java").then(|| Info {
-        named_interface: f.package_annotations.iter().find(|a| a.name == "NamedInterface").map(|a| interface_name(a, &f.package)),
-        module: f.package_annotations.iter().find(|a| a.name == "ApplicationModule").map(|a| module_decl(a, text)),
+        named_interface: f
+            .package_annotations
+            .iter()
+            .find(|a| a.name == "NamedInterface")
+            .map(|a| interface_name(a, &f.package)),
+        module: f
+            .package_annotations
+            .iter()
+            .find(|a| a.name == "ApplicationModule")
+            .map(|a| module_decl(a, text)),
     });
     let imports = f.imports.iter().map(|i| i.path.clone()).collect();
-    Some(Unit { package: f.package, imports, types, roots, info })
+    Some(Unit {
+        package: f.package,
+        imports,
+        types,
+        roots,
+        info,
+    })
 }
 
 /// Tests may reach into modules; Spring Modulith verifies production code.
@@ -133,7 +177,11 @@ pub struct Module {
 
 impl Module {
     fn interface_names(&self) -> BTreeSet<&str> {
-        self.interfaces.iter().chain(&self.exposed).map(|(n, _)| n.as_str()).collect()
+        self.interfaces
+            .iter()
+            .chain(&self.exposed)
+            .map(|(n, _)| n.as_str())
+            .collect()
     }
 }
 
@@ -156,15 +204,28 @@ impl Model {
     pub fn build(index: &Index<Unit>) -> Self {
         let units: Vec<(&str, &Unit)> = index.iter().filter(|(p, _)| !is_test(p)).collect();
         let mut model = Model {
-            roots: units.iter().find(|(_, u)| !u.roots.is_empty()).map(|(_, u)| u.roots.clone()).unwrap_or_default(),
+            roots: units
+                .iter()
+                .find(|(_, u)| !u.roots.is_empty())
+                .map(|(_, u)| u.roots.clone())
+                .unwrap_or_default(),
             ..Model::default()
         };
         for (path, u) in units {
             model.packages.insert(u.package.clone());
-            let Some((name, base)) = model.module_of(&u.package) else { continue };
-            let m = model.modules.entry(name.clone()).or_insert_with(|| Module { name, base, ..Module::default() });
+            let Some((name, base)) = model.module_of(&u.package) else {
+                continue;
+            };
+            let m = model.modules.entry(name.clone()).or_insert_with(|| Module {
+                name,
+                base,
+                ..Module::default()
+            });
             for (ty, r, named) in &u.types {
-                m.location.get_or_insert_with(|| Location { path: path.into(), range: *r });
+                m.location.get_or_insert_with(|| Location {
+                    path: path.into(),
+                    range: *r,
+                });
                 if let Some(n) = named {
                     m.exposed.push((n.clone(), format!("{}.{ty}", u.package)));
                 }
@@ -177,7 +238,10 @@ impl Model {
                 m.display_name = d.display_name.clone();
                 m.allowed = d.allowed.clone();
                 m.open = d.open;
-                m.location = Some(Location { path: path.into(), range: d.range });
+                m.location = Some(Location {
+                    path: path.into(),
+                    range: d.range,
+                });
                 m.open_fix = d.open_fix.clone().map(|e| (path.to_owned(), e));
             }
         }
@@ -187,7 +251,11 @@ impl Model {
     /// The module holding `package`: its name and base package.
     pub fn module_of(&self, package: &str) -> Option<(String, String)> {
         self.roots.iter().find_map(|root| {
-            let name = package.strip_prefix(root.as_str())?.strip_prefix('.')?.split('.').next()?;
+            let name = package
+                .strip_prefix(root.as_str())?
+                .strip_prefix('.')?
+                .split('.')
+                .next()?;
             Some((name.to_owned(), format!("{root}.{name}")))
         })
     }
@@ -195,7 +263,10 @@ impl Model {
     /// The module an import of module `from` reaches into, and what's wrong with it.
     pub fn check(&self, from: &str, import: &str) -> Option<(&Module, Option<Violation>)> {
         let segments: Vec<&str> = import.split('.').filter(|s| *s != "*").collect();
-        let split = segments.iter().position(|s| !s.starts_with(|c: char| c.is_lowercase())).unwrap_or(segments.len());
+        let split = segments
+            .iter()
+            .position(|s| !s.starts_with(|c: char| c.is_lowercase()))
+            .unwrap_or(segments.len());
         let package = segments[..split].join(".");
         if !self.packages.contains(&package) {
             return None;
@@ -207,28 +278,55 @@ impl Model {
             .interfaces
             .iter()
             .find(|(_, p)| package == *p || package.starts_with(&format!("{p}.")))
-            .or_else(|| b.exposed.iter().find(|(_, q)| Some(q) == qualified.as_ref()))
+            .or_else(|| {
+                b.exposed
+                    .iter()
+                    .find(|(_, q)| Some(q) == qualified.as_ref())
+            })
             .map(|(n, _)| n.as_str())
             .or_else(|| (package == b.base || b.open).then_some(""));
-        let Some(interface) = interface else { return Some((b, Some(Violation::Internal))) };
-        let wanted = if interface.is_empty() { b.name.clone() } else { format!("{}::{interface}", b.name) };
-        let allowed = self.modules.get(from).and_then(|a| a.allowed.as_ref()).is_none_or(|list| {
-            list.iter().map(|d| d.split_whitespace().collect::<String>()).any(|d| d == wanted || d == format!("{}::*", b.name))
-        });
+        let Some(interface) = interface else {
+            return Some((b, Some(Violation::Internal)));
+        };
+        let wanted = if interface.is_empty() {
+            b.name.clone()
+        } else {
+            format!("{}::{interface}", b.name)
+        };
+        let allowed = self
+            .modules
+            .get(from)
+            .and_then(|a| a.allowed.as_ref())
+            .is_none_or(|list| {
+                list.iter()
+                    .map(|d| d.split_whitespace().collect::<String>())
+                    .any(|d| d == wanted || d == format!("{}::*", b.name))
+            });
         Some((b, (!allowed).then_some(Violation::NotAllowed(wanted))))
     }
 
     /// Whether an `allowedDependencies` entry names a module (and interface) of the project.
     fn knows(&self, dependency: &str) -> bool {
         let d: String = dependency.split_whitespace().collect();
-        let (module, interface) = d.split_once("::").map_or((d.as_str(), None), |(m, i)| (m, Some(i)));
-        self.modules.get(module).is_some_and(|m| interface.is_none_or(|i| i == "*" || m.interface_names().contains(i)))
+        let (module, interface) = d
+            .split_once("::")
+            .map_or((d.as_str(), None), |(m, i)| (m, Some(i)));
+        self.modules
+            .get(module)
+            .is_some_and(|m| interface.is_none_or(|i| i == "*" || m.interface_names().contains(i)))
     }
 }
 
 /// The problems of a Java file: `(range, module reached, violation)` per import.
-fn violations<'m>(model: &'m Model, path: &str, f: &JavaFile, text: &str) -> Vec<(Range, &'m Module, Violation)> {
-    let Some((from, _)) = model.module_of(&f.package).filter(|_| !is_test(path)) else { return Vec::new() };
+fn violations<'m>(
+    model: &'m Model,
+    path: &str,
+    f: &JavaFile,
+    text: &str,
+) -> Vec<(Range, &'m Module, Violation)> {
+    let Some((from, _)) = model.module_of(&f.package).filter(|_| !is_test(path)) else {
+        return Vec::new();
+    };
     f.imports
         .iter()
         .filter_map(|i| {
@@ -242,19 +340,34 @@ fn message(import: &str, b: &Module, v: &Violation, from: &str) -> String {
     match v {
         Violation::Internal => {
             let what = import.strip_suffix(".*").unwrap_or(last_segment(import));
-            format!("`{what}` is internal to module `{}`: use its API package or a named interface.", b.name)
+            format!(
+                "`{what}` is internal to module `{}`: use its API package or a named interface.",
+                b.name
+            )
         }
-        Violation::NotAllowed(d) => format!("Module `{from}` doesn't list `{d}` in its allowedDependencies."),
+        Violation::NotAllowed(d) => {
+            format!("Module `{from}` doesn't list `{d}` in its allowedDependencies.")
+        }
     }
 }
 
 /// The `allowedDependencies` literals of a `package-info.java`.
 fn allowed_literals(f: &JavaFile) -> Vec<&Str> {
-    f.package_annotations.iter().filter(|a| a.name == "ApplicationModule").flat_map(|a| a.strings(&["allowedDependencies"])).collect()
+    f.package_annotations
+        .iter()
+        .filter(|a| a.name == "ApplicationModule")
+        .flat_map(|a| a.strings(&["allowedDependencies"]))
+        .collect()
 }
 
 /// Nothing until the project has been read once: a named interface not read yet would look internal.
-fn diagnostics(model: &Model, complete: bool, path: &str, f: &JavaFile, text: &str) -> Vec<Diagnostic> {
+fn diagnostics(
+    model: &Model,
+    complete: bool,
+    path: &str,
+    f: &JavaFile,
+    text: &str,
+) -> Vec<Diagnostic> {
     if !complete {
         return Vec::new();
     }
@@ -262,14 +375,32 @@ fn diagnostics(model: &Model, complete: bool, path: &str, f: &JavaFile, text: &s
     let mut out: Vec<Diagnostic> = violations(model, path, f, text)
         .into_iter()
         .map(|(r, b, v)| {
-            let code = if v == Violation::Internal { "module-internal" } else { "module-not-allowed" };
-            Diagnostic::new(r, Severity::Warning, message(&text_of(text, r), b, &v, &from)).code(code)
+            let code = if v == Violation::Internal {
+                "module-internal"
+            } else {
+                "module-not-allowed"
+            };
+            Diagnostic::new(
+                r,
+                Severity::Warning,
+                message(&text_of(text, r), b, &v, &from),
+            )
+            .code(code)
         })
         .collect();
     if path.ends_with("package-info.java") {
-        for s in allowed_literals(f).into_iter().filter(|s| !model.knows(&s.value)) {
-            let message = format!("`{}` is not an application module or named interface.", s.value);
-            out.push(Diagnostic::new(range(text, s.at, s.end), Severity::Warning, message).code("unknown-module"));
+        for s in allowed_literals(f)
+            .into_iter()
+            .filter(|s| !model.knows(&s.value))
+        {
+            let message = format!(
+                "`{}` is not an application module or named interface.",
+                s.value
+            );
+            out.push(
+                Diagnostic::new(range(text, s.at, s.end), Severity::Warning, message)
+                    .code("unknown-module"),
+            );
         }
     }
     out
@@ -288,34 +419,70 @@ pub struct ModulithTools {
 
 impl Default for ModulithTools {
     fn default() -> Self {
-        Self { indexes: Indexes::new(&["**/*.java"], scan), expansion: Expansion::default() }
+        Self {
+            indexes: Indexes::new(&["**/*.java"], scan),
+            expansion: Expansion::default(),
+        }
     }
 }
 
 impl Providers for ModulithTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        let Some(index) = self.indexes.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        let Some(index) = self
+            .indexes
+            .for_document(&doc.path, &doc.text, PROVIDER_BUDGET)
+        else {
+            return Vec::new();
+        };
         let model = Model::build(index);
-        let problems = diagnostics(&model, index.complete(), &doc.path, &java::parse(&doc.text), &doc.text);
+        let problems = diagnostics(
+            &model,
+            index.complete(),
+            &doc.path,
+            &java::parse(&doc.text),
+            &doc.text,
+        );
         let _ = host::publish_diagnostics(&doc.path, &problems);
         Vec::new()
     }
 
-    fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+    fn completion(
+        &mut self,
+        doc: &Document,
+        at: Position,
+        _trigger: Option<&str>,
+    ) -> Vec<CompletionItem> {
         if !doc.path.ends_with("package-info.java") {
             return Vec::new();
         }
         let f = java::parse(&doc.text);
-        let Some(at) = offset(&doc.text, at) else { return Vec::new() };
-        let Some(s) = allowed_literals(&f).into_iter().find(|s| s.holds(at)) else { return Vec::new() };
-        let Some(index) = self.indexes.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        let Some(at) = offset(&doc.text, at) else {
+            return Vec::new();
+        };
+        let Some(s) = allowed_literals(&f).into_iter().find(|s| s.holds(at)) else {
+            return Vec::new();
+        };
+        let Some(index) = self
+            .indexes
+            .for_document(&doc.path, &doc.text, PROVIDER_BUDGET)
+        else {
+            return Vec::new();
+        };
         let model = Model::build(index);
         let own = model.module_of(&f.package).map(|m| m.0);
         let replace = Some(range(&doc.text, s.at, s.end));
         let mut out = Vec::new();
-        for m in model.modules.values().filter(|m| Some(&m.name) != own.as_ref()) {
+        for m in model
+            .modules
+            .values()
+            .filter(|m| Some(&m.name) != own.as_ref())
+        {
             let detail = m.display_name.clone().unwrap_or_else(|| m.base.clone());
-            out.push(CompletionItem { detail: Some(detail), replace, ..CompletionItem::new(&m.name, CompletionKind::Module) });
+            out.push(CompletionItem {
+                detail: Some(detail),
+                replace,
+                ..CompletionItem::new(&m.name, CompletionKind::Module)
+            });
             for i in m.interface_names() {
                 let label = format!("{}::{i}", m.name);
                 out.push(CompletionItem {
@@ -329,7 +496,12 @@ impl Providers for ModulithTools {
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
-        let Some(index) = self.indexes.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        let Some(index) = self
+            .indexes
+            .for_document(&doc.path, &doc.text, PROVIDER_BUDGET)
+        else {
+            return Vec::new();
+        };
         let model = Model::build(index);
         violations(&model, &doc.path, &java::parse(&doc.text), &doc.text)
             .into_iter()
@@ -359,8 +531,12 @@ type Dependencies<'m> = BTreeMap<&'m str, BTreeMap<&'m str, Option<Violation>>>;
 fn dependencies<'m>(model: &'m Model, index: &Index<Unit>) -> Dependencies<'m> {
     let mut dependencies: Dependencies = BTreeMap::new();
     for (_, u) in index.iter().filter(|(p, _)| !is_test(p)) {
-        let Some((from, _)) = model.module_of(&u.package) else { continue };
-        let Some(a) = model.modules.get(&from) else { continue };
+        let Some((from, _)) = model.module_of(&u.package) else {
+            continue;
+        };
+        let Some(a) = model.modules.get(&from) else {
+            continue;
+        };
         let found = dependencies.entry(a.name.as_str()).or_default();
         for i in &u.imports {
             if let Some((b, v)) = model.check(&from, i) {
@@ -386,7 +562,9 @@ fn diagram_of(model: &Model, index: &Index<Unit>) -> (Vec<Node>, Vec<Edge>) {
     let nodes = model
         .modules
         .values()
-        .map(|m| Node::new(&key(&m.name, ""), &m.name).detail(if m.open { "open" } else { "closed" }))
+        .map(|m| {
+            Node::new(&key(&m.name, ""), &m.name).detail(if m.open { "open" } else { "closed" })
+        })
         .collect();
     let edges = dependencies(model, index)
         .into_iter()
@@ -412,7 +590,10 @@ pub fn plantuml(model: &Model, index: &Index<Unit>) -> String {
     for (from, found) in dependencies(model, index) {
         for (to, v) in found {
             match v {
-                Some(v) => out.push_str(&format!("[{from}] -[#red]-> [{to}] : {}\n", violation_label(&v))),
+                Some(v) => out.push_str(&format!(
+                    "[{from}] -[#red]-> [{to}] : {}\n",
+                    violation_label(&v)
+                )),
                 None => out.push_str(&format!("[{from}] --> [{to}]\n")),
             }
         }
@@ -422,8 +603,17 @@ pub fn plantuml(model: &Model, index: &Index<Unit>) -> String {
 }
 
 impl Views for ModulithTools {
-    fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
-        let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its application modules.")) };
+    fn render(
+        &mut self,
+        view: &str,
+        _viewport: Option<Viewport>,
+        ctx: &Invocation,
+    ) -> Result<View, Error> {
+        let Some(project) = ctx.project() else {
+            return Ok(View::message(
+                "Open a project to see its application modules.",
+            ));
+        };
         let index = self.indexes.get(&project, COMMAND_BUDGET);
         let complete = index.complete();
         if !complete {
@@ -444,35 +634,72 @@ impl Views for ModulithTools {
         if view == id(DIAGRAM_VIEW) {
             let (nodes, edges) = diagram_of(&model, index);
             let status = format!("{} modules · {} dependencies", nodes.len(), edges.len());
-            return Ok(View::new(Body::Html(diagram::html(&nodes, &edges, "No application modules."))).button(refresh).status(&status));
+            return Ok(View::new(Body::Html(diagram::html(
+                &nodes,
+                &edges,
+                "No application modules.",
+            )))
+            .button(refresh)
+            .status(&status));
         }
         let dependencies = dependencies(&model, index);
         let mut items = Vec::new();
         for m in model.modules.values() {
-            let mut detail = if m.open { "open".to_owned() } else { "closed".to_owned() };
+            let mut detail = if m.open {
+                "open".to_owned()
+            } else {
+                "closed".to_owned()
+            };
             if let Some(d) = &m.display_name {
                 detail = format!("{detail} · {d}");
             }
             let parent = key(&m.name, "");
-            items.push(TreeItem::new(&parent, &m.name).detail(&detail).icon("module").expandable(false));
+            items.push(
+                TreeItem::new(&parent, &m.name)
+                    .detail(&detail)
+                    .icon("module")
+                    .expandable(false),
+            );
             for i in m.interface_names() {
-                items.push(TreeItem::new(&key(&m.name, &format!("i:{i}")), i).parent(&parent).detail("named interface").icon("interface"));
+                items.push(
+                    TreeItem::new(&key(&m.name, &format!("i:{i}")), i)
+                        .parent(&parent)
+                        .detail("named interface")
+                        .icon("interface"),
+                );
             }
             for d in m.allowed.iter().flatten() {
-                items.push(TreeItem::new(&key(&m.name, &format!("a:{d}")), d).parent(&parent).detail("allowed dependency").icon("module"));
+                items.push(
+                    TreeItem::new(&key(&m.name, &format!("a:{d}")), d)
+                        .parent(&parent)
+                        .detail("allowed dependency")
+                        .icon("module"),
+                );
             }
             for (b, v) in dependencies.get(m.name.as_str()).into_iter().flatten() {
                 let (detail, icon) = match v {
                     None => ("dependency".to_owned(), "module"),
-                    Some(Violation::Internal) => ("dependency on internal types".to_owned(), "warning"),
-                    Some(Violation::NotAllowed(d)) => (format!("dependency on {d}, not in allowedDependencies"), "warning"),
+                    Some(Violation::Internal) => {
+                        ("dependency on internal types".to_owned(), "warning")
+                    }
+                    Some(Violation::NotAllowed(d)) => (
+                        format!("dependency on {d}, not in allowedDependencies"),
+                        "warning",
+                    ),
                 };
-                let item = TreeItem::new(&key(b, &format!("d:{}", m.name)), b).parent(&parent).detail(&detail).icon(icon);
+                let item = TreeItem::new(&key(b, &format!("d:{}", m.name)), b)
+                    .parent(&parent)
+                    .detail(&detail)
+                    .icon(icon);
                 items.push(item);
             }
         }
         self.expansion.apply(&mut items);
-        let mut status = format!("{} modules in {}", model.modules.len(), model.roots.join(", "));
+        let mut status = format!(
+            "{} modules in {}",
+            model.modules.len(),
+            model.roots.join(", ")
+        );
         if !complete {
             status.push_str(" · scanning…");
         }
@@ -496,8 +723,12 @@ impl Views for ModulithTools {
                 refresh(view);
             }
             ViewEvent::Activate(key) | ViewEvent::Message(key) => {
-                let Some(name) = key.strip_prefix("open:").and_then(|k| k.split('#').next()) else { return Ok(()) };
-                let Some(project) = ctx.project() else { return Ok(()) };
+                let Some(name) = key.strip_prefix("open:").and_then(|k| k.split('#').next()) else {
+                    return Ok(());
+                };
+                let Some(project) = ctx.project() else {
+                    return Ok(());
+                };
                 let model = Model::build(self.indexes.get(&project, COMMAND_BUDGET));
                 if let Some(at) = model.modules.get(name).and_then(|m| m.location.as_ref()) {
                     host::open_location(&at.path, at.range.start.line, at.range.start.character)?;
@@ -510,19 +741,34 @@ impl Views for ModulithTools {
 }
 
 impl Plugin for ModulithTools {
-    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(
+        &mut self,
+        id: &str,
+        ctx: &Invocation,
+        _arg: Option<&str>,
+    ) -> Result<Option<String>, Error> {
         if id != self::id(COPY_DOCS) {
             return Err(Error::NotFound(format!("command {id}")));
         }
-        let project = ctx.project().ok_or_else(|| Error::Invalid("Open a project first.".into()))?;
+        let project = ctx
+            .project()
+            .ok_or_else(|| Error::Invalid("Open a project first.".into()))?;
         let index = self.indexes.get(&project, COMMAND_BUDGET);
         let model = Model::build(index);
         if model.modules.is_empty() {
-            host::notify(NotificationLevel::Info, TITLE, "No application modules found.");
+            host::notify(
+                NotificationLevel::Info,
+                TITLE,
+                "No application modules found.",
+            );
             return Ok(None);
         }
         match host::copy_to_clipboard(&plantuml(&model, index)) {
-            Ok(()) => host::notify(NotificationLevel::Info, TITLE, "PlantUML module diagram copied to the clipboard."),
+            Ok(()) => host::notify(
+                NotificationLevel::Info,
+                TITLE,
+                "PlantUML module diagram copied to the clipboard.",
+            ),
             Err(Error::Denied(_)) => host::notify(
                 NotificationLevel::Warning,
                 TITLE,
@@ -539,11 +785,19 @@ pub const WINDOW_SECTION: &str = "modulith";
 const OWNER_WINDOW: &str = "structure";
 
 fn window(view: &str) -> &str {
-    if cfg!(feature = "embedded") { OWNER_WINDOW } else { view }
+    if cfg!(feature = "embedded") {
+        OWNER_WINDOW
+    } else {
+        view
+    }
 }
 
 fn id(name: &str) -> String {
-    if cfg!(feature = "embedded") { format!("{WINDOW_SECTION}.{name}") } else { name.to_owned() }
+    if cfg!(feature = "embedded") {
+        format!("{WINDOW_SECTION}.{name}")
+    } else {
+        name.to_owned()
+    }
 }
 
 pub(crate) fn refresh(view: &str) {
@@ -551,15 +805,29 @@ pub(crate) fn refresh(view: &str) {
 }
 
 const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
-const DEPENDENCY_MARKERS: [&str; 4] = ["spring-modulith", "<module>", "include", "libs."];
+const DEPENDENCY_MARKERS: [&str; 7] = [
+    "spring-modulith",
+    "<module>",
+    "include(",
+    "include '",
+    "include \"",
+    "(libs.",
+    " libs.",
+];
 
 /// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
 pub fn applies(project: &Project) -> bool {
-    let Ok(root) = project.root() else { return true };
+    let Ok(root) = project.root() else {
+        return true;
+    };
     BUILD_FILES
         .iter()
         .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
-        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+        .any(|build| {
+            DEPENDENCY_MARKERS
+                .iter()
+                .any(|marker| build.contains(marker))
+        })
 }
 
 #[cfg(not(feature = "embedded"))]
@@ -578,17 +846,38 @@ mod tests {
     fn setup() -> MockHost {
         let host = MockHost::install();
         let files = [
-            ("Application.java", "package com.acme;\n\n@SpringBootApplication\npublic class Application {}\n"),
-            ("order/OrderService.java", "package com.acme.order;\n\npublic class OrderService {}\n"),
-            ("order/internal/OrderRepository.java", "package com.acme.order.internal;\n\nclass OrderRepository {}\n"),
+            (
+                "Application.java",
+                "package com.acme;\n\n@SpringBootApplication\npublic class Application {}\n",
+            ),
+            (
+                "order/OrderService.java",
+                "package com.acme.order;\n\npublic class OrderService {}\n",
+            ),
+            (
+                "order/internal/OrderRepository.java",
+                "package com.acme.order.internal;\n\nclass OrderRepository {}\n",
+            ),
             (
                 "order/package-info.java",
                 "@ApplicationModule(displayName = \"Orders\")\npackage com.acme.order;\n\nimport org.springframework.modulith.ApplicationModule;\n",
             ),
-            ("inventory/Inventory.java", "package com.acme.inventory;\n\npublic class Inventory {}\n"),
-            ("inventory/api/StockApi.java", "package com.acme.inventory.api;\n\npublic interface StockApi {}\n"),
-            ("inventory/api/package-info.java", "@org.springframework.modulith.NamedInterface(\"api\")\npackage com.acme.inventory.api;\n"),
-            ("inventory/spi/Hook.java", "package com.acme.inventory.spi;\n\n@NamedInterface(\"hooks\")\npublic interface Hook {}\n"),
+            (
+                "inventory/Inventory.java",
+                "package com.acme.inventory;\n\npublic class Inventory {}\n",
+            ),
+            (
+                "inventory/api/StockApi.java",
+                "package com.acme.inventory.api;\n\npublic interface StockApi {}\n",
+            ),
+            (
+                "inventory/api/package-info.java",
+                "@org.springframework.modulith.NamedInterface(\"api\")\npackage com.acme.inventory.api;\n",
+            ),
+            (
+                "inventory/spi/Hook.java",
+                "package com.acme.inventory.spi;\n\n@NamedInterface(\"hooks\")\npublic interface Hook {}\n",
+            ),
             (
                 "shipping/package-info.java",
                 "@ApplicationModule(allowedDependencies = {\"order\", \"inventory :: api\", \"billing\"})\npackage com.acme.shipping;\n",
@@ -616,7 +905,12 @@ class Shipper {}
 ";
 
     fn doc(path: &str, text: &str) -> Document {
-        Document { path: format!("{SRC}{path}"), language: "java".into(), version: 1, text: text.into() }
+        Document {
+            path: format!("{SRC}{path}"),
+            language: "java".into(),
+            version: 1,
+            text: text.into(),
+        }
     }
 
     fn pos(text: &str, needle: &str) -> Position {
@@ -625,7 +919,11 @@ class Shipper {}
 
     #[test]
     fn reads_package_info() {
-        let u = scan("/p/package-info.java", "@ApplicationModule(\n  type = ApplicationModule.Type.OPEN)\npackage a.b;").unwrap();
+        let u = scan(
+            "/p/package-info.java",
+            "@ApplicationModule(\n  type = ApplicationModule.Type.OPEN)\npackage a.b;",
+        )
+        .unwrap();
         let m = u.info.unwrap().module.unwrap();
         assert!(m.open);
         assert_eq!(m.open_fix, None);
@@ -635,37 +933,65 @@ class Shipper {}
             let at = offset(text, e.range.start).unwrap();
             format!("{}{}{}", &text[..at], e.text, &text[at..])
         };
-        assert_eq!(fix("@ApplicationModule\npackage a.b;"), format!("@ApplicationModule({OPEN})\npackage a.b;"));
-        assert_eq!(fix("@ApplicationModule()\npackage a.b;"), format!("@ApplicationModule({OPEN})\npackage a.b;"));
-        assert_eq!(fix("@ApplicationModule(displayName = \"B\")\npackage a.b;"), format!("@ApplicationModule(displayName = \"B\", {OPEN})\npackage a.b;"));
+        assert_eq!(
+            fix("@ApplicationModule\npackage a.b;"),
+            format!("@ApplicationModule({OPEN})\npackage a.b;")
+        );
+        assert_eq!(
+            fix("@ApplicationModule()\npackage a.b;"),
+            format!("@ApplicationModule({OPEN})\npackage a.b;")
+        );
+        assert_eq!(
+            fix("@ApplicationModule(displayName = \"B\")\npackage a.b;"),
+            format!("@ApplicationModule(displayName = \"B\", {OPEN})\npackage a.b;")
+        );
     }
 
     #[test]
     fn warns_about_internal_and_unlisted_dependencies() {
         let host = setup();
         let mut tools = ModulithTools::default();
-        assert!(tools.line_markers(&doc("shipping/Shipper.java", SHIPPER)).is_empty());
+        assert!(
+            tools
+                .line_markers(&doc("shipping/Shipper.java", SHIPPER))
+                .is_empty()
+        );
         let problems = &host.diagnostics()[&format!("{SRC}shipping/Shipper.java")];
-        let found: Vec<_> = problems.iter().map(|p| (p.code.as_deref().unwrap(), p.range.start, p.message.as_str())).collect();
-        assert_eq!(found, [
-            (
-                "module-internal",
-                pos(SHIPPER, "com.acme.order.internal"),
-                "`OrderRepository` is internal to module `order`: use its API package or a named interface."
-            ),
-            (
-                "module-not-allowed",
-                pos(SHIPPER, "com.acme.inventory.Inventory"),
-                "Module `shipping` doesn't list `inventory` in its allowedDependencies."
-            ),
-            (
-                "module-not-allowed",
-                pos(SHIPPER, "com.acme.inventory.spi"),
-                "Module `shipping` doesn't list `inventory::hooks` in its allowedDependencies."
-            ),
-        ]);
+        let found: Vec<_> = problems
+            .iter()
+            .map(|p| {
+                (
+                    p.code.as_deref().unwrap(),
+                    p.range.start,
+                    p.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "module-internal",
+                    pos(SHIPPER, "com.acme.order.internal"),
+                    "`OrderRepository` is internal to module `order`: use its API package or a named interface."
+                ),
+                (
+                    "module-not-allowed",
+                    pos(SHIPPER, "com.acme.inventory.Inventory"),
+                    "Module `shipping` doesn't list `inventory` in its allowedDependencies."
+                ),
+                (
+                    "module-not-allowed",
+                    pos(SHIPPER, "com.acme.inventory.spi"),
+                    "Module `shipping` doesn't list `inventory::hooks` in its allowedDependencies."
+                ),
+            ]
+        );
         let test = "package com.acme.shipping;\nimport com.acme.order.internal.OrderRepository;\nclass ShipperTest {}\n";
-        let test_doc = Document { path: "/project/src/test/java/com/acme/shipping/ShipperTest.java".into(), ..doc("", test) };
+        let test_doc = Document {
+            path: "/project/src/test/java/com/acme/shipping/ShipperTest.java".into(),
+            ..doc("", test)
+        };
         tools.line_markers(&test_doc);
         assert!(!host.diagnostics().contains_key(&test_doc.path));
     }
@@ -678,11 +1004,27 @@ class Shipper {}
         let d = doc("shipping/package-info.java", text);
         tools.line_markers(&d);
         let problems = &host.diagnostics()[&d.path];
-        let found: Vec<_> = problems.iter().map(|p| (p.code.as_deref().unwrap(), p.range.start)).collect();
-        assert_eq!(found, [("unknown-module", pos(text, "billing")), ("unknown-module", pos(text, "order::x"))]);
+        let found: Vec<_> = problems
+            .iter()
+            .map(|p| (p.code.as_deref().unwrap(), p.range.start))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("unknown-module", pos(text, "billing")),
+                ("unknown-module", pos(text, "order::x"))
+            ]
+        );
 
-        let labels: Vec<_> = tools.completion(&d, pos(text, "billing"), None).into_iter().map(|i| i.label).collect();
-        assert_eq!(labels, ["inventory", "inventory::api", "inventory::hooks", "order"]);
+        let labels: Vec<_> = tools
+            .completion(&d, pos(text, "billing"), None)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(
+            labels,
+            ["inventory", "inventory::api", "inventory::hooks", "order"]
+        );
     }
 
     #[test]
@@ -693,7 +1035,10 @@ class Shipper {}
         let at = pos(SHIPPER, "order.internal");
         let actions = tools.code_actions(&d, Range::new(at, at));
         assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].title, "Make module `order` open (exposes all its types)");
+        assert_eq!(
+            actions[0].title,
+            "Make module `order` open (exposes all its types)"
+        );
         let (path, edits) = &actions[0].edits[0];
         assert_eq!(path, &format!("{SRC}order/package-info.java"));
         assert_eq!(edits[0].text, format!(", {OPEN}"));
@@ -706,28 +1051,54 @@ class Shipper {}
         let host = setup();
         let mut tools = ModulithTools::default();
         let view = tools.render(VIEW, None, &host.invocation()).unwrap();
-        let Body::Tree(items) = view.body else { panic!("tree expected") };
+        let Body::Tree(items) = view.body else {
+            panic!("tree expected")
+        };
         let rows: Vec<_> = items
             .iter()
-            .map(|i| (i.parent.is_some(), i.label.as_str(), i.detail.as_deref().unwrap_or_default(), i.icon.as_deref().unwrap()))
+            .map(|i| {
+                (
+                    i.parent.is_some(),
+                    i.label.as_str(),
+                    i.detail.as_deref().unwrap_or_default(),
+                    i.icon.as_deref().unwrap(),
+                )
+            })
             .collect();
-        assert_eq!(rows, [
-            (false, "inventory", "closed", "module"),
-            (true, "api", "named interface", "interface"),
-            (true, "hooks", "named interface", "interface"),
-            (false, "order", "closed · Orders", "module"),
-            (false, "shipping", "closed", "module"),
-            (true, "order", "allowed dependency", "module"),
-            (true, "inventory :: api", "allowed dependency", "module"),
-            (true, "billing", "allowed dependency", "module"),
-            (true, "inventory", "dependency on inventory, not in allowedDependencies", "warning"),
-            (true, "order", "dependency on internal types", "warning"),
-        ]);
+        assert_eq!(
+            rows,
+            [
+                (false, "inventory", "closed", "module"),
+                (true, "api", "named interface", "interface"),
+                (true, "hooks", "named interface", "interface"),
+                (false, "order", "closed · Orders", "module"),
+                (false, "shipping", "closed", "module"),
+                (true, "order", "allowed dependency", "module"),
+                (true, "inventory :: api", "allowed dependency", "module"),
+                (true, "billing", "allowed dependency", "module"),
+                (
+                    true,
+                    "inventory",
+                    "dependency on inventory, not in allowedDependencies",
+                    "warning"
+                ),
+                (true, "order", "dependency on internal types", "warning"),
+            ]
+        );
         assert_eq!(view.status.as_deref(), Some("3 modules in com.acme"));
         assert!(host.refreshed_views().is_empty(), "the scan is complete");
         let dependency = items.iter().rfind(|i| i.label == "order").unwrap();
-        tools.handle(VIEW, ViewEvent::Activate(dependency.key.clone()), &host.invocation()).unwrap();
-        assert_eq!(host.opened_locations(), [(format!("{SRC}order/package-info.java"), 0, 0)]);
+        tools
+            .handle(
+                VIEW,
+                ViewEvent::Activate(dependency.key.clone()),
+                &host.invocation(),
+            )
+            .unwrap();
+        assert_eq!(
+            host.opened_locations(),
+            [(format!("{SRC}order/package-info.java"), 0, 0)]
+        );
     }
 
     #[test]
@@ -736,17 +1107,30 @@ class Shipper {}
         let mut tools = ModulithTools::default();
         let module = |tools: &mut ModulithTools| {
             let view = tools.render(VIEW, None, &host.invocation()).unwrap();
-            let Body::Tree(items) = view.body else { panic!("tree expected") };
-            items.into_iter().find(|i| i.label == "inventory" && i.parent.is_none()).unwrap()
+            let Body::Tree(items) = view.body else {
+                panic!("tree expected")
+            };
+            items
+                .into_iter()
+                .find(|i| i.label == "inventory" && i.parent.is_none())
+                .unwrap()
         };
         let inventory = module(&mut tools);
         assert!(inventory.expandable && !inventory.expanded);
 
-        tools.handle(VIEW, ViewEvent::Expand(inventory.key.clone()), &host.invocation()).unwrap();
+        tools
+            .handle(
+                VIEW,
+                ViewEvent::Expand(inventory.key.clone()),
+                &host.invocation(),
+            )
+            .unwrap();
         assert_eq!(host.refreshed_views(), [window(VIEW)]);
         assert!(module(&mut tools).expanded);
 
-        tools.handle(VIEW, ViewEvent::Collapse(inventory.key), &host.invocation()).unwrap();
+        tools
+            .handle(VIEW, ViewEvent::Collapse(inventory.key), &host.invocation())
+            .unwrap();
         assert!(!module(&mut tools).expanded);
     }
 
@@ -755,60 +1139,150 @@ class Shipper {}
         let host = setup();
         let mut tools = ModulithTools::default();
         let project = host.invocation().project().unwrap();
-        tools.indexes.get(&project, Duration::ZERO).update(&format!("{SRC}shipping/Shipper.java"), SHIPPER);
-        tools.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
-        assert_eq!(tools.indexes.get(&project, Duration::ZERO).files().len(), 1, "not reset");
+        tools
+            .indexes
+            .get(&project, Duration::ZERO)
+            .update(&format!("{SRC}shipping/Shipper.java"), SHIPPER);
+        tools
+            .handle(
+                VIEW,
+                ViewEvent::Button("refresh".into()),
+                &host.invocation(),
+            )
+            .unwrap();
+        assert_eq!(
+            tools.indexes.get(&project, Duration::ZERO).files().len(),
+            1,
+            "not reset"
+        );
         assert_eq!(host.refreshed_views(), [window(VIEW)]);
 
         tools.indexes.get(&project, COMMAND_BUDGET);
-        tools.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
-        assert!(tools.indexes.get(&project, Duration::ZERO).files().is_empty(), "a complete index starts over");
+        tools
+            .handle(
+                VIEW,
+                ViewEvent::Button("refresh".into()),
+                &host.invocation(),
+            )
+            .unwrap();
+        assert!(
+            tools
+                .indexes
+                .get(&project, Duration::ZERO)
+                .files()
+                .is_empty(),
+            "a complete index starts over"
+        );
     }
 
     #[test]
     fn modulith_diagram_has_expected_nodes_and_edges() {
         let host = setup();
         let mut tools = ModulithTools::default();
-        let index = tools.indexes.get(&host.invocation().project().unwrap(), COMMAND_BUDGET);
+        let index = tools
+            .indexes
+            .get(&host.invocation().project().unwrap(), COMMAND_BUDGET);
         let model = Model::build(index);
         let (nodes, edges) = diagram_of(&model, index);
-        let nodes: Vec<_> = nodes.iter().map(|n| (n.id.as_str(), n.label.as_str(), n.detail.as_deref())).collect();
-        assert_eq!(nodes, [
-            ("open:inventory#", "inventory", Some("closed")),
-            ("open:order#", "order", Some("closed")),
-            ("open:shipping#", "shipping", Some("closed")),
-        ]);
-        let edges: Vec<_> = edges.iter().map(|e| (e.from.as_str(), e.to.as_str(), e.label.as_deref(), e.warning)).collect();
-        assert_eq!(edges, [
-            ("open:shipping#", "open:inventory#", Some("inventory not allowed"), true),
-            ("open:shipping#", "open:order#", Some("internal types"), true),
-        ]);
+        let nodes: Vec<_> = nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.label.as_str(), n.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            nodes,
+            [
+                ("open:inventory#", "inventory", Some("closed")),
+                ("open:order#", "order", Some("closed")),
+                ("open:shipping#", "shipping", Some("closed")),
+            ]
+        );
+        let edges: Vec<_> = edges
+            .iter()
+            .map(|e| {
+                (
+                    e.from.as_str(),
+                    e.to.as_str(),
+                    e.label.as_deref(),
+                    e.warning,
+                )
+            })
+            .collect();
+        assert_eq!(
+            edges,
+            [
+                (
+                    "open:shipping#",
+                    "open:inventory#",
+                    Some("inventory not allowed"),
+                    true
+                ),
+                (
+                    "open:shipping#",
+                    "open:order#",
+                    Some("internal types"),
+                    true
+                ),
+            ]
+        );
 
-        let view = tools.render(&id(DIAGRAM_VIEW), None, &host.invocation()).unwrap();
-        let Body::Html(page) = view.body else { panic!("html expected") };
+        let view = tools
+            .render(&id(DIAGRAM_VIEW), None, &host.invocation())
+            .unwrap();
+        let Body::Html(page) = view.body else {
+            panic!("html expected")
+        };
         assert!(page.contains("data-id=\"open:order#\""));
         assert_eq!(view.status.as_deref(), Some("3 modules · 2 dependencies"));
-        tools.handle(DIAGRAM_VIEW, ViewEvent::Message("open:order#".into()), &host.invocation()).unwrap();
-        assert_eq!(host.opened_locations(), [(format!("{SRC}order/package-info.java"), 0, 0)]);
+        tools
+            .handle(
+                DIAGRAM_VIEW,
+                ViewEvent::Message("open:order#".into()),
+                &host.invocation(),
+            )
+            .unwrap();
+        assert_eq!(
+            host.opened_locations(),
+            [(format!("{SRC}order/package-info.java"), 0, 0)]
+        );
 
         let empty = MockHost::install();
-        let view = ModulithTools::default().render(&id(DIAGRAM_VIEW), None, &empty.invocation()).unwrap();
-        assert_eq!(view.body, Body::Message("No @SpringBootApplication or @Modulithic class found.".into()));
+        let view = ModulithTools::default()
+            .render(&id(DIAGRAM_VIEW), None, &empty.invocation())
+            .unwrap();
+        assert_eq!(
+            view.body,
+            Body::Message("No @SpringBootApplication or @Modulithic class found.".into())
+        );
     }
 
     #[test]
     fn modulith_plantuml_text_lists_modules_and_dependencies() {
         let host = setup();
         let mut tools = ModulithTools::default();
-        tools.run_command(&id(COPY_DOCS), &host.invocation(), None).unwrap();
+        tools
+            .run_command(&id(COPY_DOCS), &host.invocation(), None)
+            .unwrap();
         assert_eq!(host.clipboard().as_deref(), Some(PLANTUML));
 
         let denied = MockHost::install().with_capabilities(&["project.read"]);
-        denied.add_file("src/main/java/com/acme/Application.java", "package com.acme;\n@SpringBootApplication\nclass Application {}\n");
-        denied.add_file("src/main/java/com/acme/order/Order.java", "package com.acme.order;\nclass Order {}\n");
-        ModulithTools::default().run_command(&id(COPY_DOCS), &denied.invocation(), None).unwrap();
+        denied.add_file(
+            "src/main/java/com/acme/Application.java",
+            "package com.acme;\n@SpringBootApplication\nclass Application {}\n",
+        );
+        denied.add_file(
+            "src/main/java/com/acme/order/Order.java",
+            "package com.acme.order;\nclass Order {}\n",
+        );
+        ModulithTools::default()
+            .run_command(&id(COPY_DOCS), &denied.invocation(), None)
+            .unwrap();
         assert_eq!(denied.clipboard(), None);
-        assert!(denied.notifications().iter().any(|n| n.body.contains("Allow the clipboard")));
+        assert!(
+            denied
+                .notifications()
+                .iter()
+                .any(|n| n.body.contains("Allow the clipboard"))
+        );
     }
 
     const PLANTUML: &str = "@startuml
@@ -824,12 +1298,39 @@ component [shipping]
         let host = MockHost::install();
         let project = &host::projects().unwrap()[0];
         assert!(!applies(project), "no build file");
-        host.add_file("pom.xml", "<project><artifactId>spring-boot-starter-web</artifactId></project>");
+        host.add_file(
+            "pom.xml",
+            "<project><artifactId>spring-boot-starter-web</artifactId></project>",
+        );
         assert!(!applies(project));
-        host.add_file("pom.xml", "<project><artifactId>spring-modulith-core</artifactId></project>");
+        host.add_file(
+            "pom.xml",
+            "<project><artifactId>spring-modulith-core</artifactId></project>",
+        );
         assert!(applies(project));
-        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        host.add_file(
+            "pom.xml",
+            "<project><modules><module>app</module></modules></project>",
+        );
         assert!(applies(project), "multi-module is unsure");
+        host.add_file(
+            "pom.xml",
+            "<project><build><plugins><include>**/*Test.java</include></plugins></build></project>",
+        );
+        assert!(!applies(project), "surefire include is not a module");
+        host.add_file("pom.xml", "");
+        host.add_file(
+            "build.gradle.kts",
+            "includeBuild(\"tools\")\ndependencies { implementation(\"org.slf4j:slf4j-api\") }",
+        );
+        assert!(!applies(project), "gradle without the dependency");
+        host.add_file(
+            "build.gradle.kts",
+            "dependencies { implementation(libs.spring.thing) }",
+        );
+        assert!(applies(project), "version catalog is unsure");
+        host.add_file("build.gradle.kts", "include(\"app\")");
+        assert!(applies(project), "gradle multi-module is unsure");
     }
 
     #[cfg(feature = "embedded")]
@@ -839,5 +1340,4 @@ component [shipping]
         refresh("diagram");
         assert_eq!(host.refreshed_views(), ["structure"]);
     }
-
 }
