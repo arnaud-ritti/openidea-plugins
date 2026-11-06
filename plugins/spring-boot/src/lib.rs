@@ -161,6 +161,10 @@ fn renamed(text: &str, k: &Key, replacement: &str, yaml: bool) -> Option<String>
 
 /// The problem with a key's value, read as a list when the key's type is one (comma separated, or one item of a YAML sequence).
 fn value_problem(lookup: &Lookup, k: &Key, facts: &Summary) -> Option<String> {
+    if k.value.contains("${") || k.value.contains("#{") {
+        return None;
+    }
+
     if let Some(p) = lookup.prop(&k.key) {
         return match values::element_type(&p.ty) {
             Some(element) => k.value.split(',').find_map(|v| values::problem(element, v, facts)),
@@ -783,6 +787,19 @@ public class MailProperties {
         let path = "/project/src/test/java/OwnerTests.java";
         BootTools::default().line_markers(&doc(path, "@SpringBootTest\nclass OwnerTests {\n    OwnerTests(Service s) {}\n}\n"));
         assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn placeholder_defaults_with_commas_are_not_split_into_list_items() {
+        let host = MockHost::install();
+        host.add_file(
+            "src/main/java/com/acme/FuelProperties.java",
+            "package com.acme;\n@ConfigurationProperties(prefix = \"app.fuel\")\npublic class FuelProperties {\n    private List<Integer> years = new ArrayList<>();\n}\n",
+        );
+        let text = "app.fuel.years=${APP_FUEL_YEARS:2021,2022,2026}\napp.fuel.years=2021,2x\n";
+        BootTools::default().line_markers(&doc(PROPS, text));
+        let lines: Vec<u32> = host.diagnostics()[PROPS].iter().filter(|d| d.code.as_deref() == Some("invalid-property-value")).map(|d| d.range.start.line).collect();
+        assert_eq!(lines, [1]);
     }
 
     #[test]
