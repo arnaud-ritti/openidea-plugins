@@ -14,17 +14,32 @@ use crate::index::{self, Index};
 use crate::refs;
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Finding {
+pub(crate) struct Finding {
     pub start: usize,
     pub end: usize,
     pub code: &'static str,
     pub message: String,
     pub severity: Severity,
+    /// Text that replaces `start..end` in a quick fix.
+    pub replacement: Option<String>,
 }
 
+#[allow(dead_code)] // `hint` and `error` are used by the checks added after this foundation
 impl Finding {
+    fn with_severity(range: Range<usize>, code: &'static str, message: String, severity: Severity) -> Finding {
+        Finding { start: range.start, end: range.end, code, message, severity, replacement: None }
+    }
+
     fn warn(range: Range<usize>, code: &'static str, message: String) -> Finding {
-        Finding { start: range.start, end: range.end, code, message, severity: Severity::Warning }
+        Finding::with_severity(range, code, message, Severity::Warning)
+    }
+
+    pub(crate) fn hint(range: Range<usize>, code: &'static str, message: String) -> Finding {
+        Finding::with_severity(range, code, message, Severity::Hint)
+    }
+
+    pub(crate) fn error(range: Range<usize>, code: &'static str, message: String) -> Finding {
+        Finding::with_severity(range, code, message, Severity::Error)
     }
 }
 
@@ -721,7 +736,7 @@ mod tests {
 
     use super::*;
     use crate::index::Entry;
-    use crate::{Groups, Main};
+    use crate::Main;
 
     const BLOG: &str = "<?php\nnamespace App\\Controller;\nclass BlogController\n{\n    public function index() {}\n    private function hidden() {}\n}\n";
     const INVOKABLE: &str = "<?php\nnamespace App\\Controller;\nclass InvokableController\n{\n    public function __invoke() {}\n}\n";
@@ -765,7 +780,7 @@ mod tests {
     fn run_with(index: &Index, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
         let files = sources();
         let read = |file: &str| files.get(file).cloned();
-        let groups = Groups { controllers: true, services: true, php_calls: true, twig: true };
+        let groups = crate::Groups::all_on();
         crate::extra_problems(index, groups, &read, path, language, text)
     }
 
@@ -1163,7 +1178,7 @@ mod tests {
     fn run_custom(index: &Index, files: &[(&str, &str)], path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
         let files: BTreeMap<String, String> = files.iter().map(|(p, t)| ((*p).to_owned(), (*t).to_owned())).collect();
         let read = |file: &str| files.get(file).cloned();
-        let groups = Groups { controllers: true, services: true, php_calls: true, twig: true };
+        let groups = crate::Groups::all_on();
         crate::extra_problems(index, groups, &read, path, language, text)
     }
 

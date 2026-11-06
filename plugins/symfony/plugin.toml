@@ -21,9 +21,10 @@ wasm = "dist/plugin.wasm"
 activation = ["on-language:php", "on-language:twig", "on-language:yaml", "on-language:xml", "on-view:symfony-profiler"]
 
 [capabilities]
-required = ["project.read", "events"]
+required = ["project.read"]
 # Cache: Warm Up / Clear run `php bin/console`; everything else works without it.
-optional = ["process:php"]
+# events: problems refresh on open and save; without it they are not published.
+optional = ["process:php", "events"]
 
 [[contributes.commands]]
 id = "reindex"

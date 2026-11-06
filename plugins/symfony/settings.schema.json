@@ -25,6 +25,31 @@
       "title": "Report missing routes and assets in Twig templates",
       "default": true
     },
+    "twigSyntaxChecks": {
+      "type": "boolean",
+      "title": "Report deprecated and mixed syntax in Twig templates",
+      "default": true
+    },
+    "yamlSyntaxChecks": {
+      "type": "boolean",
+      "title": "Report syntax problems in YAML configuration files",
+      "default": true
+    },
+    "commandChecks": {
+      "type": "boolean",
+      "title": "Report problems in console commands",
+      "default": true
+    },
+    "deprecationChecks": {
+      "type": "boolean",
+      "title": "Report deprecated Symfony APIs in PHP",
+      "default": true
+    },
+    "doctrineChecks": {
+      "type": "boolean",
+      "title": "Report problems in Doctrine mappings",
+      "default": true
+    },
     "publicDirectory": {
       "type": "string",
       "title": "Public directory that asset() paths start from (project-relative)",

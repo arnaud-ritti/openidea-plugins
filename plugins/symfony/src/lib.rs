@@ -7,6 +7,8 @@
 
 mod checks;
 mod index;
+#[allow(dead_code)] // used by the checks added after this foundation
+mod php_text;
 mod profiler;
 mod refs;
 mod twig;
@@ -284,22 +286,52 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
 
 /// Which groups of the text inspections in `checks.rs` are switched on.
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // the groups added after this foundation are read by their checks
 struct Groups {
     controllers: bool,
     services: bool,
     php_calls: bool,
     twig: bool,
+    twig_syntax: bool,
+    yaml_syntax: bool,
+    commands: bool,
+    deprecations: bool,
+    doctrine: bool,
 }
 
 impl Groups {
+    fn all_on() -> Groups {
+        Groups {
+            controllers: true,
+            services: true,
+            php_calls: true,
+            twig: true,
+            twig_syntax: true,
+            yaml_syntax: true,
+            commands: true,
+            deprecations: true,
+            doctrine: true,
+        }
+    }
+
     fn from_settings() -> Groups {
         let on = |key: &str| host::setting_bool(key).unwrap_or(true);
-        Groups { controllers: on("controllerChecks"), services: on("serviceChecks"), php_calls: on("phpCallChecks"), twig: on("twigChecks") }
+        Groups {
+            controllers: on("controllerChecks"),
+            services: on("serviceChecks"),
+            php_calls: on("phpCallChecks"),
+            twig: on("twigChecks"),
+            twig_syntax: on("twigSyntaxChecks"),
+            yaml_syntax: on("yamlSyntaxChecks"),
+            commands: on("commandChecks"),
+            deprecations: on("deprecationChecks"),
+            doctrine: on("doctrineChecks"),
+        }
     }
 }
 
-/// Problems of the text inspections, converted to diagnostics.
-fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+/// Findings of the switched-on groups.
+fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<checks::Finding> {
     let ctx = checks::Context::new(index, read);
     let mut findings = Vec::new();
 
@@ -320,6 +352,22 @@ fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &st
     }
 
     findings
+}
+
+/// Findings of all groups that carry a replacement, for quick fixes.
+fn fixes(index: &Index, path: &str, language: &str, text: &str) -> Vec<checks::Finding> {
+    let project = project_for(path);
+    let read = |file: &str| project.as_ref().and_then(|project| project.read_file(file).ok());
+
+    findings(index, Groups::all_on(), &read, path, language, text)
+        .into_iter()
+        .filter(|finding| finding.replacement.is_some())
+        .collect()
+}
+
+/// Problems of the text inspections, converted to diagnostics.
+fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+    findings(index, groups, read, path, language, text)
         .into_iter()
         .map(|finding| Diagnostic {
             range: range_of(text, finding.start, finding.end),
@@ -446,7 +494,9 @@ impl Main {
 impl Plugin for Main {
     fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
         for kind in [EventKind::FileSaved, EventKind::FileOpened] {
-            host::subscribe(kind)?;
+            if let Err(error) = host::subscribe(kind) {
+                host::log(LogLevel::Warn, &format!("Symfony problems need the {} event: {error}", kind.name()));
+            }
         }
         self.index_all();
         Ok(())
@@ -604,50 +654,66 @@ impl Providers for Main {
         markers
     }
 
-    /// Adds a missing translation key to one of the domain's YAML files.
+    /// Quick fixes: quote YAML scalars, apply check replacements, add a missing translation key.
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
+        let mut actions = Vec::new();
+
         if doc.language == "yaml" && is_quoted_config(&doc.path) {
-            let quote_fixes: Vec<CodeAction> = yaml_quotes::unquoted(&doc.text)
-                .into_iter()
-                .map(|range| (range_of(&doc.text, range.start, range.end), range))
-                .filter(|(range, _)| range.start.line >= selection.start.line && range.start.line <= selection.end.line)
-                .map(|(range, bytes)| {
-                    let quoted = format!("'{}'", doc.text[bytes].replace('\'', "''"));
-                    CodeAction {
-                        title: format!("Quote {quoted}"),
-                        kind: Some("quickfix".into()),
-                        preferred: true,
-                        edits: vec![(doc.path.clone(), vec![TextEdit { range, text: quoted }])],
-                        data: None,
-                    }
-                })
-                .collect();
-            if !quote_fixes.is_empty() {
-                return quote_fixes;
-            }
+            actions.extend(
+                yaml_quotes::unquoted(&doc.text)
+                    .into_iter()
+                    .map(|range| (range_of(&doc.text, range.start, range.end), range))
+                    .filter(|(range, _)| range.start.line >= selection.start.line && range.start.line <= selection.end.line)
+                    .map(|(range, bytes)| {
+                        let quoted = format!("'{}'", doc.text[bytes].replace('\'', "''"));
+                        CodeAction {
+                            title: format!("Quote {quoted}"),
+                            kind: Some("quickfix".into()),
+                            preferred: true,
+                            edits: vec![(doc.path.clone(), vec![TextEdit { range, text: quoted }])],
+                            data: None,
+                        }
+                    }),
+            );
         }
-        let Some(offset) = text::offset(&doc.text, selection.start) else { return Vec::new() };
-        let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return Vec::new() };
+
+        let Some(offset) = text::offset(&doc.text, selection.start) else { return actions };
+        let selection_end = text::offset(&doc.text, selection.end).unwrap_or(offset);
+
+        for finding in fixes(index, &doc.path, &doc.language, &doc.text) {
+            let Some(replacement) = finding.replacement else { continue };
+            if finding.start > selection_end || finding.end < offset {
+                continue;
+            }
+
+            actions.push(CodeAction {
+                title: format!("Replace with {replacement}"),
+                kind: Some("quickfix".into()),
+                preferred: true,
+                edits: vec![(doc.path.clone(), vec![TextEdit { range: range_of(&doc.text, finding.start, finding.end), text: replacement }])],
+                data: None,
+            });
+        }
+
+        let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return actions };
 
         let key = &doc.text[reference.start..reference.end];
         let domain = domain_of(&doc.language, &doc.text, &reference);
         let missing = index.translations.get(&domain).is_some_and(|keys| !keys.contains_key(key));
         if reference.kind != Kind::Translation || is_dynamic(key) || !missing {
-            return Vec::new();
+            return actions;
         }
 
         let files = index.translation_files.get(&domain).map(Vec::as_slice).unwrap_or_default();
-        files
-            .iter()
-            .map(|file| CodeAction {
-                title: format!("Add translation key \"{key}\" to {}", file_name(file)),
-                kind: Some("quickfix".into()),
-                preferred: false,
-                edits: Vec::new(),
-                data: Some(format!("{file}\n{key}")),
-            })
-            .collect()
+        actions.extend(files.iter().map(|file| CodeAction {
+            title: format!("Add translation key \"{key}\" to {}", file_name(file)),
+            kind: Some("quickfix".into()),
+            preferred: false,
+            edits: Vec::new(),
+            data: Some(format!("{file}\n{key}")),
+        }));
+        actions
     }
 
     fn resolve_code_action(&mut self, _doc: &Document, mut action: CodeAction) -> Result<CodeAction, Error> {
@@ -869,6 +935,33 @@ mod tests {
 
     fn labels(items: Vec<CompletionItem>) -> Vec<String> {
         items.into_iter().map(|item| item.label).collect()
+    }
+
+    #[test]
+    fn denied_events_log_a_warning_and_still_activate() {
+        let host = MockHost::install().with_capabilities(&["project.read"]);
+        symfony_project(&host);
+        let mut plugin = Main::default();
+        assert!(plugin.activate(&host.context("aritti.symfony")).is_ok());
+        assert!(host.logs().iter().any(|(level, _)| *level == LogLevel::Warn));
+    }
+
+    #[test]
+    fn settings_groups_default_on_and_switch_off_independently() {
+        let host = MockHost::install();
+        let keys = ["controllerChecks", "serviceChecks", "phpCallChecks", "twigChecks", "twigSyntaxChecks", "yamlSyntaxChecks", "commandChecks", "deprecationChecks", "doctrineChecks"];
+        let states = |groups: Groups| {
+            [groups.controllers, groups.services, groups.php_calls, groups.twig, groups.twig_syntax, groups.yaml_syntax, groups.commands, groups.deprecations, groups.doctrine]
+        };
+        assert_eq!(states(Groups::from_settings()), [true; 9]);
+
+        for (position, key) in keys.iter().enumerate() {
+            host.set_setting(key, "false");
+            let mut expected = [true; 9];
+            expected[position] = false;
+            assert_eq!(states(Groups::from_settings()), expected);
+            host.set_setting(key, "true");
+        }
     }
 
     #[test]
