@@ -5,6 +5,11 @@
       "title": "Report missing routes, templates, services and translation keys, and duplicate routes",
       "default": true
     },
+    "controllerChecks": {
+      "type": "boolean",
+      "title": "Report route controllers without the named method and deprecated route settings",
+      "default": true
+    },
     "publicDirectory": {
       "type": "string",
       "title": "Public directory that asset() paths start from (project-relative)",

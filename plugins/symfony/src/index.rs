@@ -611,7 +611,7 @@ pub fn yaml_routes(path: &str, text: &str, names: &mut impl Sink) {
 }
 
 /// Value of `name="…"` (or `name='…'`) in an XML tag, with its offset.
-fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<(&'a str, usize)> {
+pub(crate) fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<(&'a str, usize)> {
     let mut from = 0;
 
     while let Some(found) = tag[from..].find(name) {
@@ -636,7 +636,7 @@ fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<(&'a str, usize)> {
 }
 
 /// Start tags `<name …>` of an XML document with their offsets.
-fn xml_tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
+pub(crate) fn xml_tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
     let open = format!("<{name}");
 
     text.match_indices(open.as_str())
@@ -682,7 +682,7 @@ pub fn xml_routes(path: &str, text: &str, names: &mut impl Sink) {
 
 /// End of a parenthesised argument list starting after `(` at `from`,
 /// skipping strings.
-fn closing_paren(text: &str, from: usize) -> usize {
+pub(crate) fn closing_paren(text: &str, from: usize) -> usize {
     let bytes = text.as_bytes();
     let mut depth = 1;
     let mut quote: Option<u8> = None;
@@ -783,7 +783,7 @@ pub fn php_class(text: &str) -> Option<(String, usize)> {
     Some((format!("{namespace}{}", &text[at..at + name_len]), at))
 }
 
-fn class_declaration(text: &str) -> Option<usize> {
+pub(crate) fn class_declaration(text: &str) -> Option<usize> {
     text.match_indices("class ").map(|(at, _)| at).find(|&at| {
         let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
         let before = text[line_start..at].trim();

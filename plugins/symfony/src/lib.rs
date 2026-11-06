@@ -5,6 +5,7 @@
 //! Partial port of the Symfony Plugin for IntelliJ (Daniel Espendiller, Adrien
 //! Brault; MIT), see README.md for what was and wasn't ported.
 
+mod checks;
 mod index;
 mod profiler;
 mod refs;
@@ -281,6 +282,43 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
     problems
 }
 
+/// Which groups of the text inspections in `checks.rs` are switched on.
+#[derive(Clone, Copy)]
+struct Groups {
+    controllers: bool,
+}
+
+impl Groups {
+    fn from_settings() -> Groups {
+        let on = |key: &str| host::setting_bool(key).unwrap_or(true);
+        Groups { controllers: on("controllerChecks") }
+    }
+}
+
+/// Problems of the text inspections, converted to diagnostics.
+fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+    let ctx = checks::Context { index, read };
+    let mut findings = Vec::new();
+
+    if groups.controllers {
+        findings.extend(checks::check_routes(&ctx, path, language, text));
+    }
+
+    findings
+        .into_iter()
+        .map(|finding| Diagnostic {
+            range: range_of(text, finding.start, finding.end),
+            severity: finding.severity,
+            message: finding.message,
+            code: Some(finding.code.into()),
+            source: Some(SOURCE.into()),
+            unnecessary: false,
+            deprecated: false,
+            related: Vec::new(),
+        })
+        .collect()
+}
+
 #[derive(Default)]
 pub struct Main {
     /// By project root.
@@ -330,7 +368,12 @@ impl Main {
 
         let enabled = host::setting_bool("diagnostics").unwrap_or(true);
         let found = match project.read_file(path) {
-            Ok(text) if enabled && !index.partial => problems(index, path, language, &text),
+            Ok(text) if enabled && !index.partial => {
+                let read = |file: &str| project.read_file(file).ok();
+                let mut found = problems(index, path, language, &text);
+                found.extend(extra_problems(index, Groups::from_settings(), &read, path, language, &text));
+                found
+            }
             _ => Vec::new(),
         };
 

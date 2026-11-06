@@ -313,7 +313,7 @@ pub fn references(language: &str, text: &str) -> Vec<Reference> {
 }
 
 /// Top-level arguments of a call whose `(` is at `open`.
-fn arguments(text: &str, open: usize) -> Vec<&str> {
+pub(crate) fn arguments(text: &str, open: usize) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut parts = Vec::new();
     let mut depth = 0;
