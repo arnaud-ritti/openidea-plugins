@@ -7,7 +7,6 @@ use openidea_plugin::{Severity, host};
 use spring_text::finding::Finding;
 use spring_text::java::{Annotation, JavaFile, Member, TypeRef};
 
-const PAGE_RETURNS: [&str; 2] = ["Page", "Slice"];
 const PAGING_SUFFIXES: [&str; 2] = ["Pageable", "PageRequest"];
 const WRITING_KEYWORDS: [&str; 2] = ["update", "delete"];
 const KEYED_COLLECTIONS: [&str; 2] = ["List", "Map"];
@@ -74,10 +73,10 @@ fn single_literal(annotation: &Annotation, name: &str) -> Option<(String, usize,
     delimited.then(|| (literal.value.clone(), arg.at, arg.end))
 }
 
-/// A `Page` or `Slice` result needs a `Pageable` to know which page to read; derived and `@Query` methods have no other source for it.
+/// A `Page` result needs a `Pageable` to know which page to read; derived and `@Query` methods have no other source for it.
 fn page_without_pageable(file: &JavaFile, method: &Member, out: &mut Vec<Finding>) {
     let Some(result) = &method.ty else { return };
-    if !PAGE_RETURNS.contains(&result.name.as_str()) || !file.from_spring(&result.name) {
+    if result.name != "Page" || !file.from_spring("Page") {
         return;
     }
     let is_query = method.has(&["Query", "NativeQuery"]) && abstract_method(method);
@@ -171,9 +170,9 @@ mod tests {
     }
 
     #[test]
-    fn slice_without_pageable_warns() {
+    fn slice_without_pageable_is_quiet() {
         let text = PAGE.replace("Page<User>", "Slice<User>").replace("domain.Page;", "domain.Slice;");
-        assert_eq!(run(&text), [("page-without-pageable", "findByName".to_owned())]);
+        assert!(run(&text).is_empty());
     }
 
     #[test]
