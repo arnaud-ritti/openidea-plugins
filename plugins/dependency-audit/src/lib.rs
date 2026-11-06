@@ -17,7 +17,7 @@ use spring_text::range;
 use spring_text::tree::Expansion;
 
 use manifest::{Dep, GLOBS, Kind, bumped, kind, lockfile, parse};
-use osv::{Finding, audit, cached_advisory, compare, ignored_advisories, level};
+use osv::{Finding, audit, cached_advisory, compare, ignored_advisories, is_ignored, level};
 
 type Display = HashMap<String, Option<(String, Option<String>)>>;
 
@@ -93,7 +93,7 @@ fn stored_rows(project: &Project) -> Result<Option<Vec<Row>>, Error> {
     Ok(rows.map(|rows| {
         rows.into_iter()
             .map(|mut row| {
-                row.advisories.retain(|id| !ignored.contains(id));
+                row.advisories.retain(|id| !is_ignored(&ignored, id, &cached_advisory(id).map(|a| a.aliases).unwrap_or_default()));
                 row
             })
             .filter(|row| !row.advisories.is_empty())

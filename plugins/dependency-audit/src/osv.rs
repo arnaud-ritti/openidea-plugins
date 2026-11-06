@@ -15,6 +15,8 @@ pub struct Advisory {
     pub modified: String,
     pub summary: String,
     pub severity: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// Keyed `"{ecosystem}:{name}"` in OSV spelling.
     pub fixed: BTreeMap<String, Vec<String>>,
 }
@@ -44,6 +46,7 @@ pub fn parse_advisory(json: &str) -> Option<Advisory> {
         modified: text(&value["modified"]).unwrap_or_default(),
         summary: text(&value["summary"]).unwrap_or_default(),
         severity,
+        aliases: value["aliases"].as_array().into_iter().flatten().filter_map(|a| text(a)).collect(),
         fixed,
     })
 }
@@ -286,14 +289,18 @@ impl CacheWriter {
     }
 }
 
-/// Advisory ids of the `ignoredAdvisories` setting: one per line, `#` starts a comment.
+/// Lowercased advisory ids of the `ignoredAdvisories` setting: one per line, `#` starts a comment.
 pub fn ignored_advisories() -> HashSet<String> {
     host::setting_string("ignoredAdvisories")
         .unwrap_or_default()
         .lines()
-        .map(|line| line.split('#').next().unwrap_or_default().trim().to_owned())
+        .map(|line| line.split('#').next().unwrap_or_default().trim().to_lowercase())
         .filter(|id| !id.is_empty())
         .collect()
+}
+
+pub fn is_ignored(ignored: &HashSet<String>, id: &str, aliases: &[String]) -> bool {
+    ignored.contains(&id.to_lowercase()) || aliases.iter().any(|alias| ignored.contains(&alias.to_lowercase()))
 }
 
 pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<Vec<Finding>, Error> {
@@ -342,11 +349,13 @@ pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<
         };
         let mut found = Vec::new();
 
-        for (id, modified) in query.vulns.iter().filter(|(id, _)| !ignored.contains(id)) {
+        for (id, modified) in &query.vulns {
             let advisory = advisories
                 .entry(id.clone())
                 .or_insert_with(|| advisory(id, modified, &mut online, deadline, &mut writer));
-            found.push(advisory.clone());
+            if !is_ignored(&ignored, id, &advisory.aliases) {
+                found.push(advisory.clone());
+            }
         }
 
         if !found.is_empty() {

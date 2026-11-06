@@ -46,7 +46,7 @@ Settings › Plugins › Dependency Audit › **Check on open and save** (`autoC
 Off: nothing is sent until you run a scan.
 
 **Ignored advisories** (`ignoredAdvisories`): one advisory id per line (`GHSA-…`, `CVE-…`), `#` starts a comment.
-Listed ids are not reported, neither as squiggles nor in the Vulnerable Dependencies view.
+Ids are case-insensitive and match the advisory's id or any of its aliases (a `CVE-…` works for a `GHSA-…` advisory once its details are fetched). Listed ids are not reported, neither as squiggles nor in the Vulnerable Dependencies view.
 
 ## Privacy
 

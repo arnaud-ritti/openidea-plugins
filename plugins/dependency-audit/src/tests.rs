@@ -531,3 +531,28 @@ fn ignoring_an_advisory_hides_it_from_an_earlier_scan() {
     assert!(labels.iter().any(|l| l.starts_with("lodash")));
     assert!(!labels.iter().any(|l| l.contains("jackson")));
 }
+
+#[test]
+fn ignored_cve_alias_is_not_reported() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    let lodash = LODASH.replacen(r#""summary""#, r#""aliases": ["CVE-2019-10744"], "summary""#, 1);
+    host.on_fetch(move |req| match req.url.as_str() {
+        "https://api.osv.dev/v1/vulns/GHSA-35jh-r3h4-6jhm" => ok(lodash.clone()),
+        _ => osv(req),
+    });
+    host.add_file("pom.xml", POM);
+    host.add_file("web/package.json", PACKAGE);
+    host.add_file("web/package-lock.json", PACKAGE_LOCK);
+    let mut plugin = DependencyAudit::default();
+    plugin.run_command("scan", &host.invocation(), None).unwrap();
+
+    host.set_setting("ignoredAdvisories", r#""cve-2019-10744""#);
+    let labels: Vec<String> = tree(&mut plugin, &host).into_iter().map(|i| i.label).collect();
+    assert!(!labels.iter().any(|l| l.contains("lodash")));
+    assert!(labels.iter().any(|l| l.contains("jackson")));
+
+    host.set_setting("ignoredAdvisories", r#""ghsa-57j2-w4cx-62h2""#);
+    let labels: Vec<String> = tree(&mut plugin, &host).into_iter().map(|i| i.label).collect();
+    assert!(labels.iter().any(|l| l.starts_with("lodash")), "the alias is no longer ignored");
+    assert!(!labels.iter().any(|l| l.contains("jackson")), "lowercase ids match");
+}

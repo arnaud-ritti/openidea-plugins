@@ -561,7 +561,7 @@ fn version_catalog(path: &str, text: &str) -> Vec<Dep> {
                     versions.insert(key.trim(), version);
                 }
             }
-            "libraries" => libraries.push((at, line)),
+            "libraries" if !trimmed.starts_with('#') => libraries.push((at, line)),
             _ => {}
         }
     }
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn reads_libs_versions_toml_aliases() {
-        let text = "[versions]\njackson = \"2.12.3\"\n[libraries]\na = { module = \"com.fasterxml.jackson.core:jackson-databind\", version.ref = \"jackson\" }\nb = { group = \"org.yaml\", name = \"snakeyaml\", version = \"1.33\" }\nc = \"com.google.guava:guava:31.0-jre\"\nd = { module = \"x:managed\" }\ne = { module = \"x:dangling\", version = { ref = \"nope\" } }\nf = { module = \"x:ref\", version = { ref = \"jackson\" } }\n[plugins]\np = { id = \"x\", version = \"1.0\" }\n";
+        let text = "[versions]\njackson = \"2.12.3\"\n[libraries]\na = { module = \"com.fasterxml.jackson.core:jackson-databind\", version.ref = \"jackson\" }\nb = { group = \"org.yaml\", name = \"snakeyaml\", version = \"1.33\" }\nc = \"com.google.guava:guava:31.0-jre\"\nd = { module = \"x:managed\" }\n# old = { module = \"x:old\", version = \"1.0.0\" }\n  #g = \"x:older:2.0.0\"\ne = { module = \"x:dangling\", version = { ref = \"nope\" } }\nf = { module = \"x:ref\", version = { ref = \"jackson\" } }\n[plugins]\np = { id = \"x\", version = \"1.0\" }\n";
         let deps = parse("/p/gradle/libs.versions.toml", text, None);
 
         assert_eq!(
