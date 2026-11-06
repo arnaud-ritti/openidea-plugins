@@ -6,7 +6,8 @@ authors = ["Arnaud RITTI", "Adel Fayzrakhmanov (original plugin)", "JetBrains s.
 license = "MIT"
 change-notes = "0.1.0: first release. Port of ru.adelf.idea.dotenv 263.7307.209 (github.com/JetBrains/idea-php-dotenv-plugin, revision a1e60501; Docker, PHP, PHPUnit, Go, Ruby and Rust support from revision c1484553, before it was removed upstream). Includes highlighting, the 11 inspections and their quick fixes, ${VARIABLE} completion and navigation, environment variable completion, go to declaration and usages in code, keys from Dockerfiles and docker-compose files, and renaming the usages of an edited key."
 categories = ["languages", "linters"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:dotenv"]
 
