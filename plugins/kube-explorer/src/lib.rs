@@ -61,10 +61,12 @@ const KINDS: &[(&str, &str, &str)] = &[
 const BUILT_IN_GROUPS: &[&str] = &[
     "apps", "batch", "autoscaling", "policy",
     "networking.k8s.io", "events.k8s.io", "storage.k8s.io", "rbac.authorization.k8s.io",
-    "coordination.k8s.io", "discovery.k8s.io", "apiextensions.k8s.io", "metrics.k8s.io",
+    "coordination.k8s.io", "discovery.k8s.io", "apiextensions.k8s.io",
+    // Served by the metrics-server add-on; read-only node and pod metrics, not user-managed.
+    "metrics.k8s.io",
     "scheduling.k8s.io", "node.k8s.io", "certificates.k8s.io", "admissionregistration.k8s.io",
     "flowcontrol.apiserver.k8s.io", "apiregistration.k8s.io", "internal.apiserver.k8s.io",
-    "resource.k8s.io", "authentication.k8s.io", "authorization.k8s.io",
+    "resource.k8s.io", "storagemigration.k8s.io", "authentication.k8s.io", "authorization.k8s.io",
 ];
 
 /// Kinds whose pods `kubectl logs --all-pods` follows.
@@ -1241,7 +1243,7 @@ mod tests {
         let names = [
             "storageclasses.storage.k8s.io", "roles.rbac.authorization.k8s.io", "poddisruptionbudgets.policy",
             "horizontalpodautoscalers.autoscaling", "leases.coordination.k8s.io", "customresourcedefinitions.apiextensions.k8s.io",
-            "pods.metrics.k8s.io", "gateways.gateway.networking.k8s.io", "certificates.cert-manager.io",
+            "pods.metrics.k8s.io", "storageversionmigrations.storagemigration.k8s.io", "gateways.gateway.networking.k8s.io", "certificates.cert-manager.io",
             "clusters.cluster.x-k8s.io", "volumesnapshots.snapshot.storage.k8s.io", "pods",
         ];
 
@@ -1296,6 +1298,13 @@ mod tests {
 
         let node = items.iter().find(|i| i.key == "crds!").unwrap();
         assert!(node.label.contains("Forbidden"));
+    }
+
+    #[test]
+    fn empty_api_resources_output_shows_a_placeholder() {
+        let items = crd_tree(ok(""));
+
+        assert!(items.iter().any(|i| i.key == "crds!" && i.label == "No custom resources"));
     }
 
     #[test]
