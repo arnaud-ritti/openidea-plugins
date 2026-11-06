@@ -383,18 +383,58 @@ fn views_list_and_draw_beans() {
     n.handle(BEANS_VIEW, ViewEvent::Activate(users.key.clone()), &host.invocation()).unwrap();
     assert_eq!(host.opened_locations(), [(format!("{ROOT}/UserServiceImpl.java"), 7, 13)]);
 
-    let graph = n.render(GRAPH_VIEW, None, &host.invocation()).unwrap();
+    n.handle(BEANS_VIEW, ViewEvent::Button("section:graph".into()), &host.invocation()).unwrap();
+    let graph = n.render(BEANS_VIEW, None, &host.invocation()).unwrap();
     let Body::Html(page) = graph.body else { panic!("html expected") };
     assert!(page.contains(">users<") && page.contains("<path class=\"e\""));
     assert!(page.contains("<title>users (@Service)</title>"));
     let status = graph.status.unwrap();
     assert!(status.ends_with("dependencies · arrows point to dependencies"), "{status}");
-    n.handle(GRAPH_VIEW, ViewEvent::Message(users.key.clone()), &host.invocation()).unwrap();
+    let refreshed = host.refreshed_views().len();
+    n.handle(BEANS_VIEW, ViewEvent::Message(users.key.clone()), &host.invocation()).unwrap();
     assert_eq!(host.opened_locations().len(), 2);
-    assert!(host.refreshed_views().is_empty(), "a complete scan doesn't re-render");
+    assert_eq!(host.refreshed_views().len(), refreshed, "a complete scan doesn't re-render");
 
-    n.handle(GRAPH_VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
-    assert_eq!(host.refreshed_views(), [BEANS_VIEW, GRAPH_VIEW]);
+    n.handle(BEANS_VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+    assert_eq!(host.refreshed_views().last().map(String::as_str), Some(BEANS_VIEW));
+}
+
+fn toolbar_ids(view: &View) -> Vec<&str> {
+    view.toolbar.iter().map(|b| b.id.as_str()).collect()
+}
+
+#[test]
+fn beans_window_has_three_sections() {
+    let host = setup();
+    let mut n = Navigator::default();
+    let beans = n.render(BEANS_VIEW, None, &host.invocation()).unwrap();
+    assert_eq!(&toolbar_ids(&beans)[..3], ["section:beans", "section:graph", "section:report"]);
+    assert!(matches!(beans.body, Body::Tree(_)));
+    n.handle(BEANS_VIEW, ViewEvent::Button("section:report".into()), &host.invocation()).unwrap();
+    let report = n.render(BEANS_VIEW, None, &host.invocation()).unwrap();
+    assert!(matches!(report.body, Body::Message(_)));
+    assert_eq!(toolbar_ids(&report), ["section:beans", "section:graph", "section:report"]);
+}
+
+#[test]
+fn check_configuration_command_opens_the_report_section() {
+    let host = setup();
+    let mut n = Navigator::default();
+    assert_eq!(n.sections.active(), "beans");
+    n.run_command("check-spring-configuration", &host.invocation(), None).unwrap();
+    assert_eq!(n.sections.active(), "report");
+    assert_eq!(host.revealed_views(), [BEANS_VIEW]);
+    assert_eq!(host.refreshed_views().last().map(String::as_str), Some(BEANS_VIEW));
+}
+
+#[test]
+fn graph_section_renders_the_bean_graph() {
+    let host = setup();
+    let mut n = Navigator::default();
+    n.handle(BEANS_VIEW, ViewEvent::Button("section:graph".into()), &host.invocation()).unwrap();
+    let graph = n.render(BEANS_VIEW, None, &host.invocation()).unwrap();
+    assert!(matches!(graph.body, Body::Html(_)));
+    assert!(toolbar_ids(&graph).contains(&"refresh"));
 }
 
 #[test]
@@ -402,7 +442,9 @@ fn graph_says_when_it_is_capped() {
     let host = MockHost::install();
     let beans: String = (0..MAX_GRAPH + 1).map(|i| format!("    @Bean Clock clock{i}() {{ return null; }}\n")).collect();
     host.add_file("src/main/java/com/acme/Many.java", &format!("@Configuration\nclass Many {{\n{beans}}}\n"));
-    let graph = Navigator::default().render(GRAPH_VIEW, None, &host.invocation()).unwrap();
+    let mut n = Navigator::default();
+    n.sections.set(GRAPH_SECTION);
+    let graph = n.render(BEANS_VIEW, None, &host.invocation()).unwrap();
     let status = graph.status.unwrap();
     assert!(status.starts_with(&format!("{MAX_GRAPH} of {} beans shown · ", MAX_GRAPH + 2)), "{status}");
 }
@@ -2686,13 +2728,13 @@ fn check_configuration_collects_problems_into_the_report_view() {
     host.add_file("src/main/java/com/acme/Bad.java", "package com.acme;\n@Service\nclass Bad {\n    @Transactional\n    private void save() {}\n}\n");
     let mut n = Navigator::default();
     n.run_command("check-spring-configuration", &host.invocation(), None).unwrap();
-    assert_eq!(host.revealed_views(), [REPORT_VIEW]);
-    let shown = n.render(REPORT_VIEW, None, &host.invocation()).unwrap();
+    assert_eq!(host.revealed_views(), [BEANS_VIEW]);
+    let shown = n.render(BEANS_VIEW, None, &host.invocation()).unwrap();
     let Body::Tree(items) = shown.body else { panic!("tree expected") };
     let bad = items.iter().find(|i| i.label == "Bad.java").unwrap();
     assert!(items.iter().any(|i| i.parent.as_deref() == Some(&bad.key) && i.detail.as_deref() == Some("line 5 · non-proxyable-method")));
     let problem = items.iter().find(|i| i.parent.is_some() && i.detail.as_deref().is_some_and(|d| d.ends_with("non-proxyable-method"))).unwrap();
-    n.handle(REPORT_VIEW, ViewEvent::Activate(problem.key.clone()), &host.invocation()).unwrap();
+    n.handle(BEANS_VIEW, ViewEvent::Activate(problem.key.clone()), &host.invocation()).unwrap();
     assert_eq!(host.opened_locations(), [(format!("{ROOT}/Bad.java"), 4, 17)]);
     assert!(host.notifications().last().unwrap().body.contains("problems in"));
 }
@@ -2703,7 +2745,7 @@ fn check_configuration_says_when_nothing_is_wrong() {
     host.add_file("src/main/java/com/acme/Fine.java", "package com.acme;\n@Service\nclass Fine {}\n");
     let mut n = Navigator::default();
     n.run_command("check-spring-configuration", &host.invocation(), None).unwrap();
-    let Body::Message(text) = n.render(REPORT_VIEW, None, &host.invocation()).unwrap().body else { panic!("message expected") };
+    let Body::Message(text) = n.render(BEANS_VIEW, None, &host.invocation()).unwrap().body else { panic!("message expected") };
     assert_eq!(text, "No problems found.");
 }
 
@@ -2712,7 +2754,7 @@ fn dump_configuration_lists_the_beans() {
     let host = setup();
     let mut n = Navigator::default();
     n.run_command("dump-spring-configuration", &host.invocation(), None).unwrap();
-    let Body::Html(page) = n.render(REPORT_VIEW, None, &host.invocation()).unwrap().body else { panic!("html expected") };
+    let Body::Html(page) = n.render(BEANS_VIEW, None, &host.invocation()).unwrap().body else { panic!("html expected") };
     assert!(page.contains("@Service") && page.contains("users") && page.contains("UserServiceImpl.java:8"), "{page}");
     assert!(page.contains("[profiles: dev, prod]") && page.contains("[primary]"));
 }

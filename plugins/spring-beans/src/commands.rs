@@ -1,7 +1,7 @@
 //! Editor commands that add a bean dependency or an event listener to the class at the
 //! caret, and the active profiles the plugin's own profile-scoped checks consider.
 
-use crate::{Navigator, REPORT_VIEW, Report, World, describe, file_name, indent_of, merge_into, problems_of};
+use crate::{Navigator, BEANS_VIEW, REPORT_SECTION, Report, World, describe, file_name, indent_of, merge_into, problems_of};
 use openidea_plugin::text::offset;
 use openidea_plugin::{Error, Invocation, NotificationLevel, PickItem, Severity, TextEdit, TextEditor, host};
 use spring_text::index::COMMAND_BUDGET;
@@ -273,8 +273,9 @@ pub fn check_configuration(nav: &mut Navigator, ctx: &Invocation) -> Result<Opti
     let message = if total == 0 { format!("No problems found.{partial}") } else { format!("{total} problems in {} files.{partial}", found.len()) };
     nav.report = Report::Problems(found);
     host::notify(NotificationLevel::Info, TITLE, &message);
-    host::reveal_view(REPORT_VIEW)?;
-    host::refresh_view(REPORT_VIEW);
+    nav.sections.set(REPORT_SECTION);
+    host::reveal_view(BEANS_VIEW)?;
+    host::refresh_view(BEANS_VIEW);
     Ok(None)
 }
 
@@ -307,8 +308,9 @@ pub fn dump_configuration(nav: &mut Navigator, ctx: &Invocation) -> Result<Optio
     let report = format!("{} beans of the project (library and auto-configured beans are not listed)\n\n{}\n", lines.len(), lines.join("\n"));
     drop(world);
     nav.report = Report::Dump(report);
-    host::reveal_view(REPORT_VIEW)?;
-    host::refresh_view(REPORT_VIEW);
+    nav.sections.set(REPORT_SECTION);
+    host::reveal_view(BEANS_VIEW)?;
+    host::refresh_view(BEANS_VIEW);
     Ok(None)
 }
 

@@ -32,6 +32,7 @@ use sites::{Hit, Site, Word};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::diagram;
 use spring_text::tree::Expansion;
+use ui_kit::sections::{SectionDef, Switcher};
 use spring_text::java::{self, MemberKind};
 use spring_text::{contains, range};
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,8 +40,13 @@ use std::time::Duration;
 
 const GLOBS: &[&str] = &["**/*.java", "**/*.kt", "**/*.xml"];
 const BEANS_VIEW: &str = "beans";
-const GRAPH_VIEW: &str = "bean-graph";
-const REPORT_VIEW: &str = "spring-report";
+const SECTIONS: &[SectionDef] = &[
+    SectionDef { id: "beans", label: "Beans" },
+    SectionDef { id: "graph", label: "Graph" },
+    SectionDef { id: "report", label: "Report" },
+];
+const GRAPH_SECTION: &str = "graph";
+const REPORT_SECTION: &str = "report";
 const MAX_GRAPH: usize = 400;
 const MAX_CLASSES: usize = 200;
 
@@ -440,11 +446,17 @@ pub struct Navigator {
     indexes: Indexes<FileModel>,
     expansion: Expansion,
     report: Report,
+    sections: Switcher,
 }
 
 impl Default for Navigator {
     fn default() -> Self {
-        Self { indexes: Indexes::new(GLOBS, model::parse), expansion: Expansion::default(), report: Report::default() }
+        Self {
+            indexes: Indexes::new(GLOBS, model::parse),
+            expansion: Expansion::default(),
+            report: Report::default(),
+            sections: Switcher::new("beans.section", SECTIONS),
+        }
     }
 }
 
@@ -912,26 +924,24 @@ fn scanning(index: &Index<FileModel>) -> &'static str {
 impl Views for Navigator {
     fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
         let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its Spring beans.")) };
-        if view == REPORT_VIEW {
-            let mut shown = self.report_view();
-            if let Body::Tree(items) = &mut shown.body {
-                self.expansion.apply(items);
+        let section = self.sections.active();
+        let mut shown = if section == REPORT_SECTION {
+            self.report_view()
+        } else {
+            let index = self.indexes.get(&project, COMMAND_BUDGET);
+            if !index.complete() {
+                host::refresh_view(view);
             }
-            return Ok(shown);
-        }
-        let index = self.indexes.get(&project, COMMAND_BUDGET);
-        if !index.complete() {
-            host::refresh_view(view);
-        }
-        let mut shown = if view == GRAPH_VIEW { Self::graph(index) } else { Self::tree(index) };
+            if section == GRAPH_SECTION { Self::graph(index) } else { Self::tree(index) }
+        };
         if let Body::Tree(items) = &mut shown.body {
             self.expansion.apply(items);
         }
-        Ok(shown)
+        Ok(self.sections.buttons(shown, &[]))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
-        if self.expansion.handle(&event) {
+        if self.sections.handle(&event) || self.expansion.handle(&event) {
             host::refresh_view(view);
             return Ok(());
         }
@@ -947,7 +957,6 @@ impl Views for Navigator {
                     }
                 }
                 host::refresh_view(BEANS_VIEW);
-                host::refresh_view(GRAPH_VIEW);
                 return Ok(());
             }
             ViewEvent::Activate(key) | ViewEvent::Message(key) => key,

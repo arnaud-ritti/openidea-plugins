@@ -108,6 +108,7 @@ version = "0.1.0"
 dependencies = [
  "openidea-plugin",
  "spring-text",
+ "ui-kit",
 ]
 
 [[package]]
@@ -202,6 +203,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "ui-kit"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
 ]
 
 [[package]]

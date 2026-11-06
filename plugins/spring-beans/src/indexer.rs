@@ -362,6 +362,7 @@ mod tests {
     use super::*;
 
     fn index(path: &str, text: &str) -> Edges {
+        let _host = openidea_plugin::mock::MockHost::install();
         Navigator::default().index(&Document { path: path.into(), text: text.into(), symbols: Vec::new() })
     }
 
