@@ -17,6 +17,7 @@ mod model;
 mod queries;
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use openidea_plugin::host;
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
@@ -30,6 +31,9 @@ use checks::{Finding, inspect_entity, inspect_repository};
 use generate::{Dialect, Known, ddl, dto, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
 use model::{Class, Edit, Kind, Relation, has_word, language_of, mask, parse_class};
 use queries::{ItemKind, Prop, complete, parse_repository};
+
+/// Time one provider call may spend reading repositories.
+const REPOSITORY_BUDGET: Duration = Duration::from_millis(30);
 
 /// Source files listed per pattern.
 const MAX_SOURCES: u32 = 50_000;
@@ -89,9 +93,62 @@ pub struct JpaAssist {
     locations: HashMap<String, (String, Position)>,
     /// Expanded entities of the structure tree.
     expanded: HashSet<String>,
+    /// Repositories per project root, read lazily.
+    repositories: HashMap<String, RepositoryIndex>,
+}
+
+/// Repositories by entity simple name, filled within the provider budget.
+#[derive(Default)]
+struct RepositoryIndex {
+    listed: bool,
+    unread: Vec<String>,
+    by_entity: HashMap<String, Vec<(String, Location)>>,
+}
+
+impl RepositoryIndex {
+    fn add(&mut self, path: &str, text: &str) {
+        for found in self.by_entity.values_mut() {
+            found.retain(|(_, location)| location.path != path);
+        }
+
+        let Some(kotlin) = language_of(path) else { return };
+        let Some(repository) = parse_repository(text, kotlin) else { return };
+
+        let at = position(text, repository.name_start);
+        let location = Location { path: path.into(), range: Range::new(at, at) };
+        self.by_entity.entry(repository.entity).or_default().push((repository.name, location));
+    }
+}
+
+fn is_repository_file(path: &str) -> bool {
+    path.ends_with("Repository.java") || path.ends_with("Repository.kt")
 }
 
 impl JpaAssist {
+    /// Repositories declaring `entity`, from the index; reads at most one budget's worth of unread files.
+    fn repositories_of(&mut self, project: &Project, entity: &str) -> Vec<(String, Location)> {
+        let index = self.repositories.entry(project.root().unwrap_or_default()).or_default();
+
+        if !index.listed {
+            index.listed = true;
+            for pattern in ["**/*Repository.java", "**/*Repository.kt"] {
+                index.unread.extend(project.find_files(pattern, MAX_SOURCES).unwrap_or_default());
+            }
+        }
+
+        let start = Instant::now();
+        while start.elapsed() < REPOSITORY_BUDGET {
+            let Some(path) = index.unread.pop() else { break };
+            if let Ok(text) = project.read_file(&path) {
+                index.add(&path, &text);
+            }
+        }
+
+        let mut found = index.by_entity.get(entity).cloned().unwrap_or_default();
+        found.sort_by(|a, b| a.1.path.cmp(&b.1.path));
+        found
+    }
+
     fn class(&self, name: &str) -> Option<&Class> {
         self.classes.get(name)?.as_ref()
     }
@@ -304,6 +361,12 @@ impl Plugin for JpaAssist {
             let Some(project) = project_of(path) else { continue };
             let Ok(text) = project.read_file(path) else { continue };
 
+            if is_repository_file(path)
+                && let Some(index) = self.repositories.get_mut(&project.root().unwrap_or_default())
+            {
+                index.add(path, &text);
+            }
+
             let diagnostics: Vec<Diagnostic> =
                 self.findings(&project, path, &text, kotlin).iter().map(|f| f.diagnostic(&text)).collect();
             let _ = host::publish_diagnostics(path, &diagnostics);
@@ -347,21 +410,7 @@ impl Providers for JpaAssist {
         }
         let Some(project) = project_of(&doc.path) else { return Vec::new() };
 
-        let mut repositories = Vec::new();
-        for pattern in ["**/*Repository.java", "**/*Repository.kt"] {
-            for path in project.find_files(pattern, MAX_SOURCES).unwrap_or_default() {
-                let Some(kotlin) = language_of(&path) else { continue };
-                let Ok(text) = project.read_file(&path) else { continue };
-                let Some(repository) = parse_repository(&text, kotlin) else { continue };
-                if repository.entity != class.name {
-                    continue;
-                }
-
-                let at = position(&text, repository.name_start);
-                repositories.push((repository.name, Location { path: path.into(), range: Range::new(at, at) }));
-            }
-        }
-
+        let repositories = self.repositories_of(&project, &class.name);
         let Some((_, first)) = repositories.first() else { return Vec::new() };
         let names: Vec<&str> = repositories.iter().map(|(name, _)| name.as_str()).collect();
 
@@ -615,6 +664,21 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
 
         let customer = Document { path: "/project/src/shop/Customer.java".into(), language: "java".into(), version: 1, text: "@Entity\nclass Customer {}".into() };
         assert!(plugin.line_markers(&customer).is_empty());
+    }
+
+    #[test]
+    fn entity_marker_does_not_rescan_repositories_per_request() {
+        let host = host();
+        let mut plugin = JpaAssist::default();
+        let doc = Document { path: "/project/src/shop/Order.java".into(), language: "java".into(), version: 1, text: ORDER.into() };
+        assert_eq!(plugin.line_markers(&doc).len(), 1);
+
+        host.add_file("src/shop/data/OrderRepository.java", "interface OrderRepository {}");
+        host.add_file("src/shop/data/OtherRepository.java", REPOSITORY);
+        assert_eq!(plugin.line_markers(&doc)[0].tooltip, "Repositories: OrderRepository", "served from the index");
+
+        plugin.handle_events(&[Event::FileSaved("/project/src/shop/data/OrderRepository.java".into())], &host.invocation());
+        assert!(plugin.line_markers(&doc).is_empty(), "a saved repository is read again");
     }
 
     #[test]

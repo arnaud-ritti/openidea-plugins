@@ -38,7 +38,7 @@ declaration with parameters and return type (`List`, `Optional` for
 A gutter arrow on an `@Entity` class opens the Spring Data repository that
 declares it as domain type (the tooltip lists all of them; the arrow opens the
 first). Repository files are found by the `*Repository.java` / `.kt` name. The
-reverse arrow, from a repository to its entity, comes from Spring Data.
+Only repositories naming the entity directly as the `…Repository<Entity, Id>` argument are found (a `UserRepo extends BaseRepo<User>` whose `BaseRepo` extends `JpaRepository` is not resolved), and repositories not named `*Repository` are missed. The repositories are read once and updated when a repository file is opened or saved. The reverse arrow, from a repository to its entity, comes from Spring Data.
 
 ## Generators
 
