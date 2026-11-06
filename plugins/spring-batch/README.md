@@ -9,7 +9,9 @@ Spring Batch job configuration in OpenIDEA:
 
 Matching is text-based: names as written in attributes and string literals. Jobs and beans from libraries, auto-configuration or other modules aren't seen.
 
-Not ported: job and flow diagrams, Spring Batch Admin, job parameters and late-binding SpEL (`#{jobParameters[...]}`) checks, Kotlin configuration (Kotlin sources only count as bean declarations).
+- **Batch Jobs** tool window (bottom): jobs, steps, flows, splits and decisions of the project's XML (and Java job and step names as plain nodes). A job points at its first state; `next`, `<next on= to=>`, `<stop/end/fail restart=>` become labelled transition edges. Click a node to open its source. Java `.next(step)` chains are not drawn.
+
+Not ported: Spring Batch Admin, job parameters and late-binding SpEL (`#{jobParameters[...]}`) checks, Kotlin configuration (Kotlin sources only count as bean declarations).
 
 ```sh
 cargo test

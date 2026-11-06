@@ -26,3 +26,9 @@ languages = ["xml", "properties", "yaml"]
 [[contributes.providers]]
 kinds = ["line-markers"]
 languages = ["java"]
+
+[[contributes.views]]
+id = "diagram"
+title = "Batch Jobs"
+icon = "hierarchy"
+location = "bottom"

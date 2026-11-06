@@ -3,10 +3,12 @@
 //! names in `spring.batch.job.name`, and Spring Batch 5 migration hints in
 //! Java configuration. Text-based: names match as written.
 
+use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
-use spring_text::index::{Index, Indexes, PROVIDER_BUDGET};
+use spring_text::diagram::{self, Edge, Node};
+use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::{beans, config, contains, java, range, xml};
 use std::collections::BTreeSet;
 
@@ -50,6 +52,12 @@ pub struct Name {
     pub range: Range,
     /// The enclosing job (or top-level flow) element of an XML state.
     pub scope: Option<usize>,
+    /// The element index of an XML job or state, for matching transitions to it.
+    pub el: usize,
+    /// `job`, `step`, `flow`, `split` or `decision`; empty for beans.
+    pub detail: &'static str,
+    /// Transitions leaving an XML state: target id and its label (`on` value).
+    pub goes: Vec<(String, Option<String>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,12 +102,14 @@ pub fn parse_xml(text: &str) -> (Vec<Name>, Vec<Link>) {
     let attr_range = |a: &xml::Attr| range(text, a.value_at, a.value_end);
     let mut names: Vec<Name> = xml::bean_ids(&els)
         .into_iter()
-        .map(|a| Name { name: a.value.clone(), kind: Kind::Bean, range: attr_range(a), scope: None })
+        .map(|a| Name { name: a.value.clone(), kind: Kind::Bean, range: attr_range(a), scope: None, el: 0, detail: "", goes: Vec::new() })
         .collect();
     let mut links = Vec::new();
     if !text.contains(NAMESPACE) {
         return (names, links);
     }
+    let mut owners = std::collections::BTreeMap::new();
+    let mut transitions: Vec<(usize, String, Option<String>)> = Vec::new();
     for (i, e) in els.iter().enumerate().filter(|(i, _)| xml::namespace(&els, *i) == Some(NAMESPACE)) {
         let scope = scope_of(&els, i);
         if let Some(id) = e.attr("id") {
@@ -109,7 +119,9 @@ pub fn parse_xml(text: &str) -> (Vec<Name>, Vec<Link>) {
                 _ => None,
             };
             if let Some(kind) = kind {
-                names.push(Name { name: id.value.clone(), kind, range: attr_range(id), scope });
+                let detail = if e.local() == "job" { "job" } else { STATES.iter().find(|s| **s == e.local()).copied().unwrap_or("") };
+                owners.insert(i, names.len());
+                names.push(Name { name: id.value.clone(), kind, range: attr_range(id), scope, el: i, detail, goes: Vec::new() });
             }
         }
         for a in &e.attrs {
@@ -120,6 +132,23 @@ pub fn parse_xml(text: &str) -> (Vec<Name>, Vec<Link>) {
                 _ => continue,
             };
             links.push(Link { value: a.value.trim().to_owned(), kind, range: attr_range(a), scope });
+            if kind != LinkKind::Target {
+                continue;
+            }
+            let mut owner = Some(i);
+            while let Some(o) = owner.filter(|o| !STATES.contains(&els[*o].local())) {
+                owner = els[o].parent;
+            }
+            let on = e.attr("on").map(|on| on.value.clone());
+            let label = if a.local() == "restart" { Some(format!("{} restart", on.unwrap_or_default()).trim().to_owned()) } else { on };
+            if let Some(owner) = owner {
+                transitions.push((owner, a.value.trim().to_owned(), label));
+            }
+        }
+    }
+    for (owner, target, label) in transitions {
+        if let Some(&n) = owners.get(&owner) {
+            names[n].goes.push((target, label));
         }
     }
     (names, links)
@@ -128,7 +157,7 @@ pub fn parse_xml(text: &str) -> (Vec<Name>, Vec<Link>) {
 /// The names a Java or Kotlin source declares.
 pub fn parse_source(path: &str, text: &str) -> Vec<Name> {
     let file = spring_text::parse_source(path, text);
-    let name = |name: String, kind, from, to| Name { name, kind, range: range(text, from, to), scope: None };
+    let name = |name: String, kind, from, to| Name { name, kind, range: range(text, from, to), scope: None, el: 0, detail: "", goes: Vec::new() };
     let mut out: Vec<Name> =
         java::bean_names(&file).into_iter().map(|b| name(b.name, Kind::Bean, b.at, b.at + b.len)).collect();
     out.extend(file.types.iter().filter(|t| t.has(&["SpringBootApplication"])).map(|t| {
@@ -147,7 +176,7 @@ pub fn parse_source(path: &str, text: &str) -> Vec<Name> {
             "get" if receiver.contains("stepbuilder") => Kind::State,
             _ => continue,
         };
-        out.push(name(s.value.clone(), kind, s.at, s.end));
+        out.push(Name { detail: if kind == Kind::Job { "job" } else { "step" }, ..name(s.value.clone(), kind, s.at, s.end) });
     }
     out
 }
@@ -417,13 +446,81 @@ impl Providers for Batch {
     }
 }
 
+const VIEW: &str = "diagram";
+
+fn location_key(path: &str, range: Range) -> String {
+    format!("b:{}:{}:{path}", range.start.line, range.start.character)
+}
+
+/// Jobs and their steps, flows, splits and decisions as nodes; the job points at its first state, states at the states they lead to.
+fn diagram_of(index: &Index<Vec<Name>>) -> (Vec<Node>, Vec<Edge>) {
+    let shown = |n: &&Name| matches!(n.kind, Kind::Job | Kind::State);
+    let mut nodes = Vec::new();
+    let mut edges = BTreeSet::new();
+    for (path, names) in index.iter() {
+        let id = |n: &Name| location_key(path, n.range);
+        for n in names.iter().filter(shown) {
+            nodes.push(Node::new(&id(n), &n.name).detail(n.detail).accent(n.kind == Kind::Job));
+            for (target, label) in &n.goes {
+                let found = names.iter().find(|t| t.kind == Kind::State && t.scope == n.scope && t.name == *target);
+                if let Some(t) = found {
+                    edges.insert((id(n), id(t), label.clone()));
+                }
+            }
+            if n.kind == Kind::Job || n.detail == "flow" {
+                if let Some(first) = names.iter().find(|t| t.kind == Kind::State && t.scope == Some(n.el) && n.detail != "") {
+                    edges.insert((id(n), id(first), None));
+                }
+            }
+        }
+    }
+    let edges = edges.into_iter().map(|(a, b, label)| {
+        let edge = Edge::new(&a, &b);
+        match label {
+            Some(l) => edge.label(&l),
+            None => edge,
+        }
+    });
+    (nodes, edges.collect())
+}
+
+impl Views for Batch {
+    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its batch jobs.").button(refresh)) };
+        let index = self.indexes.get(&project, COMMAND_BUDGET);
+        let (nodes, edges) = diagram_of(index);
+        let status = format!("{} nodes · {} transitions{}", nodes.len(), edges.len(), if index.complete() { "" } else { " · scanning…" });
+        Ok(View::new(Body::Html(diagram::html(&nodes, &edges, "No batch jobs found."))).button(refresh).status(&status))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        let key = match event {
+            ViewEvent::Button(b) if b == "refresh" => {
+                if let Some(project) = ctx.project() {
+                    self.indexes.get(&project, std::time::Duration::ZERO).reset();
+                }
+                host::refresh_view(view);
+                return Ok(());
+            }
+            ViewEvent::Activate(key) | ViewEvent::Message(key) => key,
+            _ => return Ok(()),
+        };
+        let mut parts = key.splitn(4, ':');
+        if let (Some("b"), Some(line), Some(col), Some(path)) = (parts.next(), parts.next(), parts.next(), parts.next()) {
+            host::open_location(path, line.parse().unwrap_or(0), col.parse().unwrap_or(0))?;
+        }
+        Ok(())
+    }
+}
+
 impl Plugin for Batch {
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         Err(Error::NotFound(format!("command {id}")))
     }
 }
 
-register_plugin!(Batch, providers);
+register_plugin!(Batch, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -595,5 +692,48 @@ public class BatchConfig {
         let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["exportJob", "importJob", "legacyJob"]);
         assert!(b.completion(&doc(path, "properties", "server.port=1\n"), Position::new(0, 13), None).is_empty());
+    }
+
+    #[test]
+    fn batch_diagram_has_expected_nodes_and_edges() {
+        let host = setup();
+        let (nodes, edges) = diagram_of(Batch::default().indexes.get(&host.invocation().project().unwrap(), COMMAND_BUDGET));
+        let label_of = |id: &str| nodes.iter().find(|n| n.id == id).map(|n| n.label.as_str()).unwrap_or("?");
+        let mut labels: Vec<(&str, Option<&str>)> = nodes.iter().map(|n| (n.label.as_str(), n.detail.as_deref())).collect();
+        labels.sort();
+        assert_eq!(labels, [
+            ("baseStep", Some("step")),
+            ("check", Some("decision")),
+            ("exportJob", Some("job")),
+            ("importJob", Some("job")),
+            ("legacyJob", Some("job")),
+            ("load", Some("step")),
+            ("report", Some("step")),
+        ]);
+        let mut pairs: Vec<(&str, &str, Option<&str>)> =
+            edges.iter().map(|e| (label_of(&e.from), label_of(&e.to), e.label.as_deref())).collect();
+        pairs.sort();
+        assert_eq!(pairs, [
+            ("check", "report", Some("FAILED")),
+            ("importJob", "load", None),
+            ("load", "check", None),
+            ("report", "load", Some("RETRY restart")),
+        ]);
+
+        let mut b = Batch::default();
+        let view = b.render(VIEW, None, &host.invocation()).unwrap();
+        let Body::Html(page) = view.body else { panic!("html expected") };
+        assert!(page.contains(&format!("data-id=\"b:3:13:{XML_PATH}\"")), "{page}");
+        assert_eq!(view.status.as_deref(), Some("7 nodes · 4 transitions"));
+        b.handle(VIEW, ViewEvent::Message(format!("b:3:13:{XML_PATH}")), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations(), [(XML_PATH.to_string(), 3, 13)]);
+    }
+
+    #[test]
+    fn batch_diagram_is_empty_without_jobs() {
+        let host = MockHost::install();
+        let view = Batch::default().render(VIEW, None, &host.invocation()).unwrap();
+        let Body::Html(page) = view.body else { panic!("html expected") };
+        assert!(page.contains("No batch jobs found."));
     }
 }
