@@ -541,6 +541,13 @@ class KtChatController(private val messagingTemplate: SimpMessagingTemplate) {
     }
 
     #[test]
+    fn kotlin_template_destinations_are_not_indexed() {
+        let src = "class C(val messagingTemplate: SimpMessagingTemplate) {\n    fun f(room: String) {\n        messagingTemplate.convertAndSend(\"/topic/$room\", 1)\n        messagingTemplate.convertAndSend(\"/topic/all\", 1)\n    }\n}\n";
+        let dests: Vec<_> = parse("C.kt", src).unwrap().uses.into_iter().map(|u| u.dest).collect();
+        assert_eq!(dests, ["/topic/all"]);
+    }
+
+    #[test]
     fn indexes_configuration_handlers_and_senders() {
         let config = parse("", CONFIG).unwrap();
         assert_eq!(

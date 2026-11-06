@@ -1,6 +1,6 @@
 # Spring WebSocket Tools
 
-STOMP messaging support for Spring Java projects in OpenIDEA:
+STOMP messaging support for Spring Java and Kotlin projects in OpenIDEA:
 
 - **Index** of the project's broker configuration (`enableSimpleBroker`, `enableStompBrokerRelay`, `setApplicationDestinationPrefixes`, `setUserDestinationPrefix`, `addEndpoint` in a `WebSocketMessageBrokerConfigurer`), handlers (`@MessageMapping`, `@SubscribeMapping`, class-level `@MessageMapping` prefix joined) and destinations sent to (`@SendTo`, `@SendToUser`, `convertAndSend`, `convertAndSendToUser`, `send` of a messaging template).
 - **Gutter arrows**: a handler shows the destination a client uses (`SEND /app/chat/send`). A destination sent to links to the other places that use it, and Go to Definition on the literal lists them all. User destinations match as the client sees them (`/user/queue/replies`).

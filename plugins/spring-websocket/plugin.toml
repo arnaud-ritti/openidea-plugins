@@ -1,7 +1,7 @@
 id = "aritti.spring-websocket"
 name = "Spring WebSocket Tools"
 version = "0.1.0"
-description = "STOMP messaging in Spring Java projects, linked to JavaScript and TypeScript STOMP clients. Shows the destination a client uses for each @MessageMapping and @SubscribeMapping handler, links @SendTo, @SendToUser and messaging template sends to the same destination with gutter arrows and Go to Definition, completes broker prefixes and known destinations, and warns about destinations that no configured broker prefix covers. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "STOMP messaging in Spring Java and Kotlin projects, linked to JavaScript and TypeScript STOMP clients. Shows the destination a client uses for each @MessageMapping and @SubscribeMapping handler, links @SendTo, @SendToUser and messaging template sends to the same destination with gutter arrows and Go to Definition, completes broker prefixes and known destinations, and warns about destinations that no configured broker prefix covers. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0 (first release): STOMP destination index, gutter arrows on handlers and destinations, Go to Definition, completion, warning for destinations outside the broker prefixes."
