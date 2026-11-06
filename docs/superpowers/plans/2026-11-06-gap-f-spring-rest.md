@@ -204,25 +204,32 @@ Tests: `view_lists_handlers_and_clients_under_one_destination`, `view_is_a_messa
 - **Proportion:** about 250 lines for 12 rows across 6 plugins; no code blocks beyond manifest keys.
 - **Order:** Task 1 first; the rest are independent (Tasks 6 and 7 both edit `spring-web/src/lib.rs`: run them in order).
 
-## Ledger (fill during execution)
+## Ledger
 
 Rulings changed or added while executing:
 
 | Row / task | Ruling and reason |
 |---|---|
-| | |
+| T6 manifest | Plan said no new provider kind; spring-web already declares `code-actions`, so nothing was added. |
+| Data 5 (T4) | Built: `@Sequence` is documented (docs.spring.io/spring-data/relational/reference/jdbc/sequences.html, attributes `sequence`, `schema`); only a blank `sequence` literal is checked. |
+| T10 | `Snapshot.complete` field accepted (needed for the Scanning message and refresh-keeps-scan). |
+| Final review | Plan deny-list for `@BatchMapping` wrongly listed `Collection`/`Set`; `Slice` wrongly required a `Pageable`. Both removed (Spring documents `Collection<V>`; only `Page` is validated). |
+| Final review | Kotlin expression-body `@BatchMapping` fun without declared type is quiet (parser invents `Unit`). Residual: `= { ... }` lambda body still warns. |
+| Final review | Deferred: `invalid-api-version` and `api-version-mismatch` can both fire on one bad literal; running the generate actions twice yields ambiguous duplicate handlers (placeholder template). |
 
-Per-task status (`todo`, `done <commit>`, `narrowed: ...`, `dropped: ...`):
+Per-task status:
 
 | Task | Status | Doc notes |
 |---|---|---|
-| 1 `JavaFile::from_spring` | todo | |
-| 2 spring-boot Java checks | todo | |
-| 3 spring-boot file icons | todo | |
-| 4 spring-data checks | todo | |
-| 5 spring-web version format | todo | |
-| 6 spring-web generate actions | todo | |
-| 7 spring-web Endpoints view | todo | |
-| 8 spring-security path patterns | todo | |
-| 9 spring-graphql `@BatchMapping` | todo | |
-| 10 spring-websocket destinations view | todo | |
+| 1 `JavaFile::from_spring` | done 609153e | |
+| 2 spring-boot Java checks | done 4eaecef (+ c753165) | Boot 3 prefix part, 4, 5 covered. Unverified in IDE: host offering the quick fix on the annotation line; Java docs requesting code actions. |
+| 3 spring-boot file icons | done e061046 | Boot 23: applies only under an icon theme that merging plugin icons (unverified); SVG not rendered, dashed-gear may look like a dotted ring at 16px. |
+| 4 spring-data checks | done a231a9b (+ 9b5da8f) | Data 3 (`Page` only), 4, 5 (`sequence` attribute only), 6 (Hint) covered. |
+| 5 spring-web version format | done 1c565a6, 963a73f | Web 2: lone literal in `version` of Java mapping annotations only; Kotlin and functional routes not covered. |
+| 6 spring-web generate actions | done 55dddea, 1044069 | Web 4: Java only, two refactor actions, caret not moved, placeholder `/path`; unverified: host offering refactor actions on a caret in blank class space. |
+| 7 spring-web Endpoints view | done 6362d41 (+ 19b0543 manifest text) | Web 7: literal annotated mappings and functional routes only; view unverified in IDE. |
+| 8 spring-security path patterns | done 62b3ef4 (+ 6976517) | Security 1: `**` before the last segment in requestMatchers/mvcMatchers/securityMatcher/Kotlin authorize; no fix; may false-positive under `ant_path_matcher`. |
+| 9 spring-graphql `@BatchMapping` | done f806dc7 (+ 21d18d4) | GraphQL 1: deny-list; raw `Mono` and custom wrappers quiet; Java and Kotlin. |
+| 10 spring-websocket destinations view | done b1d5d3e (+ be5f918) | WebSocket 2: own "WebSocket Destinations" view; unverified in IDE. |
+
+Final whole-branch review (opus): 4 Important plus minors found, one fix wave (21d18d4, 9b5da8f, 19b0543, be5f918, c753165, 6976517), one scoped re-review: clean. Deferred minors are listed in the final report.
