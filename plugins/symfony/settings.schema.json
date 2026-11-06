@@ -15,6 +15,11 @@
       "title": "Report deprecated service classes, duplicate parameters and unknown named arguments",
       "default": true
     },
+    "phpCallChecks": {
+      "type": "boolean",
+      "title": "Report removed form type names, missing assets and unknown translation domains in PHP",
+      "default": true
+    },
     "publicDirectory": {
       "type": "string",
       "title": "Public directory that asset() paths start from (project-relative)",

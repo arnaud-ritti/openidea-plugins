@@ -486,6 +486,144 @@ pub fn check_services(ctx: &Context, path: &str, language: &str, text: &str) -> 
     out
 }
 
+const FORM_TYPES: &[(&str, &str)] = &[
+    ("text", "TextType"),
+    ("textarea", "TextareaType"),
+    ("email", "EmailType"),
+    ("integer", "IntegerType"),
+    ("money", "MoneyType"),
+    ("number", "NumberType"),
+    ("password", "PasswordType"),
+    ("percent", "PercentType"),
+    ("search", "SearchType"),
+    ("url", "UrlType"),
+    ("range", "RangeType"),
+    ("choice", "ChoiceType"),
+    ("entity", "EntityType"),
+    ("country", "CountryType"),
+    ("language", "LanguageType"),
+    ("locale", "LocaleType"),
+    ("timezone", "TimezoneType"),
+    ("currency", "CurrencyType"),
+    ("date", "DateType"),
+    ("datetime", "DateTimeType"),
+    ("time", "TimeType"),
+    ("birthday", "BirthdayType"),
+    ("checkbox", "CheckboxType"),
+    ("file", "FileType"),
+    ("radio", "RadioType"),
+    ("collection", "CollectionType"),
+    ("repeated", "RepeatedType"),
+    ("hidden", "HiddenType"),
+    ("button", "ButtonType"),
+    ("submit", "SubmitType"),
+    ("reset", "ResetType"),
+    ("form", "FormType"),
+];
+
+/// Translation domains that Symfony's own bundles provide.
+const BUILT_IN_DOMAINS: &[&str] = &["messages", "validators", "security"];
+
+/// Positions of the `(` of every call that ends with `needle` (which ends in
+/// `(`). A needle that starts with a name is a function call: not a method,
+/// not part of a longer name.
+fn call_opens<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let function = needle.as_bytes()[0].is_ascii_alphabetic();
+
+    text.match_indices(needle).filter_map(move |(at, _)| {
+        let before = text[..at].bytes().last();
+        let member = before.is_some_and(|b| refs::is_identifier(b) || matches!(b, b'>' | b':' | b'$' | b'\\'));
+        (!(function && member)).then_some(at + needle.len() - 1)
+    })
+}
+
+/// Range of the contents of a quoted string argument.
+fn literal(text: &str, argument: &str) -> Option<Range<usize>> {
+    let argument = argument.trim();
+    let quote = argument.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let inner = argument.strip_prefix(quote)?.strip_suffix(quote)?;
+    let start = offset_in(text, inner);
+    Some(start..start + inner.len())
+}
+
+fn is_dynamic(name: &str) -> bool {
+    name.is_empty() || name.contains(['{', '$', '~', '#'])
+}
+
+fn form_type_strings(text: &str, out: &mut Vec<Finding>) {
+    if !text.contains("FormBuilderInterface") && !text.contains("AbstractType") && !text.contains("$builder") {
+        return;
+    }
+
+    for open in call_opens(text, "->add(") {
+        let arguments = refs::arguments(text, open);
+        let Some(range) = arguments.get(1).and_then(|argument| literal(text, argument)) else { continue };
+        let Some((alias, class)) = FORM_TYPES.iter().find(|(alias, _)| *alias == &text[range.clone()]) else { continue };
+
+        let message = format!("Form type \"{alias}\" was removed in Symfony 3; use {class}::class.");
+        out.push(Finding::warn(range, "form-type-string", message));
+    }
+}
+
+fn missing_assets(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
+    if ctx.index.assets.is_empty() {
+        return;
+    }
+
+    for open in call_opens(text, "->getUrl(").chain(call_opens(text, "asset(")) {
+        let arguments = refs::arguments(text, open);
+        if arguments.len() != 1 {
+            continue;
+        }
+
+        let Some(range) = literal(text, arguments[0]) else { continue };
+        let name = &text[range.clone()];
+        let external = name.contains("://") || name.starts_with(['/', '#']) || name.starts_with("data:");
+        if external || is_dynamic(name) {
+            continue;
+        }
+
+        let file = name.split(['?', '#']).next().unwrap_or(name);
+        if !ctx.index.assets.contains_key(file) {
+            out.push(Finding::warn(range, "missing-asset", format!("Asset \"{name}\" does not exist in the public directory.")));
+        }
+    }
+}
+
+fn missing_translation_domains(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
+    if ctx.index.translations.is_empty() {
+        return;
+    }
+
+    for open in call_opens(text, "->trans(").chain(call_opens(text, "t(")) {
+        let arguments = refs::arguments(text, open);
+        let named = arguments.iter().find_map(|argument| argument.trim().strip_prefix("domain:"));
+        let Some(range) = named.or_else(|| arguments.get(2).copied()).and_then(|argument| literal(text, argument)) else { continue };
+
+        let domain = &text[range.clone()];
+        let name = domain.strip_suffix("+intl-icu").unwrap_or(domain);
+        if is_dynamic(name) || BUILT_IN_DOMAINS.contains(&name) || ctx.index.translations.contains_key(name) {
+            continue;
+        }
+
+        out.push(Finding::warn(range, "missing-translation-domain", format!("Translation domain \"{domain}\" has no translation files.")));
+    }
+}
+
+/// `form-type-string`, `missing-asset` and `missing-translation-domain` in PHP.
+pub fn check_php(ctx: &Context, language: &str, text: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if language != "php" {
+        return out;
+    }
+
+    form_type_strings(text, &mut out);
+    missing_assets(ctx, text, &mut out);
+    missing_translation_domains(ctx, text, &mut out);
+    out.sort_by_key(|finding| finding.start);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -539,7 +677,7 @@ mod tests {
     fn run_with(index: &Index, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
         let files = sources();
         let read = |file: &str| files.get(file).cloned();
-        let groups = Groups { controllers: true, services: true };
+        let groups = Groups { controllers: true, services: true, php_calls: true };
         crate::extra_problems(index, groups, &read, path, language, text)
     }
 
@@ -787,5 +925,149 @@ mod tests {
         let host = MockHost::install();
         let mut plugin = project(&host);
         assert!(opened(&host, &mut plugin, "/project/config/services.xml").is_empty());
+    }
+
+    fn php_index() -> Index {
+        let mut index = fixture_index();
+        index.assets.insert("img/logo.png".into(), Entry { detail: None, path: "/project/public/img/logo.png".into(), at: Position::new(0, 0) });
+        index.translations.insert("messages".into(), Default::default());
+        index.translations.insert("admin".into(), Default::default());
+        index
+    }
+
+    fn php(body: &str) -> String {
+        format!("<?php\nclass F extends AbstractType\n{{\n    public function buildForm(FormBuilderInterface $builder, array $options)\n    {{\n{body}\n    }}\n}}\n")
+    }
+
+    fn run_php(text: &str) -> Vec<Diagnostic> {
+        run_with(&php_index(), "/project/src/Form/F.php", "php", text)
+    }
+
+    const FORM: &str = "/project/src/Form/F.php";
+
+    #[test]
+    fn form_type_string_warns() {
+        let text = php("        $builder->add('name', 'text')->add('body', \"textarea\", ['required' => false]);");
+        let found = run_php(&text);
+        assert_eq!(codes(&found), ["form-type-string"; 2]);
+        assert_eq!(found[0].message, "Form type \"text\" was removed in Symfony 3; use TextType::class.");
+        assert_eq!(found[0].range, TextRange::new(Position::new(5, 31), Position::new(5, 35)));
+        assert_eq!(found[1].message, "Form type \"textarea\" was removed in Symfony 3; use TextareaType::class.");
+    }
+
+    #[test]
+    fn form_type_string_is_quiet_for_library_or_dynamic_name() {
+        for call in [
+            "$builder->add('name', TextType::class);",
+            "$builder->add('name', 'custom_alias');",
+            "$builder->add('name', 'Text');",
+            "$builder->add('name');",
+            "$builder->add('name', $type);",
+            "$builder->add('name', 'text' . $suffix);",
+            "$builder->add('name', 'App\\\\Form\\\\TextType');",
+        ] {
+            assert!(run_php(&php(&format!("        {call}"))).is_empty(), "{call}");
+        }
+
+        let unrelated = "<?php\nclass Bag\n{\n    public function fill($collection)\n    {\n        $collection->add('name', 'text');\n    }\n}\n";
+        assert!(run_php(unrelated).is_empty());
+    }
+
+    #[test]
+    fn missing_asset_warns() {
+        let text = "<?php\nclass A\n{\n    public function url($packages)\n    {\n        $packages->getUrl('img/missing.png');\n        return asset(\"css/none.css\");\n    }\n}\n";
+        let found = run_php(text);
+        assert_eq!(codes(&found), ["missing-asset"; 2]);
+        assert_eq!(found[0].message, "Asset \"img/missing.png\" does not exist in the public directory.");
+        assert_eq!(found[0].range, TextRange::new(Position::new(5, 27), Position::new(5, 42)));
+    }
+
+    #[test]
+    fn missing_asset_is_quiet_for_library_or_dynamic_name() {
+        for call in [
+            "$packages->getUrl('img/logo.png');",
+            "$packages->getUrl('img/logo.png?v=2');",
+            "$packages->getUrl('https://cdn.example.com/x.js');",
+            "$packages->getUrl('//cdn.example.com/x.js');",
+            "$packages->getUrl('/already/absolute.png');",
+            "$packages->getUrl('data:image/png;base64,AAAA');",
+            "$packages->getUrl(\"img/$name.png\");",
+            "$packages->getUrl('img/' . $name);",
+            "$packages->getUrl('img/none.png', 'cdn');",
+            "$this->asset('img/none.png');",
+            "$packages->getUrl($path);",
+        ] {
+            let text = format!("<?php\nfunction f($packages) {{\n    {call}\n}}\n");
+            assert!(run_php(&text).is_empty(), "{call}");
+        }
+
+        let text = "<?php\n$packages->getUrl('img/none.png');\n";
+        assert!(run_with(&fixture_index(), FORM, "php", text).is_empty());
+    }
+
+    #[test]
+    fn missing_translation_domain_warns() {
+        let text = "<?php\nfunction f($translator) {\n    $translator->trans('k', [], 'nodomain');\n    t('k', [], \"other\");\n    $translator->trans('k', domain: 'named');\n}\n";
+        let found = run_php(text);
+        assert_eq!(codes(&found), ["missing-translation-domain"; 3]);
+        assert_eq!(found[0].message, "Translation domain \"nodomain\" has no translation files.");
+        assert_eq!(found[0].range, TextRange::new(Position::new(2, 33), Position::new(2, 41)));
+    }
+
+    #[test]
+    fn missing_translation_domain_is_quiet_for_library_or_dynamic_name() {
+        for call in [
+            "$translator->trans('k', [], 'admin');",
+            "$translator->trans('k', [], 'messages+intl-icu');",
+            "$translator->trans('k', [], 'validators');",
+            "$translator->trans('k', [], 'security');",
+            "$translator->trans('k', [], $domain);",
+            "$translator->trans('k', [], \"dom_{$x}\");",
+            "$translator->trans('k', [], null);",
+            "$translator->trans('k');",
+            "$this->format('k', [], 'nodomain');",
+            "$translator->trans('k', domain: $domain);",
+        ] {
+            let text = format!("<?php\nfunction f($translator) {{\n    {call}\n}}\n");
+            assert!(run_php(&text).is_empty(), "{call}");
+        }
+
+        let text = "<?php\n$translator->trans('k', [], 'nodomain');\n";
+        assert!(run_with(&fixture_index(), FORM, "php", text).is_empty());
+    }
+
+    #[test]
+    fn php_group_ranges_use_utf16_columns_with_multibyte_text() {
+        let text = "<?php /* é😀 */ $packages->getUrl('img/missing.png');\n";
+        let found = run_php(text);
+        assert_eq!(found[0].range.start, Position::new(0, 15 + 20));
+        assert_eq!(found[0].range.end.character, 15 + 20 + 15);
+    }
+
+    #[test]
+    fn php_group_crlf_files_report_correct_lines() {
+        let text = php("        $builder->add('name', 'text');").replace('\n', "\r\n");
+        let found = run_php(&text);
+        assert_eq!(found[0].range, TextRange::new(Position::new(5, 31), Position::new(5, 35)));
+    }
+
+    #[test]
+    fn php_group_fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        let mut plugin = project(&host);
+
+        host.add_file("src/Form/F.php", &php("        $builder->add('name', 'text');"));
+        assert_eq!(codes(&opened(&host, &mut plugin, FORM)), ["form-type-string"]);
+
+        host.add_file("src/Form/F.php", &php("        $builder->add('name', TextType::class);"));
+        plugin.handle_events(&[Event::FileSaved(FORM.into())], &host.invocation());
+        assert!(host.diagnostics().get(FORM).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn php_group_missing_file_is_treated_as_absent() {
+        let host = MockHost::install();
+        let mut plugin = project(&host);
+        assert!(opened(&host, &mut plugin, "/project/src/Gone.php").is_empty());
     }
 }

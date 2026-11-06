@@ -37,6 +37,34 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
   `embed`, `apply`, `autoescape`, `with`, `verbatim`, `cache`, `sandbox`) never closed. Files are
   checked when opened or saved. _Settings › Plugins › Symfony_ turns the
   checks off.
+- Text inspections (`src/checks.rs`, written from the Symfony documentation;
+  each is silent when the class, service or file it needs is not in the
+  index, and when a name is dynamic or comes from a library). Three groups,
+  each with a setting:
+  - _Route controllers_ (`controllerChecks`): `controller-method-missing`, a
+    route in `config/routes*` (YAML/XML) naming `Class::method` where the
+    project class has no such public method, an invokable class without
+    `__invoke`, or a class-level `#[Route]` with neither `__invoke` nor routed
+    methods; `deprecated-route-setting`, only these: the
+    `Bundle:Controller:action` notation (removed in 4.0), `pattern` (removed in
+    3.0), `type: annotation` on imports (deprecated in 6.4), and the
+    `_method` / `_scheme` requirements (removed in 3.0). Classes that extend a
+    class other than `AbstractController`, use traits or define `__call` are
+    not reported.
+  - _Services_ (`serviceChecks`, YAML/XML under `config/`):
+    `deprecated-service-class`, a `class:` naming a project class with
+    `@deprecated` or `#[Deprecated]`; `duplicate-parameter-key`, one
+    parameter twice in a file; `named-argument-missing`, a `$name` argument the
+    class constructor has no parameter for (not for variadic constructors,
+    services with `parent` or a factory, `calls`, or classes without a
+    constructor).
+  - _PHP calls_ (`phpCallChecks`): `form-type-string`, `$builder->add('f',
+    'text')` with a core type alias removed in Symfony 3; `missing-asset`,
+    `->getUrl('x')` / `asset('x')` of a file absent from the public directory
+    (not for URLs, absolute paths, dynamic names or a second package
+    argument); `missing-translation-domain`, `->trans(…, domain)` / `t()` with a
+    domain that has no file in `translations/` (`messages`, `validators` and
+    `security` are never reported).
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
   YAML files; on an unquoted `@` / `%` YAML value, quote it.
 - Gutter: controller `render()` → template; template → controllers rendering
@@ -72,7 +100,7 @@ which the OpenIDEA plugin API has no equivalent for:
 - container `get()` return types, Twig variable types (`{{ post.| }}`),
   form types and options, Doctrine (QueryBuilder, repositories, DQL),
   serializer, event dispatcher, constraint validators;
-- the remaining inspections (service arguments, deprecated Twig, …) and intentions (they need resolved PHP types);
+- the remaining inspections (deprecated Twig, Twig route and asset checks, …) and intentions (they need resolved PHP types);
 - refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing
   files.

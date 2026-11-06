@@ -287,12 +287,13 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
 struct Groups {
     controllers: bool,
     services: bool,
+    php_calls: bool,
 }
 
 impl Groups {
     fn from_settings() -> Groups {
         let on = |key: &str| host::setting_bool(key).unwrap_or(true);
-        Groups { controllers: on("controllerChecks"), services: on("serviceChecks") }
+        Groups { controllers: on("controllerChecks"), services: on("serviceChecks"), php_calls: on("phpCallChecks") }
     }
 }
 
@@ -307,6 +308,10 @@ fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &st
 
     if groups.services {
         findings.extend(checks::check_services(&ctx, path, language, text));
+    }
+
+    if groups.php_calls {
+        findings.extend(checks::check_php(&ctx, language, text));
     }
 
     findings
