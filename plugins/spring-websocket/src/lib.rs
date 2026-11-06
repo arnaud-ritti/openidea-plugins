@@ -5,12 +5,15 @@
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
+use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host, register_plugin,
 };
-use spring_text::index::{Indexes, PROVIDER_BUDGET, project_of};
+use spring_text::index::{COMMAND_BUDGET, Indexes, PROVIDER_BUDGET, project_of};
+use spring_text::tree::Expansion;
 use spring_text::{parse_source, range, source_calls};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 const DEFAULT_USER_PREFIX: &str = "/user/";
 /// Receivers named like a STOMP messaging template.
@@ -37,6 +40,19 @@ pub enum Kind {
 impl Kind {
     fn is_client(self) -> bool {
         matches!(self, Kind::ClientSubscribe | Kind::ClientSend)
+    }
+
+    fn sends(self) -> bool {
+        matches!(self, Kind::Send | Kind::SendToUser | Kind::ClientSend)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Kind::Message | Kind::Subscribe => "handler",
+            Kind::Send | Kind::SendToUser => "sender",
+            Kind::ClientSubscribe => "client subscribe",
+            Kind::ClientSend => "client send",
+        }
     }
 
     /// Whether a client use of this kind talks to `other`.
@@ -277,6 +293,7 @@ impl Config {
 struct Snapshot {
     config: Config,
     uses: Vec<(String, Use)>,
+    complete: bool,
 }
 
 impl Snapshot {
@@ -314,6 +331,7 @@ pub struct WebSocketTools {
     index: Indexes<WsFile>,
     /// Project roots known to serve STOMP: a build file names the dependency, or a Java/Kotlin file was opened.
     stomp_roots: BTreeSet<String>,
+    expansion: Expansion,
 }
 
 impl Default for WebSocketTools {
@@ -324,15 +342,15 @@ impl Default for WebSocketTools {
                 parse,
             ),
             stomp_roots: BTreeSet::new(),
+            expansion: Expansion::default(),
         }
     }
 }
 
 impl WebSocketTools {
-    /// Script documents are only indexed in projects whose root build file names a Spring messaging dependency,
+    /// Scripts are only read in projects whose root build file names a Spring messaging dependency,
     /// or after a Java/Kotlin document of the project was opened (multi-module layouts).
-    fn serves_stomp(&mut self, doc: &Document) -> bool {
-        let Some(project) = project_of(&doc.path) else { return false };
+    fn serves_stomp(&mut self, project: &Project) -> bool {
         let Ok(root) = project.root() else { return false };
 
         if self.stomp_roots.contains(&root) {
@@ -353,31 +371,136 @@ impl WebSocketTools {
     }
 
     fn snapshot(&mut self, doc: &Document) -> Snapshot {
-        let mut config = Config::default();
-        let mut uses = Vec::new();
-        let mut user = None;
+        let project = project_of(&doc.path);
 
-        if is_script(&doc.path) && !self.serves_stomp(doc) {
-            config.user = DEFAULT_USER_PREFIX.to_owned();
-            return Snapshot { config, uses };
+        if is_script(&doc.path) && !project.as_ref().is_some_and(|p| self.serves_stomp(p)) {
+            let config = Config { user: DEFAULT_USER_PREFIX.to_owned(), ..Config::default() };
+            return Snapshot { config, uses: Vec::new(), complete: true };
         }
 
         if !is_script(&doc.path)
-            && let Some(root) = project_of(&doc.path).and_then(|p| p.root().ok())
+            && let Some(root) = project.and_then(|p| p.root().ok())
         {
             self.stomp_roots.insert(root);
         }
 
-        if let Some(index) = self.index.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
-            for (path, file) in index.iter() {
-                config.brokers.extend(file.brokers.iter().cloned());
-                config.apps.extend(file.apps.iter().cloned());
-                user = user.or(file.user.clone());
-                uses.extend(file.uses.iter().map(|u| (path.to_owned(), u.clone())));
+        match self.index.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
+            Some(index) => collect(index.iter(), |_| true, index.complete()),
+            None => collect(std::iter::empty(), |_| true, true),
+        }
+    }
+
+    fn project_snapshot(&mut self, project: &Project, budget: Duration) -> Snapshot {
+        let serves_stomp = self.serves_stomp(project);
+        let index = self.index.get(project, budget);
+
+        collect(index.iter(), |path| serves_stomp || !is_script(path), index.complete())
+    }
+}
+
+fn collect<'a>(files: impl Iterator<Item = (&'a str, &'a WsFile)>, include: impl Fn(&str) -> bool, complete: bool) -> Snapshot {
+    let mut config = Config::default();
+    let mut uses = Vec::new();
+    let mut user = None;
+
+    for (path, file) in files.filter(|(path, _)| include(path)) {
+        config.brokers.extend(file.brokers.iter().cloned());
+        config.apps.extend(file.apps.iter().cloned());
+        user = user.or(file.user.clone());
+        uses.extend(file.uses.iter().map(|u| (path.to_owned(), u.clone())));
+    }
+    config.user = user.map_or(DEFAULT_USER_PREFIX.to_owned(), |u| format!("{}/", u.trim_end_matches('/')));
+
+    Snapshot { config, uses, complete }
+}
+
+impl WebSocketTools {
+    fn destinations_view(&mut self, view: &str, project: &Project, budget: Duration) -> View {
+        let snapshot = self.project_snapshot(project, budget);
+
+        if !snapshot.complete {
+            host::refresh_view(view);
+        }
+
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let mut destinations: BTreeMap<String, Vec<&(String, Use)>> = BTreeMap::new();
+        for entry in &snapshot.uses {
+            for key in snapshot.config.keys(&entry.1) {
+                destinations.entry(key).or_default().push(entry);
             }
         }
-        config.user = user.map_or(DEFAULT_USER_PREFIX.to_owned(), |u| format!("{}/", u.trim_end_matches('/')));
-        Snapshot { config, uses }
+
+        if destinations.is_empty() {
+            let text = if snapshot.complete { "No STOMP destinations found." } else { "Scanning…" };
+            return View::message(text).button(refresh);
+        }
+
+        let mut items = Vec::new();
+        for (index, (destination, mut entries)) in destinations.iter().map(|(k, v)| (k, v.clone())).enumerate() {
+            entries.sort_by(|a, b| (&a.0, a.1.at).cmp(&(&b.0, b.1.at)));
+            let senders = entries.iter().filter(|(_, u)| u.kind.sends()).count();
+            let receivers = entries.len() - senders;
+            let key = format!("d:{destination}");
+            let detail = format!("{senders} senders, {receivers} receivers");
+            let icon = if senders == 0 || receivers == 0 { "warning" } else { "send" };
+            items.push(TreeItem::new(&key, destination).detail(&detail).icon(icon));
+
+            for (path, u) in entries {
+                let child = format!("u:{index}:{}:{}:{path}", u.range.start.line, u.range.start.character);
+                let label = format!("{}:{}", file_name(path), u.range.start.line + 1);
+                let detail = format!("{} · {}", u.kind.label(), u.via);
+                items.push(TreeItem::new(&child, &label).parent(&key).detail(&detail).icon("file"));
+            }
+        }
+        self.expansion.apply(&mut items);
+
+        let count = destinations.len();
+        let status = if snapshot.complete { format!("{count} destinations") } else { format!("{count} destinations · scanning…") };
+        View::new(Body::Tree(items)).button(refresh).status(&status)
+    }
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+impl Views for WebSocketTools {
+    fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let Some(project) = ctx.project() else {
+            return Ok(View::message("Open a project to see its STOMP destinations."));
+        };
+
+        Ok(self.destinations_view(view, &project, COMMAND_BUDGET))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if self.expansion.handle(&event) {
+            host::refresh_view(view);
+            return Ok(());
+        }
+
+        match event {
+            ViewEvent::Button(b) if b == "refresh" => {
+                if let Some(project) = ctx.project()
+                    && self.index.get(&project, Duration::ZERO).complete()
+                {
+                    self.index.reset();
+                }
+                host::refresh_view(view);
+            }
+            ViewEvent::Activate(key) => {
+                let mut parts = key.splitn(5, ':');
+                if let (Some("u"), Some(_), Some(line), Some(column), Some(path)) =
+                    (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
+                    && let (Ok(line), Ok(column)) = (line.parse(), column.parse())
+                {
+                    host::open_location(path, line, column)?;
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
     }
 }
 
@@ -478,7 +601,7 @@ impl Plugin for WebSocketTools {
     }
 }
 
-register_plugin!(WebSocketTools, providers);
+register_plugin!(WebSocketTools, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -831,5 +954,168 @@ client.onConnect = () => {
         let text = "class Chat {\n  private stomp2: StompJs.Client = new StompJs.Client({});\n  connect() {\n    this.link = new Client<Opts>({});\n    const client: Client = new Client({});\n    client.subscribe('/topic/messages', cb);\n    this.stomp2.send('/app/chat/send', {}, '');\n    this.link.subscribe('/topic/messages', cb);\n  }\n}\n";
         let kinds: Vec<_> = parse("chat.ts", text).unwrap().uses.iter().map(|u| u.kind).collect();
         assert_eq!(kinds, [Kind::ClientSubscribe, Kind::ClientSend, Kind::ClientSubscribe]);
+    }
+
+    const DESTINATIONS_VIEW: &str = "destinations";
+
+    fn tree(view: View) -> Vec<TreeItem> {
+        match view.body {
+            Body::Tree(items) => items,
+            _ => panic!("not a tree"),
+        }
+    }
+
+    fn message(view: &View) -> &str {
+        match &view.body {
+            Body::Message(text) => text,
+            _ => panic!("not a message"),
+        }
+    }
+
+    fn children<'a>(items: &'a [TreeItem], key: &str) -> Vec<&'a TreeItem> {
+        items.iter().filter(|i| i.parent.as_deref() == Some(key)).collect()
+    }
+
+    #[test]
+    fn view_lists_handlers_and_clients_under_one_destination() {
+        let host = setup();
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+        let view = tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap();
+        assert_eq!(view.status.as_deref(), Some("7 destinations"));
+        let items = tree(view);
+
+        let messages = items.iter().find(|i| i.key == "d:/topic/messages").unwrap();
+        assert_eq!(messages.detail.as_deref(), Some("2 senders, 1 receivers"));
+        assert_eq!(messages.icon.as_deref(), Some("send"));
+        let uses: Vec<_> = children(&items, "d:/topic/messages")
+            .iter()
+            .map(|i| (i.label.as_str(), i.detail.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            uses,
+            [
+                ("ChatController.java:9", "sender · @SendTo"),
+                ("ChatController.java:20", "sender · convertAndSend"),
+                ("chat.ts:5", "client subscribe · client.subscribe"),
+            ]
+        );
+
+        let handler = children(&items, "d:/app/chat/send");
+        assert_eq!(handler[0].detail.as_deref(), Some("handler · @MessageMapping"));
+        assert_eq!(handler[1].detail.as_deref(), Some("client send · client.publish"));
+        assert!(handler[1].key.ends_with(":/project/web/src/chat.ts"));
+    }
+
+    #[test]
+    fn view_is_a_message_while_scanning() {
+        let host = setup();
+        let mut tools = WebSocketTools::default();
+        let project = host.invocation().project().unwrap();
+        let view = tools.destinations_view(DESTINATIONS_VIEW, &project, Duration::ZERO);
+        assert_eq!(message(&view), "Scanning…");
+        assert_eq!(host.refreshed_views(), [DESTINATIONS_VIEW]);
+    }
+
+    #[test]
+    fn view_without_destinations_is_a_message() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Plain.java", "class Plain {}");
+        let mut tools = WebSocketTools::default();
+        let view = tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap();
+        assert_eq!(message(&view), "No STOMP destinations found.");
+    }
+
+    #[test]
+    fn destination_with_only_senders_gets_a_warning_icon() {
+        let host = setup();
+        let mut tools = WebSocketTools::default();
+        let items = tree(tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap());
+        let news = items.iter().find(|i| i.key == "d:/news/today").unwrap();
+        assert_eq!(news.icon.as_deref(), Some("warning"));
+        assert_eq!(news.detail.as_deref(), Some("1 senders, 0 receivers"));
+        let rooms = items.iter().find(|i| i.key == "d:/app/chat/rooms").unwrap();
+        assert_eq!(rooms.icon.as_deref(), Some("warning"));
+    }
+
+    #[test]
+    fn activating_a_use_opens_its_location() {
+        let host = setup();
+        let mut tools = WebSocketTools::default();
+        let items = tree(tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap());
+        let send_to = children(&items, "d:/topic/messages")[0];
+        tools.handle(DESTINATIONS_VIEW, ViewEvent::Activate(send_to.key.clone()), &host.invocation()).unwrap();
+        let opened = host.opened_locations();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].0, "/project/src/main/java/com/acme/chat/ChatController.java");
+        assert_eq!(opened[0].1, 8);
+    }
+
+    #[test]
+    fn use_keys_are_unique_when_a_use_appears_under_several_destinations() {
+        let host = setup();
+        let mut tools = WebSocketTools::default();
+        let items = tree(tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap());
+        let mut keys: Vec<_> = items.iter().map(|i| i.key.as_str()).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total);
+
+        let subscribe: Vec<_> = items.iter().filter(|i| i.detail.as_deref().is_some_and(|d| d.contains("@SubscribeMapping"))).collect();
+        assert!(subscribe.len() >= 2, "{subscribe:?}");
+    }
+
+    #[test]
+    fn malformed_key_is_ignored() {
+        let host = MockHost::install();
+        let mut tools = WebSocketTools::default();
+        for key in ["u:0:x:y:/a.java", "u:0:1", "d:/topic/x", "", "u:0:1:2"] {
+            tools.handle(DESTINATIONS_VIEW, ViewEvent::Activate(key.into()), &host.invocation()).unwrap();
+        }
+        assert!(host.opened_locations().is_empty());
+    }
+
+    #[test]
+    fn view_skips_scripts_in_projects_without_stomp() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/chat/ChatController.java", CHAT);
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+        let items = tree(tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap());
+        assert!(items.iter().all(|i| !i.key.contains("chat.ts")));
+        assert!(items.iter().any(|i| i.key == "d:/topic/messages"));
+    }
+
+    #[test]
+    fn refresh_keeps_a_scan_in_progress() {
+        let host = setup();
+        let mut tools = WebSocketTools::default();
+        let project = host.invocation().project().unwrap();
+        tools.index.get(&project, Duration::ZERO).update("/project/src/main/java/com/acme/chat/ChatController.java", CHAT);
+        tools.handle(DESTINATIONS_VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert_eq!(tools.index.get(&project, Duration::ZERO).files().len(), 1, "not reset");
+        assert_eq!(host.refreshed_views(), [DESTINATIONS_VIEW]);
+
+        tools.index.get(&project, COMMAND_BUDGET);
+        tools.handle(DESTINATIONS_VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert!(tools.index.get(&project, Duration::ZERO).files().is_empty(), "a complete index starts over");
+    }
+
+    #[test]
+    fn ranges_use_utf16_columns_with_multibyte_text() {
+        let host = MockHost::install();
+        host.add_file("pom.xml", "<artifactId>spring-websocket</artifactId>");
+        host.add_file(
+            "src/main/java/com/acme/Wide.java",
+            "class Wide {\n    void f() { messagingTemplate.convertAndSend(\"/topic/\u{1F600}\", \"é😀\"); messagingTemplate.convertAndSend(\"/topic/b\", 1); }\n}\n",
+        );
+        let mut tools = WebSocketTools::default();
+        let items = tree(tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap());
+        let second = children(&items, "d:/topic/b")[0];
+        assert_eq!(second.key.split(':').nth(2), Some("1"), "{}", second.key);
+        let column: u32 = second.key.split(':').nth(3).unwrap().parse().unwrap();
+        let line = "    void f() { messagingTemplate.convertAndSend(\"/topic/\u{1F600}\", \"é😀\"); messagingTemplate.convertAndSend(\"";
+        assert_eq!(column as usize, line.encode_utf16().count());
     }
 }

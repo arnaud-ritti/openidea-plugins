@@ -13,6 +13,8 @@ use spring_text::kotlin;
 use spring_text::{contains, range};
 use std::collections::BTreeMap;
 
+mod checks;
+
 const SCHEMA_GLOBS: &[&str] = &["**/*.graphqls", "**/*.graphql"];
 const JAVA_GLOBS: &[&str] = &["**/*.java", "**/*.kt"];
 const DOCUMENT_DIR: &str = "/graphql-documents/";
@@ -615,6 +617,10 @@ impl GraphQlTools {
                 }
             }
         }
+        if host::setting_bool("springGraphql.checkBatchMappingReturn").unwrap_or(true) {
+            let file = if doc.language == "kotlin" { kotlin::parse(&doc.text) } else { java::parse(&doc.text) };
+            problems.extend(checks::batch_mapping_return(&file, &doc.text).iter().map(|f| f.diagnostic(&doc.text)));
+        }
         let _ = host::publish_diagnostics(&doc.path, &problems);
         links
     }
@@ -935,6 +941,21 @@ class BookController {
             .filter(|d| d.code.as_deref() == Some("unknown-schema-field"))
             .map(|d| d.message.clone())
             .collect()
+    }
+
+    const BATCH: &str = "@Controller\nclass C {\n    @BatchMapping\n    public void titles(List<Book> books) {}\n}\n";
+
+    fn batch_codes(host: &MockHost, text: &str) -> Vec<String> {
+        problems_of(host, text);
+        host.diagnostics()["/project/src/main/java/com/acme/C.java"].iter().filter_map(|d| d.code.clone()).filter(|c| c.starts_with("batch")).collect()
+    }
+
+    #[test]
+    fn batch_mapping_group_can_be_switched_off() {
+        let host = setup();
+        assert_eq!(batch_codes(&host, BATCH), ["batch-mapping-return-type"]);
+        host.set_setting("springGraphql.checkBatchMappingReturn", "false");
+        assert!(batch_codes(&host, BATCH).is_empty());
     }
 
     const MAPPED: &str = "@Controller\nclass C {\n    @QueryMapping\n    public Book nope() { return null; }\n}\n";

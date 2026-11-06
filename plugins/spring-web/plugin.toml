@@ -1,14 +1,14 @@
 id = "aritti.spring-web"
 name = "Spring Web Tools"
 version = "0.1.0" # x-release-please-version
-description = "Spring MVC helpers for Java controllers. Checks @PathVariable parameters against the URI templates of their request mappings, with a quick fix for a misnamed variable, and links the view names a @Controller returns to their template files (Thymeleaf, FreeMarker, Mustache, Pebble, JTE, JSP) with gutter arrows, Go to Definition and completion, and links functional routes (RouterFunctions, Kotlin router DSL) and test URLs to their handlers. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "Spring MVC helpers for Java controllers. Checks @PathVariable parameters against the URI templates of their request mappings, with a quick fix for a misnamed variable, and links the view names a @Controller returns to their template files (Thymeleaf, FreeMarker, Mustache, Pebble, JTE, JSP) with gutter arrows, Go to Definition and completion, and links functional routes (RouterFunctions, Kotlin router DSL) and test URLs to their handlers. Checks the format of API version values, offers actions that add a @RequestMapping or @ExceptionHandler method, and lists every endpoint of the project in an Endpoints tool window. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0 (first release): path variable checks with a quick fix, view name navigation and completion."
+change-notes = "0.1.0 (first release): path variable checks with a quick fix, view name navigation and completion, API version format check, generate actions for request mapping and exception handler methods, Endpoints tool window."
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-language:kotlin"]
+activation = ["on-language:java", "on-language:kotlin", "on-view:endpoints"]
 
 [capabilities]
 required = ["project.read"]
@@ -20,3 +20,9 @@ languages = ["java", "kotlin"]
 [contributes.settings]
 schema = "settings.schema.json"
 title = "Spring Web"
+
+[[contributes.views]]
+id = "endpoints"
+title = "Endpoints"
+icon = "send"
+location = "left"

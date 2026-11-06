@@ -74,6 +74,21 @@ impl BootTools {
     }
 }
 
+fn removal_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
+    checks::removal_fixes(&java::parse(&doc.text), &doc.text)
+        .into_iter()
+        .map(|(from, to, title)| (range(&doc.text, from, to), title))
+        .filter(|(covered, _)| contains(*covered, selection.start))
+        .map(|(covered, title)| CodeAction {
+            title,
+            kind: Some("quickfix".into()),
+            preferred: true,
+            edits: vec![(doc.path.clone(), vec![TextEdit { range: covered, text: String::new() }])],
+            data: None,
+        })
+        .collect()
+}
+
 struct Problem {
     diagnostic: Diagnostic,
     fix: Option<(String, TextEdit)>,
@@ -171,6 +186,13 @@ impl Providers for BootTools {
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        if doc.path.ends_with(".java") {
+            if !checks::Groups::from_settings().application_setup {
+                return Vec::new();
+            }
+
+            return removal_actions(doc, selection);
+        }
         if !is_config_file(&doc.path) {
             return Vec::new();
         }
@@ -427,6 +449,29 @@ public class MailProperties {
         assert_eq!(codes(&found), [("invalid-cron", "Cron hour `25`: 25 is outside 0-23.")]);
         let at = java.find("0 0 25").unwrap();
         assert_eq!(found[0].range, range(java, at, at + 12));
+    }
+
+    #[test]
+    fn redundant_annotation_gets_a_removal_action() {
+        let _host = MockHost::install();
+        let text = "package a;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n@SpringBootApplication\n@ComponentScan\nclass App {}\n";
+        let path = "/project/src/main/java/App.java";
+        let mut tools = BootTools::default();
+        let actions = tools.code_actions(&doc(path, text), Range::new(Position::new(3, 3), Position::new(3, 3)));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Remove redundant @ComponentScan");
+        assert_eq!(actions[0].edits[0].1, [TextEdit { range: range(text, text.find("@ComponentScan").unwrap(), text.find("class").unwrap()), text: String::new() }]);
+        assert!(tools.code_actions(&doc(path, text), Range::new(Position::new(4, 1), Position::new(4, 1))).is_empty());
+    }
+
+    #[test]
+    fn removal_action_is_not_offered_when_application_setup_checks_are_off() {
+        let host = MockHost::install();
+        host.set_setting("springBoot.checkApplicationSetup", "false");
+        let text = "package a;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n@SpringBootApplication\n@ComponentScan\nclass App {}\n";
+        let mut tools = BootTools::default();
+        let actions = tools.code_actions(&doc("/project/src/main/java/App.java", text), Range::new(Position::new(3, 3), Position::new(3, 3)));
+        assert!(actions.is_empty());
     }
 
     #[test]

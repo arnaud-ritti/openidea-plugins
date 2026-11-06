@@ -79,13 +79,13 @@ The feasible-parity pass (branch `feasible-parity`, [plan](docs/superpowers/plan
 | Plugin | Built on this branch | Still feasible | Blocked |
 |---|---|---|---|
 | `spring-beans` | `non-proxyable-method`, `scheduled-signature`, `duplicate-bean-name`, `configuration-proxy-method`, `bean-name-convention` (hint), `self-invocation` (off by default); opt-in `unresolved-depends-on`, `component-scan-package-missing`. Java only, project beans only | Kotlin diagnostics; XML component-scan | diagrams as IDE format, generate-dependency actions (U2) |
-| `spring-security` | `matchers-after-any-request`, `matcher-order` (Java/Kotlin; `unreachable-patterns` was XML-only), `debug-enabled` | cross-chain analysis | OAuth2/SAML assistance, SpEL |
-| `spring-web` | `api-version-mismatch`, `init-binder-signature` | | Endpoints window, request generation |
-| `spring-boot` | `test-constructor-autowire`, `event-listener-signature` | | run-config awareness, jar metadata |
+| `spring-security` | `matchers-after-any-request`, `matcher-order` (Java/Kotlin; `unreachable-patterns` was XML-only), `debug-enabled`; gap F plan 2 adds `obsolete-path-pattern` (see below) | cross-chain analysis | OAuth2/SAML assistance, SpEL |
+| `spring-web` | `api-version-mismatch`, `init-binder-signature`; gap F plan 2 adds `invalid-api-version`, two generate actions and an Endpoints view (see below) | | the IDE's own Endpoints window, HTTP request generation |
+| `spring-boot` | `test-constructor-autowire`, `event-listener-signature`; gap F plan 2 adds `config-properties-prefix`, `early-event-listener`, application setup checks and a config file icon (see below) | | run-config awareness, jar metadata |
 | `spring-cloud` | `stream-channel-unbound` (hint, `StreamBridge` literals and binder keys), `bootstrap-config-missing-dependency` | legacy `@Input`/`@Output` channels | |
-| `spring-graphql` | nothing new: `unknown-schema-field` already existed; setting `checkUnmatchedMapping` and tests added | | |
+| `spring-graphql` | `unknown-schema-field` already existed (setting `checkUnmatchedMapping` and tests added); gap F plan 2 adds `batch-mapping-return-type` (see below) | | |
 | `spring-batch` | `chunk-missing-commit-interval` (XML) | Java `.start()`/`.next()` step-is-not-a-bean (false-positive prone) | |
-| `spring-websocket` | nothing new: `unrouted-destination` already existed; setting `checkBrokerPrefixes` and tests added | `@MessageMapping` without `@Controller` | |
+| `spring-websocket` | `unrouted-destination` already existed (setting `checkBrokerPrefixes` and tests added); gap F plan 2 adds the WebSocket Destinations view (see below) | `@MessageMapping` without `@Controller` | |
 | `jpa-assist` | `entity-missing-id` (replaces `jpa-missing-id`, follows project superclasses), `attribute-type` (`@Temporal`, `@Enumerated`, `@Version`), `entity-listener-signature` | `@Lob` | JPA console, ER diagram, inlays, wizard |
 | `gitlab` | CI inspections (`undefined-job`, `undefined-stage`, `duplicate-job-usage`, `single-quoted-shell-variable`) and `needs`/`extends`/stage navigation; Open Merge Request in Worktree; Update Merge Request Branch (the rebase API already existed; the command is new) | schema validation, `include:` following | self-hosted servers |
 | `quarkus` | `duplicate-key`, `missing-separator`, `invalid-value`, `unassigned-value` (hint), `undefined-expression` (typo candidates in base files only) | | `missing-required` (metadata has no required-ness), LSP4MP, Qute, wizard |
@@ -114,6 +114,19 @@ Built from the F rows of `kube-explorer`, `openapi`, `devcontainer`, `flyway` an
 - **`jpa-assist`:** Kotlin checks (val attributes, read-only collections, data classes; first class in a file only, collection types judged by simple name), class-signature and listener-without-callbacks warnings, and seven Add @X callback actions skipped when a method of that name exists. `parse_class` now accepts classes only, so an entity on an interface or enum drops out of the structure view and the generators.
 
 **Unverified in the IDE** (this pass): the `jsonc` language id for the devcontainer completion provider; whether completion `Document.path` equals the path of the file-opened event; the openapi Reload button (cargo cannot run page scripts); snippet tab stops; whether the Flyway detectors match root-level files only; whether a missing kubectl shows the install hint or a permission message on the real host.
+
+### Gap F, plan 2: rest of Spring (branch `gap-f-spring-rest`)
+
+[Plan](docs/superpowers/plans/2026-11-06-gap-f-spring-rest.md). Built with unit tests against the mock host; nothing was run in the IDE. No rating was changed. Each check has a settings toggle.
+
+- **`spring-boot`:** `config-properties-prefix` (the prefix part of `@ConfigurationProperties` only, not the binding), `early-event-listener` (an `@EventListener` for an event published before the context exists), application setup checks (`default-package-application`, `redundant-component-scan`, `redundant-enable-auto-configuration`) and a file icon for `application*` and `bootstrap*` config files.
+- **`spring-data`:** `page-without-pageable` (a `Page` return without a `Pageable`; `Slice` is valid and not flagged), `query-needs-modifying` (`@Modifying` on an update or delete `@Query`), `jdbc-empty-sequence-name` (only the empty `sequence` attribute of `@Sequence`) and `mapped-collection-key-column` (a Hint).
+- **`spring-web`:** `invalid-api-version` for a lone literal in `version` of Java mapping annotations (Kotlin and functional routes are not covered); Java-only actions "Add @RequestMapping method" and "Add @ExceptionHandler method" (caret not moved, the path is a placeholder); an Endpoints view for literal annotated mappings and functional routes.
+- **`spring-security`:** `obsolete-path-pattern` flags a `**` before the last path segment in `requestMatchers`, `mvcMatchers`, `securityMatcher` and Kotlin `authorize`. No quick fix. It can be a false positive when the project sets `ant_path_matcher`.
+- **`spring-graphql`:** `batch-mapping-return-type` is a deny-list of return types for `@BatchMapping` in Java and Kotlin. `Collection` and `Set` are valid; a raw `Mono` and custom wrappers stay quiet. A Kotlin `= { ... }` lambda body still warns.
+- **`spring-websocket`:** the plugin's own "WebSocket Destinations" view. A plugin cannot add items to the Endpoints view of `spring-web`.
+
+**Unverified in the IDE:** the removal quick fix on the annotation line; whether Java documents request code actions from `spring-boot`; the refactor actions with the caret in blank class space; the config file icon under icon themes that merge plugin icons; the dashed-stroke gear SVG at 16 px (never rendered); how the Endpoints and Destinations views render.
 
 ## Cross-cutting gaps (largest effect first)
 

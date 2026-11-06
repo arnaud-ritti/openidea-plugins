@@ -520,6 +520,43 @@ fn matcher_problems(text: &str, code: &str, kotlin: bool) -> Vec<Problem> {
     out
 }
 
+const PATH_PATTERN_CALLS: [&str; 3] = ["requestMatchers", "mvcMatchers", "securityMatcher"];
+
+fn path_pattern_problems(text: &str, code: &str, kotlin: bool) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let bytes = code.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !is_ident_byte(bytes[i]) || (i > 0 && is_ident_byte(bytes[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let end = (i..bytes.len()).find(|&j| !is_ident_byte(bytes[j])).unwrap_or(bytes.len());
+        let name = &code[i..end];
+        let open = end + code[end..].len() - code[end..].trim_start().len();
+        let is_call = PATH_PATTERN_CALLS.contains(&name) || kotlin && name == "authorize";
+        i = end;
+        if !is_call || bytes.get(open) != Some(&b'(') {
+            continue;
+        }
+        let close = closing(code, open);
+        let (_, patterns) = leading_patterns(text, &argument_ranges(code, open, close));
+        for (from, _, pattern) in patterns {
+            let segments: Vec<&str> = pattern.split('/').collect();
+            let mut offset = from;
+            for (n, segment) in segments.iter().enumerate() {
+                if *segment == "**" && n + 1 < segments.len() {
+                    let message = "A `**` before the last path segment is rejected by PathPatternParser, which Spring MVC request matching uses, and is not supported there: `**` may only end a pattern.";
+                    let diagnostic = problem(text, offset, offset + 2, Severity::Warning, "obsolete-path-pattern", message.to_owned());
+                    out.push(Problem { diagnostic, fix: None });
+                }
+                offset += segment.len() + 1;
+            }
+        }
+    }
+    out
+}
+
 fn debug_problems(text: &str, code: &str) -> Vec<Problem> {
     let mut out = Vec::new();
     let mut warn = |from: usize, to: usize| {
@@ -646,6 +683,9 @@ fn problems(path: &str, text: &str) -> Vec<Problem> {
         let code = kotlin_code_only(text);
         if host::setting_bool("springSecurity.checkMatchers").unwrap_or(true) {
             out.extend(matcher_problems(text, &code, kotlin));
+        }
+        if host::setting_bool("springSecurity.checkPathPatterns").unwrap_or(true) {
+            out.extend(path_pattern_problems(text, &code, kotlin));
         }
         if host::setting_bool("springSecurity.checkDebug").unwrap_or(true) {
             out.extend(debug_problems(text, &code));
@@ -1175,5 +1215,92 @@ class SecurityConfig : WebSecurityConfigurerAdapter() {
         let line = text.lines().nth(1).unwrap();
         let expected = line.encode_utf16().count() - line[line.find("requestMatchers").unwrap()..].encode_utf16().count();
         assert_eq!(d.range.start.character as usize, expected);
+    }
+
+    #[test]
+    fn double_star_before_the_last_segment_warns() {
+        let body = "http.securityMatcher(\"/a/**/b\").authorizeHttpRequests(a -> a.requestMatchers(\"/**/*.css\", \"/ok/**\").permitAll());";
+        assert_eq!(java_spans(body, "obsolete-path-pattern"), ["**", "**"]);
+        let located = java_spans("http.securityMatcher(\"/a/**/b\");", "obsolete-path-pattern");
+        assert_eq!(located, ["**"]);
+    }
+
+    #[test]
+    fn trailing_double_star_is_quiet() {
+        let body = "http.authorizeHttpRequests(a -> a.requestMatchers(\"/a/**\", \"/**\", \"/a/*\").permitAll());";
+        assert!(java_spans(body, "obsolete-path-pattern").is_empty());
+    }
+
+    #[test]
+    fn kotlin_authorize_pattern_warns() {
+        let kotlin = "import org.springframework.security.config.annotation.web.invoke\nclass C {\n    fun f(http: HttpSecurity) {\n        http { authorizeHttpRequests { authorize(HttpMethod.GET, \"/x/**/y\", permitAll) } }\n    }\n}\n";
+        assert_eq!(spans("/project/C.kt", kotlin, "obsolete-path-pattern"), ["**"]);
+    }
+
+    #[test]
+    fn path_patterns_are_quiet_for_library_or_dynamic_name() {
+        let wrong = "http.authorizeHttpRequests(a -> a.requestMatchers(\"/a/**/b\").permitAll());";
+        let library = format!("class C {{ void f(Lib http) {{\n{wrong}\n}} }}");
+        assert!(spans("/project/C.java", &library, "obsolete-path-pattern").is_empty());
+        for body in [
+            "http.authorizeHttpRequests(a -> a.requestMatchers(antMatcher(\"/a/**/b\")).permitAll());",
+            "http.authorizeHttpRequests(a -> a.requestMatchers(PATTERN).permitAll());",
+            "http.authorizeHttpRequests(a -> a.requestMatchers(\"/a/**\" + \"/b\").permitAll());",
+            "http.authorizeHttpRequests(a -> a.requestMatchers(\"${p}/**/b\").permitAll());",
+            "// http.requestMatchers(\"/a/**/b\")\nString s = \"requestMatchers(\\\"/a/**/b\\\")\";",
+        ] {
+            assert!(java_spans(body, "obsolete-path-pattern").is_empty(), "{body}");
+        }
+        let method = "http.authorizeHttpRequests(a -> a.requestMatchers(HttpMethod.GET, \"/a/**/b\").permitAll());";
+        assert_eq!(java_spans(method, "obsolete-path-pattern"), ["**"]);
+    }
+
+    #[test]
+    fn ant_matchers_are_not_reported_twice() {
+        let body = "http.authorizeHttpRequests(a -> a.antMatchers(\"/a/**/b\").permitAll().regexMatchers(\"/a/**/b\").denyAll());";
+        assert!(java_spans(body, "obsolete-path-pattern").is_empty());
+    }
+
+    #[test]
+    fn path_pattern_group_can_be_switched_off() {
+        let host = MockHost::install();
+        host.set_setting("springSecurity.checkPathPatterns", "false");
+        let text = format!("{SECURITY_IMPORT}class C {{ void f(HttpSecurity http) {{ http.securityMatcher(\"/a/**/b\"); }} }}");
+        assert!(problems("/project/C.java", &text).iter().all(|p| p.diagnostic.code.as_deref() != Some("obsolete-path-pattern")));
+    }
+
+    #[test]
+    fn path_pattern_fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        let mut tools = SecurityTools::default();
+        let bad = format!("{SECURITY_IMPORT}class C {{ void f(HttpSecurity http) {{ http.securityMatcher(\"/a/**/b\"); }} }}");
+        let d = Document { path: "/project/C.java".into(), language: "java".into(), version: 1, text: bad };
+        tools.line_markers(&d);
+        assert_eq!(host.diagnostics()[&d.path].len(), 1);
+        let fixed = Document { text: format!("{SECURITY_IMPORT}class C {{ void f(HttpSecurity http) {{ http.securityMatcher(\"/a/**\"); }} }}"), ..d };
+        tools.line_markers(&fixed);
+        assert!(host.diagnostics().get(&fixed.path).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn path_pattern_ranges_use_utf16_columns_with_multibyte_text() {
+        let text = format!("{SECURITY_IMPORT}class C {{ void f(HttpSecurity http) {{ http.securityMatcher(\"/\u{e9}\u{1F600}/**/b\"); }} }}");
+        let _host = MockHost::install();
+        let found = problems("/project/C.java", &text);
+        let d = &found.iter().find(|p| p.diagnostic.code.as_deref() == Some("obsolete-path-pattern")).unwrap().diagnostic;
+        let line = text.lines().nth(1).unwrap();
+        let expected = line.encode_utf16().count() - line[line.find("**").unwrap()..].encode_utf16().count();
+        assert_eq!(d.range.start.character as usize, expected);
+        assert_eq!(d.range.end.character as usize, expected + 2);
+    }
+
+    #[test]
+    fn path_pattern_crlf_files_report_correct_lines() {
+        let text = format!("{SECURITY_IMPORT}class C {{\n    void f(HttpSecurity http) {{\n        http.securityMatcher(\"/a/**/b\");\n    }}\n}}").replace('\n', "\r\n");
+        let _host = MockHost::install();
+        let found = problems("/project/C.java", &text);
+        let d = &found.iter().find(|p| p.diagnostic.code.as_deref() == Some("obsolete-path-pattern")).unwrap().diagnostic;
+        assert_eq!(d.range.start.line, 3);
+        assert_eq!(d.range.start.character, 33);
     }
 }

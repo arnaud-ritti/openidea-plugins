@@ -9,6 +9,21 @@
       "type": "boolean",
       "title": "Check the parameters and return type of @EventListener methods",
       "default": true
+    },
+    "springBoot.checkConfigurationProperties": {
+      "type": "boolean",
+      "title": "Check @ConfigurationProperties prefixes",
+      "default": true
+    },
+    "springBoot.checkEarlyEvents": {
+      "type": "boolean",
+      "title": "Warn about @EventListener methods for events published before the context exists",
+      "default": true
+    },
+    "springBoot.checkApplicationSetup": {
+      "type": "boolean",
+      "title": "Check @SpringBootApplication classes (default package, redundant annotations)",
+      "default": true
     }
   }
 }
