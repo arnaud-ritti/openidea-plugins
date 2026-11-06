@@ -1,7 +1,7 @@
 //! Spring Web Services Tools for OpenIDEA: links `@PayloadRoot` endpoint
 //! methods to the top-level elements of the project's XML schemas (`.xsd`
 //! files and schemas embedded in `.wsdl`) and checks the classpath resources
-//! given to `ClassPathResource`. Text-based, Java only.
+//! given to `ClassPathResource`. Text-based, Java and Kotlin.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::{

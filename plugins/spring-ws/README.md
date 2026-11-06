@@ -1,6 +1,6 @@
 # Spring Web Services Tools
 
-Spring Web Services support for Java projects in OpenIDEA:
+Spring Web Services support for Java and Kotlin projects in OpenIDEA:
 
 - **Endpoint ↔ schema**: on an `@Endpoint` class, a `@PayloadRoot(namespace = …, localPart = "x")` method gets a gutter arrow to the top-level element `x` of a schema with that target namespace; Go to Definition on the `localPart` literal does the same. In the schema, the element gets an arrow back to the method that handles it.
 - **Completion** of element names in `localPart = "…"`, from the schemas of the method's namespace.
