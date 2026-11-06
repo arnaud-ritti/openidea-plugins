@@ -367,3 +367,37 @@ pub fn complete(text: &str, offset: usize, version: &str) -> Option<Completion> 
 
     Some(Completion::Keys { items, from })
 }
+
+/// The keys or enum values at a caret in a JSON document, with the text to insert and where it starts.
+/// The flag says the caret is on a value.
+pub fn complete_json(text: &str, offset: usize, version: &str) -> Option<(Vec<Key>, usize, bool)> {
+    if !version.starts_with('3') {
+        return None;
+    }
+
+    let caret = crate::json::caret(text, offset)?;
+    let path: Vec<&str> = caret.path.iter().map(String::as_str).collect();
+    let place = resolve(&path)?;
+    if caret.value {
+        let Place::Node(name) = place else { return None };
+        let Val(values) = &node(name).iter().find(|(k, _)| Some(*k) == caret.key.as_deref())?.1 else { return None };
+        let items: Vec<Key> = values
+            .iter()
+            .filter(|value| !(caret.in_string && matches!(**value, "true" | "false")))
+            .map(|value| {
+                let bare = caret.in_string || matches!(*value, "true" | "false");
+                Key { label: value, insert: if bare { (*value).to_owned() } else { format!("\"{value}\"") } }
+            })
+            .collect();
+
+        return (!items.is_empty()).then_some((items, caret.from, true));
+    }
+
+    let quoted = |label: &str| if caret.in_string { label.to_owned() } else { format!("\"{label}\": ") };
+    let items = match place {
+        Place::Node(name) => node(name).iter().map(|(label, _)| Key { label, insert: quoted(label) }).collect(),
+        Place::Names(names) => names.iter().map(|label| Key { label, insert: quoted(label) }).collect(),
+    };
+
+    Some((items, caret.from, false))
+}

@@ -1,6 +1,6 @@
 //! Edits that move schemas between places: extracting an inline schema into
 //! `components/schemas`, bundling external `$ref`s into one document, and the
-//! JSON pointer of the key under the caret. YAML block style only, except the pointer.
+//! JSON pointer of the key under the caret. YAML block style or JSON.
 
 use crate::checks::Fetched;
 use crate::spec::{self, Key};
@@ -207,7 +207,7 @@ fn is_inline_schema(text: &str, keys: &[Key], key: &Key) -> bool {
 /// The edits that move the inline schema whose key is on `line` into `components.schemas`.
 pub fn extract_schema(text: &str, keys: &[Key], line: u32) -> Option<Vec<TextEdit>> {
     if spec::is_json(text) {
-        return None;
+        return extract_json_schema(text, keys, line);
     }
 
     let lines = Lines::new(text);
@@ -263,7 +263,129 @@ pub fn extract_schema(text: &str, keys: &[Key], line: u32) -> Option<Vec<TextEdi
     Some(edits)
 }
 
+fn line_indent(text: &str, at: usize) -> usize {
+    let start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+
+    text[start..].len() - text[start..].trim_start_matches(' ').len()
+}
+
+fn indent_unit(text: &str) -> usize {
+    text.lines().map(|line| line.len() - line.trim_start_matches(' ').len()).find(|n| *n > 0).unwrap_or(2)
+}
+
+/// `slice` with the lines after the first moved from indentation `from` to `to`.
+fn reindent(slice: &str, from: usize, to: usize, eol: &str) -> String {
+    let pad = " ".repeat(to);
+
+    slice
+        .split('\n')
+        .enumerate()
+        .map(|(n, line)| {
+            let line = line.trim_end_matches('\r');
+            if n == 0 || line.is_empty() {
+                return line.to_owned();
+            }
+            let strip = line.len() - line.trim_start_matches(' ').len();
+
+            format!("{pad}{}", &line[strip.min(from)..])
+        })
+        .collect::<Vec<_>>()
+        .join(eol)
+}
+
+/// The replacement that adds `member` (`"name": value`, already indented after its first line) to
+/// the object opened at `open`: the range it replaces and the new text.
+fn append_member(text: &str, open: usize, member: &str, eol: &str) -> Option<(usize, usize, String)> {
+    let close = crate::json::container_end(text, open)?;
+    let pad = " ".repeat(line_indent(text, open) + indent_unit(text));
+    let inner = &text[open + 1..close];
+    if inner.trim().is_empty() {
+        let closing = " ".repeat(line_indent(text, open));
+
+        return Some((open + 1, close, format!("{eol}{pad}{member}{eol}{closing}")));
+    }
+    let last = open + 1 + inner.trim_end().len();
+
+    Some((last, last, format!(",{eol}{pad}{member}")))
+}
+
+fn is_object(text: &str, key: &Key) -> bool {
+    text.as_bytes().get(key.value_at) == Some(&b'{') && (key.value_at == key.value_end || key.value == "{}")
+}
+
+fn json_container(text: &str, keys: &[Key], path: &str) -> Option<usize> {
+    let key = keys.iter().find(|k| k.key == path)?;
+
+    is_object(text, key).then_some(key.value_at)
+}
+
+/// Where to put `"name": body` under `components.<section>` of a JSON document.
+fn json_component_insertion(text: &str, section: &str, name: &str, body: &str) -> Option<(usize, usize, String)> {
+    let keys = spec::scan(text);
+    let eol = eol_of(text);
+    let unit = indent_unit(text);
+    let body_at = |depth: usize| reindent(body, 0, unit * depth, eol);
+    let entry = |depth: usize| format!("\"{name}\": {}", body_at(depth));
+    let wrap = |key: &str, inner: &str, depth: usize| {
+        let pad = " ".repeat(unit * depth);
+        let inner_pad = " ".repeat(unit * (depth + 1));
+
+        format!("\"{key}\": {{{eol}{inner_pad}{inner}{eol}{pad}}}")
+    };
+
+    if let Some(open) = json_container(text, &keys, &format!("components.{section}")) {
+        let depth = line_indent(text, open) / unit + 1;
+
+        return append_member(text, open, &entry(depth), eol);
+    }
+    if let Some(open) = json_container(text, &keys, "components") {
+        let depth = line_indent(text, open) / unit + 1;
+        let member = wrap(section, &entry(depth + 1), depth);
+
+        return append_member(text, open, &member, eol);
+    }
+    if keys.iter().any(|k| k.key == "components") {
+        return None;
+    }
+
+    let open = text.find('{')?;
+    let depth = line_indent(text, open) / unit + 1;
+    let member = wrap("components", &wrap(section, &entry(depth + 2), depth + 1), depth);
+
+    append_member(text, open, &member, eol)
+}
+
+fn extract_json_schema(text: &str, keys: &[Key], line: u32) -> Option<Vec<TextEdit>> {
+    let start = text.split_inclusive('\n').take(line as usize).map(str::len).sum::<usize>();
+    let stop = text[start..].find('\n').map_or(text.len(), |n| start + n);
+    let key = keys.iter().filter(|k| k.at >= start && k.at < stop).find(|k| is_object(text, k) && is_inline_schema(text, keys, k))?;
+
+    let own = crate::json::unescape(&text[key.at..key.end]);
+    let from = key.value_at;
+    let to = crate::json::container_end(text, from)? + 1;
+    let members: Vec<&Key> = keys.iter().filter(|k| k.key.starts_with(&format!("{}.", key.key)) || k.key.starts_with(&format!("{}[", key.key))).collect();
+    if members.is_empty() || members.iter().all(|k| k.key == format!("{}.$ref", key.key)) {
+        return None;
+    }
+
+    let eol = eol_of(text);
+    let body = reindent(&text[from..to], line_indent(text, from), 0, eol);
+    let name = unique(&suggested_name(text, keys, key, &own), &schema_names(keys, text));
+    let (insert_from, insert_to, insert) = json_component_insertion(text, "schemas", &name, &body)?;
+    if insert_to >= from && insert_from <= to {
+        return None;
+    }
+
+    let reference = TextEdit { range: spring_text::range(text, from, to), text: format!("{{\"$ref\": \"#/components/schemas/{name}\"}}") };
+    let added = TextEdit { range: spring_text::range(text, insert_from, insert_to), text: insert };
+    let mut edits = vec![reference, added];
+    edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+
+    Some(edits)
+}
+
 struct Bundle<'r> {
+    json: bool,
     read: &'r dyn Fn(&str) -> Fetched,
     assigned: HashMap<(String, String), (String, String)>,
     taken: HashMap<String, HashSet<String>>,
@@ -293,11 +415,18 @@ impl Bundle<'_> {
             Fetched::Missing => return Err(format!("Cannot find file `{file}`.")),
             Fetched::Unreadable => return Err(format!("Cannot read `{file}`.")),
         };
-        if spec::is_json(&content) {
-            return Err(format!("`{file}` is JSON; only YAML files can be bundled."));
+        if spec::is_json(&content) != self.json {
+            return Err(match self.json {
+                true => format!("`{file}` is YAML; a JSON file can only bundle JSON files."),
+                false => format!("`{file}` is JSON; a YAML file can only bundle YAML files."),
+            });
         }
 
-        let body = pointed_body(&content, pointer).ok_or_else(|| format!("Cannot find `{pointer}` in `{file}` as a block mapping."))?;
+        let found = match self.json {
+            true => json_pointed_body(&content, pointer),
+            false => pointed_body(&content, pointer),
+        };
+        let body = found.ok_or_else(|| format!("Cannot find `{pointer}` in `{file}` as a mapping."))?;
         let rest = pointer.strip_prefix("/components/").unwrap_or("");
         let section = match rest.split_once('/') {
             Some((section, name)) if !name.is_empty() && !name.contains('/') => section.to_owned(),
@@ -331,6 +460,19 @@ impl Bundle<'_> {
     }
 }
 
+fn json_pointed_body(content: &str, pointer: &str) -> Option<Vec<String>> {
+    let open = if pointer.is_empty() {
+        content.find('{').filter(|_| spec::is_json(content))?
+    } else {
+        let keys = spec::scan(content);
+        let key = spec::target(&keys, pointer)?;
+        json_container(content, &keys, &key.key)?
+    };
+    let close = crate::json::container_end(content, open)?;
+
+    Some(reindent(&content[open..=close], line_indent(content, open), 0, "\n").split('\n').map(str::to_owned).collect())
+}
+
 fn pointed_body(content: &str, pointer: &str) -> Option<Vec<String>> {
     let lines = Lines::new(content);
     let (from, to) = if pointer.is_empty() {
@@ -353,12 +495,9 @@ fn pointed_body(content: &str, pointer: &str) -> Option<Vec<String>> {
 /// `text` with every `$ref` to another file replaced by a pointer into `components`, and the
 /// referenced objects copied there. Recursive references are fine: an object is copied once.
 pub fn bundle(text: &str, path: &str, read: &dyn Fn(&str) -> Fetched) -> Result<Option<String>, String> {
-    if spec::is_json(text) {
-        return Err("Only YAML files can be bundled.".into());
-    }
-
+    let json = spec::is_json(text);
     let keys = spec::scan(text);
-    let mut bundle = Bundle { read, assigned: HashMap::new(), taken: HashMap::new(), entries: Vec::new() };
+    let mut bundle = Bundle { json, read, assigned: HashMap::new(), taken: HashMap::new(), entries: Vec::new() };
     for k in &keys {
         let Some(rest) = k.key.strip_prefix("components.") else { continue };
         if let Some((section, name)) = rest.split_once('.') {
@@ -387,6 +526,11 @@ pub fn bundle(text: &str, path: &str, read: &dyn Fn(&str) -> Fetched) -> Result<
     }
 
     for (section, name, body) in &bundle.entries {
+        if json {
+            let (from, to, insert) = json_component_insertion(&result, section, name, &body.join("\n")).ok_or("Cannot add to this file's `components`.")?;
+            result.replace_range(from..to, &insert);
+            continue;
+        }
         let (at, insert) = component_insertion(&result, section, name, body).ok_or("Cannot add to this file's `components`.")?;
         result.insert_str(at, &insert);
     }
@@ -548,8 +692,69 @@ components:
     fn bundling_reports_missing_files_json_and_nothing_to_do() {
         let main = "openapi: 3.0.0\nx:\n  $ref: './nope.yaml#/A'\n";
         assert!(bundle(main, "/p/api.yaml", &files(&[])).unwrap_err().contains("nope.yaml"));
-        assert!(bundle("{\"openapi\": \"3.0.0\"}", "/p/api.json", &files(&[])).is_err());
+        assert_eq!(bundle("{\"openapi\": \"3.0.0\"}", "/p/api.json", &files(&[])).unwrap(), None);
+        let json_main = "{\"openapi\": \"3.0.0\", \"x\": {\"$ref\": \"./c.yaml#/A\"}}";
+        assert!(bundle(json_main, "/p/api.json", &files(&[("/p/c.yaml", "A:\n  type: string\n")])).unwrap_err().contains("YAML"));
         assert_eq!(bundle("openapi: 3.0.0\nx:\n  $ref: '#/A'\n", "/p/api.yaml", &files(&[])).unwrap(), None);
+    }
+
+    const JSON_SPEC: &str = "{\n  \"openapi\": \"3.0.0\",\n  \"paths\": {\n    \"/pets\": {\n      \"get\": {\n        \"operationId\": \"listPets\",\n        \"responses\": {\n          \"200\": {\n            \"description\": \"ok\",\n            \"content\": {\n              \"application/json\": {\n                \"schema\": {\n                  \"type\": \"object\",\n                  \"properties\": {\n                    \"id\": {\n                      \"type\": \"integer\"\n                    }\n                  }\n                }\n              }\n            }\n          }\n        }\n      }\n    }\n  }\n}\n";
+
+    fn extract_valid(text: &str, needle: &str) -> String {
+        let out = extract(text, needle).unwrap();
+        assert_eq!(out.matches('{').count(), out.matches('}').count(), "{out}");
+        assert!(spec::parse(&out).is_some(), "{out}");
+        let keys = spec::scan(&out);
+        assert!(spec::refs(&out).iter().all(|r| spec::target(&keys, &r.target[1..]).is_some()), "{out}");
+
+        out
+    }
+
+    #[test]
+    fn extracts_a_json_schema_and_creates_components() {
+        let out = extract_valid(JSON_SPEC, "\"schema\"");
+        assert!(out.contains("\"schema\": {\"$ref\": \"#/components/schemas/ListPetsResponse\"}"), "{out}");
+        assert!(out.contains("  },\n  \"components\": {\n    \"schemas\": {\n      \"ListPetsResponse\": {\n        \"type\": \"object\","), "{out}");
+    }
+
+    #[test]
+    fn extracts_into_existing_json_schemas_with_a_comma_and_into_an_empty_object() {
+        let with_schemas = JSON_SPEC.replace("\n  }\n}\n", "\n  },\n  \"components\": {\n    \"schemas\": {\n      \"Pet\": {\n        \"type\": \"string\"\n      }\n    }\n  }\n}\n");
+        let out = extract_valid(&with_schemas, "\"schema\"");
+        assert!(out.contains("      },\n      \"ListPetsResponse\": {"), "{out}");
+
+        let empty = JSON_SPEC.replace("\n  }\n}\n", "\n  },\n  \"components\": {\"schemas\": {}}\n}\n");
+        extract_valid(&empty, "\"schema\"");
+        let no_schemas = JSON_SPEC.replace("\n  }\n}\n", "\n  },\n  \"components\": {\"parameters\": {}}\n}\n");
+        let out = extract_valid(&no_schemas, "\"schema\"");
+        assert!(out.contains("\"parameters\": {},"), "{out}");
+    }
+
+    #[test]
+    fn extracts_a_json_property_and_refuses_refs_and_scalars() {
+        let out = extract_valid(JSON_SPEC, "\"id\"");
+        assert!(out.contains("\"id\": {\"$ref\": \"#/components/schemas/Id\"}"), "{out}");
+        assert!(extract(JSON_SPEC, "\"type\": \"object\"").is_none());
+        let ref_only = "{\"openapi\": \"3.0.0\", \"paths\": {\"/p\": {\"get\": {\"responses\": {\"200\": {\"content\": {\"a/b\": {\"schema\": {\"$ref\": \"#/x\"}}}}}}}}}";
+        assert!(extract(ref_only, "\"schema\"").is_none());
+    }
+
+    #[test]
+    fn bundles_json_refs_into_components() {
+        let main = "{\n  \"openapi\": \"3.0.0\",\n  \"paths\": {\"/p\": {\"get\": {\"responses\": {\"200\": {\"content\": {\"a/b\": {\"schema\": {\"$ref\": \"./c.json#/Pet\"}}}}}}}},\n  \"components\": {\n    \"schemas\": {\n      \"Own\": {\"type\": \"string\"}\n    }\n  }\n}\n";
+        let read = files(&[("/p/c.json", "{\n  \"Pet\": {\n    \"properties\": {\"tag\": {\"$ref\": \"#/Tag\"}}\n  },\n  \"Tag\": {\"type\": \"string\"}\n}")]);
+        let out = bundle(main, "/p/api.json", &read).unwrap().unwrap();
+        assert!(spec::refs(&out).iter().all(|r| r.target.starts_with("#/components/schemas/")), "{out}");
+        let keys = spec::scan(&out);
+        assert!(spec::refs(&out).iter().all(|r| spec::target(&keys, &r.target[1..]).is_some()), "{out}");
+        assert!(keys.iter().any(|k| k.key == "components.schemas.Pet.properties.tag"), "{out}");
+        assert!(keys.iter().any(|k| k.key == "components.schemas.Tag.type"), "{out}");
+        assert_eq!(out.matches('{').count(), out.matches('}').count());
+
+        let bare = "{\"openapi\": \"3.0.0\", \"x\": {\"$ref\": \"./c.json#/Tag\"}}";
+        let out = bundle(bare, "/p/api.json", &read).unwrap().unwrap();
+        let keys = spec::scan(&out);
+        assert!(keys.iter().any(|k| k.key == "components.schemas.Tag.type"), "{out}");
     }
 
     #[test]

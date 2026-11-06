@@ -2,7 +2,7 @@
   "properties": {
     "specGlobs": {
       "type": "string",
-      "title": "Extra file name globs treated as OpenAPI files for completion and go to definition (comma separated, for example api/*.yaml)",
+      "title": "Extra file name globs treated as OpenAPI files for completion, go to definition, problems and the endpoints view (comma separated, for example api/*.yaml)",
       "default": ""
     },
     "checkSpecCandidates": {
