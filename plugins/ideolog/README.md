@@ -4,15 +4,18 @@ OpenIDEA port of JetBrains' [Ideolog](https://github.com/JetBrains/ideolog) (MIT
 `pycharm/263.7307.101` (`41beb53`), the version on the JetBrains Marketplace.
 
 - Detects the log format from the first 25 lines: IntelliJ IDEA, TeamCity build log, Logcat,
-  Loguru, pipe-separated, or your own; other logs are split on the first space, like Ideolog does.
+  Loguru, pipe-separated, Docker/ISO timestamps, Python `logging`, nginx error log, syslog (level
+  from keywords), Laravel/Monolog (`[date] channel.LEVEL:`), Serilog text, or your own (yours win
+  ties); other logs are split on the first space, like Ideolog does.
 - Colours each event by level (error, warning, info), including its stack trace lines. The time
   column of a coloured event gets its own colour.
 - Folds multi-line events (stack traces).
 - Lists errors and warnings in the structure view.
 - **Ideolog: Jump to Source** (F7): opens the stack frame on the caret line (Java/Kotlin, Python,
-  .NET, PHP, Node, Go, Rust…), or else the source line whose string literal best matches the
+  .NET, PHP, Ruby, Dart (`file://`, `package:`), Swift, Node, Go, Rust…), or else the source line whose string literal best matches the
   event's message.
-- **Ideolog: Go to Next Error** (Shift+F7), **Go to Previous / Next Entry**.
+- **Ideolog: Go to Next Error** (Shift+F7), **Go to Next Warning**, **Go to Next Exception** (an event
+  whose text names an exception or a Python traceback), **Go to Previous / Next Entry**.
 - Cmd/Ctrl+click on a stack frame opens its file and line.
 
 Colours come from the theme's syntax colours (keyword, tag, string, number…), which are close to

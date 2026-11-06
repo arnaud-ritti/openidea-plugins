@@ -9,7 +9,8 @@ use openidea_plugin::host::{self, storage};
 use openidea_plugin::views::{Body, Button, View};
 use serde_json::Value;
 
-use crate::api::{self, Discussion, DraftNote, FileDiff};
+use crate::api::{self, DiffRefs, Discussion, DraftNote, FileDiff};
+use crate::branch::git_ok;
 use crate::{CHANGES, DETAILS, GitLab, LIST, gitlab_project};
 
 #[derive(Debug, PartialEq)]
@@ -74,7 +75,43 @@ fn viewed_key(project: &str, iid: u64) -> String {
     format!("viewed:{project}:{iid}")
 }
 
-/// Files marked viewed, with the head commit they were viewed at.
+/// The newest commit touching each path in `git log --name-only --format=%x01%H`.
+fn parse_last_commits(log: &str) -> BTreeMap<String, String> {
+    let mut commits = BTreeMap::new();
+    let mut sha = "";
+
+    for line in log.lines() {
+        match line.strip_prefix('\u{1}') {
+            Some(next) => sha = next,
+            None if !line.is_empty() => {
+                commits.entry(line.to_owned()).or_insert_with(|| sha.to_owned());
+            }
+            None => {}
+        }
+    }
+
+    commits
+}
+
+/// Last commit of the merge request touching each file, from the local history;
+/// empty when the project has no git access or lacks the commits (files then count against the head).
+fn last_commits(ctx: &openidea_plugin::Invocation, refs: Option<&DiffRefs>) -> BTreeMap<String, String> {
+    let (Some(project), Some(refs)) = (ctx.project(), refs) else {
+        return BTreeMap::new();
+    };
+
+    let range = format!("{}..{}", refs.base_sha, refs.head_sha);
+    let args = ["-c", "core.quotepath=off", "log", "--name-only", "--no-renames", "--format=%x01%H", "-n", "1000", &range];
+
+    git_ok(&project, &args).map(|log| parse_last_commits(&log)).unwrap_or_default()
+}
+
+/// What a file's viewed mark is compared with: its last commit, else the head.
+fn version<'a>(commits: &'a BTreeMap<String, String>, path: &str, head: &'a str) -> &'a str {
+    commits.get(path).map(String::as_str).unwrap_or(head)
+}
+
+/// Files marked viewed, with the commit they were viewed at.
 fn viewed(project: &str, iid: u64) -> BTreeMap<String, String> {
     let saved = storage::get(&viewed_key(project, iid)).ok().flatten().unwrap_or_default();
 
@@ -110,6 +147,7 @@ fn thread_html(d: &Discussion, drafts: &[&DraftNote]) -> String {
 pub struct Page<'a> {
     pub iid: u64,
     pub head_sha: &'a str,
+    pub last_commits: &'a BTreeMap<String, String>,
     pub diffs: &'a [FileDiff],
     pub threads: &'a [Discussion],
     pub drafts: &'a [DraftNote],
@@ -131,7 +169,7 @@ pub fn render_html(page: &Page) -> String {
     html.push_str(NO_SCRIPTS);
 
     for (index, file) in page.diffs.iter().enumerate() {
-        let is_viewed = page.viewed.get(&file.new_path).is_some_and(|sha| sha == page.head_sha);
+        let is_viewed = page.viewed.get(&file.new_path).is_some_and(|sha| sha == version(page.last_commits, &file.new_path, page.head_sha));
         let lines = parse_diff(&file.diff);
         let added = lines.iter().filter(|l| l.kind == '+').count();
         let removed = lines.iter().filter(|l| l.kind == '-').count();
@@ -340,9 +378,11 @@ impl GitLab {
         let threads: Vec<Discussion> = self.threads.get(&iid).into_iter().flatten().filter(|d| !d.is_system()).cloned().collect();
         let head_sha = details.mr.diff_refs.as_ref().map(|r| r.head_sha.as_str()).unwrap_or("");
         let viewed = viewed(&project, iid);
+        let last_commits = last_commits(ctx, details.mr.diff_refs.as_ref());
         let page = Page {
             iid,
             head_sha,
+            last_commits: &last_commits,
             diffs: self.diffs.as_ref().map(|(_, d)| d.as_slice()).unwrap_or_default(),
             threads: &threads,
             drafts: &details.drafts,
@@ -384,7 +424,11 @@ impl GitLab {
                 let head = details.mr.diff_refs.as_ref().map(|r| r.head_sha.clone()).unwrap_or_default();
                 let mut viewed = viewed(&project, iid);
                 match message["viewed"].as_bool() == Some(true) {
-                    true => viewed.insert(text("path"), head),
+                    true => {
+                        let commits = last_commits(ctx, details.mr.diff_refs.as_ref());
+                        let sha = version(&commits, &text("path"), &head).to_owned();
+                        viewed.insert(text("path"), sha)
+                    }
                     false => viewed.remove(&text("path")),
                 };
                 let json = serde_json::to_string(&viewed).map_err(|e| Error::Failed(e.to_string()))?;

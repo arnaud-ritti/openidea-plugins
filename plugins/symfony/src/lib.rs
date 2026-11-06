@@ -6,13 +6,16 @@
 //! Brault; MIT), see README.md for what was and wasn't ported.
 
 mod index;
+mod profiler;
 mod refs;
+mod twig;
+mod yaml_quotes;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
-use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
+use openidea_plugin::views::{Body, Button, Table, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, Position, Range, Severity, TextEdit};
 use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, host, register_plugin, text};
 
@@ -21,6 +24,7 @@ use index::{Entry, Names, Sink};
 use refs::{Kind, Reference};
 
 const VIEW: &str = "symfony";
+const PROFILER_VIEW: &str = "symfony-profiler";
 const SOURCE: &str = "Symfony";
 const DEFAULT_DOMAIN: &str = "messages";
 const CHECKED_LANGUAGES: &[(&str, &str)] = &[(".php", "php"), (".twig", "twig"), (".yaml", "yaml"), (".yml", "yaml"), (".xml", "xml")];
@@ -150,9 +154,41 @@ fn twig_variables(index: &Index, doc: &Document, offset: usize) -> Vec<Completio
         .collect()
 }
 
+/// Twig tags, filters, functions and tests, plus variables where an expression can start.
+fn twig_names(index: &Index, doc: &Document, offset: usize) -> Vec<CompletionItem> {
+    if doc.language != "twig" {
+        return Vec::new();
+    }
+
+    let Some((slot, start, end)) = twig::slot_at(&doc.text, offset) else { return Vec::new() };
+    let kind = match slot {
+        twig::Slot::Tag => CompletionKind::Keyword,
+        _ => CompletionKind::Function,
+    };
+    let replace = range_of(&doc.text, start, end);
+    let mut items: Vec<CompletionItem> = twig::names(&slot)
+        .iter()
+        .map(|name| {
+            let mut item = CompletionItem::new(name, kind);
+            item.replace = Some(replace);
+            item
+        })
+        .collect();
+
+    if matches!(slot, twig::Slot::Function) {
+        items.extend(twig_variables(index, doc, offset));
+    }
+
+    items
+}
+
 /// A name that is built at run time (`'blog/' ~ name`, `"{$x}"`): not checked.
 fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '~', '$', '#'])
+}
+
+fn is_quoted_config(path: &str) -> bool {
+    path.contains("/config/") || path.contains("/translations/")
 }
 
 /// Problems of a file: missing routes, templates, services and translation
@@ -160,7 +196,11 @@ fn is_dynamic(name: &str) -> bool {
 pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
     let mut problems = Vec::new();
     let mut problem = |start: usize, end: usize, code: &str, message: String| {
-        let severity = if code == "missing-translation" { Severity::Info } else { Severity::Warning };
+        let severity = match code {
+            "missing-translation" => Severity::Info,
+            "unclosed-tag" => Severity::Error,
+            _ => Severity::Warning,
+        };
         problems.push(Diagnostic {
             range: range_of(text, start, end),
             severity,
@@ -197,6 +237,31 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
                 }
             }
             _ => {}
+        }
+    }
+
+    if language == "twig" {
+        for (range, name) in twig::unclosed_tags(text) {
+            problem(range.start, range.end, "unclosed-tag", format!("Tag \"{name}\" is never closed: missing {{% end{name} %}}."));
+        }
+    }
+
+    if language == "yaml" && is_quoted_config(path) {
+        for range in yaml_quotes::unquoted(text) {
+            let first = text[range.start..].chars().next().unwrap_or('@');
+            let message = format!("A YAML value starting with \"{first}\" must be quoted.");
+            problem(range.start, range.end, "unquoted-yaml-scalar", message);
+        }
+    }
+
+    if language == "xml" && !path.contains("/var/cache/") {
+        let mut services: Vec<(String, Position)> = Vec::new();
+        index::xml_services(path, text, &mut services);
+        for (i, (id, at)) in services.iter().enumerate() {
+            if services[..i].iter().any(|(earlier, _)| earlier == id) {
+                let start = text::offset(text, *at).unwrap_or(0);
+                problem(start, start + id.len(), "duplicate-service", format!("Service \"{id}\" is already defined in this file."));
+            }
         }
     }
 
@@ -337,6 +402,11 @@ impl Plugin for Main {
                 host::notify(NotificationLevel::Info, SOURCE, &self.summary());
                 Ok(None)
             }
+            "show-profiler" => {
+                host::refresh_view(PROFILER_VIEW);
+                host::notify(NotificationLevel::Info, SOURCE, "The latest requests are in the Symfony Profiler tool window.");
+                Ok(None)
+            }
             "cache-warmup" => self.console(ctx, "cache:warmup"),
             "cache-clear" => self.console(ctx, "cache:clear"),
             _ => Err(Error::NotFound(format!("command {id}"))),
@@ -382,7 +452,7 @@ impl Providers for Main {
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
 
         let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else {
-            return twig_variables(index, doc, offset);
+            return twig_names(index, doc, offset);
         };
         let replace = range_of(&doc.text, reference.start, reference.end);
 
@@ -479,6 +549,26 @@ impl Providers for Main {
     /// Adds a missing translation key to one of the domain's YAML files.
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
+        if doc.language == "yaml" && is_quoted_config(&doc.path) {
+            let quote_fixes: Vec<CodeAction> = yaml_quotes::unquoted(&doc.text)
+                .into_iter()
+                .map(|range| (range_of(&doc.text, range.start, range.end), range))
+                .filter(|(range, _)| range.start.line >= selection.start.line && range.start.line <= selection.end.line)
+                .map(|(range, bytes)| {
+                    let quoted = format!("'{}'", doc.text[bytes].replace('\'', "''"));
+                    CodeAction {
+                        title: format!("Quote {quoted}"),
+                        kind: Some("quickfix".into()),
+                        preferred: true,
+                        edits: vec![(doc.path.clone(), vec![TextEdit { range, text: quoted }])],
+                        data: None,
+                    }
+                })
+                .collect();
+            if !quote_fixes.is_empty() {
+                return quote_fixes;
+            }
+        }
         let Some(offset) = text::offset(&doc.text, selection.start) else { return Vec::new() };
         let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return Vec::new() };
 
@@ -604,8 +694,40 @@ impl Main {
     }
 }
 
+/// The profiler's recent requests; the file is read when the view is shown
+/// (a missing one is `NotFound` in the mock and `Invalid` in the host).
+fn profiler_view(ctx: &Invocation) -> View {
+    let refresh = Button::new("refresh-profiler", "Refresh").icon("refresh");
+    let Some(project) = ctx.project() else {
+        return View::message("No project is open.").button(refresh);
+    };
+    let Ok(text) = project.read_file(profiler::INDEX_FILE) else {
+        return View::message(&format!("No {} yet: open a page of the app in dev mode with the web profiler enabled.", profiler::INDEX_FILE))
+            .button(refresh);
+    };
+
+    let requests = profiler::rows(&text);
+    let rows: Vec<Vec<String>> = requests
+        .iter()
+        .map(|r| vec![profiler::timestamp(r.time), r.method.clone(), r.status.clone(), r.url.clone(), r.ip.clone(), r.token.clone()])
+        .collect();
+    let table = Table {
+        columns: ["Time (UTC)", "Method", "Status", "URL", "IP", "Token"].map(String::from).to_vec(),
+        total_rows: rows.len() as u32,
+        first_row: 0,
+        rows,
+        editable: false,
+    };
+
+    View::new(Body::Table(table)).button(refresh).status(&format!("{} latest requests", requests.len()))
+}
+
 impl Views for Main {
-    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+    fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        if view == PROFILER_VIEW {
+            return Ok(profiler_view(ctx));
+        }
+
         let reindex = Button::new("reindex", "Reindex").icon("refresh");
         let Some(index) = self.view_index(ctx) else {
             return Ok(View::message("This project is not a Symfony application.").button(reindex));
@@ -642,6 +764,7 @@ impl Views for Main {
                     host::open_location(&entry.path, entry.at.line, entry.at.character)?;
                 }
             }
+            ViewEvent::Button(id) if id == "refresh-profiler" => host::refresh_view(PROFILER_VIEW),
             ViewEvent::Button(id) => {
                 self.run_command(&id, ctx, None)?;
                 host::refresh_view(view);
@@ -732,7 +855,73 @@ mod tests {
         let twig = doc("/project/templates/blog/index.html.twig", "twig", text);
 
         assert_eq!(labels(plugin.completion(&twig, Position::new(1, 9), None)), ["body", "title"]);
-        assert_eq!(labels(plugin.completion(&twig, Position::new(2, 4), None)), ["posts", "title"]);
+        let variables = labels(plugin.completion(&twig, Position::new(2, 4), None));
+        assert_eq!(variables.iter().filter(|v| ["posts", "title"].contains(&v.as_str())).count(), 2);
+    }
+
+    #[test]
+    fn completes_tags_filters_functions_tests_from_static_list() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let complete = |plugin: &mut Main, text: &str, character: u32| {
+            let twig = doc("/project/templates/a.html.twig", "twig", text);
+            labels(plugin.completion(&twig, Position::new(0, character), None))
+        };
+
+        let tags = complete(&mut plugin, "{% ", 3);
+        assert!(["if", "for", "block", "extends", "endblock", "endif", "verbatim", "types"].iter().all(|t| tags.contains(&(*t).to_owned())));
+
+        let filters = complete(&mut plugin, "{{ name|", 8);
+        assert!(filters.contains(&"upper".to_owned()) && !filters.contains(&"if".to_owned()));
+
+        let functions = complete(&mut plugin, "{{ ", 3);
+        assert!(functions.contains(&"range".to_owned()) && !functions.contains(&"upper".to_owned()));
+
+        let tests = complete(&mut plugin, "{% if x is not ", 15);
+        assert!(tests.contains(&"empty".to_owned()) && !tests.contains(&"range".to_owned()));
+
+        assert!(complete(&mut plugin, "{{ 'ra' }}", 5).is_empty());
+        assert!(complete(&mut plugin, "plain ra", 8).is_empty());
+    }
+
+    #[test]
+    fn extends_and_include_paths_complete_from_templates_dir() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let names = ["base.html.twig", "blog/index.html.twig"];
+
+        for tag in ["extends", "include", "embed", "import", "from"] {
+            let text = format!("{{% {tag} '' %}}");
+            let twig = doc("/project/templates/a.html.twig", "twig", &text);
+            let at = Position::new(0, (tag.len() + 5) as u32);
+            assert_eq!(labels(plugin.completion(&twig, at, None)), names, "{tag}");
+        }
+    }
+
+    #[test]
+    fn unclosed_block_tag_is_reported() {
+        let host = MockHost::install();
+        let plugin = activated(&host);
+        let index = plugin.index_for("/project/x").unwrap();
+        let found = |text: &str| -> Vec<(String, u32)> {
+            problems(index, "/project/templates/a.html.twig", "twig", text)
+                .into_iter()
+                .filter(|d| d.code.as_deref() == Some("unclosed-tag"))
+                .map(|d| (d.message, d.range.start.character))
+                .collect()
+        };
+
+        let reported = found("{% block a %}\n{% if x %}{% endif %}");
+        assert_eq!(reported, [("Tag \"block\" is never closed: missing {% endblock %}.".to_owned(), 3)]);
+
+        for name in ["for x in y", "macro m()", "embed 'a.html.twig'", "apply upper", "autoescape", "with {}", "cache 'k'", "sandbox"] {
+            assert_eq!(found(&format!("{{% {name} %}}")).len(), 1, "{name}");
+        }
+
+        assert_eq!(found("{% if a %}{% for x in y %}{% endif %}").len(), 1);
+        assert!(found("{% block a %}{% if x %}{% else %}{% endif %}{% endblock %}{% block t 'x' %}{% set v = 1 %}").is_empty());
+        assert!(found("{# {% block a %} #}{% verbatim %}{% if %}{% endverbatim %}").is_empty());
+        assert!(found("{%- block a -%}{%- endblock -%}").is_empty());
     }
 
     #[test]
@@ -864,5 +1053,101 @@ mod tests {
         plugin.activate(&host.context("aritti.symfony")).unwrap();
         assert_eq!(plugin.run_command("reindex", &host.invocation(), None).unwrap(), None);
         assert_eq!(host.notifications()[0].body, "No Symfony project is open.");
+    }
+
+    #[test]
+    fn twig_paths_namespace_resolves() {
+        let host = MockHost::install();
+        host.add_file(
+            "config/packages/twig.yaml",
+            "twig:\n    paths:\n        'templates/emails': 'emails'\n        '%kernel.project_dir%/templates/pdf': pdf\n        templates/plain:\n",
+        );
+        host.add_file("templates/emails/welcome.html.twig", "hi");
+        host.add_file("templates/pdf/invoice.html.twig", "pdf");
+        host.add_file("templates/plain/p.html.twig", "plain");
+        let mut plugin = activated(&host);
+
+        let twig = doc("/project/templates/a.html.twig", "twig", "{% include '@emails/welcome.html.twig' %}");
+        let found = plugin.definition(&twig, Position::new(0, 16));
+        assert_eq!(found[0].path, "/project/templates/emails/welcome.html.twig");
+
+        let typing = doc("/project/templates/a.html.twig", "twig", "{% include '@' %}");
+        let offered = labels(plugin.completion(&typing, Position::new(0, 13), None));
+        assert!(offered.contains(&"@emails/welcome.html.twig".to_owned()));
+        assert!(offered.contains(&"@pdf/invoice.html.twig".to_owned()));
+        assert!(offered.contains(&"p.html.twig".to_owned()));
+        assert!(offered.contains(&"base.html.twig".to_owned()));
+    }
+
+    #[test]
+    fn profiler_view_lists_requests_latest_first() {
+        let host = MockHost::install();
+        host.add_file(profiler::INDEX_FILE, "a,1.1.1.1,GET,/old,1700000000,,200\nb,1.1.1.1,POST,/new,1700000500,,500\n");
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+
+        let View { body: Body::Table(table), .. } = plugin.render(PROFILER_VIEW, None, &ctx).unwrap() else { panic!("not a table") };
+        assert_eq!(table.rows[0], ["2023-11-14 22:21:40", "POST", "500", "/new", "1.1.1.1", "b"]);
+        assert_eq!(table.rows.len(), 2);
+
+        plugin.run_command("show-profiler", &ctx, None).unwrap();
+        assert!(host.refreshed_views().contains(&PROFILER_VIEW.to_owned()));
+    }
+
+    #[test]
+    fn profiler_view_without_index_explains() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+
+        let View { body, .. } = plugin.render(PROFILER_VIEW, None, &host.invocation()).unwrap();
+        assert!(matches!(body, Body::Message(_)));
+    }
+
+    #[test]
+    fn duplicate_service_key_warns() {
+        let host = MockHost::install();
+        let plugin = activated(&host);
+        let index = plugin.index_for("/project/x").unwrap();
+        let found = |text: &str| -> Vec<(String, Position)> {
+            problems(index, "/project/config/services.xml", "xml", text)
+                .into_iter()
+                .filter(|d| d.code.as_deref() == Some("duplicate-service"))
+                .map(|d| (d.message, d.range.start))
+                .collect()
+        };
+        let wrap = |body: &str| format!("<container>\n  <services>\n{body}  </services>\n</container>\n");
+
+        let twice = wrap("    <service id=\"app.a\" class=\"A\"/>\n    <service id=\"app.b\"/>\n    <service id=\"app.a\" class=\"B\"/>\n");
+        assert_eq!(found(&twice), [("Service \"app.a\" is already defined in this file.".to_owned(), Position::new(4, 17))]);
+
+        let distinct = wrap("    <service id=\"app.a\"/>\n    <service id=\"app.b\"/>\n");
+        assert!(found(&distinct).is_empty());
+
+        let defaults = wrap("    <defaults autowire=\"true\"/>\n    <prototype namespace=\"App\\\" resource=\"../src\"/>\n    <service id=\"app.a\"><argument type=\"service\" id=\"app.a\"/></service>\n");
+        assert!(found(&defaults).is_empty());
+    }
+
+    #[test]
+    fn quotes_unquoted_yaml_scalar_with_quick_fix() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let text = "services:\n    app.a:\n        arguments: [@logger, '@ok']\n";
+        let yaml = doc("/project/config/services.yaml", "yaml", text);
+
+        let index = plugin.index_for("/project/x").unwrap();
+        let found = problems(index, &yaml.path, "yaml", text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code.as_deref(), Some("unquoted-yaml-scalar"));
+        assert_eq!(found[0].range, Range::new(Position::new(2, 20), Position::new(2, 27)));
+
+        let at = Range::new(Position::new(2, 22), Position::new(2, 22));
+        let actions = plugin.code_actions(&yaml, at);
+        assert_eq!(actions[0].title, "Quote '@logger'");
+        assert_eq!(actions[0].edits[0].1[0].text, "'@logger'");
+        assert_eq!(actions[0].edits[0].1[0].range, found[0].range);
+
+        let other = doc("/project/docker/compose.yaml", "yaml", "a: @x\n");
+        assert!(plugin.code_actions(&other, at).is_empty());
+        assert!(problems(plugin.index_for("/project/x").unwrap(), &other.path, "yaml", &other.text).is_empty());
     }
 }

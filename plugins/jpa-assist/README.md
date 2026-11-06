@@ -33,6 +33,13 @@ entity's properties (and one level into its associations), conditions
 declaration with parameters and return type (`List`, `Optional` for
 `First`/`Top1`, `long` for `count`, …) and adds the imports it needs.
 
+## Navigation
+
+A gutter arrow on an `@Entity` class opens the Spring Data repository that
+declares it as domain type (the tooltip lists all of them; the arrow opens the
+first). Repository files are found by the `*Repository.java` / `.kt` name. The
+Only repositories naming the entity directly as the `…Repository<Entity, Id>` argument are found (a `UserRepo extends BaseRepo<User>` whose `BaseRepo` extends `JpaRepository` is not resolved), and repositories not named `*Repository` are missed. The repositories are read once and updated when a repository file is opened or saved. The reverse arrow, from a repository to its entity, comes from Spring Data.
+
 ## Generators
 
 - On an entity's class line, ⌥⏎ offers **Generate equals() and hashCode()**
@@ -46,6 +53,9 @@ declaration with parameters and return type (`List`, `Optional` for
 - **JPA: Copy Entity from CREATE TABLE at Caret** (in any SQL file): the
   entity for that table, with `@Id`, `@Column`, `@ManyToOne` for foreign
   keys and, in Java, getters and setters. A setting picks Java or Kotlin.
+
+The context-menu entries show only where they apply: Copy DDL and Copy DTO in
+Java and Kotlin files, Copy Entity in SQL files.
 
 Without the `clipboard` permission, a notification asks you to allow it in
 Settings › Plugins.

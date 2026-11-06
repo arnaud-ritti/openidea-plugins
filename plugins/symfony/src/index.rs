@@ -117,6 +117,15 @@ impl Index {
             index.templates.entry(name).or_insert(Entry { detail: None, path, at: Position::new(0, 0) });
         }
 
+        let twig_config = project.read_file("config/packages/twig.yaml").unwrap_or_default();
+        for (directory, namespace) in twig_paths(&twig_config) {
+            for path in files(&[&format!("{directory}/**/*.twig")]) {
+                let Some(file) = relative(&path).strip_prefix(&format!("{directory}/")).map(str::to_owned) else { continue };
+                let name = if namespace.is_empty() { file } else { format!("@{namespace}/{file}") };
+                index.templates.entry(name).or_insert(Entry { detail: None, path, at: Position::new(0, 0) });
+            }
+        }
+
         let public = host::setting_string("publicDirectory").filter(|d| !d.is_empty()).unwrap_or("public".into());
         let public = public.trim_end_matches('/');
         for path in files(&[&format!("{public}/**/*")]) {
@@ -392,6 +401,48 @@ pub fn template_name(relative: &str) -> String {
     relative.to_owned()
 }
 
+/// `twig: paths:` of config/packages/twig.yaml: (project-relative directory,
+/// namespace) pairs, as a mapping `dir: namespace` or a list of directories
+/// (an empty namespace is Twig's main one).
+pub fn twig_paths(text: &str) -> Vec<(String, String)> {
+    let keys = yaml_keys(text);
+    let Some(paths) = keys.iter().find(|k| k.key == "paths" && k.parents == ["twig"]) else { return Vec::new() };
+
+    let unquote = |value: &str| value.trim().trim_matches(['\'', '"']).to_owned();
+    let mut found = Vec::new();
+    let mut paths_indent = None;
+
+    for line in text[paths.offset..].lines().skip(1) {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let indent = line.len() - trimmed.len();
+        let paths_indent = *paths_indent.get_or_insert(indent);
+        if indent < paths_indent {
+            break;
+        }
+
+        let (directory, namespace) = match trimmed.strip_prefix("- ") {
+            Some(item) => (unquote(item), String::new()),
+            None => match split_yaml_key(trimmed) {
+                Some((key, value)) => (key.to_owned(), unquote(value)),
+                None => continue,
+            },
+        };
+
+        let directory = directory.replace("%kernel.project_dir%", "");
+        let directory = directory.trim_start_matches("./").trim_matches('/').to_owned();
+        let namespace = if namespace == "~" || namespace == "null" { String::new() } else { namespace.trim_start_matches('!').to_owned() };
+        if !directory.is_empty() && !directory.contains("..") {
+            found.push((directory, namespace));
+        }
+    }
+
+    found
+}
+
 /// Byte offset → editor position, for many offsets of one file.
 struct Lines<'a> {
     text: &'a str,
@@ -497,7 +548,7 @@ pub fn yaml_keys(text: &str) -> Vec<YamlKey> {
     keys
 }
 
-fn split_yaml_key(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_yaml_key(line: &str) -> Option<(&str, &str)> {
     if let Some(quote) = line.chars().next().filter(|c| *c == '\'' || *c == '"') {
         let close = line[1..].find(quote)? + 1;
         let rest = line[close + 1..].trim_start().strip_prefix(':')?;

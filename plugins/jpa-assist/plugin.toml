@@ -15,7 +15,7 @@ required = ["events", "project.read", "editor.read", "storage"]
 optional = ["clipboard"]
 
 [[contributes.providers]]
-kinds = ["completion", "code-actions"]
+kinds = ["completion", "code-actions", "line-markers"]
 languages = ["java", "kotlin"]
 
 [[contributes.views]]
@@ -47,6 +47,21 @@ category = "JPA Assist"
 [[contributes.menus]]
 menu = "tools"
 command = "copy-ddl-all"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "copy-ddl"
+when = "editorLangId == java || editorLangId == kotlin"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "copy-dto"
+when = "editorLangId == java || editorLangId == kotlin"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "copy-entity"
+when = "editorLangId == sql"
 
 [contributes.settings]
 title = "JPA Assist"

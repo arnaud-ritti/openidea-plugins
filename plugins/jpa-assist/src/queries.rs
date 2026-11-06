@@ -29,6 +29,9 @@ pub struct Method {
 }
 
 pub struct Repository {
+    pub name: String,
+    /// Offset of the interface name.
+    pub name_start: usize,
     pub entity: String,
     pub id_type: String,
     pub id_start: usize,
@@ -99,7 +102,13 @@ pub fn parse_repository(text: &str, kotlin: bool) -> Option<Repository> {
         }
     }
 
+    let after_keyword = interface + "interface".len();
+    let name_start = after_keyword + masked[after_keyword..].len() - masked[after_keyword..].trim_start().len();
+    let name_len = masked[name_start..].bytes().take_while(|&c| is_ident(c)).count();
+
     Some(Repository {
+        name: masked[name_start..name_start + name_len].to_owned(),
+        name_start,
         entity: entity.trim().rsplit('.').next()?.to_owned(),
         id_type: id.trim().trim_end_matches('?').to_owned(),
         id_start,
