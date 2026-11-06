@@ -103,7 +103,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "openidea-plugin-aritti-spring-batch"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
+ "spring-text",
+]
+
+[[package]]
 name = "openidea-plugin-aritti-spring-integration"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
+ "openidea-plugin-aritti-spring-batch",
+ "openidea-plugin-aritti-spring-modulith",
+ "spring-text",
+ "ui-kit",
+]
+
+[[package]]
+name = "openidea-plugin-aritti-spring-modulith"
 version = "0.1.0"
 dependencies = [
  "openidea-plugin",
@@ -202,6 +221,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "ui-kit"
+version = "0.1.0"
+dependencies = [
+ "openidea-plugin",
 ]
 
 [[package]]

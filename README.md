@@ -8,7 +8,7 @@ Plugins for [OpenIDEA](https://github.com/l0ng-ai/openidea), each a sandboxed We
 |---|---|
 | Files and editing | `blade`, `dotenv`, `ignore`, `properties`, `twig`, `openapi`, `ideolog` |
 | PHP frameworks | `laravel`, `symfony` |
-| Spring | `spring-beans`, `spring-boot`, `spring-cloud`, `spring-data`, `spring-security`, `spring-web`, `spring-batch`, `spring-graphql`, `spring-integration`, `spring-messaging`, `spring-modulith`, `spring-osgi`, `spring-runtime`, `spring-shell`, `spring-webflow`, `spring-websocket`, `spring-ws`, `spring-initializr`, `jpa-assist` |
+| Spring | `spring-beans`, `spring-boot`, `spring-cloud`, `spring-data`, `spring-security`, `spring-web`, `spring-graphql`, `spring-integration`, `spring-messaging`, `spring-osgi`, `spring-runtime`, `spring-shell`, `spring-webflow`, `spring-websocket`, `spring-ws`, `spring-initializr`, `jpa-assist` |
 | Java frameworks | `quarkus` |
 | Database migrations | `flyway`, `liquibase` |
 | Tooling and workflow | `dependency-audit`, `devcontainer`, `kube-explorer`, `gitlab`, `tasks` |

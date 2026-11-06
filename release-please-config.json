@@ -97,12 +97,6 @@
         "plugin.toml"
       ]
     },
-    "plugins/spring-batch": {
-      "component": "spring-batch",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
     "plugins/spring-beans": {
       "component": "spring-beans",
       "extra-files": [
@@ -147,12 +141,6 @@
     },
     "plugins/spring-messaging": {
       "component": "spring-messaging",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
-    "plugins/spring-modulith": {
-      "component": "spring-modulith",
       "extra-files": [
         "plugin.toml"
       ]

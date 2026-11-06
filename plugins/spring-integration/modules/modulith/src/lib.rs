@@ -15,6 +15,7 @@ use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::java::{self, Annotation, JavaFile, Str};
 use spring_text::tree::Expansion;
 use spring_text::{contains, range};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -297,7 +298,7 @@ impl Providers for ModulithTools {
         let Some(index) = self.indexes.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
         let model = Model::build(index);
         let problems = diagnostics(&model, index.complete(), &doc.path, &java::parse(&doc.text), &doc.text);
-        let _ = host::publish_diagnostics(&doc.path, &problems);
+        publish(&doc.path, &problems);
         Vec::new()
     }
 
@@ -550,6 +551,23 @@ pub(crate) fn refresh(view: &str) {
     host::refresh_view(window(view));
 }
 
+thread_local! {
+    static PROBLEMS: RefCell<Vec<Diagnostic>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(path: &str, problems: &[Diagnostic]) {
+    if cfg!(feature = "embedded") {
+        PROBLEMS.set(problems.to_vec());
+        return;
+    }
+    let _ = host::publish_diagnostics(path, problems);
+}
+
+pub fn take_problems() -> Vec<Diagnostic> {
+    PROBLEMS.take()
+}
+
 const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
 const DEPENDENCY_MARKERS: [&str; 7] = ["spring-modulith", "<module>", "include(", "include '", "include \"", "(libs.", " libs."];
 
@@ -640,6 +658,7 @@ class Shipper {}
         assert_eq!(fix("@ApplicationModule(displayName = \"B\")\npackage a.b;"), format!("@ApplicationModule(displayName = \"B\", {OPEN})\npackage a.b;"));
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn warns_about_internal_and_unlisted_dependencies() {
         let host = setup();
@@ -670,6 +689,7 @@ class Shipper {}
         assert!(!host.diagnostics().contains_key(&test_doc.path));
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn checks_and_completes_allowed_dependencies() {
         let host = setup();

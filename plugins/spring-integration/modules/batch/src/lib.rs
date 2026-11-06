@@ -10,6 +10,7 @@ use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position,
 use spring_text::diagram::{self, Edge, Node};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::{beans, config, contains, java, range, xml};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 mod scope;
@@ -544,7 +545,7 @@ impl Providers for Batch {
             }
             _ => config_problems(doc, index),
         };
-        let _ = host::publish_diagnostics(&doc.path, &problems);
+        publish(&doc.path, &problems);
         Vec::new()
     }
 }
@@ -644,6 +645,23 @@ fn window(view: &str) -> &str {
 
 pub(crate) fn refresh(view: &str) {
     host::refresh_view(window(view));
+}
+
+thread_local! {
+    static PROBLEMS: RefCell<Vec<Diagnostic>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(path: &str, problems: &[Diagnostic]) {
+    if cfg!(feature = "embedded") {
+        PROBLEMS.set(problems.to_vec());
+        return;
+    }
+    let _ = host::publish_diagnostics(path, problems);
+}
+
+pub fn take_problems() -> Vec<Diagnostic> {
+    PROBLEMS.take()
 }
 
 const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
@@ -777,6 +795,7 @@ public class BatchConfig {
         assert!(beans.contains(&"dbWriter".to_owned()) && beans.contains(&"csvReader".to_owned()) && beans.contains(&"app".to_owned()));
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn reports_unknown_targets_and_beans() {
         let host = setup();
@@ -858,6 +877,7 @@ public class BatchConfig {
         assert!(b.completion(&j, after(PARAMS_JAVA, "inputFile'"), None).is_empty(), "closed key");
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn fixed_file_publishes_empty_list() {
         let host = MockHost::install();
@@ -876,6 +896,7 @@ public class BatchConfig {
         assert_eq!(chunks(), 0);
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn flags_spring_batch_5_migrations() {
         let host = setup();
@@ -898,6 +919,7 @@ public class BatchConfig {
         assert!(no_boot.iter().all(|d| d.code.as_deref() != Some("enable-batch-processing-with-boot")));
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn links_the_job_name_property() {
         let host = setup();
@@ -971,11 +993,6 @@ public class BatchConfig {
         b.indexes.get(&project, COMMAND_BUDGET);
         b.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
         assert!(b.indexes.get(&project, std::time::Duration::ZERO).files().is_empty(), "a complete index starts over");
-    }
-
-    #[test]
-    fn manifest_activates_on_the_diagram_view() {
-        assert!(include_str!("../plugin.toml").contains("\"on-view:diagram\""));
     }
 
     #[test]

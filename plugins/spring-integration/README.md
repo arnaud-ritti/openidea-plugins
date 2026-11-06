@@ -1,4 +1,15 @@
-# Spring Integration Tools
+# Spring Structure Tools (aritti.spring-integration)
+
+One **Spring Structure** tool window (right) with four sections, plus the editor support of three former plugins: Spring Integration (this one), Spring Batch and Spring Modulith. `aritti.spring-batch` and `aritti.spring-modulith` are no longer maintained: uninstall them, otherwise their windows and completions show twice.
+
+- **Channels**: the Integration Channels diagram described below.
+- **Batch**: Spring Batch jobs, steps, flows, splits and decisions as a diagram. XML job navigation, completion and transition/bean checks, `spring.batch.job.name` navigation, `jobParameters` key completion, late-binding scope checks, Spring Batch 5 migration hints (setting `springBatch.checkChunk`).
+- **Modules**: Spring Modulith application modules with named interfaces, allowed and actual dependencies; checks for internal types and unlisted dependencies, `allowedDependencies` completion, quick fix to make a module open.
+- **Diagram**: the module dependency diagram; the command "Spring Modulith: Copy Module Diagram (PlantUML)" copies it.
+
+A module whose dependency is not in the root build file (`spring-integration`, `spring-batch`, `spring-modulith`; multi-module builds and version catalogs count as unsure) does no work. The command ids and storage keys of the absorbed modules are prefixed `batch.` and `modulith.`; their old settings values are not migrated.
+
+## Spring Integration
 
 Spring Integration message channels in OpenIDEA, for Java and XML configuration:
 
