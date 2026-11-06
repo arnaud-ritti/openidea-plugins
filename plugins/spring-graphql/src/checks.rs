@@ -2,11 +2,11 @@
 //! comes from a library other than Spring or the return type is not clearly invalid.
 
 use spring_text::finding::Finding;
-use spring_text::java::{JavaFile, TypeRef};
+use spring_text::java::{JavaFile, Member, TypeRef};
 
-const INVALID_RETURNS: [&str; 24] = [
+const INVALID_RETURNS: [&str; 22] = [
     "void", "Unit", "boolean", "byte", "short", "int", "long", "float", "double", "char", "Boolean", "Byte", "Short",
-    "Integer", "Long", "Float", "Double", "Character", "String", "Object", "Set", "Collection", "Iterable", "Optional",
+    "Integer", "Long", "Float", "Double", "Character", "String", "Object", "Iterable", "Optional",
 ];
 
 fn invalid_return(ty: &TypeRef) -> bool {
@@ -21,8 +21,20 @@ fn invalid_return(ty: &TypeRef) -> bool {
     INVALID_RETURNS.contains(&ty.name.as_str())
 }
 
+fn inferred_expression_body(method: &Member, text: &str) -> bool {
+    let Some(ty) = method.ty.as_ref() else {
+        return false;
+    };
+
+    let Some((body_start, _)) = method.body else {
+        return false;
+    };
+
+    ty.at == method.at && !text[body_start..].starts_with('{')
+}
+
 /// A `@BatchMapping` method returns a `Map` of source to value, a `List` aligned with the sources, a `Flux`, or a `Mono<Map>`; the clearly invalid shapes are reported, custom wrappers are not.
-pub fn batch_mapping_return(file: &JavaFile) -> Vec<Finding> {
+pub fn batch_mapping_return(file: &JavaFile, text: &str) -> Vec<Finding> {
     if !file.from_spring("BatchMapping") || !file.from_spring("Controller") || !file.from_spring("RestController") {
         return Vec::new();
     }
@@ -32,6 +44,7 @@ pub fn batch_mapping_return(file: &JavaFile) -> Vec<Finding> {
         .filter(|ty| ty.has(&["Controller", "RestController"]))
         .flat_map(|ty| ty.methods())
         .filter(|method| method.annotation("BatchMapping").is_some())
+        .filter(|method| !inferred_expression_body(method, text))
         .filter_map(|method| method.ty.as_ref())
         .filter(|ty| invalid_return(ty))
         .map(|ty| {
@@ -56,7 +69,7 @@ mod tests {
     }
 
     fn flagged(text: &str) -> Vec<String> {
-        batch_mapping_return(&parse(text)).iter().map(|f| text[f.start..f.end].to_owned()).collect()
+        batch_mapping_return(&parse(text), text).iter().map(|f| text[f.start..f.end].to_owned()).collect()
     }
 
     #[test]
@@ -68,7 +81,6 @@ mod tests {
     fn string_batch_mapping_warns() {
         assert_eq!(flagged(&controller("String")), ["String"]);
         assert_eq!(flagged(&controller("int")), ["int"]);
-        assert_eq!(flagged(&controller("Set<String>")), ["Set"]);
         assert_eq!(flagged(&controller("String[]")), ["String"]);
     }
 
@@ -79,7 +91,7 @@ mod tests {
 
     #[test]
     fn valid_batch_mapping_returns_are_quiet() {
-        for ret in ["Map<Book, String>", "List<String>", "Flux<String>", "Mono<Map<Book, String>>"] {
+        for ret in ["Map<Book, String>", "List<String>", "Flux<String>", "Mono<Map<Book, String>>", "Collection<String>", "Set<String>"] {
             assert!(flagged(&controller(ret)).is_empty(), "{ret}");
         }
     }
@@ -97,8 +109,23 @@ mod tests {
     #[test]
     fn kotlin_unit_batch_mapping_warns() {
         let text = "@Controller\nclass C {\n    @BatchMapping\n    fun titles(books: List<Book>) {}\n\n    @BatchMapping\n    fun ok(books: List<Book>): Map<Book, String> = emptyMap()\n}\n";
-        let found: Vec<_> = batch_mapping_return(&kotlin::parse(text)).iter().map(|f| f.code).collect();
+        let found: Vec<_> = batch_mapping_return(&kotlin::parse(text), text).iter().map(|f| f.code).collect();
         assert_eq!(found, ["batch-mapping-return-type"]);
+    }
+
+    #[test]
+    fn kotlin_expression_body_without_declared_type_is_quiet() {
+        let text = "@Controller\nclass C {\n    @BatchMapping\n    fun titles(books: List<Book>) = service.titles(books)\n}\n";
+        assert!(batch_mapping_return(&kotlin::parse(text), text).is_empty());
+    }
+
+    #[test]
+    fn kotlin_explicit_unit_or_block_body_warns() {
+        let explicit = "@Controller\nclass C {\n    @BatchMapping\n    fun titles(books: List<Book>): Unit = service.titles(books)\n}\n";
+        assert_eq!(batch_mapping_return(&kotlin::parse(explicit), explicit).len(), 1);
+
+        let block = "@Controller\nclass C {\n    @BatchMapping\n    fun titles(books: List<Book>) { service.titles(books) }\n}\n";
+        assert_eq!(batch_mapping_return(&kotlin::parse(block), block).len(), 1);
     }
 
     #[test]
@@ -111,7 +138,7 @@ mod tests {
     fn ranges_use_utf16_columns_with_multibyte_text() {
         let text = controller("String").replace("class C", "class Cé😀");
         let text = text.replace("    String titles", "    /* é😀 */ String titles");
-        let d = batch_mapping_return(&parse(&text))[0].diagnostic(&text);
+        let d = batch_mapping_return(&parse(&text), &text)[0].diagnostic(&text);
         assert_eq!((d.range.start.line, d.range.start.character), (4, 14));
         assert_eq!(d.range.end.character - d.range.start.character, 6);
     }
@@ -119,7 +146,7 @@ mod tests {
     #[test]
     fn crlf_files_report_correct_lines() {
         let text = controller("void").replace('\n', "\r\n");
-        let lines: Vec<_> = batch_mapping_return(&parse(&text)).iter().map(|f| f.diagnostic(&text).range.start.line).collect();
+        let lines: Vec<_> = batch_mapping_return(&parse(&text), &text).iter().map(|f| f.diagnostic(&text).range.start.line).collect();
         assert_eq!(lines, [4]);
     }
 }

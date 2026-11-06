@@ -619,7 +619,7 @@ impl GraphQlTools {
         }
         if host::setting_bool("springGraphql.checkBatchMappingReturn").unwrap_or(true) {
             let file = if doc.language == "kotlin" { kotlin::parse(&doc.text) } else { java::parse(&doc.text) };
-            problems.extend(checks::batch_mapping_return(&file).iter().map(|f| f.diagnostic(&doc.text)));
+            problems.extend(checks::batch_mapping_return(&file, &doc.text).iter().map(|f| f.diagnostic(&doc.text)));
         }
         let _ = host::publish_diagnostics(&doc.path, &problems);
         links
