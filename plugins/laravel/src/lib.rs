@@ -12,6 +12,7 @@ mod controllers;
 mod directives;
 mod eloquent_checks;
 mod function_checks;
+mod generate;
 mod index;
 mod js;
 mod migrations;
@@ -440,6 +441,23 @@ impl Main {
         Ok(None)
     }
 
+    fn generator(&self, id: &str, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let project = ctx.project().ok_or("No project is open.")?;
+        let root = project.root()?;
+        let index = self.indexes.get(&root);
+
+        match id {
+            "make" => {
+                let has_livewire = index.is_some_and(|i| !i.livewire.is_empty())
+                    || project.read_file("composer.json").is_ok_and(|c| c.contains("\"livewire/livewire\""));
+                generate::make(ctx, index, None, has_livewire)
+            }
+            "new-model" => generate::make(ctx, index, Some("model"), false),
+            "generate-for-model" => generate::for_model(ctx, index),
+            _ => generate::create_missing(ctx, index),
+        }
+    }
+
     fn summary(&self) -> String {
         if self.indexes.is_empty() {
             return "No Laravel project is open.".into();
@@ -505,6 +523,8 @@ impl Plugin for Main {
                 }
                 self.artisan(ctx, "migrate:fresh")
             }
+            "artisan-run" => generate::run_artisan(ctx),
+            "make" | "new-model" | "generate-for-model" | "create-missing" => self.generator(id, ctx),
             "route-list" => {
                 host::open_terminal("artisan route:list", "php", &["artisan".to_owned(), "route:list".to_owned()])?;
                 Ok(None)

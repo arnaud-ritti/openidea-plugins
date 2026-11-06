@@ -1926,3 +1926,96 @@ fn forelse_snippet_has_an_empty_branch_before_its_closing_directive() {
 
     assert!(body.find("@empty").unwrap() < body.find("@endforelse").unwrap());
 }
+
+fn terminal_args(host: &MockHost) -> Vec<Vec<String>> {
+    host.terminals().into_iter().map(|t| t.args).collect()
+}
+
+#[test]
+fn make_asks_then_runs_artisan_in_a_terminal() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&["controller"]));
+    host.answer_next_prompt(Some(&["Admin/ReportController"]));
+    host.answer_next_prompt(Some(&["--resource", "--api"]));
+    host.answer_next_prompt(Some(&["Post"]));
+    plugin.run_command("make", &host.invocation(), None).unwrap();
+    assert_eq!(
+        terminal_args(&host),
+        [["artisan", "make:controller", "Admin/ReportController", "--model=Post", "--resource", "--api"]]
+    );
+}
+
+#[test]
+fn new_model_passes_the_flags() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&["Tag"]));
+    host.answer_next_prompt(Some(&["-m", "-f"]));
+    plugin.run_command("new-model", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:model", "Tag", "-m", "-f"]]);
+}
+
+#[test]
+fn make_rejects_unsafe_names_and_honours_dismissal() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    for bad in ["Foo; rm -rf /", "--force", "$(id)", "Foo Bar", "..\\x", ""] {
+        host.answer_next_prompt(Some(&[bad]));
+        assert!(plugin.run_command("new-model", &host.invocation(), None).is_err(), "{bad}");
+    }
+    assert!(plugin.run_command("new-model", &host.invocation(), None).unwrap().is_none());
+    host.answer_next_prompt(Some(&["Tag"]));
+    assert!(plugin.run_command("new-model", &host.invocation(), None).unwrap().is_none());
+    assert!(host.terminals().is_empty());
+}
+
+#[test]
+fn generates_for_a_model_with_a_default_name() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&["Post"]));
+    host.answer_next_prompt(Some(&["policy"]));
+    host.answer_next_prompt(Some(&["PostPolicy"]));
+    plugin.run_command("generate-for-model", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:policy", "PostPolicy", "--model=Post"]]);
+
+    host.answer_next_prompt(Some(&["Nope"]));
+    assert!(plugin.run_command("generate-for-model", &host.invocation(), None).is_err());
+}
+
+#[test]
+fn run_artisan_picks_a_listed_command_and_splits_arguments() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    host.on_process("php", |_, _| {
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "about  Display info\nmigrate:status  Show status\n".into(), stderr: String::new() })
+    });
+    host.answer_next_prompt(Some(&["migrate:status"]));
+    host.answer_next_prompt(Some(&["--pending  --no-ansi"]));
+    plugin.run_command("artisan-run", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "migrate:status", "--pending", "--no-ansi"]]);
+
+    host.answer_next_prompt(Some(&["rm"]));
+    assert!(plugin.run_command("artisan-run", &host.invocation(), None).is_err());
+    assert!(plugin.run_command("artisan-run", &host.invocation(), None).unwrap().is_none());
+}
+
+#[test]
+fn creates_the_missing_view_under_the_cursor() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    let text = "<?php\nreturn view('posts.create');\n";
+    host.open_editor("/project/app/Http/Controllers/A.php", "php", text, &[(1, 17, 1, 17)]);
+    host.answer_next_prompt(Some(&[]));
+    plugin.run_command("create-missing", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:view", "posts.create"]]);
+
+    let existing = "<?php\nreturn view('welcome');\n";
+    host.open_editor("/project/app/Http/Controllers/A.php", "php", existing, &[(1, 17, 1, 17)]);
+    assert!(plugin.run_command("create-missing", &host.invocation(), None).is_err());
+
+    host.open_editor("/project/app/Http/Controllers/A.php", "php", text, &[(1, 17, 1, 17)]);
+    plugin.run_command("create-missing", &host.invocation(), None).unwrap();
+    assert_eq!(host.terminals().len(), 1);
+}
