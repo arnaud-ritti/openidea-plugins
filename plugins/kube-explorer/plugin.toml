@@ -1,12 +1,12 @@
 id = "aritti.kube-explorer"
 name = "Kube Explorer"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Browse a Kubernetes cluster with kubectl. Switch context and namespace, list workloads, services, config, storage, events and nodes, then describe a resource, edit its YAML with schema completion (saving applies it), stream its logs, open a shell, attach, forward ports or delete it. Commands on the open file apply, validate (server dry run), diff or delete a manifest, render or apply a Kustomization, and run helm template, lint and dependency update. Never changes your kubeconfig."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT AND Apache-2.0"
-change-notes = "0.1.0: first release. Cluster tree; describe; YAML in an editor that applies on save, with the Kubernetes schema; logs (pods and workloads), shell, attach, port forward; delete; apply, dry run, diff and delete of the open manifest; Kustomize render and apply; Helm template, lint and dependency update."
+change-notes = "Unreleased: Create Helm Chart, Configure Helm Parameters (release, values file, --set for template and lint), Customize Namespaces, Select Log Sources (pick pods or containers), a Debug image prompt with recent images (Edit Recent Debug Images), and Go to Declaration between manifests (names of ConfigMaps, Secrets, Services, claims and service accounts). 0.2.0: right-click a resource in the tree for describe, YAML, logs, shell, attach, debug, port forward, show secret and delete (asks to confirm); needs OpenIDEA 1.2. 0.1.0: first release. Cluster tree; describe; YAML in an editor that applies on save, with the Kubernetes schema; logs (pods and workloads), shell, attach, port forward; delete; apply, dry run, diff and delete of the open manifest; Kustomize render and apply; Helm template, lint and dependency update."
 categories = ["tools"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-view:kube", "on-event:file-opened", "on-event:file-saved"]
 
@@ -20,7 +20,7 @@ optional = ["process:tee", "events", "project.read", "process:helm"]
 [[contributes.views]]
 id = "kube"
 title = "Kube Explorer"
-icon = "icons/k8s/cluster.svg"
+icon = "icons/kubernetes.svg"
 location = "right"
 
 [[contributes.commands]]
@@ -78,6 +78,76 @@ id = "how-to-install-kubectl"
 title = "Kube Explorer: How to Install kubectl"
 category = "Kube Explorer"
 
+[[contributes.commands]]
+id = "helm-create"
+title = "Kube Explorer: Create Helm Chart"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "helm-parameters"
+title = "Kube Explorer: Configure Helm Parameters"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "customize-namespaces"
+title = "Kube Explorer: Customize Namespaces"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "edit-debug-images"
+title = "Kube Explorer: Edit Recent Debug Images"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-log-sources"
+title = "Kube Explorer: Select Log Sources"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-describe"
+title = "Kube Explorer: Describe Resource"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-yaml"
+title = "Kube Explorer: Edit YAML Resource"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-logs"
+title = "Kube Explorer: Logs Resource"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-shell"
+title = "Kube Explorer: Shell Resource"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-attach"
+title = "Kube Explorer: Attach Resource"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-debug"
+title = "Kube Explorer: Debug Resource"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-port-forward"
+title = "Kube Explorer: Port Forward Resource"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-show-secret"
+title = "Kube Explorer: Show Secret Resource"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "resource-delete"
+title = "Kube Explorer: Delete Resource"
+category = "Kube Explorer"
+
 # ⌥⏎ on a manifest: add the Kubernetes schema for the YAML language server.
 [[contributes.providers]]
 kinds = ["code-actions"]
@@ -86,6 +156,69 @@ languages = ["yaml"]
 [[contributes.menus]]
 menu = "editor.context"
 command = "apply"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-describe"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-yaml"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-logs"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-log-sources"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-shell"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-attach"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-debug"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-port-forward"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-show-secret"
+when = "viewItemKind == res"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "kube"
+command = "resource-delete"
+when = "viewItemKind == res"
+
+[[contributes.documentIndexers]]
+extensions = ["yaml", "yml"]
 
 [contributes.settings]
 title = "Kube Explorer"

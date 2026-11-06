@@ -9,7 +9,9 @@
 
 mod checks;
 mod convert;
+mod indexer;
 mod manifest;
+mod prompts;
 mod schema;
 mod secrets;
 
@@ -20,7 +22,7 @@ use std::path::Path;
 use openidea_plugin::providers::{CodeAction, Document, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Context, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Range, host, register_plugin,
+    Context, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Range, host,
 };
 
 pub const TREE: &str = "kube";
@@ -109,6 +111,8 @@ pub struct KubeExplorer {
     revealed: Option<(String, Vec<(String, String)>)>,
     /// A Secret being created. Dropped by Back and by submitting.
     draft: Option<Draft>,
+    /// Chosen by Debug Resource's prompt, used by the next debug.
+    debug_image: Option<String>,
 }
 
 #[derive(Default)]
@@ -199,8 +203,9 @@ impl KubeExplorer {
         Ok(self.args_in(namespace.as_deref(), &rest))
     }
 
-    fn debug_pod(&self, row: &str) -> Result<(), Error> {
-        let image = host::setting_string("debugImage").filter(|i| !i.trim().is_empty());
+    fn debug_pod(&mut self, row: &str) -> Result<(), Error> {
+        let setting = host::setting_string("debugImage").filter(|i| !i.trim().is_empty());
+        let image = self.debug_image.take().or(setting);
         let image = image.as_deref().map_or(DEFAULT_DEBUG_IMAGE, str::trim);
         self.debug_args(row, image, None)?;
         let (namespace, pod) = self.split_scope("pods", row)?;
@@ -208,7 +213,9 @@ impl KubeExplorer {
         let first = self.kubectl_in(namespace.as_deref(), &jsonpath, None);
         let target = first.as_deref().map(str::trim).ok().filter(|t| !t.is_empty());
         let args = self.debug_args(row, image, target)?;
-        host::open_terminal(&format!("Debug: {pod}"), KUBECTL, &args)
+        host::open_terminal(&format!("Debug: {pod}"), KUBECTL, &args)?;
+        self.remember_debug_image(image);
+        Ok(())
     }
 
     fn reveal_allowed() -> bool {
@@ -338,7 +345,8 @@ impl KubeExplorer {
             return Ok(out.lines().filter(|line| !line.is_empty()).map(str::to_owned).collect());
         }
         let out = self.kubectl(&["get", kind, "-o", "name", REQUEST_TIMEOUT], None)?;
-        Ok(out.lines().map(|line| line.split_once('/').map_or(line, |(_, name)| name).to_owned()).collect())
+        let names: Vec<String> = out.lines().map(|line| line.split_once('/').map_or(line, |(_, name)| name).to_owned()).collect();
+        Ok(if kind == "namespaces" { self.visible_namespaces(names) } else { names })
     }
 
     /// `kind.group` names of the cluster's custom resources.
@@ -665,7 +673,11 @@ impl KubeExplorer {
             }
             Some(Ok(names)) => {
                 for name in names {
-                    let child = TreeItem::new(&format!("{key}/{name}"), name).parent(key).icon(icon);
+                    let child_key = match key.strip_prefix("kind:") {
+                        Some(kind) => format!("res:{kind}/{name}"),
+                        None => format!("{key}/{name}"),
+                    };
+                    let child = TreeItem::new(&child_key, name).parent(key).icon(icon);
                     items.push(if Some(name) == active { child.detail("active") } else { child });
                 }
             }
@@ -867,10 +879,10 @@ fn custom_resource_names(names: Vec<String>) -> Vec<String> {
     custom
 }
 
-/// `(kind, name)` of a resource node key (`kind:pods/web-1`).
+/// `(kind, name)` of a resource node key (`res:pods/web-1`).
 fn resource(key: &str) -> Option<(String, String)> {
     let (parent, name) = key.split_once('/')?;
-    let kind = parent.strip_prefix("kind:")?;
+    let kind = parent.strip_prefix("res:")?;
     Some((kind.to_owned(), name.to_owned()))
 }
 
@@ -1148,14 +1160,21 @@ impl Plugin for KubeExplorer {
     }
 
     /// The IDE drops a command's result text: it is shown in a notification.
-    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
         match id {
             "helm-repo-update" => return helm_repo_update().map(|()| None),
+            "helm-create" => return self.helm_create(ctx).map(|()| None),
+            "helm-parameters" => return self.helm_parameters().map(|()| None),
+            "customize-namespaces" => return self.customize_namespaces().map(|()| None),
+            "edit-debug-images" => return self.edit_debug_images().map(|()| None),
             "how-to-install-kubectl" => {
                 notify_install_hint();
                 return Ok(None);
             }
             _ => {}
+        }
+        if let Some(action) = id.strip_prefix("resource-") {
+            return self.resource_command(action, arg).map(|()| None);
         }
         let (working, done) = match id {
             "apply" => ("Applying manifest", "Manifest applied"),
@@ -1177,6 +1196,39 @@ impl Plugin for KubeExplorer {
 }
 
 impl KubeExplorer {
+    fn resource_command(&mut self, action: &str, key: Option<&str>) -> Result<(), Error> {
+        let (kind, row) = key.and_then(resource).ok_or("Right-click a resource in Kube Explorer.")?;
+        let applies = match action {
+            "logs" | "log-sources" => kind == "pods" || WORKLOADS.contains(&kind.as_str()),
+            "shell" | "attach" | "debug" => kind == "pods",
+            "show-secret" => kind == "secrets",
+            "port-forward" => FORWARDABLE.iter().any(|(k, _)| *k == kind),
+            "describe" | "yaml" | "delete" => true,
+            _ => return Err(Error::NotFound(format!("command resource-{action}"))),
+        };
+        if !applies {
+            return Err(format!("{action} does not apply to {kind}.").into());
+        }
+        if action == "delete" && !host::confirm("Delete resource", &format!("Delete {kind}/{row}?"))? {
+            return Ok(());
+        }
+        if action == "log-sources" {
+            return self.select_log_sources(&kind, &row);
+        }
+        if action == "debug" {
+            let Some(image) = self.ask_debug_image()? else { return Ok(()) };
+            self.debug_image = Some(image);
+        }
+        self.selected = Some((kind, row));
+        self.confirm_delete = action == "delete";
+        self.button(action)?;
+        if self.details.is_some() || self.forward.is_some() || self.revealed.is_some() {
+            host::reveal_view(TREE)?;
+        }
+        host::refresh_view(TREE);
+        Ok(())
+    }
+
     fn command(&mut self, id: &str, ctx: &Invocation) -> Result<String, Error> {
         match id {
             "apply" => self.single_namespace_gate("Apply Manifest")?,
@@ -1208,13 +1260,17 @@ impl KubeExplorer {
             }
             "helm-template" | "helm-lint" | "helm-dependency-update" => {
                 let chart = chart_dir(ctx, &path)?;
-                let release = chart.rsplit('/').next().unwrap_or("release");
+                let release = prompts::helm_release().unwrap_or_else(|| chart.rsplit('/').next().unwrap_or("release").to_owned());
+                let release = release.as_str();
                 let args: &[&str] = match id {
                     "helm-template" => &["template", release, &chart],
                     "helm-lint" => &["lint", &chart],
                     _ => &["dependency", "update", &chart],
                 };
-                let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+                let mut args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+                if id != "helm-dependency-update" {
+                    args.extend(prompts::helm_flags());
+                }
                 let out = host::run_process(HELM, &args, None)?;
                 // `helm lint` reports problems on stdout and fails; show them either way.
                 if id == "helm-lint" {
@@ -1274,7 +1330,18 @@ impl Views for KubeExplorer {
     }
 }
 
-register_plugin!(KubeExplorer, providers, views);
+// `register_plugin!` has no arm for providers, views and indexing together.
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn() -> KubeExplorer = <KubeExplorer as Default>::default;
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    struct Component;
+    openidea_plugin::__plugin_exports!(KubeExplorer, Component, openidea_plugin::bindings);
+    openidea_plugin::__providers_exports!(KubeExplorer, Component);
+    openidea_plugin::__views_exports!(KubeExplorer, Component);
+    openidea_plugin::__indexing_exports!(KubeExplorer, Component);
+    openidea_plugin::bindings::__export_plugin_world!(Component with_types_in openidea_plugin::bindings);
+};
 
 #[cfg(test)]
 mod tests {
@@ -1322,9 +1389,9 @@ mod tests {
 
         kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
         let tree = keys(kube.render(TREE, None, &host.invocation()).unwrap());
-        assert!(tree.contains(&"kind:pods/web-1".to_owned()));
+        assert!(tree.contains(&"res:pods/web-1".to_owned()));
 
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Button("logs".into()), &host.invocation()).unwrap();
         assert_eq!(host.terminals()[0].args, ["logs", "-f", "--tail=500", "web-1"]);
     }
@@ -1346,7 +1413,7 @@ mod tests {
     fn describe_shows_its_output_in_the_tree_view_until_back() {
         let host = host();
         let mut kube = KubeExplorer::default();
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
 
         kube.handle(TREE, ViewEvent::Button("describe".into()), &host.invocation()).unwrap();
         let shown = kube.render(TREE, None, &host.invocation()).unwrap().body;
@@ -1381,7 +1448,7 @@ mod tests {
     fn yaml_is_editable_and_describe_is_read_only() {
         let host = host();
         let mut kube = KubeExplorer::default();
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
 
         kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
         let yaml = page(&mut kube, &host);
@@ -1398,7 +1465,7 @@ mod tests {
     fn applying_edited_yaml_replaces_the_object_and_shows_it_again() {
         let host = host();
         let mut kube = KubeExplorer::default();
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
 
         kube.handle(TREE, ViewEvent::Message("apply\nkind: Pod # edited".into()), &host.invocation()).unwrap();
@@ -1411,7 +1478,7 @@ mod tests {
     fn a_rejected_apply_keeps_the_edits_and_reports_why() {
         let host = host();
         let mut kube = KubeExplorer::default();
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
         let refreshes = host.refreshed_views().len();
 
@@ -1433,7 +1500,7 @@ mod tests {
     }
 
     fn open_in_editor(kube: &mut KubeExplorer, host: &MockHost) -> String {
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
         host.opened_locations()[0].0.clone()
     }
@@ -1507,7 +1574,7 @@ mod tests {
     fn port_forward_asks_for_ports_then_opens_a_terminal() {
         let host = host();
         let mut kube = KubeExplorer::default();
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
 
         kube.handle(TREE, ViewEvent::Button("port-forward".into()), &host.invocation()).unwrap();
         let form = kube.render(TREE, None, &host.invocation()).unwrap().body;
@@ -1523,9 +1590,9 @@ mod tests {
         let host = host();
         let mut kube = KubeExplorer::default();
 
-        kube.handle(TREE, ViewEvent::Select("kind:deployments/web".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:deployments/web".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Button("logs".into()), &host.invocation()).unwrap();
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Button("attach".into()), &host.invocation()).unwrap();
 
         assert!(host.terminals()[0].args.starts_with(&["logs".into(), "-f".into(), "deployments/web".into(), "--all-pods=true".into()]));
@@ -1758,7 +1825,7 @@ mod tests {
 
         assert_eq!(icon("ctx").as_deref(), Some(k8s!("cluster")));
         assert_eq!(icon("kind:pods").as_deref(), Some(k8s!("pod")));
-        assert_eq!(icon("kind:pods/web-1").as_deref(), Some(k8s!("pod")));
+        assert_eq!(icon("res:pods/web-1").as_deref(), Some(k8s!("pod")));
     }
 
     #[test]
@@ -1776,13 +1843,54 @@ mod tests {
     fn delete_runs_only_after_confirmation() {
         let host = host();
         let mut kube = KubeExplorer::default();
-        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
 
         kube.handle(TREE, ViewEvent::Button("delete".into()), &host.invocation()).unwrap();
         assert!(!host.process_runs().iter().any(|r| r.args.contains(&"delete".to_owned())));
 
         kube.handle(TREE, ViewEvent::Button("delete".into()), &host.invocation()).unwrap();
         assert!(host.process_runs().iter().any(|r| r.args.contains(&"delete".to_owned())));
+    }
+
+    #[test]
+    fn the_context_menu_acts_on_the_right_clicked_resource() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        kube.run_command("resource-logs", &host.invocation(), Some("res:pods/web-1")).unwrap();
+        kube.run_command("resource-describe", &host.invocation(), Some("res:pods/web-1")).unwrap();
+        assert_eq!(host.terminals().len(), 1);
+        assert_eq!(host.terminals()[0].args.last().map(String::as_str), Some("web-1"));
+        assert!(kube.details.is_some());
+        assert_eq!(host.revealed_views(), [TREE]);
+    }
+
+    #[test]
+    fn the_context_menu_refuses_actions_that_do_not_fit_the_kind() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        assert!(kube.run_command("resource-shell", &host.invocation(), Some("res:services/web")).is_err());
+        assert!(kube.run_command("resource-logs", &host.invocation(), Some("kind:pods")).is_err());
+        assert!(host.terminals().is_empty());
+    }
+
+    #[test]
+    fn the_context_menu_delete_asks_first() {
+        let host = host();
+        let mut kube = KubeExplorer::default();
+        kube.run_command("resource-delete", &host.invocation(), Some("res:pods/web-1")).unwrap();
+        assert!(!host.process_runs().iter().any(|r| r.args.contains(&"delete".to_owned())));
+
+        host.answer_next_prompt(Some(&[]));
+        kube.run_command("resource-delete", &host.invocation(), Some("res:pods/web-1")).unwrap();
+        assert!(host.process_runs().iter().any(|r| r.args.contains(&"delete".to_owned())));
+    }
+
+    #[test]
+    fn every_context_menu_command_is_declared() {
+        let manifest = include_str!("../plugin.toml");
+        for action in ["describe", "yaml", "logs", "shell", "attach", "debug", "port-forward", "show-secret", "delete"] {
+            assert!(manifest.contains(&format!("command = \"resource-{action}\"")), "{action}");
+        }
     }
 
     const API_RESOURCES: &str = "pods\ndeployments.apps\njobs.batch\ningresses.networking.k8s.io\ncertificates.cert-manager.io\nissuers.cert-manager.io\nservices\n";
@@ -1826,9 +1934,9 @@ mod tests {
         kube.handle(TREE, ViewEvent::Expand("crd:cert-manager.io".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Expand("kind:certificates.cert-manager.io".into()), &host.invocation()).unwrap();
         let tree = keys(kube.render(TREE, None, &host.invocation()).unwrap());
-        assert!(tree.contains(&"kind:certificates.cert-manager.io/web-tls".to_owned()));
+        assert!(tree.contains(&"res:certificates.cert-manager.io/web-tls".to_owned()));
 
-        kube.handle(TREE, ViewEvent::Select("kind:certificates.cert-manager.io/web-tls".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:certificates.cert-manager.io/web-tls".into()), &host.invocation()).unwrap();
         assert_eq!(kube.selected, Some(("certificates.cert-manager.io".into(), "web-tls".into())));
     }
 
@@ -2003,7 +2111,7 @@ mod tests {
         assert!(kube.debug_args("web", "busybox", Some("a b")).is_err());
         let host = host();
         host.set_setting("debugImage", "\"busybox --privileged\"");
-        let kube = KubeExplorer { selected: Some(("pods".into(), "web-1".into())), ..Default::default() };
+        let mut kube = KubeExplorer { selected: Some(("pods".into(), "web-1".into())), ..Default::default() };
         assert!(kube.debug_pod("web-1").is_err());
         assert!(host.terminals().is_empty());
     }
@@ -2338,9 +2446,9 @@ mod tests {
         kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
         let Body::Tree(items) = kube.render(TREE, None, &host.invocation()).unwrap().body else { panic!("not a tree") };
 
-        let row = items.iter().find(|i| i.key == "kind:pods/team-a/web").unwrap();
+        let row = items.iter().find(|i| i.key == "res:pods/team-a/web").unwrap();
         assert_eq!(row.label, "team-a/web");
-        assert!(items.iter().any(|i| i.key == "kind:pods/team-b/api"));
+        assert!(items.iter().any(|i| i.key == "res:pods/team-b/api"));
     }
 
     #[test]
@@ -2350,10 +2458,10 @@ mod tests {
 
         kube.handle(TREE, ViewEvent::Expand("kind:nodes".into()), &host.invocation()).unwrap();
         let tree = keys(kube.render(TREE, None, &host.invocation()).unwrap());
-        kube.handle(TREE, ViewEvent::Select("kind:nodes/node-1".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:nodes/node-1".into()), &host.invocation()).unwrap();
         kube.button("describe").unwrap();
 
-        assert!(tree.contains(&"kind:nodes/node-1".to_owned()), "{tree:?}");
+        assert!(tree.contains(&"res:nodes/node-1".to_owned()), "{tree:?}");
         let calls = kubectl_calls(&host);
         assert!(!calls[0].contains(&"--all-namespaces".to_owned()));
         assert!(calls.iter().all(|args| !args.iter().any(|a| a.starts_with("--namespace"))), "{calls:?}");
@@ -2365,7 +2473,7 @@ mod tests {
         let host = all_host();
         let mut kube = all_mode();
 
-        kube.handle(TREE, ViewEvent::Activate("kind:pods/team-a/web".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Activate("res:pods/team-a/web".into()), &host.invocation()).unwrap();
         press(&mut kube, "pods", "team-a/web", "yaml").unwrap();
         let path = host.opened_locations()[0].0.clone();
         KubeExplorer::default().handle_events(&[openidea_plugin::Event::FileSaved(path.clone())], &host.invocation());
@@ -2398,7 +2506,7 @@ mod tests {
     fn delete_in_all_namespaces_targets_the_rows_namespace() {
         let host = all_host();
         let mut kube = all_mode();
-        kube.handle(TREE, ViewEvent::Select("kind:pods/team-a/web".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Select("res:pods/team-a/web".into()), &host.invocation()).unwrap();
 
         kube.handle(TREE, ViewEvent::Button("delete".into()), &host.invocation()).unwrap();
         assert!(kubectl_calls(&host).iter().all(|args| !args.contains(&"delete".to_owned())));
@@ -2554,7 +2662,7 @@ mod tests {
             kube.handle(TREE, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
             let tree = keys(kube.render(TREE, None, &host.invocation()).unwrap());
 
-            let new = if namespace.is_some() { "kind:pods/team-a/new" } else { "kind:pods/new" };
+            let new = if namespace.is_some() { "res:pods/team-a/new" } else { "res:pods/new" };
             assert!(tree.contains(&new.to_owned()), "{namespace:?}: {tree:?}");
             assert!(!tree.iter().any(|k| k.ends_with("/old")), "{namespace:?}: {tree:?}");
         }
