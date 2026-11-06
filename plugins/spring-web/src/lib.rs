@@ -358,7 +358,7 @@ impl WebTools {
         out
     }
 
-    /// The spans of the document that lead to a handler: functional routes' method references.
+    /// The spans of the document that lead to a handler: functional routes' method references and test URLs.
     fn links(&mut self, doc: &Document) -> Vec<Link> {
         let Some(index) = self.endpoints.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else {
             return Vec::new();
@@ -371,6 +371,20 @@ impl WebTools {
             return Vec::new();
         };
         let mut out = Vec::new();
+        for r in endpoints::requests(&doc.path, &doc.text) {
+            let targets: Vec<Location> = index
+                .iter()
+                .flat_map(|(p, info)| {
+                    info.endpoints
+                        .iter()
+                        .filter(|e| endpoints::serves(e, &r))
+                        .map(move |e| Location { path: p.to_owned(), range: e.range })
+                })
+                .collect();
+            if !targets.is_empty() {
+                out.push(Link { at: r.at, end: r.end, tooltip: format!("Handler of {} {}", r.verb, r.path), targets });
+            }
+        }
         for e in &mine.endpoints {
             let Some(handler) = &e.handler else { continue };
             let targets = handler_targets(index, &doc.path, handler);
@@ -691,6 +705,63 @@ class UserController {
         assert_eq!(targets[0].range.start.line, 1);
         assert!(tools.definition(&d, Position::new(6, 52)).len() == 1, "this::list, on the reference");
         assert!(tools.definition(&d, Position::new(6, 15)).is_empty());
+    }
+
+    const USERS: &str = r#"@RestController
+@RequestMapping("/users")
+class UserApi {
+    @GetMapping
+    List<User> all() { return null; }
+
+    @GetMapping("/{id}")
+    User get(@PathVariable long id) { return null; }
+
+    @DeleteMapping("/{id}")
+    void delete(@PathVariable long id) {}
+
+    @GetMapping("/{id}/orders") List<Order> orders(@PathVariable long id) { return null; }
+    @GetMapping("/by-{name}") User byName(@PathVariable String name) { return null; }
+}
+"#;
+
+    const USER_TESTS: &str = r#"@WebMvcTest
+class UserApiTests {
+    @Autowired MockMvc mockMvc;
+    @Autowired WebTestClient webTestClient;
+    @Autowired TestRestTemplate restTemplate;
+
+    @Test void get() throws Exception {
+        mockMvc.perform(get("/users/{id}", 1)).andExpect(status().isOk());
+        mockMvc.perform(MockMvcRequestBuilders.delete("/users/7"));
+        mockMvc.perform(post("/users"));
+        webTestClient.get().uri("/users").exchange();
+        webTestClient.get().uri("/users/by-bob?x=1").exchange();
+        restTemplate.getForObject("/users/1/orders", String.class);
+        restTemplate.exchange("/users/3", HttpMethod.DELETE, null, Void.class);
+        Map<String, String> m = new HashMap<>(); m.put("/users", "x");
+    }
+}
+"#;
+
+    #[test]
+    fn mockmvc_perform_get_links_to_handler() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/UserApi.java", USERS);
+        let mut tools = WebTools::default();
+        let d = doc("src/test/java/com/acme/UserApiTests.java", USER_TESTS);
+        let markers = tools.line_markers(&d);
+        let found: Vec<_> = markers.iter().map(|m| (m.line, m.target.as_ref().unwrap().range.start.line)).collect();
+        assert_eq!(found, [(7, 7), (8, 10), (10, 4), (11, 7), (12, 12), (13, 10)]);
+        assert_eq!(markers[0].tooltip, "Handler of GET /users/{id}");
+
+        let at = Position::new(7, 30);
+        let targets = tools.definition(&d, at);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].path, "/project/src/main/java/com/acme/UserApi.java");
+        assert_eq!(targets[0].range.start.line, 7);
+        assert!(tools.definition(&d, Position::new(9, 30)).is_empty(), "no POST /users mapping");
+        let main = doc("src/main/java/com/acme/UserApi.java", USERS);
+        assert!(tools.line_markers(&main).is_empty(), "not a test source");
     }
 
     #[test]

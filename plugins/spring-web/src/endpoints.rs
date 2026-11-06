@@ -171,6 +171,114 @@ fn routes(path: &str, text: &str) -> Vec<Endpoint> {
     out
 }
 
+/// A request a test sends to a literal URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    pub verb: String,
+    /// The URL's path, without query or fragment.
+    pub path: String,
+    pub at: usize,
+    pub end: usize,
+}
+
+const TEMPLATE_METHODS: [(&str, &str); 9] = [
+    ("getForObject", "GET"),
+    ("getForEntity", "GET"),
+    ("postForObject", "POST"),
+    ("postForEntity", "POST"),
+    ("postForLocation", "POST"),
+    ("put", "PUT"),
+    ("delete", "DELETE"),
+    ("patchForObject", "PATCH"),
+    ("headForHeaders", "HEAD"),
+];
+
+/// The URL literals of MockMvc, WebTestClient/WebClient/RestClient and
+/// RestTemplate calls in a test source.
+pub fn requests(path: &str, text: &str) -> Vec<Request> {
+    if !path.contains("/src/test/") {
+        return Vec::new();
+    }
+    let mock = text.contains("MockMvc");
+    let client = ["WebTestClient", "RestTestClient", "WebClient", "RestClient"].iter().any(|k| text.contains(k));
+    let template = text.contains("RestTemplate");
+    if !(mock || client || template) {
+        return Vec::new();
+    }
+    let calls = source_calls(path, text);
+    let mut out = Vec::new();
+    for c in calls.iter().filter(|c| !c.is_new || is_kotlin(path)) {
+        let Some(url) = c.args.first().and_then(|a| a.string.as_ref()) else { continue };
+        let lower = c.name.to_uppercase();
+        let verb = if mock
+            && !c.chained
+            && VERBS.contains(&lower.as_str())
+            && c.name == c.name.to_lowercase()
+            && c.receiver.as_ref().is_none_or(|r| r == "MockMvcRequestBuilders" || r.to_lowercase().contains("mvc"))
+        {
+            lower
+        } else if client && c.name == "uri" {
+            let before = calls.iter().find(|p| {
+                p.args.is_empty()
+                    && VERBS.contains(&p.name.to_uppercase().as_str())
+                    && p.name == p.name.to_lowercase()
+                    && text.get(p.end..c.at).is_some_and(|gap| gap.trim() == ".")
+            });
+            let Some(before) = before else { continue };
+            before.name.to_uppercase()
+        } else if template && c.name == "exchange" {
+            let Some(method) = c.args.get(1) else { continue };
+            let verb = method.text.rsplit('.').next().unwrap_or("").to_owned();
+            if !VERBS.contains(&verb.as_str()) {
+                continue;
+            }
+            verb
+        } else if template && let Some((_, verb)) = TEMPLATE_METHODS.iter().find(|(n, _)| *n == c.name) {
+            verb.to_string()
+        } else {
+            continue;
+        };
+        let path = url.value.split(['?', '#']).next().unwrap_or("");
+        if path.starts_with('/') {
+            out.push(Request { verb, path: path.to_owned(), at: url.at, end: url.end });
+        }
+    }
+    out
+}
+
+/// Whether a request path reaches a mapping's URI template; a `{variable}`
+/// matches any segment.
+pub fn matches(mapping: &str, request: &str) -> bool {
+    let segments = |p: &str| p.split('/').filter(|s| !s.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+    let (wanted, got) = (segments(mapping), segments(request));
+    for (i, seg) in wanted.iter().enumerate() {
+        if seg == "**" || seg.starts_with("{*") {
+            return true;
+        }
+        let Some(part) = got.get(i) else { return false };
+        if seg == "*" {
+            continue;
+        }
+        let Some(open) = seg.find('{') else {
+            if seg != part {
+                return false;
+            }
+            continue;
+        };
+        let (prefix, suffix) = (&seg[..open], seg.rsplit_once('}').map_or("", |x| x.1));
+        if !(part.len() >= prefix.len() + suffix.len() && part.starts_with(prefix) && part.ends_with(suffix)) {
+            return false;
+        }
+    }
+    wanted.len() == got.len()
+}
+
+/// Whether a mapping serves a request (`HEAD` falls back to `GET`).
+pub fn serves(endpoint: &Endpoint, request: &Request) -> bool {
+    (endpoint.verb.is_empty() || endpoint.verb == request.verb || (request.verb == "HEAD" && endpoint.verb == "GET"))
+        && matches(&endpoint.path, &request.path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +363,44 @@ class Routes(private val h: UserHandler) {
             [list(None), None, list(Some("Handler")), None, list(None), list(None), list(None)]
         );
         assert_eq!(handlers("A.kt", KOTLIN_ROUTES), [list(None), None, None, None]);
+    }
+
+    #[test]
+    fn matches_uri_templates() {
+        assert!(matches("/users/{id}", "/users/42"));
+        assert!(matches("/users/{id}", "/users/{id}/"));
+        assert!(matches("/users/{id:[0-9]+}/x", "/users/1/x"));
+        assert!(matches("/f/{*rest}", "/f/a/b"));
+        assert!(matches("/a/*/c", "/a/b/c"));
+        assert!(matches("/by-{n}.json", "/by-x.json"));
+        assert!(!matches("/users/{id}", "/users"));
+        assert!(!matches("/users", "/users/1"));
+        assert!(!matches("/users", "/other"));
+    }
+
+    #[test]
+    fn reads_test_requests() {
+        let src = r#"class T {
+            void t() {
+                mockMvc.perform(get("/a/{id}", 1)).andExpect(x);
+                mockMvc.perform(MockMvcRequestBuilders.patch("/b"));
+                webTestClient.post().uri("/c?q=1").exchange();
+                map.get("/not");
+                client.get().uri("http://host/d");
+                rest.headForHeaders("/e");
+            }
+        } // MockMvc WebTestClient RestTemplate"#;
+        let found: Vec<_> = requests("/p/src/test/java/T.java", src).into_iter().map(|r| (r.verb, r.path)).collect();
+        assert_eq!(
+            found,
+            [
+                ("GET".into(), "/a/{id}".into()),
+                ("PATCH".into(), "/b".into()),
+                ("POST".into(), "/c".into()),
+                ("HEAD".into(), "/e".into())
+            ]
+        );
+        assert!(requests("/p/src/main/java/T.java", src).is_empty());
     }
 
     #[test]
