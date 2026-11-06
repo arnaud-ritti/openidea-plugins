@@ -33,7 +33,7 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
 
 - Problems: missing template, missing translation key (in a domain that has
   keys), missing route (once the compiled routes exist), missing service (once
-  the compiled container exists), route defined twice in a file, Twig block tags (`block`, `if`, `for`, `macro`,
+  the compiled container exists), route defined twice in a file, service id defined twice in an XML file, Twig block tags (`block`, `if`, `for`, `macro`,
   `embed`, `apply`, `autoescape`, `with`, `verbatim`, `cache`, `sandbox`) never closed. Files are
   checked when opened or saved. _Settings › Plugins › Symfony_ turns the
   checks off.

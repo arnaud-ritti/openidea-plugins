@@ -241,6 +241,17 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
         }
     }
 
+    if language == "xml" && !path.contains("/var/cache/") {
+        let mut services: Vec<(String, Position)> = Vec::new();
+        index::xml_services(path, text, &mut services);
+        for (i, (id, at)) in services.iter().enumerate() {
+            if services[..i].iter().any(|(earlier, _)| earlier == id) {
+                let start = text::offset(text, *at).unwrap_or(0);
+                problem(start, start + id.len(), "duplicate-service", format!("Service \"{id}\" is already defined in this file."));
+            }
+        }
+    }
+
     let mut routes: Vec<(String, Position)> = Vec::new();
     match language {
         "php" => index::php_routes(path, text, &mut routes),
@@ -1057,5 +1068,29 @@ mod tests {
 
         let View { body, .. } = plugin.render(PROFILER_VIEW, None, &host.invocation()).unwrap();
         assert!(matches!(body, Body::Message(_)));
+    }
+
+    #[test]
+    fn duplicate_service_key_warns() {
+        let host = MockHost::install();
+        let plugin = activated(&host);
+        let index = plugin.index_for("/project/x").unwrap();
+        let found = |text: &str| -> Vec<(String, Position)> {
+            problems(index, "/project/config/services.xml", "xml", text)
+                .into_iter()
+                .filter(|d| d.code.as_deref() == Some("duplicate-service"))
+                .map(|d| (d.message, d.range.start))
+                .collect()
+        };
+        let wrap = |body: &str| format!("<container>\n  <services>\n{body}  </services>\n</container>\n");
+
+        let twice = wrap("    <service id=\"app.a\" class=\"A\"/>\n    <service id=\"app.b\"/>\n    <service id=\"app.a\" class=\"B\"/>\n");
+        assert_eq!(found(&twice), [("Service \"app.a\" is already defined in this file.".to_owned(), Position::new(4, 17))]);
+
+        let distinct = wrap("    <service id=\"app.a\"/>\n    <service id=\"app.b\"/>\n");
+        assert!(found(&distinct).is_empty());
+
+        let defaults = wrap("    <defaults autowire=\"true\"/>\n    <prototype namespace=\"App\\\" resource=\"../src\"/>\n    <service id=\"app.a\"><argument type=\"service\" id=\"app.a\"/></service>\n");
+        assert!(found(&defaults).is_empty());
     }
 }
