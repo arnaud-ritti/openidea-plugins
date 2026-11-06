@@ -20,15 +20,16 @@ const show = (text) => {
 };
 let timer = 0;
 let latest = "";
-let name = "";
+const id = crypto.randomUUID();
 let known = "";
 const render = (text) => {
   latest = text;
-  window.openidea.postMessage(`files\t${known}\t${name}`);
+  window.openidea.postMessage(`files\t${id}\t${known}`);
   show(text);
 };
 window.openidea.onMessage((message) => {
   const reply = JSON.parse(message);
+  if (reply.id !== id) return; // replies go to every open preview
   known = reply.hash;
   const received = reply.files ?? {};
   files = new Map(Object.entries(received).map(([name, text]) => [new URL(name, root).href.split("#")[0], text]));
@@ -38,7 +39,4 @@ window.openidea.document.onChange((state) => {
   clearTimeout(timer);
   timer = setTimeout(() => render(state.text), 300);
 });
-window.openidea.document.get().then((doc) => {
-  name = doc.name;
-  render(doc.text);
-});
+window.openidea.document.get().then((doc) => render(doc.text));

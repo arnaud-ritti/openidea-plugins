@@ -63,8 +63,9 @@ fn fingerprint(text: &str) -> String {
 }
 
 /// The files `$ref`s of `text` point at, keyed as written, for the preview to resolve them.
-/// `None` when they are the ones the page already has (`known` is its fingerprint).
-fn preview_files(project: &Project, path: &str, text: &str, known: &str) -> Option<String> {
+/// `None` when they are the ones the page already has (`known` is its fingerprint). The reply
+/// is broadcast to every preview, so it names the requesting page by `id`.
+fn preview_files(project: &Project, path: &str, text: &str, id: &str, known: &str) -> Option<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut members = Vec::new();
     let mut bytes = 0;
@@ -96,7 +97,7 @@ fn preview_files(project: &Project, path: &str, text: &str, known: &str) -> Opti
         return None;
     }
 
-    Some(format!("{files},\"hash\":\"{hash}\"}}"))
+    Some(format!("{{\"id\":\"{}\",{},\"hash\":\"{hash}\"}}", escape_json(id), &files[1..]))
 }
 
 /// `./schemas/pet.yaml`, or `../common/pet.yaml`, from the directory of `from_file`.
@@ -402,17 +403,13 @@ impl Views for OpenApi {
                 return Ok(());
             };
             let mut parts = request.splitn(3, '\t');
-            let (Some("files"), Some(known), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
+            let (Some("files"), Some(id), Some(known)) = (parts.next(), parts.next(), parts.next()) else {
                 return Ok(());
             };
             let editor = ctx.editor().ok_or_else(|| Error::Invalid("the preview needs its document".into()))?;
             let path = editor.path();
-            if path.rsplit('/').next() != Some(name) {
-                return Ok(());
-            }
-
             let project = project_for(&path)?;
-            return match preview_files(&project, &path, &editor.document()?.text, known) {
+            return match preview_files(&project, &path, &editor.document()?.text, id, known) {
                 Some(files) => host::post_view_message(view, &files),
                 None => Ok(()),
             };
@@ -698,8 +695,8 @@ mod tests {
 
     const PREVIEW_TEXT: &str = "openapi: 3.0.0\nx:\n  $ref: './schemas/pet.yaml#/Pet'\ny:\n  $ref: 'gone.yaml'\nz:\n  $ref: '#/x'\n";
 
-    fn request(hash: &str, name: &str) -> ViewEvent {
-        ViewEvent::Message(format!("files\t{hash}\t{name}"))
+    fn request(hash: &str, id: &str) -> ViewEvent {
+        ViewEvent::Message(format!("files\t{id}\t{hash}"))
     }
 
     #[test]
@@ -708,30 +705,34 @@ mod tests {
         host.open_editor("/project/api.yaml", "yaml", PREVIEW_TEXT, &[(0, 0, 0, 0)]);
         host.add_file("/project/schemas/pet.yaml", "Pet:\n  type: \"object\"\n");
         let mut plugin = OpenApi::default();
-        plugin.handle("preview", request("", "api.yaml"), &host.invocation()).unwrap();
+        plugin.handle("preview", request("", "a"), &host.invocation()).unwrap();
 
         let messages = host.view_messages();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].0, "preview");
-        let prefix = r#"{"skipped":0,"files":{"./schemas/pet.yaml":"Pet:\n  type: \"object\"\n"},"hash":""#;
+        let prefix = r#"{"id":"a","skipped":0,"files":{"./schemas/pet.yaml":"Pet:\n  type: \"object\"\n"},"hash":""#;
         assert!(messages[0].1.starts_with(prefix), "{}", messages[0].1);
 
         let hash = messages[0].1[prefix.len()..].trim_end_matches("\"}").to_owned();
-        plugin.handle("preview", request(&hash, "api.yaml"), &host.invocation()).unwrap();
+        plugin.handle("preview", request(&hash, "a"), &host.invocation()).unwrap();
         assert_eq!(host.view_messages().len(), 1);
 
         host.add_file("/project/schemas/pet.yaml", "Pet: {}\n");
-        plugin.handle("preview", request(&hash, "api.yaml"), &host.invocation()).unwrap();
+        plugin.handle("preview", request(&hash, "a"), &host.invocation()).unwrap();
         assert_eq!(host.view_messages().len(), 2);
     }
 
     #[test]
-    fn preview_answers_only_for_its_own_document() {
+    fn reply_carries_its_document_identity() {
         let host = MockHost::install();
         host.open_editor("/project/api.yaml", "yaml", PREVIEW_TEXT, &[(0, 0, 0, 0)]);
-        host.add_file("/project/schemas/pet.yaml", "Pet: {}\n");
-        OpenApi::default().handle("preview", request("", "other.yaml"), &host.invocation()).unwrap();
-        assert!(host.view_messages().is_empty());
+        let mut plugin = OpenApi::default();
+        plugin.handle("preview", request("", "first"), &host.invocation()).unwrap();
+        plugin.handle("preview", request("", "second"), &host.invocation()).unwrap();
+
+        let messages = host.view_messages();
+        assert!(messages[0].1.starts_with(r#"{"id":"first","#));
+        assert!(messages[1].1.starts_with(r#"{"id":"second","#));
     }
 
     #[test]
@@ -745,10 +746,10 @@ mod tests {
         text.push_str("big:\n  $ref: 'big.yaml'\n");
         host.add_file("/project/big.yaml", &"x".repeat(600 * 1024));
         host.open_editor("/project/api.yaml", "yaml", &text, &[(0, 0, 0, 0)]);
-        OpenApi::default().handle("preview", request("", "api.yaml"), &host.invocation()).unwrap();
+        OpenApi::default().handle("preview", request("", "a"), &host.invocation()).unwrap();
 
         let message = &host.view_messages()[0].1;
-        assert!(message.starts_with(r#"{"skipped":4,"#), "{}", &message[..40]);
+        assert!(message.starts_with(r#"{"id":"a","skipped":4,"#), "{}", &message[..60]);
         assert_eq!(message.matches(".yaml\":\"A: {}").count(), 50);
         assert!(!message.contains("big.yaml"));
     }
