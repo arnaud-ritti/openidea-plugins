@@ -825,8 +825,8 @@ fn paging_stops_at_the_deadline() {
 
     let threads: Vec<Discussion> = api::paged_until("/projects/g%2Fp/merge_requests/7/discussions", 100, now, 45).unwrap();
 
-    assert_eq!(threads.len(), 300, "checks read 20 s (start), 40 s, 60 s, 80 s: the fourth page is 60 s past the start");
-    assert_eq!(host.requests().len(), 3);
+    assert_eq!(threads.len(), 200, "the deadline is 65 s; checks read 40 s, 60 s, 80 s");
+    assert_eq!(host.requests().len(), 2);
 }
 
 #[test]
@@ -899,4 +899,18 @@ fn crlf_suggestion_on_a_last_line_without_newline_keeps_no_carriage_return() {
     let doc = Document { text: "a\r\nb\r\nc\r\nd".into(), ..document("/project/src/a.rs") };
 
     assert_eq!(plugin.code_actions(&doc, at_line(3))[0].edits[0].1[0].text, "X");
+}
+
+#[test]
+fn second_list_in_the_same_task_respects_the_shared_deadline() {
+    let host = setup();
+    host.on_fetch(|_| ok(&format!("[{}]", vec![r#"{"id": "d"}"#; 100].join(","))));
+    let now = || if host.requests().is_empty() { 0 } else { 36 };
+    api::begin_budget_at(0);
+
+    let first: Vec<Discussion> = api::paged_until("/a", 100, now, 35).unwrap();
+    let second: Vec<Discussion> = api::paged_until("/b", 100, now, 35).unwrap();
+
+    assert_eq!((first.len(), second.len()), (100, 0));
+    assert_eq!(host.requests().len(), 1);
 }

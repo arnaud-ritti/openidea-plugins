@@ -37,7 +37,7 @@ Optional permissions:
 
 ## Tool windows
 
-- **Merge Requests** (left): the project's merge requests (50 per page, up to 10 pages or 35 s) as
+- **Merge Requests** (left): the project's merge requests (50 per page, up to 10 pages) as
   `!iid title`, with author, branches and draft state. *Filter* cycles through
   the original's quick filters: Open, Include my changes, Need my review,
   Assigned to me (the default) and Closed. Expanding a merge request loads its
@@ -101,8 +101,9 @@ open file, *GitLab: Apply suggestion* appears in the quick fixes there. It
 replaces the N lines above, the commented line and the M lines below with the
 suggestion (a plain ` ```suggestion ` replaces the commented line; an empty one
 deletes it). It's offered for the unresolved threads shown in the editor and
-isn't offered when the Changes view's cached diff shows a different text on the
-commented line; without that diff it doesn't check, so look at the lines before
+isn't offered when the Changes view's cached diff shows a different text on any
+line of the replaced range that appears in that diff (lines outside the diff
+aren't checked); without a cached diff it doesn't check at all, so look at the lines before
 applying. It only edits the open file; nothing is posted to GitLab.
 
 ## Commands
@@ -141,7 +142,8 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 
 - gitlab.com only, with one personal access token; no OAuth login and no
   multiple accounts.
-- Lists are read page by page up to 10 pages: 500 merge requests, 1,000 threads
+- Lists are read page by page up to 10 pages, all the lists of one command or
+  refresh sharing a 35 s budget (lists after it are partial or empty): 500 merge requests, 1,000 threads
   per merge request, 1,000 projects, 1,000 diff files.
 - No side-by-side diff in the IDE's diff viewer, no per-commit diffs, and no
   commenting from the editor gutter.

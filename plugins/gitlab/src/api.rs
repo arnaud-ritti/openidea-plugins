@@ -3,6 +3,8 @@
 //! fills `{{secret:token}}` in the `Authorization` header.
 
 use openidea_plugin::{Error, HttpRequest, LogLevel, host};
+use std::cell::Cell;
+
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -304,25 +306,39 @@ fn rest(method: &str, path: &str, body: Option<Value>) -> Result<Value, Error> {
 }
 
 const MAX_PAGES: usize = 10;
-/// Per list. Checked before each page, and a page can take up to 20 s: one list ends by 55 s, under the task's 60 s limit.
+/// For all the lists of one task, checked before every page; a page can take up to 20 s, so the task ends by 55 s, under its 60 s limit.
 const PAGING_BUDGET_SECS: u64 = 35;
+
+thread_local! {
+    static DEADLINE: Cell<Option<u64>> = const { Cell::new(None) };
+}
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Every page of a list (a short page is the last one), up to [`MAX_PAGES`] and [`PAGING_BUDGET_SECS`].
+/// Starts the paging budget of the task (command, refresh, event) that is about to run.
+pub fn begin_budget() {
+    begin_budget_at(now_secs());
+}
+
+pub(crate) fn begin_budget_at(now: u64) {
+    DEADLINE.set(Some(now + PAGING_BUDGET_SECS));
+}
+
+/// Every page of a list (a short page is the last one), up to [`MAX_PAGES`] and the task's deadline.
 fn paged<T: DeserializeOwned>(path: &str, per_page: usize) -> Result<Vec<T>, Error> {
     paged_until(path, per_page, now_secs, PAGING_BUDGET_SECS)
 }
 
+/// Without [`begin_budget`], the deadline is `budget_secs` from now.
 pub(crate) fn paged_until<T: DeserializeOwned>(path: &str, per_page: usize, now: impl Fn() -> u64, budget_secs: u64) -> Result<Vec<T>, Error> {
     let separator = if path.contains('?') { '&' } else { '?' };
-    let started = now();
+    let deadline = DEADLINE.get().unwrap_or_else(|| now() + budget_secs);
     let mut all = Vec::new();
 
     for page in 1..=MAX_PAGES {
-        if page > 1 && now().saturating_sub(started) >= budget_secs {
+        if now() >= deadline {
             host::log(LogLevel::Warn, &format!("{path}: out of time after {} pages; showing the first {} results.", page - 1, all.len()));
             break;
         }
