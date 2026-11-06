@@ -30,7 +30,12 @@ pub fn findings(text: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<Findin
     found
 }
 
-/// `orderBy('created_at', 'desc')` and `orderBy('created_at')`, which `latest()` and `oldest()` spell shorter.
+fn is_date_column(column: &str) -> bool {
+    column == "date" || column.strip_suffix("_at").or_else(|| column.strip_suffix("_date")).is_some_and(|prefix| !prefix.is_empty())
+}
+
+/// `orderBy('created_at', 'desc')` and `orderBy('created_at')`, and the same on other date columns,
+/// which `latest()` and `oldest()` spell shorter.
 pub fn order_by(masked: &str) -> Vec<Finding> {
     let mut found = Vec::new();
 
@@ -48,8 +53,8 @@ pub fn order_by(masked: &str) -> Vec<Finding> {
 
         let Some(close) = php::closing(masked, open) else { continue };
         let arguments = php::arguments(masked, open);
-        let column = arguments.first().and_then(|range| php::literal(masked, range.clone()));
-        if column.is_none_or(|(name, _)| name != "created_at") {
+        let Some((column, column_at)) = arguments.first().and_then(|range| php::literal(masked, range.clone())) else { continue };
+        if !is_date_column(column) {
             continue;
         }
 
@@ -63,16 +68,16 @@ pub fn order_by(masked: &str) -> Vec<Finding> {
             continue;
         }
 
+        let quote = masked.as_bytes()[column_at - 1] as char;
+        let argument = if column == "created_at" { String::new() } else { format!("{quote}{column}{quote}") };
+        let direction = if method == "latest" { "descending" } else { "ascending" };
         found.push(Finding {
             start: at,
             end: close + 1,
             code: "simplify-order-by",
-            message: match method {
-                "latest" => "`latest()` orders by created_at descending: use it instead of orderBy('created_at', 'desc').".into(),
-                _ => "`oldest()` orders by created_at ascending: use it instead of orderBy('created_at').".into(),
-            },
+            message: format!("`{method}({argument})` orders by {column} {direction}: use it instead of orderBy()."),
             severity: Severity::Hint,
-            replacement: Some(format!("{method}()")),
+            replacement: Some(format!("{method}({argument})")),
         });
     }
 

@@ -51,9 +51,14 @@ in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
   `Prunable` or `MassPrunable` while none of `routes/console.php`,
   `app/Console/Kernel.php` and `bootstrap/app.php` mentions `model:prune` (quiet
   when none can be read); and `orderBy('created_at', 'desc')` /
-  `orderBy('created_at')`, a hint with a quick fix to `latest()` / `oldest()`.
+  `orderBy('created_at')` (also any literal column ending in `_at` or `_date`,
+  or `date`), a hint with a quick fix to `latest()` / `oldest()` (with the
+  column when it is not `created_at`).
   Models with `getFillable()`, `#[Fillable]` or `unguard` stay quiet, as do
   classes without a file in the project and dynamic class names.
+- Function problems (setting `checkFunctions`, PHP files): `env-outside-config`,
+  a warning on `env()` calls outside `config/`, `bootstrap/`, `vendor/` and
+  `tests/`, because `env()` returns null once the configuration is cached.
 - Quick fix (⌥⏎) on a missing `file.key` translation key: add `'key' => 'key'`
   to the main locale's lang file.
 - Intentions (⌥⏎): `'required|email'` in a validation call or `rules()` becomes

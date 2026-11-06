@@ -11,6 +11,7 @@ mod blade;
 mod controllers;
 mod directives;
 mod eloquent_checks;
+mod function_checks;
 mod index;
 mod js;
 mod migrations;
@@ -287,6 +288,18 @@ fn eloquent_problems(project: &Project, path: &str, language: &str, text: &str) 
         .collect()
 }
 
+/// `env()` calls outside the configuration files.
+fn function_problems(path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+    if !enabled("checkFunctions") {
+        return Vec::new();
+    }
+
+    function_checks::env_outside_config(path, language, text)
+        .into_iter()
+        .map(|finding| problem(text, finding.start..finding.end, finding.code, finding.severity, finding.message))
+        .collect()
+}
+
 fn enabled(setting: &str) -> bool {
     host::setting_bool(setting).unwrap_or(true)
 }
@@ -385,6 +398,7 @@ impl Main {
             Ok(text) if enabled && !index.partial => {
                 let mut found = problems(index, language, &text, check_routes);
                 found.extend(eloquent_problems(project, path, language, &text));
+                found.extend(function_problems(path, language, &text));
                 found.sort_by_key(|d| (d.range.start.line, d.range.start.character));
                 found
             }

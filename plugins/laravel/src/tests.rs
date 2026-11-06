@@ -1282,3 +1282,119 @@ fn slash_star_inside_a_multiline_template_literal_silences_later_lines() {
 fn multiline_template_plain_text_after_interpolation_is_quiet() {
     assert!(route_names("const t = `a ${x}\nplain |text`;\nroute('home')").is_empty());
 }
+
+fn env_snippets(path: &str, language: &str, text: &str) -> Vec<(&'static str, String)> {
+    function_checks::env_outside_config(path, language, text).into_iter().map(|f| (f.code, text[f.start..f.end].to_owned())).collect()
+}
+
+fn env_problems_of(host: &MockHost, relative: &str, body: &str) -> Vec<Diagnostic> {
+    host.add_file(relative, body);
+    let mut plugin = activated(host);
+    let path = format!("/project/{relative}");
+
+    plugin.handle_events(&[Event::FileOpened(path.clone())], &host.invocation());
+    host.diagnostics().get(&path).cloned().unwrap_or_default()
+}
+
+#[test]
+fn env_outside_config_warns_in_app_code() {
+    let text = "<?php\n$a = env('APP_KEY');\n$b = env('X', 1);\n";
+    let found = env_snippets("/project/app/Services/Mailer.php", "php", text);
+    assert_eq!(found.iter().map(|(code, _)| *code).collect::<Vec<_>>(), ["env-outside-config"; 2]);
+    assert_eq!(found[0].1, "env('APP_KEY')");
+    assert_eq!(found[1].1, "env('X', 1)");
+
+    let host = MockHost::install();
+    let found = env_problems_of(&host, "app/Services/Mailer.php", "<?php\n$a = env('APP_KEY');\n");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].severity, Severity::Warning);
+}
+
+#[test]
+fn env_in_config_bootstrap_and_tests_is_quiet() {
+    let text = "<?php\n$a = env('APP_KEY');\n";
+    for path in ["/project/config/app.php", "/project/bootstrap/app.php", "/project/vendor/a/b.php", "/project/tests/Feature/AExampleTest.php"] {
+        assert!(env_snippets(path, "php", text).is_empty(), "{path}");
+    }
+    assert!(env_snippets("/project/resources/views/a.blade.php", "blade", text).is_empty());
+}
+
+#[test]
+fn env_method_and_other_functions_named_like_env_are_quiet() {
+    let text = "<?php\n$a = $this->env('X');\n$b = getenv('X');\n$c = app_env('X');\n$d = Foo::env('X');\nfunction env($k) {}\n$e = $env('X');\n$f = env;\n";
+    assert!(env_snippets("/project/app/A.php", "php", text).is_empty());
+}
+
+#[test]
+fn env_in_comments_is_quiet() {
+    let text = "<?php\n// env('A')\n# env('B')\n/* env('C') */\n";
+    assert!(env_snippets("/project/app/A.php", "php", text).is_empty());
+}
+
+#[test]
+fn env_check_can_be_switched_off() {
+    let host = MockHost::install();
+    host.set_setting("checkFunctions", "false");
+    assert!(env_problems_of(&host, "app/A.php", "<?php\n$a = env('APP_KEY');\n").is_empty());
+}
+
+#[test]
+fn env_check_ranges_use_utf16_columns_with_multibyte_text() {
+    let host = MockHost::install();
+    let found = env_problems_of(&host, "app/A.php", "<?php\n// é日本😀\n$x = 'é日'; env('A');\n");
+    let range = found[0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.character), (2, 11, 19));
+}
+
+#[test]
+fn env_check_crlf_files_report_correct_lines() {
+    let host = MockHost::install();
+    let found = env_problems_of(&host, "app/A.php", "<?php\r\n\r\n$x = env('A');\r\n");
+    assert_eq!((found[0].range.start.line, found[0].range.start.character), (2, 5));
+}
+
+#[test]
+fn env_check_fixed_file_publishes_empty_list() {
+    let host = MockHost::install();
+    host.add_file("app/A.php", "<?php\n$x = env('A');\n");
+    let mut plugin = activated(&host);
+    plugin.handle_events(&[Event::FileOpened("/project/app/A.php".into())], &host.invocation());
+    assert_eq!(host.diagnostics()["/project/app/A.php"].len(), 1);
+
+    host.add_file("app/A.php", "<?php\n$x = config('a.b');\n");
+    plugin.handle_events(&[Event::FileSaved("/project/app/A.php".into())], &host.invocation());
+    assert!(host.diagnostics().get("/project/app/A.php").is_none_or(Vec::is_empty));
+}
+
+fn order_by_fix(text: &str, marker: &str) -> String {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    apply_rewrite(&mut plugin, "/project/app/A.php", "php", text, marker)
+}
+
+#[test]
+fn order_by_updated_at_desc_suggests_latest_with_the_column() {
+    let text = "<?php\n$a = Post::orderBy('updated_at', 'desc')->get();\n";
+    assert_eq!(order_by_fix(text, "orderBy('updated_at'"), "<?php\n$a = Post::latest('updated_at')->get();\n");
+}
+
+#[test]
+fn order_by_published_at_asc_suggests_oldest_with_the_column() {
+    let text = "<?php\n$a = Post::orderBy('published_at', 'asc')->get();\n$b = Post::orderBy('date')->get();\n$c = Post::orderBy('due_date', 'desc')->get();\n";
+    assert_eq!(order_by_fix(text, "orderBy('published_at'"), text.replace("orderBy('published_at', 'asc')", "oldest('published_at')"));
+    assert_eq!(order_by_fix(text, "orderBy('date')"), text.replace("orderBy('date')", "oldest('date')"));
+    assert_eq!(order_by_fix(text, "orderBy('due_date'"), text.replace("orderBy('due_date', 'desc')", "latest('due_date')"));
+}
+
+#[test]
+fn order_by_non_date_column_is_quiet() {
+    static NOTHING: [(&str, &str); 0] = [];
+    let text = "<?php\n$a = Post::orderBy('title', 'desc');\n$b = Post::orderBy('attendance');\n$c = Post::orderBy('updated_at_x');\n$d = Post::orderBy('_at');\n";
+    assert!(eloquent_snippets(text, &NOTHING).is_empty());
+}
+
+#[test]
+fn order_by_keeps_double_quotes() {
+    let text = "<?php\n$a = Post::orderBy(\"updated_at\", \"desc\")->get();\n";
+    assert_eq!(order_by_fix(text, "orderBy(\"updated_at\""), "<?php\n$a = Post::latest(\"updated_at\")->get();\n");
+}
