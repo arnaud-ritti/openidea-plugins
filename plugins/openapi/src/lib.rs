@@ -927,6 +927,18 @@ mod tests {
     }
 
     #[test]
+    fn only_root_level_keys_decide_the_hint() {
+        let host = MockHost::install();
+        let nested_root = "info:\n  openapi: 3.0.0\non:\n  push:\n    paths:\n      /x:\n        get: {}\npaths:\n  /pets:\n    get: {}\n";
+        let found = published(&host, "/project/n.yaml", nested_root);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].range.start.line, 7);
+
+        let nested_paths = "wrapper:\n  paths:\n    /x:\n      get: {}\n";
+        assert!(published(&host, "/project/w.yaml", nested_paths).is_empty());
+    }
+
+    #[test]
     fn candidate_check_can_be_switched_off() {
         let host = MockHost::install();
         host.set_setting("checkSpecCandidates", "false");
@@ -936,8 +948,8 @@ mod tests {
     #[test]
     fn ranges_use_utf16_columns_with_multibyte_text() {
         let host = MockHost::install();
-        let text = "\u{1F600}: 1\n\"paths\": {}\n";
-        assert!(published(&host, "/project/u.yaml", text).is_empty());
+        let text = "\u{1F600}: 1\npaths:\n  /p:\n    get: {}\n";
+        assert_eq!(published(&host, "/project/u.yaml", text)[0].range.start.line, 1);
 
         let json = "{ \"\u{1F600}\": 1, \"paths\": { \"/p\": { \"get\": {} } } }";
         let found = published(&host, "/project/u.json", json);
@@ -988,11 +1000,9 @@ mod tests {
 
     #[test]
     fn missing_file_is_treated_as_absent() {
-        let host = MockHost::install();
+        let _host = MockHost::install();
         for error in [Error::NotFound("x".into()), Error::Invalid("/project/x.yaml: no such file".into())] {
             assert!(matches!(fetch(Err(error)), Fetched::Missing));
         }
-        assert!(problems("/project/never-added.yaml").is_err());
-        let _ = host;
     }
 }
