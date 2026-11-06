@@ -37,7 +37,7 @@ Optional permissions:
 
 ## Tool windows
 
-- **Merge Requests** (left): the project's merge requests (50 per page, up to 10 pages or 45 s) as
+- **Merge Requests** (left): the project's merge requests (50 per page, up to 10 pages or 35 s) as
   `!iid title`, with author, branches and draft state. *Filter* cycles through
   the original's quick filters: Open, Include my changes, Need my review,
   Assigned to me (the default) and Closed. Expanding a merge request loads its

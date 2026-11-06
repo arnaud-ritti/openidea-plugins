@@ -852,14 +852,13 @@ fn suggestion_on_a_last_line_without_newline_adds_none() {
 
 #[test]
 fn suggestion_is_not_offered_when_the_line_differs_from_the_cached_diff() {
-    let (host, mut plugin) = branch_with_suggestion("```suggestion\nX\n```");
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\nX\n```");
     plugin.diffs = Some((7, vec![FileDiff {
         old_path: "src/a.rs".into(),
         new_path: "src/a.rs".into(),
         diff: "@@ -3,2 +3,2 @@\n c\n+d\n".into(),
         ..FileDiff::default()
     }]));
-    let _ = host;
 
     assert_eq!(plugin.code_actions(&document("/project/src/a.rs"), at_line(3)).len(), 1, "line 4 is `d` in the diff and in the file");
 
@@ -876,4 +875,28 @@ fn the_viewed_history_is_read_with_unquoted_paths() {
     changes_html(&mut plugin, &host);
 
     assert!(git_runs(&host)[0].starts_with("-c core.quotepath=off log "), "{:?}", git_runs(&host));
+}
+
+#[test]
+fn suggestion_guard_checks_the_whole_range() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion:-1+0\nX\n```");
+    plugin.diffs = Some((7, vec![FileDiff {
+        old_path: "src/a.rs".into(),
+        new_path: "src/a.rs".into(),
+        diff: "@@ -3,2 +3,2 @@\n c\n+d\n".into(),
+        ..FileDiff::default()
+    }]));
+
+    assert_eq!(plugin.code_actions(&document("/project/src/a.rs"), at_line(3)).len(), 1);
+
+    let edited = Document { text: "a\nb\nchanged\nd\ne\nf\n".into(), ..document("/project/src/a.rs") };
+    assert!(plugin.code_actions(&edited, at_line(3)).is_empty(), "the line above the comment changed");
+}
+
+#[test]
+fn crlf_suggestion_on_a_last_line_without_newline_keeps_no_carriage_return() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\r\nX\r\n```");
+    let doc = Document { text: "a\r\nb\r\nc\r\nd".into(), ..document("/project/src/a.rs") };
+
+    assert_eq!(plugin.code_actions(&doc, at_line(3))[0].edits[0].1[0].text, "X");
 }

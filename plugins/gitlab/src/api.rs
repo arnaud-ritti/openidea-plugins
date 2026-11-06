@@ -304,8 +304,8 @@ fn rest(method: &str, path: &str, body: Option<Value>) -> Result<Value, Error> {
 }
 
 const MAX_PAGES: usize = 10;
-/// Under the task's 60 s limit, leaving one request (up to 20 s) to finish.
-const PAGING_BUDGET_SECS: u64 = 45;
+/// Per list. Checked before each page, and a page can take up to 20 s: one list ends by 55 s, under the task's 60 s limit.
+const PAGING_BUDGET_SECS: u64 = 35;
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -323,7 +323,7 @@ pub(crate) fn paged_until<T: DeserializeOwned>(path: &str, per_page: usize, now:
 
     for page in 1..=MAX_PAGES {
         if page > 1 && now().saturating_sub(started) >= budget_secs {
-            host::log(LogLevel::Warn, &format!("{path}: stopped after {} results, out of time; showing the first {}.", all.len(), all.len()));
+            host::log(LogLevel::Warn, &format!("{path}: out of time after {} pages; showing the first {} results.", page - 1, all.len()));
             break;
         }
 
