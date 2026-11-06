@@ -22,7 +22,7 @@ const PROXY_ANNOTATIONS: [&str; 11] = [
     "PostFilter",
     "Retryable",
 ];
-const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+pub(crate) const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
 const ASPECTJ_WEAVING: [&str; 4] = ["aspectj-maven-plugin", "aspectj-gradle-plugin", "freefair.aspectj", "aspectjtools"];
 const ASPECTJ_PACKAGE: &str = "org.aspectj.";
 const POINTCUT_ANNOTATIONS: [&str; 6] = ["Pointcut", "Before", "After", "AfterReturning", "AfterThrowing", "Around"];
@@ -44,6 +44,7 @@ pub struct Groups {
     pub profiles: bool,
     pub async_methods: bool,
     pub cache: bool,
+    pub kotlin_plugin: bool,
 }
 
 impl Default for Groups {
@@ -62,6 +63,7 @@ impl Default for Groups {
             profiles: true,
             async_methods: true,
             cache: true,
+            kotlin_plugin: true,
         }
     }
 }
@@ -84,6 +86,7 @@ impl Groups {
             profiles: on("checkProfiles", defaults.profiles),
             async_methods: on("checkAsync", defaults.async_methods),
             cache: on("checkCache", defaults.cache),
+            kotlin_plugin: on("checkKotlinSpringPlugin", defaults.kotlin_plugin),
         }
     }
 }
@@ -262,12 +265,15 @@ fn is_test_source(path: &str) -> bool {
 }
 
 /// The nearest ancestor directory holding a build file.
-fn build_module(path: &str) -> Option<String> {
+pub(crate) fn build_module(path: &str) -> Option<String> {
     let project = spring_text::index::project_of(path)?;
     let root = project.root().ok()?;
+    if path.split('/').any(|part| part == ".." || part == ".") {
+        return None;
+    }
     let mut dir = path;
     while let Some((parent, _)) = dir.rsplit_once('/') {
-        if !parent.starts_with(&root) {
+        if parent != root && !parent.starts_with(&format!("{root}/")) {
             return None;
         }
         if BUILD_FILES.iter().any(|f| project.read_file(&format!("{parent}/{f}")).is_ok()) {

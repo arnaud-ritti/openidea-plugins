@@ -9,6 +9,7 @@ mod aop;
 mod checks;
 mod injection_checks;
 mod kotlin;
+mod kotlin_build;
 mod model;
 mod sites;
 mod xml_actions;
@@ -362,6 +363,10 @@ impl Navigator {
                 problems.extend(findings.iter().map(|f| f.diagnostic(text)));
             }
         }
+        if language == "kotlin" && checks::Groups::from_settings().kotlin_plugin {
+            let findings = kotlin_build::missing_spring_plugin(path, &spring_text::kotlin::parse(text));
+            problems.extend(findings.iter().map(|f| f.diagnostic(text)));
+        }
         let _ = host::publish_diagnostics(path, &problems);
     }
 
@@ -546,6 +551,9 @@ impl Providers for Navigator {
         if doc.language == "xml" {
             return xml_code_actions(doc, selection);
         }
+        if doc.language == "kotlin" {
+            return kotlin_code_actions(doc, selection);
+        }
         if doc.language != "java" {
             return Vec::new();
         }
@@ -558,6 +566,25 @@ impl Providers for Navigator {
             data: None,
         }]
     }
+}
+
+fn kotlin_code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
+    let Some(caret) = offset(&doc.text, selection.start) else { return Vec::new() };
+    if !checks::Groups::from_settings().kotlin_plugin {
+        return Vec::new();
+    }
+    let findings = kotlin_build::missing_spring_plugin(&doc.path, &spring_text::kotlin::parse(&doc.text));
+    if !findings.iter().any(|f| (f.start..=f.end).contains(&caret)) {
+        return Vec::new();
+    }
+    let Some((build_path, edit)) = kotlin_build::fix_for(&doc.path) else { return Vec::new() };
+    vec![CodeAction {
+        title: "Add the kotlin-spring Gradle plugin".into(),
+        kind: Some("quickfix".into()),
+        preferred: true,
+        edits: vec![(build_path, vec![edit])],
+        data: None,
+    }]
 }
 
 fn xml_code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {

@@ -1868,3 +1868,196 @@ fn cache_ranges_use_utf16_columns_with_multibyte_text() {
     let diagnostic = host.diagnostics()[&document.path].iter().find(|d| d.code.as_deref() == Some("cache-names-missing")).unwrap().clone();
     assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 16));
 }
+
+const KT_TX: &str = "@Service\nclass Billing {\n    @Transactional\n    fun charge() {}\n}\n";
+const KTS_BUILD: &str = "plugins {\n    kotlin(\"jvm\") version \"1.9.24\"\n    id(\"org.springframework.boot\") version \"3.3.0\"\n}\n";
+const KT_PATH: &str = "/project/src/main/kotlin/Billing.kt";
+
+fn kt_host(build: Option<(&str, &str)>) -> MockHost {
+    let host = MockHost::install();
+    if let Some((name, text)) = build {
+        host.add_file(name, text);
+    }
+    host
+}
+
+fn kt_findings(host: &MockHost, text: &str) -> Vec<(String, String)> {
+    let document = doc(KT_PATH, text);
+    Navigator::default().line_markers(&document);
+    host.diagnostics()
+        .get(&document.path)
+        .into_iter()
+        .flatten()
+        .filter(|d| d.code.as_deref() == Some("kotlin-spring-plugin"))
+        .map(|d| {
+            let (from, to) = (offset(text, d.range.start).unwrap(), offset(text, d.range.end).unwrap());
+            (d.code.clone().unwrap(), text[from..to].to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn final_transactional_kotlin_class_without_plugin_is_reported() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    assert_eq!(kt_findings(&host, KT_TX), [pair("kotlin-spring-plugin", "Billing")]);
+    let on_class = "@Transactional\nclass Billing\n";
+    assert_eq!(kt_findings(&host, on_class), [pair("kotlin-spring-plugin", "Billing")]);
+}
+
+#[test]
+fn configuration_class_without_plugin_is_reported() {
+    let host = kt_host(Some(("pom.xml", "<project/>")));
+    assert_eq!(kt_findings(&host, "@Configuration\nclass Config\n"), [pair("kotlin-spring-plugin", "Config")]);
+    let explicit = "@Configuration(proxyBeanMethods = true)\nclass Config\n";
+    assert_eq!(kt_findings(&host, explicit).len(), 1);
+}
+
+#[test]
+fn plugin_in_build_file_silences_the_check() {
+    for build in [
+        "plugins { kotlin(\"plugin.spring\") version \"1.9.24\" }",
+        "plugins { id 'org.jetbrains.kotlin.plugin.spring' version '1.9.24' }",
+        "apply plugin: 'kotlin-spring'",
+        "<compilerPlugins>\n  <plugin>spring</plugin>\n</compilerPlugins>",
+        "compilerPlugins { \"spring\" }",
+    ] {
+        let host = kt_host(Some(("build.gradle.kts", build)));
+        assert!(kt_findings(&host, KT_TX).is_empty(), "{build}");
+    }
+    let host = kt_host(Some(("build.gradle.kts", "compilerPlugins { \"jpa\" }")));
+    assert_eq!(kt_findings(&host, KT_TX).len(), 1);
+}
+
+#[test]
+fn open_or_abstract_class_is_quiet() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    for decl in [
+        "open class",
+        "abstract class",
+        "sealed class",
+        "data class",
+        "enum class",
+        "annotation class",
+        "interface",
+        "object",
+    ] {
+        let text = format!("@Transactional\n{decl} Billing\n");
+        assert!(kt_findings(&host, &text).is_empty(), "{decl}");
+    }
+    let inner = "class Outer {\n    @Transactional\n    inner class Billing\n}\n";
+    assert!(kt_findings(&host, inner).is_empty());
+}
+
+#[test]
+fn kotlin_spring_plugin_is_quiet_for_library_or_dynamic_name() {
+    assert!(kt_findings(&kt_host(None), KT_TX).is_empty());
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let foreign = "import com.acme.Transactional\n\nclass Billing {\n    @Transactional\n    fun charge() {}\n}\n";
+    assert!(kt_findings(&host, foreign).is_empty());
+    assert!(kt_findings(&host, "class Billing {\n    @Cacheable\n    fun a() {}\n}\n").len() == 1);
+    assert!(kt_findings(&host, "@Configuration(proxyBeanMethods = false)\nclass Config\n").is_empty());
+    assert!(kt_findings(&host, "@Configuration(proxyBeanMethods = FLAG)\nclass Config\n").is_empty());
+    assert!(kt_findings(&host, "class Plain {\n    fun a() {}\n}\n").is_empty());
+    let allopen = kt_host(Some(("build.gradle", "plugins { id 'org.jetbrains.kotlin.plugin.allopen' }")));
+    assert!(kt_findings(&allopen, KT_TX).is_empty());
+}
+
+fn edited(text: &str, edit: &TextEdit) -> String {
+    let (from, to) = (offset(text, edit.range.start).unwrap(), offset(text, edit.range.end).unwrap());
+    format!("{}{}{}", &text[..from], edit.text, &text[to..])
+}
+
+#[test]
+fn gradle_kts_fix_inserts_plugin_line() {
+    let edit = kotlin_build::gradle_fix("/project/build.gradle.kts", KTS_BUILD).unwrap();
+    assert_eq!(
+        edited(KTS_BUILD, &edit),
+        "plugins {\n    kotlin(\"jvm\") version \"1.9.24\"\n    id(\"org.springframework.boot\") version \"3.3.0\"\n    kotlin(\"plugin.spring\") version \"1.9.24\"\n}\n"
+    );
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let document = doc(KT_PATH, KT_TX);
+    let actions = Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8)));
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].edits[0].0, "/project/build.gradle.kts");
+    assert_eq!(edited(KTS_BUILD, &actions[0].edits[0].1[0]), edited(KTS_BUILD, &edit));
+    assert!(Navigator::default().code_actions(&document, Range::new(Position::new(3, 5), Position::new(3, 5))).is_empty());
+    drop(host);
+}
+
+#[test]
+fn groovy_gradle_fix_inserts_plugin_line() {
+    let build = "plugins {\n  id 'org.jetbrains.kotlin.jvm' version '1.9.24'\n}\n";
+    let edit = kotlin_build::gradle_fix("/project/build.gradle", build).unwrap();
+    assert_eq!(
+        edited(build, &edit),
+        "plugins {\n  id 'org.jetbrains.kotlin.jvm' version '1.9.24'\n  id 'org.jetbrains.kotlin.plugin.spring' version '1.9.24'\n}\n"
+    );
+    let crlf = build.replace('\n', "\r\n");
+    let edit = kotlin_build::gradle_fix("/project/build.gradle", &crlf).unwrap();
+    assert!(edited(&crlf, &edit).contains("'1.9.24'\r\n  id 'org.jetbrains.kotlin.plugin.spring' version '1.9.24'\r\n}"));
+}
+
+#[test]
+fn maven_build_offers_no_fix() {
+    let host = kt_host(Some(("pom.xml", "<project/>")));
+    let document = doc(KT_PATH, KT_TX);
+    assert!(Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8))).is_empty());
+    assert_eq!(kt_findings(&host, KT_TX).len(), 1);
+    assert!(kotlin_build::gradle_fix("/project/pom.xml", "<project/>").is_none());
+    assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", "dependencies {}\n").is_none());
+    assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", "plugins {\n    java\n}\n").is_none());
+    assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", "plugins {\n    kotlin(\"jvm\") version kv\n}\n").is_none());
+    assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", "plugins { kotlin(\"jvm\") version \"1.9\" }\n").is_none());
+}
+
+#[test]
+fn fix_never_edits_outside_the_project() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    host.add_file("../outside/build.gradle.kts", KTS_BUILD);
+    for path in ["/project/../outside/src/Billing.kt", "/projectile/src/Billing.kt", "/etc/Billing.kt"] {
+        let document = doc(path, KT_TX);
+        assert!(kotlin_build::fix_for(path).is_none(), "{path}");
+        assert!(Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8))).is_empty(), "{path}");
+    }
+    assert!(kotlin_build::fix_for(KT_PATH).is_some());
+}
+
+#[test]
+fn switched_off_kotlin_plugin_group_is_quiet() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    assert_eq!(kt_findings(&host, KT_TX).len(), 1);
+    host.set_setting("springBeans.checkKotlinSpringPlugin", "false");
+    assert!(kt_findings(&host, KT_TX).is_empty());
+    let document = doc(KT_PATH, KT_TX);
+    assert!(Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8))).is_empty());
+}
+
+#[test]
+fn fixed_kotlin_file_publishes_empty_list() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let mut navigator = Navigator::default();
+    navigator.line_markers(&doc(KT_PATH, KT_TX));
+    assert!(host.diagnostics()[KT_PATH].iter().any(|d| d.code.as_deref() == Some("kotlin-spring-plugin")));
+    navigator.line_markers(&doc(KT_PATH, "open class Billing\n"));
+    assert!(host.diagnostics().get(KT_PATH).is_none_or(|list| list.is_empty()));
+}
+
+#[test]
+fn kotlin_plugin_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\n@Named(\"é😀\") class Billing {\n    @Transactional fun a() {}\n}\n";
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let document = doc(KT_PATH, text);
+    Navigator::default().line_markers(&document);
+    let d = host.diagnostics()[KT_PATH].iter().find(|d| d.code.as_deref() == Some("kotlin-spring-plugin")).unwrap().clone();
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (1, 20, 27));
+}
+
+#[test]
+fn kotlin_plugin_crlf_files_report_correct_lines() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let text = KT_TX.replace('\n', "\r\n");
+    let document = doc(KT_PATH, &text);
+    Navigator::default().line_markers(&document);
+    let d = host.diagnostics()[KT_PATH].iter().find(|d| d.code.as_deref() == Some("kotlin-spring-plugin")).unwrap().clone();
+    assert_eq!((d.range.start.line, d.range.start.character), (1, 6));
+}

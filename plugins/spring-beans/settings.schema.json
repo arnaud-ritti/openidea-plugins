@@ -60,6 +60,11 @@
       "title": "Report cache annotations without a cache name, on interfaces, or combining @Cacheable with @CachePut",
       "default": true
     },
+    "springBeans.checkKotlinSpringPlugin": {
+      "type": "boolean",
+      "title": "Report Kotlin classes Spring must proxy when the kotlin-spring compiler plugin is missing",
+      "default": true
+    },
     "springBeans.checkXml": {
       "type": "boolean",
       "title": "Run the other checks on Spring XML configuration files",
