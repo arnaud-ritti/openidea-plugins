@@ -37,7 +37,7 @@ Optional permissions:
 
 ## Tool windows
 
-- **Merge Requests** (left): the project's merge requests (first 50) as
+- **Merge Requests** (left): the project's merge requests (50 per page, up to 10 pages) as
   `!iid title`, with author, branches and draft state. *Filter* cycles through
   the original's quick filters: Open, Include my changes, Need my review,
   Assigned to me (the default) and Closed. Expanding a merge request loads its
@@ -70,13 +70,14 @@ Optional permissions:
   merge request, one block per file with `+added −removed`, existing threads
   and pending comments under their lines. Click a line number to comment
   (*Add to Review* or *Comment Now*); threads have Reply and Resolve /
-  Unresolve. *Viewed* collapses a file and is remembered for the current head
-  commit. Clicking a file name opens it locally; clicking the header folds it.
+  Unresolve. *Viewed* collapses a file and is remembered until the file changes again
+  (compared with the last merge request commit touching it, read from the local
+  git history; without `process:git` or the commits locally, with the head commit). Clicking a file name opens it locally; clicking the header folds it.
   The diff stays readable without scripts, with every file expanded.
   Binary and very large files have no diff here; open them on GitLab. Toolbar: Refresh,
   Submit Review (n), Open on GitLab.
-- **GitLab Projects** (left): the projects you're a member of (first 100,
-  most recently active first). Double-clicking one runs `git clone` in a
+- **GitLab Projects** (left): the projects you're a member of (100 per page, up to
+  10 pages, most recently active first). Double-clicking one runs `git clone` in a
   terminal, into the clone directory. Open the clone with File › Open when it
   finishes.
 
@@ -94,6 +95,16 @@ With `editorReview` on, the merge request's unresolved threads appear in the
 open files as gutter markers and `Info` problems (source `GitLab`) on their
 line on the new side. They're hidden while the local branch is behind its
 upstream, as in the original.
+
+With a review thread's suggestion block (` ```suggestion:-N+M `) on a line of an
+open file, *GitLab: Apply suggestion* appears in the quick fixes there. It
+replaces the N lines above, the commented line and the M lines below with the
+suggestion (a plain ` ```suggestion ` replaces the commented line; an empty one
+deletes it). It's offered for the unresolved threads shown in the editor and
+isn't offered when the Changes view's cached diff shows a different text on any
+line of the replaced range that appears in that diff (lines outside the diff
+aren't checked); without a cached diff it doesn't check at all, so look at the lines before
+applying. It only edits the open file; nothing is posted to GitLab.
 
 ## Commands
 
@@ -131,8 +142,9 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 
 - gitlab.com only, with one personal access token; no OAuth login and no
   multiple accounts.
-- First page only: 50 merge requests, 100 threads per merge request, 100
-  projects. Diffs are read up to 1,000 files.
+- Lists are read page by page up to 10 pages, all the lists of one command or
+  refresh sharing a 35 s budget (lists after it are partial or empty): 500 merge requests, 1,000 threads
+  per merge request, 1,000 projects, 1,000 diff files.
 - No side-by-side diff in the IDE's diff viewer, no per-commit diffs, and no
   commenting from the editor gutter.
 - Line comments, replies, resolving and Viewed in the Changes view need
@@ -146,8 +158,9 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 - Create Merge Request, Share Project and Create Snippet have no title or
   description fields.
 - Share Project doesn't run `git init` or commit files.
-- A file counts as viewed only at the head commit it was marked at.
-- Not ported: worktrees, applying suggestions, usage statistics.
+- A file counts as viewed until a later merge request commit touches it; that
+  needs the commits in the local checkout, else the head commit is used.
+- Not ported: worktrees, usage statistics. Applying a suggestion doesn't mark it as applied on GitLab.
 
 See the `aritti.gitlab` section of `LIMITATIONS.md` at the repository root
 for the missing APIs behind each limit.

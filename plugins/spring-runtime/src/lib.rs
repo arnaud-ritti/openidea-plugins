@@ -142,9 +142,28 @@ fn marker(text: &str, at: usize, tooltip: String) -> LineMarker {
     LineMarker { line: position(text, at).line, icon: None, tooltip, target: None }
 }
 
+/// The token is a secret the host substitutes into the header; the plugin never reads it.
+pub fn actuator_request(url: &str, endpoint: &str, timeout: u32, auth: &str) -> HttpRequest {
+    let request = HttpRequest { timeout_ms: Some(timeout), ..HttpRequest::get(&format!("{url}/{endpoint}")) };
+    match auth {
+        "bearer" => request.header("Authorization", "Bearer {{secret:actuator-token}}"),
+        "basic" => request.header("Authorization", "Basic {{secret:actuator-token}}"),
+        _ => request,
+    }
+}
+
+/// Said in the view when an endpoint answered 401 or 403.
+pub fn auth_hint(missing: &[String]) -> Option<&'static str> {
+    missing
+        .iter()
+        .any(|m| m.ends_with("(401)") || m.ends_with("(403)"))
+        .then_some("needs authentication: check actuatorAuth and the actuator-token secret")
+}
+
 fn fetch_snapshot() -> Result<Snapshot, Error> {
     let url = check_url(&host::setting_string("actuatorUrl").unwrap_or_else(|| DEFAULT_URL.into()))?;
     let timeout = host::setting_number("timeoutMs").unwrap_or(2000.0).clamp(100.0, 30_000.0) as u32;
+    let auth = host::setting_string("actuatorAuth").unwrap_or_default();
     let task = host::begin_task("Reading Spring Boot Actuator endpoints", true);
     let mut snap = Snapshot { url: url.clone(), fetched_at: now(), ..Snapshot::default() };
     for (i, endpoint) in ENDPOINTS.iter().enumerate() {
@@ -152,12 +171,19 @@ fn fetch_snapshot() -> Result<Snapshot, Error> {
             return Err(Error::Cancelled);
         }
         task.report(i as u32, Some(ENDPOINTS.len() as u32), Some(endpoint));
-        let request = HttpRequest { timeout_ms: Some(timeout), ..HttpRequest::get(&format!("{url}/{endpoint}")) };
+        let request = actuator_request(&url, endpoint, timeout, &auth);
         let response = match host::fetch(&request) {
             Ok(r) => r,
             Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(Error::Denied(cap)) if cap == "secrets" => {
+                return Err("The actuator-token secret needs the secrets permission. Allow it in Settings › Plugins, or set actuatorAuth to none."
+                    .into());
+            }
             Err(Error::Denied(cap)) => {
                 return Err(format!("{cap} is not granted. Allow it in Settings › Plugins, or use http://localhost.").into());
+            }
+            Err(Error::NotFound(_)) if i == 0 && matches!(auth.as_str(), "bearer" | "basic") && !host::secret_is_set("actuator-token") => {
+                return Err("Set the actuator-token secret in Settings › Plugins, or set actuatorAuth to none.".into());
             }
             // The application isn't up: don't wait for every endpoint to time out.
             Err(e) if i == 0 => {
@@ -390,6 +416,28 @@ impl Tree<'_> {
         for (i, t) in snap.scheduled.iter().enumerate() {
             let detail = format!("{} {}", t.kind, t.detail);
             self.leaf(&format!("sched/{i}"), "sched", &t.target, &detail, Some(class_and_method(&t.target)));
+        }
+    }
+
+    fn loggers(&mut self, snap: &Snapshot) {
+        let count = snap.loggers.len().to_string();
+        if !snap.has("loggers") || !self.group("settings", "log", None, "Loggers", &count, !snap.loggers.is_empty()) {
+            return;
+        }
+        for (i, l) in snap.loggers.iter().enumerate() {
+            let detail = format!("configured {}, effective {}", l.configured, l.effective);
+            self.leaf(&format!("log/{i}"), "log", &l.name, &detail, None);
+        }
+    }
+
+    fn caches(&mut self, snap: &Snapshot) {
+        let count = snap.caches.len().to_string();
+        if !snap.has("caches") || !self.group("database", "cache", None, "Caches", &count, !snap.caches.is_empty()) {
+            return;
+        }
+        for (i, c) in snap.caches.iter().enumerate() {
+            let label = format!("{} / {}", c.manager, c.name);
+            self.leaf(&format!("cache/{i}"), "cache", &label, simple(&c.target), None);
         }
     }
 }
@@ -628,9 +676,14 @@ impl Views for Runtime {
         tree.mappings(snap);
         tree.configprops(snap);
         tree.scheduled(snap);
+        tree.loggers(snap);
+        tree.caches(snap);
         let mut status = format!("Read {} from {}", age(snap.fetched_at), snap.url);
         if !snap.missing.is_empty() {
             status.push_str(&format!(" · not available: {}", snap.missing.join(", ")));
+        }
+        if let Some(hint) = auth_hint(&snap.missing) {
+            status.push_str(&format!(" · {hint}"));
         }
         if snap.trimmed {
             status.push_str(" · only beans and environment kept (too large for storage)");
@@ -689,6 +742,7 @@ register_plugin!(Runtime, providers, views);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openidea_plugin::HttpResponse;
     use openidea_plugin::mock::MockHost;
 
     #[test]
@@ -721,6 +775,8 @@ mod tests {
             ("mappings", "web"),
             ("props", "property"),
             ("sched", "clock"),
+            ("log", "settings"),
+            ("cache", "database"),
         ]);
         assert_eq!(view.toolbar[1].icon.as_deref(), Some("trash"));
     }
@@ -729,5 +785,78 @@ mod tests {
     fn names_the_setting_as_shown_in_settings() {
         let error = check_url("http://example.com/actuator").unwrap_err();
         assert!(error.contains("Settings › Plugins › Spring Runtime Insight › Actuator base URL"), "{error}");
+    }
+
+    fn authorization(host: &MockHost, auth: &str) -> Option<String> {
+        host.set_setting("actuatorAuth", &format!("\"{auth}\""));
+        host.set_secret("actuator-token", "s3cret");
+        host.on_fetch(|_| Ok(HttpResponse { status: 404, headers: vec![], body: vec![] }));
+        let _ = fetch_snapshot();
+        let requests = host.requests();
+        assert!(!requests.is_empty());
+        requests[0].headers.iter().find(|(k, _)| k == "Authorization").map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn bearer_header_uses_secret_substitution() {
+        let host = MockHost::install().with_capabilities(&["secrets", "net:localhost"]);
+        assert_eq!(authorization(&host, "bearer").as_deref(), Some("Bearer s3cret"));
+        let host = MockHost::install().with_capabilities(&["secrets", "net:localhost"]);
+        assert_eq!(authorization(&host, "basic").as_deref(), Some("Basic s3cret"));
+        let host = MockHost::install().with_capabilities(&["secrets", "net:localhost"]);
+        assert_eq!(authorization(&host, "none"), None);
+    }
+
+    #[test]
+    fn loggers_and_caches_endpoints_parse() {
+        let mut snap = Snapshot::default();
+        snap.read("loggers", &serde_json::json!({"loggers": {
+            "ROOT": {"configuredLevel": "INFO", "effectiveLevel": "INFO"},
+            "com.acme": {"configuredLevel": "DEBUG", "effectiveLevel": "DEBUG"},
+            "com.acme.x": {"effectiveLevel": "DEBUG"}
+        }}));
+        let names: Vec<_> = snap.loggers.iter().map(|l| (l.name.as_str(), l.configured.as_str(), l.effective.as_str())).collect();
+        assert_eq!(names, [("ROOT", "INFO", "INFO"), ("com.acme", "DEBUG", "DEBUG")]);
+        snap.read("caches", &serde_json::json!({"cacheManagers": {"cm": {"caches": {
+            "users": {"target": "java.util.concurrent.ConcurrentHashMap"}
+        }}}}));
+        assert_eq!(snap.caches, [Cache { manager: "cm".into(), name: "users".into(), target: "java.util.concurrent.ConcurrentHashMap".into() }]);
+        assert!(snap.trimmed().loggers.is_empty());
+    }
+
+    #[test]
+    fn authentication_failure_explains_itself() {
+        let host = MockHost::install().with_capabilities(&["net:localhost"]);
+        host.on_fetch(|r| {
+            let status = if r.url.ends_with("/beans") { 401 } else { 200 };
+            Ok(HttpResponse { status, headers: vec![], body: b"{}".to_vec() })
+        });
+        let snap = fetch_snapshot().unwrap();
+        assert!(snap.missing.iter().any(|m| m == "beans (401)"), "{:?}", snap.missing);
+        let mut runtime = Runtime { snapshot: Some(snap), loaded: true, ..Runtime::default() };
+        let view = runtime.render(VIEW, None, &host.invocation()).unwrap();
+        let status = view.status.unwrap_or_default();
+        assert!(status.contains("check actuatorAuth and the actuator-token secret"), "{status}");
+    }
+
+    #[test]
+    fn unset_actuator_token_is_not_reported_as_unreachable() {
+        let host = MockHost::install().with_capabilities(&["secrets", "net:localhost"]);
+        host.set_setting("actuatorAuth", "\"bearer\"");
+        host.on_fetch(|_| Ok(HttpResponse { status: 200, headers: vec![], body: b"{}".to_vec() }));
+
+        let error = fetch_snapshot().unwrap_err().to_string();
+
+        assert!(error.contains("Set the actuator-token secret"), "{error}");
+        assert!(!error.contains("Could not reach"), "{error}");
+    }
+
+    #[test]
+    fn denied_secrets_capability_explains_itself() {
+        let host = MockHost::install().with_capabilities(&["net:localhost"]);
+        host.set_setting("actuatorAuth", "\"bearer\"");
+        let error = fetch_snapshot().unwrap_err().to_string();
+        assert!(error.contains("actuator-token") && error.contains("none"), "{error}");
+        assert!(!error.contains("http://localhost"), "{error}");
     }
 }

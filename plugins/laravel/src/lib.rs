@@ -6,8 +6,10 @@
 //! MIT) has are ported from its public source; the rest follows Laravel's own
 //! documentation. See README.md for what was and wasn't ported.
 
+mod actions;
 mod blade;
 mod controllers;
+mod directives;
 mod index;
 mod migrations;
 mod php;
@@ -16,6 +18,7 @@ mod routes;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
@@ -47,6 +50,9 @@ fn affects_index(relative: &str) -> bool {
         "app/Models/",
         "database/migrations/",
         "app/Providers/",
+        "database/factories/",
+        "resources/js/Pages/",
+        "resources/js/pages/",
     ];
     directory.iter().any(|d| relative.starts_with(d))
         || matches!(relative, "composer.json" | ".env" | ".env.example" | "bootstrap/app.php" | "app/Http/Kernel.php" | "app/Http/routes.php")
@@ -133,6 +139,7 @@ fn candidates<'a>(index: &'a Index, doc: &Document, reference: &Reference) -> Co
         Kind::Component => Cow::Borrowed(&index.components),
         Kind::Livewire => Cow::Borrowed(&index.livewire),
         Kind::Vite => Cow::Borrowed(&index.vite),
+        Kind::Inertia => Cow::Borrowed(&index.inertia_pages),
         Kind::Rule => Cow::Borrowed(&index.rules),
         Kind::Ability => Cow::Borrowed(&index.abilities),
         Kind::Column => {
@@ -165,6 +172,7 @@ fn completion_kind(kind: Kind) -> CompletionKind {
         Kind::Middleware => CompletionKind::Module,
         Kind::Controller | Kind::Component | Kind::Livewire => CompletionKind::Class,
         Kind::Vite => CompletionKind::File,
+        Kind::Inertia => CompletionKind::File,
         Kind::Column => CompletionKind::Field,
         Kind::Rule => CompletionKind::Keyword,
         Kind::Ability => CompletionKind::Value,
@@ -178,9 +186,9 @@ fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '$', '*']) || name.ends_with('.')
 }
 
-fn problem(text: &str, reference: &Reference, code: &str, severity: Severity, message: String) -> Diagnostic {
+fn problem(text: &str, range: std::ops::Range<usize>, code: &str, severity: Severity, message: String) -> Diagnostic {
     Diagnostic {
-        range: range_of(text, reference.start, reference.end),
+        range: range_of(text, range.start, range.end),
         severity,
         message,
         code: Some(code.into()),
@@ -195,6 +203,7 @@ fn problem(text: &str, reference: &Reference, code: &str, severity: Severity, me
 /// exist and, when asked for, routes that don't.
 pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -> Vec<Diagnostic> {
     let mut found = Vec::new();
+    let sure = !index.partial;
 
     for reference in refs::references(language, text).into_iter().filter(|r| r.closed) {
         let name = &text[reference.start..reference.end];
@@ -204,22 +213,78 @@ pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -
 
         match reference.kind {
             Kind::View if !name.contains("::") && !index.views.is_empty() && !index.views.contains_key(name) => {
-                found.push(problem(text, &reference, "missing-view", Severity::Warning, format!("View \"{name}\" does not exist.")));
+                found.push(problem(text, reference.start..reference.end, "missing-view", Severity::Warning, format!("View \"{name}\" does not exist.")));
             }
             Kind::Config if missing_config(index, name) => {
-                found.push(problem(text, &reference, "missing-config", Severity::Info, format!("Config key \"{name}\" is not defined.")));
+                found.push(problem(text, reference.start..reference.end, "missing-config", Severity::Info, format!("Config key \"{name}\" is not defined.")));
             }
             Kind::Translation if missing_translation(index, name) => {
-                found.push(problem(text, &reference, "missing-translation", Severity::Info, format!("Translation key \"{name}\" is missing.")));
+                found.push(problem(text, reference.start..reference.end, "missing-translation", Severity::Info, format!("Translation key \"{name}\" is missing.")));
             }
             Kind::Route if check_routes && !index.routes.contains_key(name) => {
-                found.push(problem(text, &reference, "missing-route", Severity::Warning, format!("Route \"{name}\" is not defined.")));
+                found.push(problem(text, reference.start..reference.end, "missing-route", Severity::Warning, format!("Route \"{name}\" is not defined.")));
+            }
+            Kind::Inertia if sure && unknown_inertia_page(index, name) && enabled("reportUnknownInertiaPages") => {
+                found.push(problem(text, reference.start..reference.end, "laravel.unknown-inertia-page", Severity::Warning, format!("Inertia page \"{name}\" does not exist.")));
+            }
+            Kind::Livewire if sure && unknown_livewire(index, name) && enabled("reportUnknownLivewireDirectives") => {
+                found.push(problem(text, reference.start..reference.end, "laravel.unknown-livewire-directive", Severity::Warning, format!("Livewire component \"{name}\" does not exist.")));
             }
             _ => {}
         }
     }
 
+    if language == "blade" && sure {
+        for reference in refs::tag_references(text) {
+            let name = &text[reference.start..reference.end];
+            let range = reference.start..reference.end;
+
+            match reference.kind {
+                Kind::Component if unknown_component(index, name) && enabled("reportUnknownComponents") => {
+                    found.push(problem(text, range, "laravel.unknown-component", Severity::Warning, format!("Blade component \"{name}\" does not exist.")));
+                }
+                Kind::Livewire if unknown_livewire(index, name) && enabled("reportUnknownLivewire") => {
+                    found.push(problem(text, range, "laravel.unknown-livewire", Severity::Warning, format!("Livewire component \"{name}\" does not exist.")));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if language == "php" && sure && enabled("reportUnknownFactories") {
+        for range in refs::factory_classes(text) {
+            let class = text[range.clone()].rsplit('\\').next().unwrap_or_default();
+            if unknown_factory(index, class) {
+                found.push(problem(text, range, "laravel.unknown-factory", Severity::Warning, format!("Model {class} has no factory.")));
+            }
+        }
+    }
+
+    found.sort_by_key(|d| (d.range.start.line, d.range.start.character));
     found
+}
+
+fn enabled(setting: &str) -> bool {
+    host::setting_bool(setting).unwrap_or(true)
+}
+
+fn unknown_component(index: &Index, name: &str) -> bool {
+    !index.open_components && !matches!(name, "slot" | "dynamic-component") && !index.components.contains_key(name)
+}
+
+fn unknown_livewire(index: &Index, name: &str) -> bool {
+    !index.open_livewire && !matches!(name, "is" | "styles" | "scripts" | "dynamic-component") && !index.livewire.contains_key(name) && !index.views.contains_key(&format!("livewire.{name}"))
+}
+
+fn unknown_inertia_page(index: &Index, name: &str) -> bool {
+    !index.inertia_pages.is_empty() && !name.contains("::") && !name.ends_with('/') && !index.inertia_pages.contains_key(name)
+}
+
+fn unknown_factory(index: &Index, class: &str) -> bool {
+    !matches!(class, "static" | "self" | "parent")
+        && index.models.contains_key(class)
+        && !index.factories.contains(&format!("{class}Factory"))
+        && !index.factory_overrides.contains(class)
 }
 
 /// A key below an array (or config file) of the project that doesn't have it.
@@ -250,6 +315,8 @@ pub struct Main {
     checked: BTreeSet<String>,
     /// Expanded nodes of the tool window.
     expanded: BTreeSet<String>,
+    /// Project root and time `migrate-fresh` was first asked for.
+    fresh_asked: Option<(String, Instant)>,
 }
 
 impl Main {
@@ -371,6 +438,24 @@ impl Plugin for Main {
             "view-clear" => self.artisan(ctx, "view:clear"),
             "migrate" => self.artisan(ctx, "migrate"),
             "storage-link" => self.artisan(ctx, "storage:link"),
+            "db-seed" => self.artisan(ctx, "db:seed"),
+            "migrate-fresh" => {
+                let root = ctx.project().and_then(|project| project.root().ok()).unwrap_or_default();
+                let confirmed = self
+                    .fresh_asked
+                    .take()
+                    .is_some_and(|(asked_root, asked)| asked_root == root && asked.elapsed() < Duration::from_secs(30));
+                if !confirmed {
+                    self.fresh_asked = Some((root, Instant::now()));
+                    host::notify(
+                        NotificationLevel::Warning,
+                        SOURCE,
+                        "Fresh migration drops all tables. Run Laravel: Fresh Migration (drops all tables) again within 30 seconds to confirm.",
+                    );
+                    return Ok(None);
+                }
+                self.artisan(ctx, "migrate:fresh")
+            }
             "route-list" => {
                 host::open_terminal("artisan route:list", "php", &["artisan".to_owned(), "route:list".to_owned()])?;
                 Ok(None)
@@ -412,11 +497,32 @@ impl Plugin for Main {
     }
 }
 
+fn directive_items(index: &Index, replace: Range) -> Vec<CompletionItem> {
+    let core = directives::CORE.iter().map(|name| (*name, None));
+    let custom = index.directives.iter().map(|(name, entry)| (name.as_str(), entry.detail.clone()));
+
+    let mut seen = BTreeSet::new();
+    custom
+        .chain(core)
+        .filter(|(name, _)| seen.insert(*name))
+        .map(|(name, detail)| {
+            let mut item = CompletionItem::new(name, CompletionKind::Keyword);
+            item.detail = detail;
+            item.replace = Some(replace);
+            item
+        })
+        .collect()
+}
+
 impl Providers for Main {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(language) = language_of(&doc.path, &doc.language) else { return Vec::new() };
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
+        if language == "blade" && let Some((start, end)) = directives::name_at(&doc.text, offset) {
+            return directive_items(index, range_of(&doc.text, start, end));
+        }
+
         let Some(reference) = refs::reference_at(language, &doc.text, offset) else { return Vec::new() };
 
         let replace = range_of(&doc.text, reference.start, reference.end);
@@ -455,39 +561,31 @@ impl Providers for Main {
         }
     }
 
-    /// Adds a missing translation key to the main locale's lang file.
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(language) = language_of(&doc.path, &doc.language) else { return Vec::new() };
-        let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, selection.start) else { return Vec::new() };
-        let Some(reference) = refs::reference_at(language, &doc.text, offset) else { return Vec::new() };
 
-        let name = &doc.text[reference.start..reference.end];
-        if reference.kind != Kind::Translation || is_dynamic(name) || !missing_translation(index, name) {
-            return Vec::new();
+        let mut found = Vec::new();
+        if let Some(index) = self.index_for(&doc.path) {
+            found.extend(missing_key_actions(index, doc, language, offset));
         }
 
-        let Some((file_key, key)) = name.split_once('.') else { return Vec::new() };
-        if key.contains('.') {
-            return Vec::new();
-        }
+        found.extend(actions::rewrites(&doc.path, language, &doc.text, offset).into_iter().map(|rewrite| CodeAction {
+            title: rewrite.title,
+            kind: Some(rewrite.kind.into()),
+            preferred: false,
+            edits: vec![(
+                doc.path.clone(),
+                rewrite.edits.into_iter().map(|(range, text)| TextEdit { range: range_of(&doc.text, range.start, range.end), text }).collect(),
+            )],
+            data: None,
+        }));
 
-        let files = index.translation_files.get(file_key).map(Vec::as_slice).unwrap_or_default();
-        files
-            .iter()
-            .take(1)
-            .map(|file| CodeAction {
-                title: format!("Add translation key \"{name}\" to {}/{}", file.rsplit('/').nth(1).unwrap_or_default(), file_name(file)),
-                kind: Some("quickfix".into()),
-                preferred: false,
-                edits: Vec::new(),
-                data: Some(format!("{file}\n{key}")),
-            })
-            .collect()
+        found
     }
 
     fn resolve_code_action(&mut self, _doc: &Document, mut action: CodeAction) -> Result<CodeAction, Error> {
-        let data = action.data.clone().ok_or("Nothing to resolve.")?;
+        let Some(data) = action.data.clone() else { return Ok(action) };
         let (file, key) = data.split_once('\n').ok_or("Malformed code action.")?;
         let project = project_for(file).ok_or("The file is not in an open project.")?;
         let text = project.read_file(file)?;
@@ -501,6 +599,34 @@ impl Providers for Main {
         action.edits = vec![(file.to_owned(), vec![edit])];
         Ok(action)
     }
+}
+
+/// Adds a missing translation key to the main locale's lang file.
+fn missing_key_actions(index: &Index, doc: &Document, language: &str, offset: usize) -> Vec<CodeAction> {
+    let Some(reference) = refs::reference_at(language, &doc.text, offset) else { return Vec::new() };
+
+    let name = &doc.text[reference.start..reference.end];
+    if reference.kind != Kind::Translation || is_dynamic(name) || !missing_translation(index, name) {
+        return Vec::new();
+    }
+
+    let Some((file_key, key)) = name.split_once('.') else { return Vec::new() };
+    if key.contains('.') {
+        return Vec::new();
+    }
+
+    let files = index.translation_files.get(file_key).map(Vec::as_slice).unwrap_or_default();
+    files
+        .iter()
+        .take(1)
+        .map(|file| CodeAction {
+            title: format!("Add translation key \"{name}\" to {}/{}", file.rsplit('/').nth(1).unwrap_or_default(), file_name(file)),
+            kind: Some("quickfix".into()),
+            preferred: false,
+            edits: Vec::new(),
+            data: Some(format!("{file}\n{key}")),
+        })
+        .collect()
 }
 
 fn php_markers(index: &Index, project: &Project, doc: &Document) -> Vec<LineMarker> {

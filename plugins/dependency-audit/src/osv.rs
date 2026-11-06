@@ -15,6 +15,8 @@ pub struct Advisory {
     pub modified: String,
     pub summary: String,
     pub severity: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// Keyed `"{ecosystem}:{name}"` in OSV spelling.
     pub fixed: BTreeMap<String, Vec<String>>,
 }
@@ -34,6 +36,10 @@ pub fn parse_advisory(json: &str) -> Option<Advisory> {
         let (Some(ecosystem), Some(name)) = (package["package"]["ecosystem"].as_str(), package["package"]["name"].as_str()) else {
             continue;
         };
+        let name = match ecosystem {
+            "PyPI" => crate::manifest::normalise_pypi(name),
+            _ => name.to_owned(),
+        };
         let versions = fixed.entry(format!("{ecosystem}:{name}")).or_default();
         let events = package["ranges"].as_array().into_iter().flatten().filter(|r| r["type"].as_str() != Some("GIT")).flat_map(|r| r["events"].as_array().into_iter().flatten());
         versions.extend(events.filter_map(|e| text(&e["fixed"])));
@@ -44,6 +50,7 @@ pub fn parse_advisory(json: &str) -> Option<Advisory> {
         modified: text(&value["modified"]).unwrap_or_default(),
         summary: text(&value["summary"]).unwrap_or_default(),
         severity,
+        aliases: value["aliases"].as_array().into_iter().flatten().filter_map(|a| text(a)).collect(),
         fixed,
     })
 }
@@ -107,7 +114,7 @@ pub struct Finding {
 
 impl Finding {
     pub fn fix(&self) -> Option<String> {
-        let key = format!("{}:{}", self.dep.ecosystem.osv(), self.dep.name);
+        let key = format!("{}:{}", self.dep.ecosystem.osv(), self.dep.ecosystem.osv_name(&self.dep.name));
 
         self.advisories
             .iter()
@@ -156,7 +163,7 @@ const TIMEOUT_MS: u32 = 10_000;
 /// Storage layout: the single key `queries` holds a JSON object
 /// `"{ecosystem}:{name}@{version}"` -> `{"at": secs, "vulns": [[id, modified], ...]}`
 /// (the host rewrites the whole storage file on every write, so it is read and written once per audit);
-/// `v:{id}` holds one `Advisory` each.
+/// `adv:{id}` holds one `Advisory` each.
 #[derive(Clone, Serialize, Deserialize)]
 struct CachedQuery {
     at: u64,
@@ -182,7 +189,7 @@ struct BatchVuln {
 }
 
 fn query_key(dep: &Dep) -> String {
-    format!("{}:{}@{}", dep.ecosystem.osv(), dep.name, dep.version)
+    format!("{}:{}@{}", dep.ecosystem.osv(), dep.ecosystem.osv_name(&dep.name), dep.version)
 }
 
 fn cached_queries() -> BTreeMap<String, CachedQuery> {
@@ -194,7 +201,7 @@ fn cached_queries() -> BTreeMap<String, CachedQuery> {
 }
 
 pub(crate) fn cached_advisory(id: &str) -> Option<Advisory> {
-    serde_json::from_str(&host::storage::get(&format!("v:{id}")).ok()??).ok()
+    serde_json::from_str(&host::storage::get(&format!("adv:{id}")).ok()??).ok()
 }
 
 fn is_safe_id(id: &str) -> bool {
@@ -214,7 +221,7 @@ fn fetch(request: HttpRequest) -> Result<Vec<u8>, Error> {
 fn query_batch(chunk: &[&Dep]) -> Result<Vec<BatchResult>, Error> {
     let queries: Vec<serde_json::Value> = chunk
         .iter()
-        .map(|dep| serde_json::json!({"package": {"ecosystem": dep.ecosystem.osv(), "name": dep.name}, "version": dep.version}))
+        .map(|dep| serde_json::json!({"package": {"ecosystem": dep.ecosystem.osv(), "name": dep.ecosystem.osv_name(&dep.name)}, "version": dep.version}))
         .collect();
     let body = serde_json::json!({"queries": queries}).to_string();
     let request = HttpRequest::post(QUERY_URL, body).header("Content-Type", "application/json");
@@ -254,7 +261,7 @@ fn advisory(id: &str, modified: &str, online: &mut bool, deadline: Instant, writ
         return id_only;
     };
 
-    writer.set(&format!("v:{id}"), &serde_json::to_string(&advisory).unwrap_or_default());
+    writer.set(&format!("adv:{id}"), &serde_json::to_string(&advisory).unwrap_or_default());
 
     advisory
 }
@@ -278,7 +285,7 @@ impl CacheWriter {
         self.dropped = true;
         // ponytail: 1 MiB storage; the whole cache is dropped when it fills
         let _ = host::storage::delete("queries");
-        for stale in host::storage::keys("v:").unwrap_or_default() {
+        for stale in host::storage::keys("adv:").unwrap_or_default() {
             let _ = host::storage::delete(&stale);
         }
 
@@ -286,7 +293,29 @@ impl CacheWriter {
     }
 }
 
+/// Lowercased advisory ids of the `ignoredAdvisories` setting: one per line, `#` starts a comment.
+pub fn ignored_advisories() -> HashSet<String> {
+    host::setting_string("ignoredAdvisories")
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default().trim().to_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+/// Advisories cached under `v:` before aliases were stored; they are re-fetched under `adv:`.
+fn drop_pre_alias_advisories() {
+    for old in host::storage::keys("v:").unwrap_or_default() {
+        let _ = host::storage::delete(&old);
+    }
+}
+
+pub fn is_ignored(ignored: &HashSet<String>, id: &str, aliases: &[String]) -> bool {
+    ignored.contains(&id.to_lowercase()) || aliases.iter().any(|alias| ignored.contains(&alias.to_lowercase()))
+}
+
 pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<Vec<Finding>, Error> {
+    drop_pre_alias_advisories();
     let mut cache = cached_queries();
     let mut seen: HashSet<String> = HashSet::new();
     let mut unique: Vec<(&Dep, String)> = Vec::new();
@@ -324,6 +353,7 @@ pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<
     let mut advisories: HashMap<String, Advisory> = HashMap::new();
     let mut online = online;
     let mut findings = Vec::new();
+    let ignored = ignored_advisories();
 
     for (dep, key) in unique {
         let Some(query) = cache.get(&key) else {
@@ -335,7 +365,9 @@ pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<
             let advisory = advisories
                 .entry(id.clone())
                 .or_insert_with(|| advisory(id, modified, &mut online, deadline, &mut writer));
-            found.push(advisory.clone());
+            if !is_ignored(&ignored, id, &advisory.aliases) {
+                found.push(advisory.clone());
+            }
         }
 
         if !found.is_empty() {

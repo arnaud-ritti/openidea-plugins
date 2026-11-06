@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Starts, rebuilds and stops the project's Dev Container (containers.dev) and opens a shell in it, using the devcontainer CLI. Adds a devcontainer.json template to the New menu. Requires the devcontainer CLI (npm i -g @devcontainers/cli) and Docker. The IDE itself keeps running on the host."
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0: first release. Start, Rebuild, Open Shell and Stop commands, and a devcontainer.json template."
+change-notes = "0.1.0: first release. Start, Rebuild, Open Shell and Stop commands, and devcontainer.json templates."
 categories = ["tools"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
@@ -33,6 +33,11 @@ id = "stop"
 title = "Dev Container: Stop Container"
 category = "Dev Container"
 
+[[contributes.commands]]
+id = "info"
+title = "Dev Container: Show Configuration"
+category = "Dev Container"
+
 [[contributes.menus]]
 menu = "tools"
 command = "up"
@@ -46,6 +51,42 @@ id = "devcontainer"
 name = "Dev Container Configuration"
 extension = "json"
 path = "templates/devcontainer.json"
+
+[[contributes.fileTemplates]]
+id = "devcontainer-node"
+name = "Dev Container (Node)"
+extension = "json"
+path = "templates/node.json"
+
+[[contributes.fileTemplates]]
+id = "devcontainer-python"
+name = "Dev Container (Python)"
+extension = "json"
+path = "templates/python.json"
+
+[[contributes.fileTemplates]]
+id = "devcontainer-java"
+name = "Dev Container (Java)"
+extension = "json"
+path = "templates/java.json"
+
+[[contributes.fileTemplates]]
+id = "devcontainer-php"
+name = "Dev Container (PHP)"
+extension = "json"
+path = "templates/php.json"
+
+[[contributes.fileTemplates]]
+id = "devcontainer-rust"
+name = "Dev Container (Rust)"
+extension = "json"
+path = "templates/rust.json"
+
+[[contributes.fileTemplates]]
+id = "devcontainer-compose"
+name = "Dev Container (Docker Compose)"
+extension = "json"
+path = "templates/compose.json"
 
 [contributes.settings]
 title = "Dev Container CLI"

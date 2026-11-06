@@ -77,13 +77,29 @@ impl Decl<'_> {
     }
 }
 
+/// Whether the `from` at `i` belongs to a function call (`extract(year from d)`): the innermost
+/// unclosed `(` has no `select` between it and the `from`.
+fn function_from(words: &[Word], i: usize) -> bool {
+    let mut closed = 0;
+    for w in words[..i].iter().rev() {
+        match w.s {
+            ")" => closed += 1,
+            "(" if closed > 0 => closed -= 1,
+            "(" => return true,
+            _ if closed == 0 && w.is("select") => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The declarations after `FROM`, `JOIN` (`JOIN FETCH`) and `UPDATE`, in order.
 pub fn declarations<'a>(words: &[Word<'a>]) -> Vec<Decl<'a>> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < words.len() {
         let w = words[i];
-        if !(w.is("from") || w.is("join") || w.is("update")) {
+        if !(w.is("from") || w.is("join") || w.is("update")) || (w.is("from") && function_from(words, i)) {
             i += 1;
             continue;
         }
@@ -125,6 +141,6 @@ mod tests {
         assert_eq!(decls, [("User", Some("u")), ("u.orders", Some("o"))]);
         let q = "SELECT a FROM Author a, Book AS b WHERE EXTRACT(YEAR FROM b.date) = 1; UPDATE Book SET title = 'x'";
         let decls: Vec<_> = declarations(&words(q)).into_iter().map(|d| (d.target.s, d.alias)).collect();
-        assert_eq!(decls, [("Author", Some("a")), ("Book", Some("b")), ("b.date", None), ("Book", None)]);
+        assert_eq!(decls, [("Author", Some("a")), ("Book", Some("b")), ("Book", None)]);
     }
 }

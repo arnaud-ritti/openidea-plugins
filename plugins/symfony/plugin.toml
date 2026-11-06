@@ -6,7 +6,7 @@ Twig templates and blocks, services, classes, translation keys (per domain), ass
 and roles, plus completion of the variables controllers pass to a Twig template. Reports missing routes, templates, \
 services and translation keys, and routes defined twice in a file, with a quick fix that adds a missing key. Gutter markers link controllers, templates, \
 parent blocks, classes and service definitions. A Symfony tool window lists routes, templates, services and \
-translations, and two commands run cache:warmup and cache:clear. \
+translations, two commands run cache:warmup and cache:clear, and a Profiler view lists the latest requests. \
 Partial port of the Symfony Plugin for IntelliJ by Daniel Espendiller and Adrien Brault (MIT). \
 Twig files need the aritti.twig plugin."""
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "Daniel Espendiller (original Symfony Plugin)", "Adrien Brault (original Symfony Plugin)"]
@@ -18,7 +18,7 @@ features that need PhpStorm's PSI are missing (container type inference, Doctrin
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:php", "on-language:twig", "on-language:yaml", "on-language:xml"]
+activation = ["on-language:php", "on-language:twig", "on-language:yaml", "on-language:xml", "on-view:symfony-profiler"]
 
 [capabilities]
 required = ["project.read", "events"]
@@ -28,6 +28,11 @@ optional = ["process:php"]
 [[contributes.commands]]
 id = "reindex"
 title = "Symfony: Reindex Project"
+category = "Symfony"
+
+[[contributes.commands]]
+id = "show-profiler"
+title = "Symfony: Show Profiler"
 category = "Symfony"
 
 [[contributes.commands]]
@@ -49,6 +54,12 @@ id = "symfony"
 title = "Symfony"
 icon = "file-php"
 location = "right"
+
+[[contributes.views]]
+id = "symfony-profiler"
+title = "Symfony Profiler"
+icon = "file-php"
+location = "bottom"
 
 [contributes.settings]
 schema = "settings.schema.json"

@@ -1,5 +1,197 @@
-# Spring Boot 3.5.16 configuration metadata (Apache-2.0), see NOTICE
+# Spring Boot 3.5.16 and Spring Cloud 2025.0.3 configuration metadata (Apache-2.0), see NOTICE
 debug	Boolean	false		Enable debug logs
+encrypt.fail-on-error	Boolean	true		Flag to say that a process should fail if there is an encryption or decryption error
+encrypt.key	String			A symmetric key
+encrypt.key-store.alias	String			Alias for a key in the store
+encrypt.key-store.location	Resource			Location of the key store file, e.g
+encrypt.key-store.password	String			Password that locks the keystore
+encrypt.key-store.secret	String			Secret protecting the key (defaults to the same as the password)
+encrypt.key-store.type	String	jks		The KeyStore type
+encrypt.rsa.algorithm	RsaAlgorithm	default		The RSA algorithm to use (DEFAULT or OEAP)
+encrypt.rsa.salt	String	deadbeef		Salt for the random secret used to encrypt cipher text
+encrypt.rsa.strong	Boolean	false		Flag to indicate that "strong" AES encryption should be used internally
+encrypt.salt	String	deadbeef		A salt for the symmetric key, in the form of a hex-encoded byte array
+endpoints.zookeeper.enabled	Boolean	true		Enable the /zookeeper endpoint to inspect the state of zookeeper
+eureka.client.allow-redirects	Boolean	false		Indicates whether server can redirect a client request to a backup server/cluster
+eureka.client.availability-zones	Map<String,String>			Gets the list of availability zones (used in AWS data centers) for the region in which this instance resides
+eureka.client.backup-registry-impl	String			Gets the name of the implementation which implements BackupRegistry to fetch the registry information as a fa…
+eureka.client.cache-refresh-executor-exponential-back-off-bound	Integer	10		Cache refresh executor exponential back off related property
+eureka.client.cache-refresh-executor-thread-pool-size	Integer	2		The thread pool size for the cacheRefreshExecutor to initialise with
+eureka.client.client-data-accept	String			EurekaAccept name for client data accept
+eureka.client.decoder-name	String			This is a transient config and once the latest codecs are stable, can be removed (as there will only be one)
+eureka.client.disable-delta	Boolean	false		Indicates whether the eureka client should disable fetching of delta and should rather resort to getting the…
+eureka.client.dollar-replacement	String	_-		Get a replacement string for Dollar sign <code>$</code> during serializing/deserializing information in eurek…
+eureka.client.enabled	Boolean	true		Flag to indicate that the Eureka client is enabled
+eureka.client.encoder-name	String			This is a transient config and once the latest codecs are stable, can be removed (as there will only be one)
+eureka.client.escape-char-replacement	String	__		Get a replacement string for underscore sign <code>_</code> during serializing/ deserializing information in…
+eureka.client.eureka-connection-idle-timeout-seconds	Integer	30		Indicates how much time (in seconds) that the HTTP connections to eureka server can stay idle before it can b…
+eureka.client.eureka-server-connect-timeout-seconds	Integer	5		Indicates how long to wait (in seconds) before a connection to eureka server needs to timeout
+eureka.client.eureka-server-d-n-s-name	String			Gets the DNS name to be queried to get the list of eureka servers.This information is not required if the con…
+eureka.client.eureka-server-port	String			Gets the port to be used to construct the service url to contact eureka server when the list of eureka server…
+eureka.client.eureka-server-read-timeout-seconds	Integer	8		Indicates how long to wait (in seconds) before a read from eureka server needs to timeout
+eureka.client.eureka-server-total-connections	Integer	200		Gets the total number of connections that is allowed from eureka client to all eureka servers
+eureka.client.eureka-server-total-connections-per-host	Integer	50		Gets the total number of connections that is allowed from eureka client to a eureka server host
+eureka.client.eureka-server-u-r-l-context	String			Gets the URL context to be used to construct the service url to contact eureka server when the list of eureka…
+eureka.client.eureka-service-url-poll-interval-seconds	Integer	300		Indicates how often(in seconds) to poll for changes to eureka server information
+eureka.client.fetch-registry	Boolean	true		Indicates whether this client should fetch eureka registry information from eureka server
+eureka.client.fetch-remote-regions-registry	String			Comma separated list of regions for which the eureka registry information will be fetched
+eureka.client.filter-only-up-instances	Boolean	true		Indicates whether to get the applications after filtering the applications for instances with only InstanceSt…
+eureka.client.g-zip-content	Boolean	true		Indicates whether the content fetched from eureka server has to be compressed whenever it is supported by the…
+eureka.client.healthcheck.enabled	Boolean	true		Enables the Eureka health check handler
+eureka.client.heartbeat-executor-exponential-back-off-bound	Integer	10		Heartbeat executor exponential back off related property
+eureka.client.heartbeat-executor-thread-pool-size	Integer	2		The thread pool size for the heartbeatExecutor to initialise with
+eureka.client.initial-instance-info-replication-interval-seconds	Integer	40		Indicates how long initially (in seconds) to replicate instance info to the eureka server
+eureka.client.instance-info-replication-interval-seconds	Integer	30		Indicates how often(in seconds) to replicate instance changes to be replicated to the eureka server
+eureka.client.jersey.enabled	Boolean	true		Enables the use of JerseyClient for Eureka HTTP Client
+eureka.client.log-delta-diff	Boolean	false		Indicates whether to log differences between the eureka server and the eureka client in terms of registry inf…
+eureka.client.on-demand-update-status-change	Boolean	true		If set to true, local status updates via ApplicationInfoManager will trigger on-demand (but rate limited) reg…
+eureka.client.order	Integer	0		Order of the discovery client used by `CompositeDiscoveryClient` for sorting available clients
+eureka.client.prefer-same-zone-eureka	Boolean	true		Indicates whether or not this instance should try to use the eureka server in the same zone for latency and/o…
+eureka.client.property-resolver	PropertyResolver			
+eureka.client.proxy-host	String			Gets the proxy host to eureka server if any
+eureka.client.proxy-password	String			Gets the proxy password if any
+eureka.client.proxy-port	String			Gets the proxy port to eureka server if any
+eureka.client.proxy-user-name	String			Gets the proxy user name if any
+eureka.client.refresh.enable	Boolean	true		Determines whether the EurekaClient instance can be refreshed or not(If disabled none of the Eureka client pr…
+eureka.client.region	String	us-east-1		Gets the region (used in AWS datacenters) where this instance resides
+eureka.client.register-with-eureka	Boolean	true		Indicates whether or not this instance should register its information with eureka server for discovery by ot…
+eureka.client.registry-fetch-interval-seconds	Integer	30		Indicates how often(in seconds) to fetch the registry information from the eureka server
+eureka.client.registry-refresh-single-vip-address	String			Indicates whether the client is only interested in the registry information for a single VIP
+eureka.client.rest-template-timeout.connect-request-timeout	Integer	180000		
+eureka.client.rest-template-timeout.connect-timeout	Integer	180000		Default values are set to 180000, in keeping with {@link RequestConfig} and {@link SocketConfig} defaults
+eureka.client.rest-template-timeout.socket-timeout	Integer	180000		
+eureka.client.restclient.enabled	Boolean	false		Enables the use of RestClient for Eureka HTTP Client
+eureka.client.restclient.timeout.connect-request-timeout	Integer	180000		
+eureka.client.restclient.timeout.connect-timeout	Integer	180000		Default values are set to 180000, in keeping with {@link RequestConfig} and {@link SocketConfig} defaults
+eureka.client.restclient.timeout.socket-timeout	Integer	180000		
+eureka.client.service-url	Map<String,String>			Map of availability zone to list of fully qualified URLs to communicate with eureka server
+eureka.client.should-enforce-registration-at-init	Boolean	false		Indicates whether the client should enforce registration during initialization
+eureka.client.should-unregister-on-shutdown	Boolean	true		Indicates whether the client should explicitly unregister itself from the remote server on client shutdown
+eureka.client.tls.enabled	Boolean			
+eureka.client.tls.key-password	String			
+eureka.client.tls.key-store	Resource			
+eureka.client.tls.key-store-password	String			
+eureka.client.tls.key-store-type	String			
+eureka.client.tls.trust-store	Resource			
+eureka.client.tls.trust-store-password	String			
+eureka.client.tls.trust-store-type	String			
+eureka.client.use-dns-for-fetching-service-urls	Boolean	false		Indicates whether the eureka client should use the DNS mechanism to fetch a list of eureka servers to talk to
+eureka.client.webclient.enabled	Boolean	false		Enables the use of WebClient for Eureka HTTP Client
+eureka.dashboard.enabled	Boolean	true		Flag to enable the Eureka dashboard
+eureka.dashboard.path	String	/		The path to the Eureka dashboard (relative to the servlet path)
+eureka.datacenter	String	default		Eureka datacenter
+eureka.environment	String	test		Eureka environment
+eureka.instance.a-s-g-name	String			Gets the AWS autoscaling group name associated with this instance
+eureka.instance.app-group-name	String			Get the name of the application group to be registered with eureka
+eureka.instance.appname	String	unknown		Get the name of the application to be registered with eureka
+eureka.instance.async-client-initialization	Boolean	false		If true the EurekaClient will be initialized asynchronously when the InstanceRegistry bean is created
+eureka.instance.data-center-info	DataCenterInfo			Returns the data center this instance is deployed
+eureka.instance.default-address-resolution-order	String[]			
+eureka.instance.environment	Environment			
+eureka.instance.health-check-url	String			Gets the absolute health check page URL for this instance
+eureka.instance.health-check-url-path	String			Gets the relative health check URL path for this instance
+eureka.instance.home-page-url	String			Gets the absolute home page URL for this instance
+eureka.instance.home-page-url-path	String	/		Gets the relative home page URL Path for this instance
+eureka.instance.hostname	String			The hostname if it can be determined at configuration time (otherwise it will be guessed from OS primitives)
+eureka.instance.initial-status	InstanceInfo.InstanceStatus	up		Initial status to register with remote Eureka server
+eureka.instance.instance-enabled-onit	Boolean	false		Indicates whether the instance should be enabled for taking traffic as soon as it is registered with eureka
+eureka.instance.instance-id	String			Get the unique Id (within the scope of the appName) of this instance to be registered with eureka
+eureka.instance.ip-address	String			Get the IPAdress of the instance
+eureka.instance.lease-expiration-duration-in-seconds	Integer	90		Indicates the time in seconds that the eureka server waits since it received the last heartbeat before it can…
+eureka.instance.lease-renewal-interval-in-seconds	Integer	30		Indicates how often (in seconds) the eureka client needs to send heartbeats to eureka server to indicate that…
+eureka.instance.metadata-map	Map<String,String>			Gets the metadata name/value pairs associated with this instance
+eureka.instance.metadata-map.weight	Integer	1		The weight of service instance for weighted load balancing
+eureka.instance.namespace	String	eureka		Get the namespace used to find properties
+eureka.instance.non-secure-port	Integer	80		Get the non-secure port on which the instance should receive traffic
+eureka.instance.non-secure-port-enabled	Boolean	true		Indicates whether the non-secure port should be enabled for traffic or not
+eureka.instance.prefer-ip-address	Boolean	false		Flag to say that, when guessing a hostname, the IP address of the server should be used in preference to the…
+eureka.instance.registry.default-open-for-traffic-count	Integer	1		Value used in determining when leases are cancelled, default to 1 for standalone
+eureka.instance.registry.expected-number-of-clients-sending-renews	Integer	1		
+eureka.instance.secure-health-check-url	String			Gets the absolute secure health check page URL for this instance
+eureka.instance.secure-port	Integer	443		Get the Secure port on which the instance should receive traffic
+eureka.instance.secure-port-enabled	Boolean	false		Indicates whether the secure port should be enabled for traffic or not
+eureka.instance.secure-virtual-host-name	String	unknown		Gets the secure virtual host name defined for this instance
+eureka.instance.status-page-url	String			Gets the absolute status page URL path for this instance
+eureka.instance.status-page-url-path	String			Gets the relative status page URL path for this instance
+eureka.instance.virtual-host-name	String	unknown		Gets the virtual host name defined for this instance
+eureka.server.a-s-g-cache-expiry-timeout-ms	Long	600000		
+eureka.server.a-s-g-query-timeout-ms	Integer	300		
+eureka.server.a-s-g-update-interval-ms	Long	300000		
+eureka.server.a-w-s-access-id	String			
+eureka.server.a-w-s-secret-key	String			
+eureka.server.batch-replication	Boolean	false		
+eureka.server.binding-strategy	AwsBindingStrategy	eip		
+eureka.server.delta-retention-timer-interval-in-ms	Long	30000		
+eureka.server.disable-delta	Boolean	false		
+eureka.server.disable-delta-for-remote-regions	Boolean	false		
+eureka.server.disable-transparent-fallback-to-other-region	Boolean	false		
+eureka.server.e-i-p-bind-rebind-retries	Integer	3		
+eureka.server.e-i-p-binding-retry-interval-ms	Integer	300000		
+eureka.server.e-i-p-binding-retry-interval-ms-when-unbound	Integer	60000		
+eureka.server.enable-replicated-request-compression	Boolean	false		
+eureka.server.enable-self-preservation	Boolean	true		
+eureka.server.eviction-interval-timer-in-ms	Long			
+eureka.server.expected-client-renewal-interval-seconds	Integer	30		
+eureka.server.g-zip-content-from-remote-region	Boolean	true		
+eureka.server.initial-capacity-of-response-cache	Integer	1000		
+eureka.server.json-codec-name	String			
+eureka.server.list-auto-scaling-groups-role-name	String	ListAutoScalingGroups		
+eureka.server.log-identity-headers	Boolean	true		
+eureka.server.max-elements-in-peer-replication-pool	Integer	10000		
+eureka.server.max-elements-in-status-replication-pool	Integer	10000		
+eureka.server.max-idle-thread-age-in-minutes-for-peer-replication	Long	15		
+eureka.server.max-idle-thread-in-minutes-age-for-status-replication	Long	10		
+eureka.server.max-threads-for-peer-replication	Integer	20		
+eureka.server.max-threads-for-status-replication	Integer	1		
+eureka.server.max-time-for-replication	Integer	30000		
+eureka.server.metrics.enabled	Boolean	false		Indicates whether the metrics should be enabled for eureka instances
+eureka.server.min-available-instances-for-peer-replication	Integer	-1		
+eureka.server.min-threads-for-peer-replication	Integer	5		
+eureka.server.min-threads-for-status-replication	Integer	1		
+eureka.server.my-url	String			
+eureka.server.number-of-replication-retries	Integer	5		
+eureka.server.peer-eureka-nodes-update-interval-ms	Integer	600000		
+eureka.server.peer-eureka-status-refresh-time-interval-ms	Integer			
+eureka.server.peer-node-connect-timeout-ms	Integer	200		
+eureka.server.peer-node-connection-idle-timeout-seconds	Integer	30		
+eureka.server.peer-node-read-timeout-ms	Integer	200		
+eureka.server.peer-node-total-connections	Integer	1000		
+eureka.server.peer-node-total-connections-per-host	Integer	500		
+eureka.server.prime-aws-replica-connections	Boolean	true		
+eureka.server.property-resolver	PropertyResolver			
+eureka.server.rate-limiter-burst-size	Integer	10		
+eureka.server.rate-limiter-enabled	Boolean	false		
+eureka.server.rate-limiter-full-fetch-average-rate	Integer	100		
+eureka.server.rate-limiter-privileged-clients	Set<String>			
+eureka.server.rate-limiter-registry-fetch-average-rate	Integer	500		
+eureka.server.rate-limiter-throttle-standard-clients	Boolean	false		
+eureka.server.registry-sync-retries	Integer	0		
+eureka.server.registry-sync-retry-wait-ms	Long			
+eureka.server.remote-region-app-whitelist	Map<String,Set<String>>			
+eureka.server.remote-region-connect-timeout-ms	Integer	1000		
+eureka.server.remote-region-connection-idle-timeout-seconds	Integer	30		
+eureka.server.remote-region-fetch-thread-pool-size	Integer	20		
+eureka.server.remote-region-read-timeout-ms	Integer	1000		
+eureka.server.remote-region-registry-fetch-interval	Integer	30		
+eureka.server.remote-region-total-connections	Integer	1000		
+eureka.server.remote-region-total-connections-per-host	Integer	500		
+eureka.server.remote-region-trust-store	String			
+eureka.server.remote-region-trust-store-password	String	changeit		
+eureka.server.remote-region-urls	String[]			
+eureka.server.remote-region-urls-with-name	Map<String,String>			
+eureka.server.renewal-percent-threshold	Double	0.85		
+eureka.server.renewal-threshold-update-interval-ms	Integer	900000		
+eureka.server.response-cache-auto-expiration-in-seconds	Long	180		
+eureka.server.response-cache-update-interval-ms	Long	30000		
+eureka.server.retention-time-in-m-s-in-delta-queue	Long	180000		
+eureka.server.route53-bind-rebind-retries	Integer	3		
+eureka.server.route53-binding-retry-interval-ms	Integer	300000		
+eureka.server.route53-domain-t-t-l	Long	30		
+eureka.server.sync-when-timestamp-differs	Boolean	true		
+eureka.server.use-read-only-response-cache	Boolean	true		
+eureka.server.wait-time-in-ms-when-sync-empty	Integer	300000		
+eureka.server.xml-codec-name	String			
+health.config.time-to-live	Duration	5m		Time to live for cached result
 info	Map<String,Object>			Arbitrary properties to add to the info endpoint
 logging.charset.console	Charset			Charset to use for console output
 logging.charset.file	Charset			Charset to use for file output
@@ -122,13 +314,37 @@ management.elastic.metrics.export.read-timeout	Duration	10s		Read timeout for re
 management.elastic.metrics.export.step	Duration	1m		Step size (i.e
 management.elastic.metrics.export.timestamp-field-name	String	@timestamp		Name of the timestamp field
 management.elastic.metrics.export.user-name	String			Login user of the Elastic server
+management.endpoint.bindings.access	Access	unrestricted		Permitted level of access for the bindings endpoint
+management.endpoint.bindings.cache.time-to-live	Duration	0ms		Maximum time that a response can be cached
+management.endpoint.bindings.enabled	Boolean	true	w:management.endpoint.bindings.access	Whether to enable the bindings endpoint
+management.endpoint.busenv.access	Access	unrestricted		Permitted level of access for the busenv endpoint
+management.endpoint.busenv.enabled	Boolean	true	w:management.endpoint.busenv.access	Whether to enable the busenv endpoint
+management.endpoint.busrefresh.access	Access	unrestricted		Permitted level of access for the busrefresh endpoint
+management.endpoint.busrefresh.enabled	Boolean	true	w:management.endpoint.busrefresh.access	Whether to enable the busrefresh endpoint
+management.endpoint.busshutdown.access	Access	unrestricted		Permitted level of access for the busshutdown endpoint
+management.endpoint.busshutdown.enabled	Boolean	true	w:management.endpoint.busshutdown.access	Whether to enable the busshutdown endpoint
+management.endpoint.channels.access	Access	unrestricted		Permitted level of access for the channels endpoint
+management.endpoint.channels.cache.time-to-live	Duration	0ms		Maximum time that a response can be cached
+management.endpoint.channels.enabled	Boolean	true	w:management.endpoint.channels.access	Whether to enable the channels endpoint
 management.endpoint.conditions.access	Access	unrestricted		Permitted level of access for the conditions endpoint
 management.endpoint.conditions.cache.time-to-live	Duration	0ms		Maximum time that a response can be cached
 management.endpoint.conditions.enabled	Boolean	true	w:management.endpoint.conditions.access	Whether to enable the conditions endpoint
 management.endpoint.configprops.roles	Set<String>			Roles used to determine whether a user is authorized to be shown unsanitized values
 management.endpoint.configprops.show-values	Show	never		When to show unsanitized values
+management.endpoint.consul.access	Access	unrestricted		Permitted level of access for the consul endpoint
+management.endpoint.consul.cache.time-to-live	Duration	0ms		Maximum time that a response can be cached
+management.endpoint.consul.enabled	Boolean	true	w:management.endpoint.consul.access	Whether to enable the consul endpoint
+management.endpoint.env.post.enabled	Boolean	false		Enables writable environment endpoint
 management.endpoint.env.roles	Set<String>			Roles used to determine whether a user is authorized to be shown unsanitized values
 management.endpoint.env.show-values	Show	never		When to show unsanitized values
+management.endpoint.features.access	Access	unrestricted		Permitted level of access for the features endpoint
+management.endpoint.features.cache.time-to-live	Duration	0ms		Maximum time that a response can be cached
+management.endpoint.features.enabled	Boolean	true	w:management.endpoint.features.access	Whether to enable the features endpoint
+management.endpoint.functions.access	Access	unrestricted		Permitted level of access for the functions endpoint
+management.endpoint.functions.cache.time-to-live	Duration	0ms		Maximum time that a response can be cached
+management.endpoint.functions.enabled	Boolean	true	w:management.endpoint.functions.access	Whether to enable the functions endpoint
+management.endpoint.gateway.access	Access	none		Permitted level of access for the gateway endpoint
+management.endpoint.gateway.enabled	Boolean	false	w:management.endpoint.gateway.access	Whether to enable the gateway endpoint
 management.endpoint.health.group	Map<String,HealthEndpointProperties.Group>			Health endpoint groups
 management.endpoint.health.logging.slow-indicator-threshold	Duration	10s		Threshold after which a warning will be logged for slow health indicators
 management.endpoint.health.probes.add-additional-paths	Boolean	false		Whether to make the liveness and readiness health groups available on the main server port
@@ -139,9 +355,21 @@ management.endpoint.health.show-details	Show	never		When to show full health det
 management.endpoint.health.status.http-mapping	Map<String,Integer>			Mapping of health statuses to HTTP status codes
 management.endpoint.health.status.order	List<String>	DOWN,OUT_OF_SERVICE,UP,UNKNOWN		List of health statuses in order of severity
 management.endpoint.health.validate-group-membership	Boolean	true		Whether to validate health group membership on startup
+management.endpoint.kafkastreamstopology.access	Access	unrestricted		Permitted level of access for the kafkastreamstopology endpoint
+management.endpoint.kafkastreamstopology.cache.time-to-live	Duration	0ms		Maximum time that a response can be cached
+management.endpoint.kafkastreamstopology.enabled	Boolean	true	w:management.endpoint.kafkastreamstopology.access	Whether to enable the kafkastreamstopology endpoint
 management.endpoint.logfile.external-file	File			External Logfile to be accessed
+management.endpoint.pause.enabled	Boolean	true		Enable the /pause endpoint (to send Lifecycle.stop())
 management.endpoint.quartz.roles	Set<String>			Roles used to determine whether a user is authorized to be shown unsanitized job or trigger values
 management.endpoint.quartz.show-values	Show	never		When to show unsanitized job or trigger values
+management.endpoint.refresh.access	Access	unrestricted		Permitted level of access for the refresh endpoint
+management.endpoint.refresh.enabled	Boolean	true	w:management.endpoint.refresh.access	Enable the /refresh endpoint to refresh configuration and re-initialize refresh scoped beans
+management.endpoint.restart.access	Access	none		Permitted level of access for the restart endpoint
+management.endpoint.restart.enabled	Boolean	true	w:management.endpoint.restart.access	Enable the /restart endpoint to restart the application context
+management.endpoint.resume.enabled	Boolean	true		Enable the /resume endpoint (to send Lifecycle.start())
+management.endpoint.serviceregistry.access	Access	unrestricted		Permitted level of access for the serviceregistry endpoint
+management.endpoint.serviceregistry.cache.time-to-live	Duration	0ms		Maximum time that a response can be cached
+management.endpoint.serviceregistry.enabled	Boolean	true	w:management.endpoint.serviceregistry.access	Whether to enable the serviceregistry endpoint
 management.endpoints.access.default	Access			Default access level for all endpoints
 management.endpoints.access.max-permitted		unrestricted		Maximum level of endpoint access that is permitted
 management.endpoints.enabled-by-default	Boolean		w:management.endpoints.access.default	Whether to enable or disable all endpoints by default
@@ -179,6 +407,7 @@ management.graphite.metrics.export.protocol	GraphiteProtocol	pickled		Protocol t
 management.graphite.metrics.export.rate-units	TimeUnit	seconds		Base time unit used to report rates
 management.graphite.metrics.export.step	Duration	1m		Step size (i.e
 management.graphite.metrics.export.tags-as-prefix	String[]			For the hierarchical naming convention, turn the specified tag keys into part of the metric prefix
+management.health.binders.enabled	Boolean	true		Allows to enable/disable binder's' health indicators
 management.health.cassandra.enabled	Boolean	true		Whether to enable Cassandra health check
 management.health.couchbase.enabled	Boolean	true		Whether to enable Couchbase health check
 management.health.couchbase.timeout	Duration	1000ms	e:	Timeout for getting the Bucket information from the server
@@ -203,8 +432,10 @@ management.health.probes.enabled	Boolean	false	w:management.endpoint.health.prob
 management.health.rabbit.enabled	Boolean	true		Whether to enable RabbitMQ health check
 management.health.readinessstate.enabled	Boolean	false		Whether to enable readiness state health check
 management.health.redis.enabled	Boolean	true		Whether to enable Redis health check
+management.health.refresh.enabled	Boolean	true		Enable the health endpoint for the refresh scope
 management.health.ssl.certificate-validity-warning-threshold	Duration	14d		If an SSL Certificate will be invalid within the time span defined by this threshold, it should trigger a war…
 management.health.ssl.enabled	Boolean	true		Whether to enable SSL certificate health check
+management.health.zookeeper.enabled	Boolean	true		Enable the health endpoint for zookeeper
 management.httpexchanges.recording.enabled	Boolean	true		Whether to enable HTTP request-response exchange recording
 management.httpexchanges.recording.include	Set<Include>	time-taken,request-headers,response-headers		Items to be included in the exchange recording
 management.humio.metrics.export.api-token	String			Humio API token
@@ -971,6 +1202,1121 @@ spring.cassandra.ssl.bundle	String			SSL bundle name
 spring.cassandra.ssl.enabled	Boolean			Whether to enable SSL support
 spring.cassandra.ssl.verify-hostname	Boolean	true		Whether to perform hostname verification
 spring.cassandra.username	String			Login user of the server
+spring.cloud.bus.ack.destination-service	String			Service that wants to listen to acks
+spring.cloud.bus.ack.enabled	Boolean	true		Flag to switch off acks (default on)
+spring.cloud.bus.content-type	MimeType			The bus mime-type
+spring.cloud.bus.destination	String			Name of Spring Cloud Stream destination for messages
+spring.cloud.bus.enabled	Boolean	true		Flag to indicate that the bus is enabled
+spring.cloud.bus.env.enabled	Boolean	true		Flag to switch off environment change events (default on)
+spring.cloud.bus.id	String	application		The identifier for this application instance
+spring.cloud.bus.refresh.enabled	Boolean	true		Flag to switch off refresh events (default on)
+spring.cloud.bus.shutdown.enabled	Boolean	true		Flag to switch off shutdown events (default on)
+spring.cloud.bus.trace.enabled	Boolean	false		Flag to switch on tracing of acks (default off)
+spring.cloud.circuitbreaker.bulkhead.resilience4j.enabled	Boolean	true		Enables to use of the Bulkhead by Resilience4j
+spring.cloud.circuitbreaker.resilience4j.blocking.enabled	Boolean	true		Enables blocking Resilience4J auto-configuration
+spring.cloud.circuitbreaker.resilience4j.default-group-tag	String	none		
+spring.cloud.circuitbreaker.resilience4j.disable-thread-pool	Boolean	false		
+spring.cloud.circuitbreaker.resilience4j.disable-time-limiter	Boolean	false		
+spring.cloud.circuitbreaker.resilience4j.disable-time-limiter-map	Map<String,Boolean>			
+spring.cloud.circuitbreaker.resilience4j.enable-group-meter-filter	Boolean	true		
+spring.cloud.circuitbreaker.resilience4j.enable-semaphore-default-bulkhead	Boolean	false		
+spring.cloud.circuitbreaker.resilience4j.enabled	Boolean	true		Enables Resilience4J auto-configuration
+spring.cloud.circuitbreaker.resilience4j.reactive.enabled	Boolean	true		Enables ReactiveResilience4J auto-configuration
+spring.cloud.compatibility-verifier.compatible-boot-versions	List<String>	3.5.x		Default accepted versions for the Spring Boot dependency
+spring.cloud.compatibility-verifier.enabled	Boolean	false		Enables creation of Spring Cloud compatibility verification
+spring.cloud.config.allow-override	Boolean	true		Flag to indicate that {@link #isOverrideSystemProperties() systemPropertiesOverride} can be used
+spring.cloud.config.charset	Charset	UTF-8		The charset to read the resource from the config server
+spring.cloud.config.discovery.enabled	Boolean	false		Flag to indicate that config server discovery is enabled (config server URL will be looked up via discovery)
+spring.cloud.config.discovery.service-id	String	configserver		Service id to locate config server
+spring.cloud.config.enabled	Boolean	true		Flag to say that remote configuration is enabled
+spring.cloud.config.fail-fast	Boolean	false		Flag to indicate that failure to connect to the server is fatal (default false)
+spring.cloud.config.headers	Map<String,String>			Additional headers used to create the client request
+spring.cloud.config.initialize-on-context-refresh	Boolean	false		Flag to initialize bootstrap configuration on context refresh event
+spring.cloud.config.label	String			The label name to use to pull remote configuration properties
+spring.cloud.config.media-type	String			The Accept header media type to send to config server
+spring.cloud.config.multiple-uri-strategy	ConfigClientProperties.MultipleUriStrategy	always		The strategy to use when call to server fails and there are multiple URLs configured on the uri property (def…
+spring.cloud.config.name	String			Name of application used to fetch remote properties
+spring.cloud.config.override-none	Boolean	false		Flag to indicate that when {@link #setAllowOverride(boolean) allowOverride} is true, external properties shou…
+spring.cloud.config.override-system-properties	Boolean	true		Flag to indicate that the external properties should override system properties
+spring.cloud.config.password	String			The password to use (HTTP Basic) when contacting the remote server
+spring.cloud.config.profile	String	default		The default profile to use when fetching remote configuration (comma-separated)
+spring.cloud.config.request-connect-timeout	Integer			timeout on waiting to connect to the Config Server
+spring.cloud.config.request-read-timeout	Integer			timeout on waiting to read data from the Config Server
+spring.cloud.config.retry.initial-interval	Long	1000		Initial retry interval in milliseconds
+spring.cloud.config.retry.max-attempts	Integer	6		Maximum number of attempts
+spring.cloud.config.retry.max-interval	Long	2000		Maximum interval for backoff
+spring.cloud.config.retry.multiplier	Double	1.1		Multiplier for next interval
+spring.cloud.config.retry.use-random-policy	Boolean	false		Use a random exponential backoff policy
+spring.cloud.config.send-all-labels	Boolean	false		If set to true the client will send all labels to the server instead of sending one at a time
+spring.cloud.config.send-state	Boolean	true		Flag to indicate whether to send state
+spring.cloud.config.server.accept-empty	Boolean	true		Flag to indicate that If HTTP 404 needs to be sent if Application is not Found
+spring.cloud.config.server.aws-secretsmanager.default-label	String			The default staging label to be used to fetch the secret values
+spring.cloud.config.server.aws-secretsmanager.endpoint	String			The endpoint to be used by AWS Secrets Manager client
+spring.cloud.config.server.aws-secretsmanager.ignore-label	Boolean	false		Do not set staging label when fetching the secret values
+spring.cloud.config.server.aws-secretsmanager.order	Integer			The order of the environment repository
+spring.cloud.config.server.aws-secretsmanager.origin	String	aws:secrets:		Prefix which indicates the origin of the property
+spring.cloud.config.server.aws-secretsmanager.prefix	String			Prefix indicating first level for every property loaded from AWS Secrets Manager
+spring.cloud.config.server.aws-secretsmanager.profile-separator	String	-		String that separates profile from the application name
+spring.cloud.config.server.aws-secretsmanager.region	String			The region to be used by AWS Secrets Manager client
+spring.cloud.config.server.awsparamstore.decrypt-values	Boolean	true		Flag to indicate the retrieval of all AWS parameters in a hierarchy with their value decrypted
+spring.cloud.config.server.awsparamstore.endpoint	String			The service endpoint to be used by the AWS Parameter Store client
+spring.cloud.config.server.awsparamstore.max-results	Integer	10		The maximum number of items to return for an AWS Parameter Store API call
+spring.cloud.config.server.awsparamstore.order	Integer			The order of the environment repository
+spring.cloud.config.server.awsparamstore.origin	String	aws:ssm:parameter:		Prefix indicating the property's origin
+spring.cloud.config.server.awsparamstore.prefix	String			Prefix indicating first level for every property loaded from the AWS Parameter Store
+spring.cloud.config.server.awsparamstore.profile-separator	String	-		String that separates an appended profile from the context name
+spring.cloud.config.server.awsparamstore.recursive	Boolean	true		Flag to indicate the retrieval of all AWS parameters within a hierarchy
+spring.cloud.config.server.awsparamstore.region	String			The region to be used by the AWS Parameter Store client
+spring.cloud.config.server.awss3.bucket	String			Name of the S3 bucket that contains config
+spring.cloud.config.server.awss3.endpoint	String			Adds the ability to override the baseUrl of the s3 client
+spring.cloud.config.server.awss3.order	Integer			
+spring.cloud.config.server.awss3.region	String			AWS region that contains config
+spring.cloud.config.server.awss3.use-directory-layout	Boolean	false		Use application name as intermediate directory
+spring.cloud.config.server.bootstrap	Boolean	false		Flag indicating that the config server should initialize its own Environment with properties from the remote…
+spring.cloud.config.server.credhub.ca-cert-files	String[]			
+spring.cloud.config.server.credhub.connection-timeout	Duration			
+spring.cloud.config.server.credhub.default-label	String	master		The default label to be used when is not provided by client applications
+spring.cloud.config.server.credhub.oauth2.registration-id	String			
+spring.cloud.config.server.credhub.order	Integer			
+spring.cloud.config.server.credhub.path	String			The common base path for credentials in CredHub
+spring.cloud.config.server.credhub.read-timeout	Duration			
+spring.cloud.config.server.credhub.url	String			
+spring.cloud.config.server.default-application-name	String	application		Default application name when incoming requests do not have a specific one
+spring.cloud.config.server.default-label	String			Default repository label when incoming requests do not have a specific label
+spring.cloud.config.server.default-profile	String	default		Default application profile when incoming requests do not have a specific one
+spring.cloud.config.server.enabled	Boolean	true		Flag indicating config server is enabled
+spring.cloud.config.server.encrypt.enabled	Boolean	true		Enable decryption of environment properties before sending to client
+spring.cloud.config.server.encrypt.plain-text-encrypt	Boolean	false		Enable decryption of environment properties served by plain text endpoint {@link org.springframework.cloud.co…
+spring.cloud.config.server.fail-on-composite-error	Boolean	true		Flag indicating that if there are any errors reading properties from a subordinate environment repository in…
+spring.cloud.config.server.gcp-secret-manager.allowed-project-ids	List<String>			When {@code token-mandatory} is {@code false}: only these project IDs may be used with client-supplied {@code…
+spring.cloud.config.server.gcp-secret-manager.application-label	String	application		
+spring.cloud.config.server.gcp-secret-manager.order	Integer			
+spring.cloud.config.server.gcp-secret-manager.profile-label	String	profile		
+spring.cloud.config.server.gcp-secret-manager.project-id	String			Used when {@code X-Project-ID} is absent and the metadata server is unavailable (for example local developmen…
+spring.cloud.config.server.gcp-secret-manager.service-account	String			
+spring.cloud.config.server.gcp-secret-manager.token-mandatory	Boolean	true		
+spring.cloud.config.server.gcp-secret-manager.version	Integer	1		
+spring.cloud.config.server.git.basedir	File			Base directory for local working copy of repository
+spring.cloud.config.server.git.clone-on-start	Boolean	false		Flag to indicate that the repository should be cloned on startup (not on demand)
+spring.cloud.config.server.git.clone-submodules	Boolean	false		Flag to indicate that the submodules in the repository should be cloned
+spring.cloud.config.server.git.continue-on-multiple-label-failure	Boolean	false		Flag to indicate whether to continue on multiple label failure
+spring.cloud.config.server.git.default-label	String			The default label to be used with the remote repository
+spring.cloud.config.server.git.delete-untracked-branches	Boolean	false		Flag to indicate that the branch should be deleted locally if it's origin tracked branch was removed
+spring.cloud.config.server.git.force-pull	Boolean	false		Flag to indicate that the repository should force pull
+spring.cloud.config.server.git.host-key	String			Valid SSH host key
+spring.cloud.config.server.git.host-key-algorithm	String			One of ssh-dss, ssh-rsa, ssh-ed25519, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, or ecdsa-sha2-nistp521
+spring.cloud.config.server.git.ignore-local-ssh-settings	Boolean	false		If true, use property-based instead of file-based SSH config
+spring.cloud.config.server.git.known-hosts-file	String			Location of custom .known_hosts file
+spring.cloud.config.server.git.order	Integer			The order of the environment repository
+spring.cloud.config.server.git.passphrase	String			Passphrase for unlocking your ssh private key
+spring.cloud.config.server.git.password	String			Password for authentication with remote repository
+spring.cloud.config.server.git.preferred-authentications	String			Override server authentication method order
+spring.cloud.config.server.git.private-key	String			Valid SSH private key
+spring.cloud.config.server.git.proxy	Map<ProxyHostProperties.ProxyForScheme,ProxyHostProperties>			HTTP proxy configuration
+spring.cloud.config.server.git.refresh-rate	Integer	0		Time (in seconds) between refresh of the git repository
+spring.cloud.config.server.git.repos	Map<String,MultipleJGitEnvironmentProperties.PatternMatchingJGitEnvironmentProperties>			Map of repository identifier to location and other properties
+spring.cloud.config.server.git.search-paths	String[]			Search paths to use within local working copy
+spring.cloud.config.server.git.skip-ssl-validation	Boolean	false		Flag to indicate that SSL certificate validation should be bypassed when communicating with a repository serv…
+spring.cloud.config.server.git.strict-host-key-checking	Boolean	true		If false, ignore errors with host key
+spring.cloud.config.server.git.timeout	Integer	5		Timeout (in seconds) for obtaining HTTP or SSH connection (if applicable), defaults to 5 seconds
+spring.cloud.config.server.git.try-master-branch	Boolean	true		To maintain compatibility we will try the master branch in addition to main when we try to fetch the default…
+spring.cloud.config.server.git.uri	String			URI of remote repository
+spring.cloud.config.server.git.username	String			Username for authentication with remote repository
+spring.cloud.config.server.health.accept-empty	Boolean	false		
+spring.cloud.config.server.health.down-health-status	String			
+spring.cloud.config.server.health.repositories	Map<String,ConfigServerHealthIndicator.Repository>			
+spring.cloud.config.server.jdbc.default-label	String	master		
+spring.cloud.config.server.jdbc.enabled	Boolean	true		Flag to indicate that JDBC environment repository configuration is enabled
+spring.cloud.config.server.jdbc.fail-on-error	Boolean	true		Flag to determine how to handle query exceptions
+spring.cloud.config.server.jdbc.order	Integer			
+spring.cloud.config.server.jdbc.sql	String	SELECT "KEY", "VALUE" from PROPERTIES where APPLICATION=? a…		SQL used to query database for keys and values
+spring.cloud.config.server.jdbc.sql-without-profile	String	SELECT "KEY", "VALUE" from PROPERTIES where APPLICATION=? a…		SQL used to query database for keys and values when profile is null
+spring.cloud.config.server.mongodb.collection	String	properties		Name of the MongoDB collection to query for configuration properties
+spring.cloud.config.server.mongodb.default-label	String	master		Default label to use if none is specified
+spring.cloud.config.server.mongodb.enabled	Boolean	true		Flag to indicate that MongoDB environment repository configuration is enabled
+spring.cloud.config.server.mongodb.fail-on-error	Boolean	true		Flag to determine how to handle query exceptions
+spring.cloud.config.server.mongodb.order	Integer			Order of the MongoDB environment repository
+spring.cloud.config.server.native.add-label-locations	Boolean	true		Flag to determine whether label locations should be added
+spring.cloud.config.server.native.default-label	String	master		
+spring.cloud.config.server.native.fail-on-error	Boolean	false		Flag to determine how to handle exceptions during decryption (default false)
+spring.cloud.config.server.native.order	Integer			
+spring.cloud.config.server.native.search-locations	String[]			Locations to search for configuration files
+spring.cloud.config.server.native.version	String			Version string to be reported for native repository
+spring.cloud.config.server.overrides	Map<String,String>			Extra map for a property source to be sent to all clients unconditionally
+spring.cloud.config.server.prefix	String			Prefix for configuration resource paths (default is empty)
+spring.cloud.config.server.redis.order	Integer			
+spring.cloud.config.server.reverse-location-order	Boolean	false		By default the location order we use in GenericResourceRepository is the order in which they are listed
+spring.cloud.config.server.strip-document-from-yaml	Boolean	true		Flag to indicate that YAML documents that are text or collections (not a map) should be returned in "native"…
+spring.cloud.config.server.svn.basedir	File			Base directory for local working copy of repository
+spring.cloud.config.server.svn.continue-on-multiple-label-failure	Boolean	false		Flag to indicate whether to continue on multiple label failure
+spring.cloud.config.server.svn.default-label	String			The default label to be used with the remote repository
+spring.cloud.config.server.svn.order	Integer			The order of the environment repository
+spring.cloud.config.server.svn.passphrase	String			Passphrase for unlocking your ssh private key
+spring.cloud.config.server.svn.password	String			Password for authentication with remote repository
+spring.cloud.config.server.svn.search-paths	String[]			Search paths to use within local working copy
+spring.cloud.config.server.svn.strict-host-key-checking	Boolean	true		Reject incoming SSH host keys from remote servers not in the known host list
+spring.cloud.config.server.svn.uri	String			URI of remote repository
+spring.cloud.config.server.svn.username	String			Username for authentication with remote repository
+spring.cloud.config.server.vault.app-role.app-role-path	String	approle		Mount path of the AppRole authentication backend
+spring.cloud.config.server.vault.app-role.role	String			Name of the role, optional, used for pull-mode
+spring.cloud.config.server.vault.app-role.role-id	String			The RoleId
+spring.cloud.config.server.vault.app-role.secret-id	String			The SecretId
+spring.cloud.config.server.vault.authentication	VaultEnvironmentProperties.AuthenticationMethod			
+spring.cloud.config.server.vault.aws-ec2.aws-ec2-path	String	aws-ec2		Mount path of the AWS-EC2 authentication backend
+spring.cloud.config.server.vault.aws-ec2.identity-document	String	http://169.254.169.254/latest/dynamic/instance-identity/pkc…		URL of the AWS-EC2 PKCS7 identity document
+spring.cloud.config.server.vault.aws-ec2.nonce	String			Nonce used for AWS-EC2 authentication
+spring.cloud.config.server.vault.aws-ec2.role	String			Name of the role, optional
+spring.cloud.config.server.vault.aws-iam.aws-path	String	aws		Mount path of the AWS authentication backend
+spring.cloud.config.server.vault.aws-iam.endpoint-uri	URI			STS server URI
+spring.cloud.config.server.vault.aws-iam.role	String			Name of the role, optional
+spring.cloud.config.server.vault.aws-iam.server-name	String			Name of the server used to set {@code X-Vault-AWS-IAM-Server-ID} header in the headers of login requests
+spring.cloud.config.server.vault.azure-msi.azure-path	String	azure		Mount path of the Azure MSI authentication backend
+spring.cloud.config.server.vault.azure-msi.identity-token-service	String			URI to the Azure MSI Identity Service
+spring.cloud.config.server.vault.azure-msi.metadata-service	String			URI to the Azure MSI Metadata Service
+spring.cloud.config.server.vault.azure-msi.role	String			Name of the role
+spring.cloud.config.server.vault.backend	String	secret		Vault backend
+spring.cloud.config.server.vault.default-key	String	application		The key in vault shared by all applications
+spring.cloud.config.server.vault.default-label	String	main		
+spring.cloud.config.server.vault.enable-label	Boolean	false		Flag to indicate that the repository should use 'label' as well as 'application-name' and 'profile', for vaul…
+spring.cloud.config.server.vault.gcp-gce.gcp-path	String	gcp		Mount path of the Kubernetes authentication backend
+spring.cloud.config.server.vault.gcp-gce.role	String			Name of the role against which the login is being attempted
+spring.cloud.config.server.vault.gcp-gce.service-account	String			Optional service account id
+spring.cloud.config.server.vault.gcp-iam.credentials.encoded-key	String			The base64 encoded contents of an OAuth2 account private key in JSON format
+spring.cloud.config.server.vault.gcp-iam.credentials.location	Resource			Location of the OAuth2 credentials private key
+spring.cloud.config.server.vault.gcp-iam.gcp-path	String	gcp		Mount path of the Kubernetes authentication backend
+spring.cloud.config.server.vault.gcp-iam.jwt-validity	Duration	15m		Validity of the JWT token
+spring.cloud.config.server.vault.gcp-iam.project-id	String			Overrides the GCP project Id
+spring.cloud.config.server.vault.gcp-iam.role	String			Name of the role against which the login is being attempted
+spring.cloud.config.server.vault.gcp-iam.service-account-id	String			Overrides the GCP service account Id
+spring.cloud.config.server.vault.host	String	127.0.0.1		Vault host
+spring.cloud.config.server.vault.kubernetes.kubernetes-path	String	kubernetes		Mount path of the Kubernetes authentication backend
+spring.cloud.config.server.vault.kubernetes.role	String			Name of the role against which the login is being attempted
+spring.cloud.config.server.vault.kubernetes.service-account-token-file	String	/var/run/secrets/kubernetes.io/serviceaccount/token		Path to the service account token file
+spring.cloud.config.server.vault.kv-version	Integer	1		Value to indicate which version of Vault kv backend is used
+spring.cloud.config.server.vault.namespace	String			The value of the Vault X-Vault-Namespace header
+spring.cloud.config.server.vault.order	Integer			
+spring.cloud.config.server.vault.path-to-key	String			KV2 API required "data" after "mount-path"
+spring.cloud.config.server.vault.pcf.instance-certificate	Resource			Path to the instance certificate (PEM)
+spring.cloud.config.server.vault.pcf.instance-key	Resource			Path to the instance key (PEM)
+spring.cloud.config.server.vault.pcf.pcf-path	String	pcf		Mount path of the Kubernetes authentication backend
+spring.cloud.config.server.vault.pcf.role	String			Name of the role against which the login is being attempted
+spring.cloud.config.server.vault.port	Integer	8200		Vault port
+spring.cloud.config.server.vault.profile-separator	String	,		Vault profile separator
+spring.cloud.config.server.vault.proxy	Map<ProxyHostProperties.ProxyForScheme,ProxyHostProperties>			HTTP proxy configuration
+spring.cloud.config.server.vault.scheme	String	http		Vault scheme
+spring.cloud.config.server.vault.skip-ssl-validation	Boolean	false		Flag to indicate that SSL certificate validation should be bypassed when communicating with a repository serv…
+spring.cloud.config.server.vault.ssl.cert-auth-path	String	cert		Mount path of the TLS cert authentication backend
+spring.cloud.config.server.vault.ssl.key-store	Resource			Trust store that holds certificates and private keys
+spring.cloud.config.server.vault.ssl.key-store-password	String			Password used to access the key store
+spring.cloud.config.server.vault.ssl.trust-store	Resource			Trust store that holds SSL certificates
+spring.cloud.config.server.vault.ssl.trust-store-password	String			Password used to access the trust store
+spring.cloud.config.server.vault.timeout	Integer	5		Timeout (in seconds) for obtaining HTTP connection, defaults to 5 seconds
+spring.cloud.config.server.vault.token	String			Static vault token
+spring.cloud.config.tls	TlsProperties			TLS properties
+spring.cloud.config.token	String			Security Token passed thru to underlying environment repository
+spring.cloud.config.uri	String[]	http://localhost:8888		The URI of the remote server (default http://localhost:8888)
+spring.cloud.config.username	String			The username to use (HTTP Basic) when contacting the remote server
+spring.cloud.consul.config.acl-token	String			
+spring.cloud.consul.config.data-key	String	data		If format is Format.PROPERTIES or Format.YAML then the following field is used as key to look up consul for c…
+spring.cloud.consul.config.default-context	String	application		
+spring.cloud.consul.config.enabled	Boolean	true		
+spring.cloud.consul.config.fail-fast	Boolean	true		Throw exceptions during config lookup if true, otherwise, log warnings
+spring.cloud.consul.config.format	ConsulConfigProperties.Format	key-value		
+spring.cloud.consul.config.name	String			Alternative to spring.application.name to use in looking up values in consul KV
+spring.cloud.consul.config.prefix	String		w:spring.cloud.consul.config.prefixes	
+spring.cloud.consul.config.prefixes	List<String>			
+spring.cloud.consul.config.profile-separator	String	,		
+spring.cloud.consul.config.watch.delay	Integer	1000		The value of the fixed delay for the watch in millis
+spring.cloud.consul.config.watch.enabled	Boolean	true		If the watch is enabled
+spring.cloud.consul.config.watch.wait-time	Integer	55		The number of seconds to wait (or block) for watch query, defaults to 55
+spring.cloud.consul.discovery.acl-token	String			
+spring.cloud.consul.discovery.catalog-services-watch-delay	Integer	1000		The delay between calls to watch consul catalog in millis, default is 1000
+spring.cloud.consul.discovery.catalog-services-watch-timeout	Integer	2		The number of seconds to block while watching consul catalog, default is 2
+spring.cloud.consul.discovery.consistency-mode	ConsistencyMode	default		Consistency mode for health service request
+spring.cloud.consul.discovery.datacenters	Map<String,String>			Map of serviceId's -> datacenter to query for in server list
+spring.cloud.consul.discovery.default-query-tag	String			Tag to query for in service list if one is not listed in serverListQueryTags
+spring.cloud.consul.discovery.default-zone-metadata-name	String	zone		Service instance zone comes from metadata
+spring.cloud.consul.discovery.deregister	Boolean	true		Disable automatic de-registration of service in consul
+spring.cloud.consul.discovery.enable-tag-override	Boolean			Enable tag override for the registered service
+spring.cloud.consul.discovery.enabled	Boolean	true		Is service discovery enabled?
+spring.cloud.consul.discovery.fail-fast	Boolean	true		Throw exceptions during service registration if true, otherwise, log warnings (defaults to true)
+spring.cloud.consul.discovery.health-check-critical-timeout	String			Timeout to deregister services critical for longer than timeout (e.g
+spring.cloud.consul.discovery.health-check-headers	Map<String,List<String>>			Headers to be applied to the Health Check calls
+spring.cloud.consul.discovery.health-check-interval	String	10s		How often to perform the health check (e.g
+spring.cloud.consul.discovery.health-check-path	String	/actuator/health		Alternate server path to invoke for health checking
+spring.cloud.consul.discovery.health-check-timeout	String			Timeout for health check (e.g
+spring.cloud.consul.discovery.health-check-tls-skip-verify	Boolean			Skips certificate verification during service checks if true, otherwise runs certificate verification
+spring.cloud.consul.discovery.health-check-url	String			Custom health check url to override default
+spring.cloud.consul.discovery.heartbeat.actuator-health-group	String			The actuator health group to use (null for the root group) when determining system health via Actuator
+spring.cloud.consul.discovery.heartbeat.enabled	Boolean	false		
+spring.cloud.consul.discovery.heartbeat.interval-ratio	Double			
+spring.cloud.consul.discovery.heartbeat.reregister-service-on-failure	Boolean	false		
+spring.cloud.consul.discovery.heartbeat.ttl	Duration	30s		
+spring.cloud.consul.discovery.heartbeat.use-actuator-health	Boolean	true		Whether or not to take the current system health (as reported via the Actuator Health endpoint) into account…
+spring.cloud.consul.discovery.hostname	String			Hostname to use when accessing server
+spring.cloud.consul.discovery.include-hostname-in-instance-id	Boolean	false		Whether hostname is included into the default instance id when registering service
+spring.cloud.consul.discovery.instance-group	String			Service instance group
+spring.cloud.consul.discovery.instance-id	String			Unique service instance id
+spring.cloud.consul.discovery.instance-zone	String			Service instance zone
+spring.cloud.consul.discovery.ip-address	String			IP address to use when accessing service (must also set preferIpAddress to use)
+spring.cloud.consul.discovery.lifecycle.enabled	Boolean	true		
+spring.cloud.consul.discovery.management-enable-tag-override	Boolean			Enable tag override for the registered management service
+spring.cloud.consul.discovery.management-metadata	Map<String,String>			Metadata to use when registering management service
+spring.cloud.consul.discovery.management-port	Integer			Port to register the management service under (defaults to management port)
+spring.cloud.consul.discovery.management-suffix	String	management		Suffix to use when registering management service
+spring.cloud.consul.discovery.management-tags	List<String>			Tags to use when registering management service
+spring.cloud.consul.discovery.metadata	Map<String,String>			Metadata to use when registering service
+spring.cloud.consul.discovery.order	Integer	0		Order of the discovery client used by `CompositeDiscoveryClient` for sorting available clients
+spring.cloud.consul.discovery.port	Integer			Port to register the service under (defaults to listening port)
+spring.cloud.consul.discovery.prefer-agent-address	Boolean	false		Source of how we will determine the address to use
+spring.cloud.consul.discovery.prefer-ip-address	Boolean	false		Use ip address rather than hostname during registration
+spring.cloud.consul.discovery.query-passing	Boolean	false		Add the 'passing` parameter to /v1/health/service/serviceName
+spring.cloud.consul.discovery.register	Boolean	true		Register as a service in consul
+spring.cloud.consul.discovery.register-health-check	Boolean	true		Register health check in consul
+spring.cloud.consul.discovery.scheme	String	http		Whether to register an http or https service
+spring.cloud.consul.discovery.server-list-query-tags	Map<String,String>			Map of serviceId's -> tag to query for in server list
+spring.cloud.consul.discovery.service-name	String			Service name
+spring.cloud.consul.discovery.tags	List<String>			Tags to use when registering service
+spring.cloud.consul.enabled	Boolean	true		Is spring cloud consul enabled
+spring.cloud.consul.host	String	localhost		Consul agent hostname
+spring.cloud.consul.path	String			Custom path if consul is under non-root
+spring.cloud.consul.port	Integer	8500		Consul agent port
+spring.cloud.consul.retry.enabled	Boolean	true		If consul retry is enabled
+spring.cloud.consul.retry.initial-interval	Long	1000		Initial retry interval in milliseconds
+spring.cloud.consul.retry.max-attempts	Integer	6		Maximum number of attempts
+spring.cloud.consul.retry.max-interval	Long	2000		Maximum interval for backoff
+spring.cloud.consul.retry.multiplier	Double	1.1		Multiplier for next interval
+spring.cloud.consul.ribbon.enabled	Boolean	true		Enables Consul and Ribbon integration
+spring.cloud.consul.scheme	String			Consul agent scheme (HTTP/HTTPS)
+spring.cloud.consul.service-registry.auto-registration.enabled	Boolean	true		Enables Consul Service Registry Auto-registration
+spring.cloud.consul.service-registry.enabled	Boolean	true		Enables Consul Service Registry functionality
+spring.cloud.consul.tls.certificate-password	String			Password to open the certificate
+spring.cloud.consul.tls.certificate-path	String			File path to the certificate
+spring.cloud.consul.tls.key-store-instance-type	TLSConfig.KeyStoreInstanceType			Type of key framework to use
+spring.cloud.consul.tls.key-store-password	String			Password to an external keystore
+spring.cloud.consul.tls.key-store-path	String			Path to an external keystore
+spring.cloud.decrypt-environment-post-processor.enabled	Boolean	true		Enable the DecryptEnvironmentPostProcessor
+spring.cloud.discovery.client.composite-indicator.enabled	Boolean	true		Enables discovery client composite health indicator
+spring.cloud.discovery.client.health-indicator.enabled	Boolean	true		
+spring.cloud.discovery.client.health-indicator.include-description	Boolean	false		
+spring.cloud.discovery.client.health-indicator.use-services-query	Boolean	true		Whether or not the indicator should use {@link DiscoveryClient#getServices} to check its health
+spring.cloud.discovery.client.simple.instances	Map<String,List<DefaultServiceInstance>>			
+spring.cloud.discovery.client.simple.local.host	String			
+spring.cloud.discovery.client.simple.local.instance-id	String			
+spring.cloud.discovery.client.simple.local.metadata	Map<String,String>			
+spring.cloud.discovery.client.simple.local.port	Integer	0		
+spring.cloud.discovery.client.simple.local.secure	Boolean	false		
+spring.cloud.discovery.client.simple.local.service-id	String			
+spring.cloud.discovery.client.simple.local.uri	URI			
+spring.cloud.discovery.client.simple.order	Integer			
+spring.cloud.discovery.enabled	Boolean	true		Enables discovery client health indicators
+spring.cloud.features.enabled	Boolean	true		Enables the features endpoint
+spring.cloud.function.application-context	ApplicationContext			
+spring.cloud.function.configuration	Map<String,FunctionProperties.FunctionConfigurationProperties>			
+spring.cloud.function.definition	String			Definition of the function to be used
+spring.cloud.function.expected-content-type	String			
+spring.cloud.function.http.delete	String			Function definition mappings for DELETE method (e.g
+spring.cloud.function.http.get	String			Function definition mappings for GET method (e.g
+spring.cloud.function.http.ignored-headers	List<String>			List of headers to be ignored when generating HttpHeaders (request or response)
+spring.cloud.function.http.post	String			Function definition mappings for POST method (e.g
+spring.cloud.function.http.put	String			Function definition mappings for PUT method (e.g
+spring.cloud.function.http.request-only-headers	List<String>			List of headers that must remain only in the request
+spring.cloud.function.ineligible-definitions	List<String>			List of functions that are not eligible to be registered in Function Catalog
+spring.cloud.function.routing-expression	String			SpEL expression which should result in function definition (e.g., function name or composition instruction)
+spring.cloud.function.web.export.auto-startup	Boolean	true		Flag to indicate that the supplier emits HTTP requests automatically on startup
+spring.cloud.function.web.export.debug	Boolean	true		Flag to indicate that extra logging is required for the supplier
+spring.cloud.function.web.export.enabled	Boolean	false		Flag to enable the export of a supplier
+spring.cloud.function.web.export.sink.content-type	String	application/json		Content type to use when serializing source's output for transport (default 'application/json`)
+spring.cloud.function.web.export.sink.headers	Map<String,String>			Additional headers to append to the outgoing HTTP requests
+spring.cloud.function.web.export.sink.name	String			The name of a specific existing Supplier to export from the function catalog
+spring.cloud.function.web.export.sink.url	String			URL template for outgoing HTTP requests
+spring.cloud.function.web.export.source.include-headers	Boolean	true		Include the incoming headers in the outgoing Supplier
+spring.cloud.function.web.export.source.type	Class<?>			If the origin url is set, the type of content expected (e.g
+spring.cloud.function.web.export.source.url	String			URL template for creating a virtual Supplier from HTTP GET
+spring.cloud.function.web.path	String			Path to web resources for functions (should start with / if not empty)
+spring.cloud.gateway	GatewayProperties		w:spring.cloud.gateway.server.webflux	
+spring.cloud.gateway.default-filters	List<FilterDefinition>		w:spring.cloud.gateway.server.webflux.default-filters	List of filter definitions that are applied to every route
+spring.cloud.gateway.discovery.locator	DiscoveryLocatorProperties		w:spring.cloud.gateway.server.webflux.discovery.locator	
+spring.cloud.gateway.discovery.locator.enabled	Boolean	false	w:spring.cloud.gateway.server.webflux.discovery.locator.enabled	Flag that enables DiscoveryClient gateway integration
+spring.cloud.gateway.discovery.locator.filters	List<FilterDefinition>		w:spring.cloud.gateway.server.webflux.discovery.locator.filters	
+spring.cloud.gateway.discovery.locator.include-expression	String	true	w:spring.cloud.gateway.server.webflux.discovery.locator.include-expression	SpEL expression that will evaluate whether to include a service in gateway integration or not, defaults to: t…
+spring.cloud.gateway.discovery.locator.lower-case-service-id	Boolean	false	w:spring.cloud.gateway.server.webflux.discovery.locator.lower-case-service-id	Option to lower case serviceId in predicates and filters, defaults to false
+spring.cloud.gateway.discovery.locator.predicates	List<PredicateDefinition>		w:spring.cloud.gateway.server.webflux.discovery.locator.predicates	
+spring.cloud.gateway.discovery.locator.route-id-prefix	String		w:spring.cloud.gateway.server.webflux.discovery.locator.route-id-prefix	The prefix for the routeId, defaults to discoveryClient.getClass().getSimpleName() + "_"
+spring.cloud.gateway.discovery.locator.url-expression	String	'lb://'+serviceId	w:spring.cloud.gateway.server.webflux.discovery.locator.url-expression	SpEL expression that create the uri for each route, defaults to: 'lb://'+serviceId
+spring.cloud.gateway.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.enabled	Enables gateway functionality
+spring.cloud.gateway.fail-on-route-definition-error	Boolean	true	w:spring.cloud.gateway.server.webflux.fail-on-route-definition-error	Option to fail on route definition errors, defaults to true
+spring.cloud.gateway.filter.add-request-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.add-request-header.enabled	Enables the add-request-header filter
+spring.cloud.gateway.filter.add-request-parameter.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.add-request-parameter.enabled	Enables the add-request-parameter filter
+spring.cloud.gateway.filter.add-response-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.add-response-header.enabled	Enables the add-response-header filter
+spring.cloud.gateway.filter.circuit-breaker.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.circuit-breaker.enabled	Enables the circuit-breaker filter
+spring.cloud.gateway.filter.dedupe-response-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.dedupe-response-header.enabled	Enables the dedupe-response-header filter
+spring.cloud.gateway.filter.fallback-headers.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.fallback-headers.enabled	Enables the fallback-headers filter
+spring.cloud.gateway.filter.hystrix.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.hystrix.enabled	Enables the hystrix filter
+spring.cloud.gateway.filter.json-to-grpc.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.json-to-grpc.enabled	Enables the JSON to gRPC filter
+spring.cloud.gateway.filter.local-response-cache	LocalResponseCacheProperties		w:spring.cloud.gateway.server.webflux.filter.local-response-cache	
+spring.cloud.gateway.filter.local-response-cache.enabled	Boolean	false	w:spring.cloud.gateway.server.webflux.filter.local-response-cache.enabled	Enables the local-response-cache filter
+spring.cloud.gateway.filter.local-response-cache.request	LocalResponseCacheProperties.RequestOptions		w:spring.cloud.gateway.server.webflux.filter.local-response-cache.request	
+spring.cloud.gateway.filter.local-response-cache.request.no-cache-strategy	LocalResponseCacheProperties.NoCacheStrategy	skip-update-cache-entry	w:spring.cloud.gateway.server.webflux.filter.local-response-cache.request.no-cache-strategy	
+spring.cloud.gateway.filter.local-response-cache.size	DataSize		w:spring.cloud.gateway.server.webflux.filter.local-response-cache.size	Maximum size of the cache to evict entries for this route (in KB, MB and GB)
+spring.cloud.gateway.filter.local-response-cache.time-to-live	Duration	5m	w:spring.cloud.gateway.server.webflux.filter.local-response-cache.time-to-live	Time to expire a cache entry (expressed in s for seconds, m for minutes, and h for hours)
+spring.cloud.gateway.filter.map-request-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.map-request-header.enabled	Enables the map-request-header filter
+spring.cloud.gateway.filter.modify-request-body.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.modify-request-body.enabled	Enables the modify-request-body filter
+spring.cloud.gateway.filter.modify-response-body.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.modify-response-body.enabled	Enables the modify-response-body filter
+spring.cloud.gateway.filter.prefix-path.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.prefix-path.enabled	Enables the prefix-path filter
+spring.cloud.gateway.filter.preserve-host-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.preserve-host-header.enabled	Enables the preserve-host-header filter
+spring.cloud.gateway.filter.redirect-to.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.redirect-to.enabled	Enables the redirect-to filter
+spring.cloud.gateway.filter.remove-hop-by-hop	RemoveHopByHopHeadersFilter		w:spring.cloud.gateway.server.webflux.filter.remove-hop-by-hop	
+spring.cloud.gateway.filter.remove-hop-by-hop.headers	Set<String>		w:spring.cloud.gateway.server.webflux.filter.remove-hop-by-hop.headers	
+spring.cloud.gateway.filter.remove-hop-by-hop.order	Integer	0	w:spring.cloud.gateway.server.webflux.filter.remove-hop-by-hop.order	
+spring.cloud.gateway.filter.remove-request-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.remove-request-header.enabled	Enables the remove-request-header filter
+spring.cloud.gateway.filter.remove-request-parameter.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.remove-request-parameter.enabled	Enables the remove-request-parameter filter
+spring.cloud.gateway.filter.remove-response-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.remove-response-header.enabled	Enables the remove-response-header filter
+spring.cloud.gateway.filter.request-header-size.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.request-header-size.enabled	Enables the request-header-size filter
+spring.cloud.gateway.filter.request-header-to-request-uri.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.request-header-to-request-uri.enabled	Enables the request-header-to-request-uri filter
+spring.cloud.gateway.filter.request-rate-limiter	RequestRateLimiterGatewayFilterFactory		w:spring.cloud.gateway.server.webflux.filter.request-rate-limiter	
+spring.cloud.gateway.filter.request-rate-limiter.default-key-resolver	KeyResolver		w:spring.cloud.gateway.server.webflux.filter.request-rate-limiter.default-key-resolver	
+spring.cloud.gateway.filter.request-rate-limiter.default-rate-limiter	RateLimiter		w:spring.cloud.gateway.server.webflux.filter.request-rate-limiter.default-rate-limiter	
+spring.cloud.gateway.filter.request-rate-limiter.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.request-rate-limiter.enabled	Enables the request-rate-limiter filter
+spring.cloud.gateway.filter.request-size.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.request-size.enabled	Enables the request-size filter
+spring.cloud.gateway.filter.retry.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.retry.enabled	Enables the retry filter
+spring.cloud.gateway.filter.rewrite-location-response-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.rewrite-location-response-header.enabled	Enables the rewrite-location-response-header filter
+spring.cloud.gateway.filter.rewrite-location.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.rewrite-location.enabled	Enables the rewrite-location filter
+spring.cloud.gateway.filter.rewrite-path.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.rewrite-path.enabled	Enables the rewrite-path filter
+spring.cloud.gateway.filter.rewrite-request-parameter.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.rewrite-request-parameter.enabled	Enables the rewrite-request-parameter filter
+spring.cloud.gateway.filter.rewrite-response-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.rewrite-response-header.enabled	Enables the rewrite-response-header filter
+spring.cloud.gateway.filter.save-session.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.save-session.enabled	Enables the save-session filter
+spring.cloud.gateway.filter.secure-headers	SecureHeadersProperties		w:spring.cloud.gateway.server.webflux.filter.secure-headers	
+spring.cloud.gateway.filter.secure-headers.content-security-policy	String	default-src 'self' https:; font-src 'self' https: data:; im…	w:spring.cloud.gateway.server.webflux.filter.secure-headers.content-security-policy	
+spring.cloud.gateway.filter.secure-headers.content-type-options	String	nosniff	w:spring.cloud.gateway.server.webflux.filter.secure-headers.content-type-options	
+spring.cloud.gateway.filter.secure-headers.default-headers	Set<String>		w:spring.cloud.gateway.server.webflux.filter.secure-headers.default-headers	
+spring.cloud.gateway.filter.secure-headers.disable	List<String>		w:spring.cloud.gateway.server.webflux.filter.secure-headers.disable	
+spring.cloud.gateway.filter.secure-headers.disabled-headers	Set<String>		w:spring.cloud.gateway.server.webflux.filter.secure-headers.disabled-headers	
+spring.cloud.gateway.filter.secure-headers.download-options	String	noopen	w:spring.cloud.gateway.server.webflux.filter.secure-headers.download-options	
+spring.cloud.gateway.filter.secure-headers.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.secure-headers.enabled	Enables the secure-headers filter
+spring.cloud.gateway.filter.secure-headers.enabled-headers	Set<String>		w:spring.cloud.gateway.server.webflux.filter.secure-headers.enabled-headers	
+spring.cloud.gateway.filter.secure-headers.frame-options	String	DENY	w:spring.cloud.gateway.server.webflux.filter.secure-headers.frame-options	
+spring.cloud.gateway.filter.secure-headers.permissions-policy	String	accelerometer=(), ambient-light-sensor=(), autoplay=(), bat…	w:spring.cloud.gateway.server.webflux.filter.secure-headers.permissions-policy	
+spring.cloud.gateway.filter.secure-headers.permitted-cross-domain-policies	String	none	w:spring.cloud.gateway.server.webflux.filter.secure-headers.permitted-cross-domain-policies	
+spring.cloud.gateway.filter.secure-headers.referrer-policy	String	no-referrer	w:spring.cloud.gateway.server.webflux.filter.secure-headers.referrer-policy	
+spring.cloud.gateway.filter.secure-headers.strict-transport-security	String	max-age=631138519	w:spring.cloud.gateway.server.webflux.filter.secure-headers.strict-transport-security	
+spring.cloud.gateway.filter.secure-headers.xss-protection-header	String	1 ; mode=block	w:spring.cloud.gateway.server.webflux.filter.secure-headers.xss-protection-header	
+spring.cloud.gateway.filter.set-path.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.set-path.enabled	Enables the set-path filter
+spring.cloud.gateway.filter.set-request-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.set-request-header.enabled	Enables the set-request-header filter
+spring.cloud.gateway.filter.set-request-host-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.set-request-host-header.enabled	Enables the set-request-host-header filter
+spring.cloud.gateway.filter.set-response-header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.set-response-header.enabled	Enables the set-response-header filter
+spring.cloud.gateway.filter.set-status.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.set-status.enabled	Enables the set-status filter
+spring.cloud.gateway.filter.strip-prefix.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.filter.strip-prefix.enabled	Enables the strip-prefix filter
+spring.cloud.gateway.forwarded.by.enabled	Boolean	false	w:spring.cloud.gateway.server.webflux.forwarded.by.enabled	Enables the Forwarded: by header part
+spring.cloud.gateway.forwarded.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.forwarded.enabled	Enables the ForwardedHeadersFilter
+spring.cloud.gateway.global-filter.adapt-cached-body.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.adapt-cached-body.enabled	Enables the adapt-cached-body global filter
+spring.cloud.gateway.global-filter.forward-path.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.forward-path.enabled	Enables the forward-path global filter
+spring.cloud.gateway.global-filter.forward-routing.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.forward-routing.enabled	Enables the forward-routing global filter
+spring.cloud.gateway.global-filter.load-balancer-client.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.load-balancer-client.enabled	Enables the load-balancer-client global filter
+spring.cloud.gateway.global-filter.local-response-cache.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.local-response-cache.enabled	Enables the local-response-cache filter for all routes, it allows to add a specific configuration at route le…
+spring.cloud.gateway.global-filter.netty-routing.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.netty-routing.enabled	Enables the netty-routing global filter
+spring.cloud.gateway.global-filter.netty-write-response.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.netty-write-response.enabled	Enables the netty-write-response global filter
+spring.cloud.gateway.global-filter.reactive-load-balancer-client.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.reactive-load-balancer-client.enabled	Enables the reactive-load-balancer-client global filter
+spring.cloud.gateway.global-filter.remove-cached-body.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.remove-cached-body.enabled	Enables the remove-cached-body global filter
+spring.cloud.gateway.global-filter.route-to-request-url.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.route-to-request-url.enabled	Enables the route-to-request-url global filter
+spring.cloud.gateway.global-filter.websocket-routing.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.global-filter.websocket-routing.enabled	Enables the websocket-routing global filter
+spring.cloud.gateway.globalcors	GlobalCorsProperties		w:spring.cloud.gateway.server.webflux.globalcors	
+spring.cloud.gateway.globalcors.add-to-simple-url-handler-mapping	Boolean	false	w:spring.cloud.gateway.server.webflux.globalcors.add-to-simple-url-handler-mapping	If global CORS config should be added to the URL handler
+spring.cloud.gateway.globalcors.cors-configurations	Map<String,CorsConfiguration>		w:spring.cloud.gateway.server.webflux.globalcors.cors-configurations	
+spring.cloud.gateway.handler-mapping.order	Integer	1	w:spring.cloud.gateway.server.webflux.handler-mapping.order	The order of RoutePredicateHandlerMapping
+spring.cloud.gateway.httpclient	HttpClientProperties		w:spring.cloud.gateway.server.webflux.httpclient	
+spring.cloud.gateway.httpclient.compression	Boolean	false	w:spring.cloud.gateway.server.webflux.httpclient.compression	Enables compression for Netty HttpClient
+spring.cloud.gateway.httpclient.connect-timeout	Integer		w:spring.cloud.gateway.server.webflux.httpclient.connect-timeout	The connect timeout in millis, the default is 30s
+spring.cloud.gateway.httpclient.max-header-size	DataSize		w:spring.cloud.gateway.server.webflux.httpclient.max-header-size	The max response header size
+spring.cloud.gateway.httpclient.max-initial-line-length	DataSize		w:spring.cloud.gateway.server.webflux.httpclient.max-initial-line-length	The max initial line length
+spring.cloud.gateway.httpclient.pool	HttpClientProperties.Pool		w:spring.cloud.gateway.server.webflux.httpclient.pool	
+spring.cloud.gateway.httpclient.pool.acquire-timeout	Long		w:spring.cloud.gateway.server.webflux.httpclient.pool.acquire-timeout	Only for type FIXED, the maximum time in millis to wait for acquiring
+spring.cloud.gateway.httpclient.pool.eviction-interval	Duration	0	w:spring.cloud.gateway.server.webflux.httpclient.pool.eviction-interval	Perform regular eviction checks in the background at a specified interval
+spring.cloud.gateway.httpclient.pool.leasing-strategy	HttpClientProperties.Pool.LeasingStrategy	fifo	w:spring.cloud.gateway.server.webflux.httpclient.pool.leasing-strategy	Configures the leasing strategy for the pool (fifo or lifo), defaults to FIFO which is Netty's default
+spring.cloud.gateway.httpclient.pool.max-connections	Integer		w:spring.cloud.gateway.server.webflux.httpclient.pool.max-connections	Only for type FIXED, the maximum number of connections before starting pending acquisition on existing ones
+spring.cloud.gateway.httpclient.pool.max-idle-time	Duration		w:spring.cloud.gateway.server.webflux.httpclient.pool.max-idle-time	Time in millis after which the channel will be closed
+spring.cloud.gateway.httpclient.pool.max-life-time	Duration		w:spring.cloud.gateway.server.webflux.httpclient.pool.max-life-time	Duration after which the channel will be closed
+spring.cloud.gateway.httpclient.pool.metrics	Boolean	false	w:spring.cloud.gateway.server.webflux.httpclient.pool.metrics	Enables channel pools metrics to be collected and registered in Micrometer
+spring.cloud.gateway.httpclient.pool.name	String	proxy	w:spring.cloud.gateway.server.webflux.httpclient.pool.name	The channel pool map name, defaults to proxy
+spring.cloud.gateway.httpclient.pool.type	HttpClientProperties.Pool.PoolType	elastic	w:spring.cloud.gateway.server.webflux.httpclient.pool.type	Type of pool for HttpClient to use (elastic, fixed or disabled)
+spring.cloud.gateway.httpclient.proxy	HttpClientProperties.Proxy		w:spring.cloud.gateway.server.webflux.httpclient.proxy	
+spring.cloud.gateway.httpclient.proxy.host	String		w:spring.cloud.gateway.server.webflux.httpclient.proxy.host	Hostname for proxy configuration of Netty HttpClient
+spring.cloud.gateway.httpclient.proxy.non-proxy-hosts-pattern	String		w:spring.cloud.gateway.server.webflux.httpclient.proxy.non-proxy-hosts-pattern	Regular expression (Java) for a configured list of hosts
+spring.cloud.gateway.httpclient.proxy.password	String		w:spring.cloud.gateway.server.webflux.httpclient.proxy.password	Password for proxy configuration of Netty HttpClient
+spring.cloud.gateway.httpclient.proxy.port	Integer		w:spring.cloud.gateway.server.webflux.httpclient.proxy.port	Port for proxy configuration of Netty HttpClient
+spring.cloud.gateway.httpclient.proxy.type	ProxyProvider.Proxy	http	w:spring.cloud.gateway.server.webflux.httpclient.proxy.type	proxyType for proxy configuration of Netty HttpClient (http, socks4 or socks5)
+spring.cloud.gateway.httpclient.proxy.username	String		w:spring.cloud.gateway.server.webflux.httpclient.proxy.username	Username for proxy configuration of Netty HttpClient
+spring.cloud.gateway.httpclient.response-timeout	Duration		w:spring.cloud.gateway.server.webflux.httpclient.response-timeout	The response timeout
+spring.cloud.gateway.httpclient.ssl	HttpClientProperties.Ssl		w:spring.cloud.gateway.server.webflux.httpclient.ssl	
+spring.cloud.gateway.httpclient.ssl.close-notify-flush-timeout	Duration	3000ms	w:spring.cloud.gateway.server.webflux.httpclient.ssl.close-notify-flush-timeout	SSL close_notify flush timeout
+spring.cloud.gateway.httpclient.ssl.close-notify-read-timeout	Duration	0	w:spring.cloud.gateway.server.webflux.httpclient.ssl.close-notify-read-timeout	SSL close_notify read timeout
+spring.cloud.gateway.httpclient.ssl.handshake-timeout	Duration	10000ms	w:spring.cloud.gateway.server.webflux.httpclient.ssl.handshake-timeout	SSL handshake timeout
+spring.cloud.gateway.httpclient.ssl.key-password	String		w:spring.cloud.gateway.server.webflux.httpclient.ssl.key-password	Key password, default is same as keyStorePassword
+spring.cloud.gateway.httpclient.ssl.key-store	String		w:spring.cloud.gateway.server.webflux.httpclient.ssl.key-store	Keystore path for Netty HttpClient
+spring.cloud.gateway.httpclient.ssl.key-store-password	String		w:spring.cloud.gateway.server.webflux.httpclient.ssl.key-store-password	Keystore password
+spring.cloud.gateway.httpclient.ssl.key-store-provider	String		w:spring.cloud.gateway.server.webflux.httpclient.ssl.key-store-provider	Keystore provider for Netty HttpClient, optional field
+spring.cloud.gateway.httpclient.ssl.key-store-type	String	JKS	w:spring.cloud.gateway.server.webflux.httpclient.ssl.key-store-type	Keystore type for Netty HttpClient, default is JKS
+spring.cloud.gateway.httpclient.ssl.ssl-bundle	String		w:spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle	The name of the SSL bundle to use
+spring.cloud.gateway.httpclient.ssl.trusted-x509-certificates	List<String>		w:spring.cloud.gateway.server.webflux.httpclient.ssl.trusted-x509-certificates	Trusted certificates for verifying the remote endpoint's certificate
+spring.cloud.gateway.httpclient.ssl.use-insecure-trust-manager	Boolean	false	w:spring.cloud.gateway.server.webflux.httpclient.ssl.use-insecure-trust-manager	Installs the netty InsecureTrustManagerFactory
+spring.cloud.gateway.httpclient.websocket	HttpClientProperties.Websocket		w:spring.cloud.gateway.server.webflux.httpclient.websocket	
+spring.cloud.gateway.httpclient.websocket.max-frame-payload-length	Integer		w:spring.cloud.gateway.server.webflux.httpclient.websocket.max-frame-payload-length	Max frame payload length
+spring.cloud.gateway.httpclient.websocket.proxy-ping	Boolean	true	w:spring.cloud.gateway.server.webflux.httpclient.websocket.proxy-ping	Proxy ping frames to downstream services, defaults to true
+spring.cloud.gateway.httpclient.wiretap	Boolean	false	w:spring.cloud.gateway.server.webflux.httpclient.wiretap	Enables wiretap debugging for Netty HttpClient
+spring.cloud.gateway.httpserver.wiretap	Boolean	false	w:spring.cloud.gateway.server.webflux.httpserver.wiretap	Enables wiretap debugging for Netty HttpServer
+spring.cloud.gateway.loadbalancer	GatewayLoadBalancerProperties		w:spring.cloud.gateway.server.webflux.loadbalancer	
+spring.cloud.gateway.loadbalancer.use404	Boolean	false	w:spring.cloud.gateway.server.webflux.loadbalancer.use404	
+spring.cloud.gateway.metrics	GatewayMetricsProperties		w:spring.cloud.gateway.server.webflux.metrics	
+spring.cloud.gateway.metrics.enabled	Boolean	false	w:spring.cloud.gateway.server.webflux.metrics.enabled	Enables the collection of metrics data
+spring.cloud.gateway.metrics.prefix	String	spring.cloud.gateway	w:spring.cloud.gateway.server.webflux.metrics.prefix	The prefix of all metrics emitted by gateway
+spring.cloud.gateway.metrics.tags	Map<String,String>		w:spring.cloud.gateway.server.webflux.metrics.tags	Tags map that added to metrics
+spring.cloud.gateway.observability.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.observability.enabled	If Micrometer Observability support should be turned on
+spring.cloud.gateway.predicate.after.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.after.enabled	Enables the after predicate
+spring.cloud.gateway.predicate.before.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.before.enabled	Enables the before predicate
+spring.cloud.gateway.predicate.between.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.between.enabled	Enables the between predicate
+spring.cloud.gateway.predicate.cloud-foundry-route-service.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.cloud-foundry-route-service.enabled	Enables the cloud-foundry-route-service predicate
+spring.cloud.gateway.predicate.cookie.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.cookie.enabled	Enables the cookie predicate
+spring.cloud.gateway.predicate.header.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.header.enabled	Enables the header predicate
+spring.cloud.gateway.predicate.host.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.host.enabled	Enables the host predicate
+spring.cloud.gateway.predicate.host.include-port	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.host.include-port	Include the port in matching the host name
+spring.cloud.gateway.predicate.method.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.method.enabled	Enables the method predicate
+spring.cloud.gateway.predicate.path.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.path.enabled	Enables the path predicate
+spring.cloud.gateway.predicate.query.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.query.enabled	Enables the query predicate
+spring.cloud.gateway.predicate.read-body.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.read-body.enabled	Enables the read-body predicate
+spring.cloud.gateway.predicate.remote-addr.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.remote-addr.enabled	Enables the remote-addr predicate
+spring.cloud.gateway.predicate.weight.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.weight.enabled	Enables the weight predicate
+spring.cloud.gateway.predicate.xforwarded-remote-addr.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.predicate.xforwarded-remote-addr.enabled	Enables the xforwarded-remote-addr predicate
+spring.cloud.gateway.redis-rate-limiter	RedisRateLimiter		w:spring.cloud.gateway.server.webflux.redis-rate-limiter	
+spring.cloud.gateway.redis-rate-limiter.burst-capacity-header	String	X-RateLimit-Burst-Capacity	w:spring.cloud.gateway.server.webflux.redis-rate-limiter.burst-capacity-header	The name of the header that returns the burst capacity configuration
+spring.cloud.gateway.redis-rate-limiter.config	Map<String,RedisRateLimiter.Config>		w:spring.cloud.gateway.server.webflux.redis-rate-limiter.config	
+spring.cloud.gateway.redis-rate-limiter.include-headers	Boolean	true	w:spring.cloud.gateway.server.webflux.redis-rate-limiter.include-headers	Whether or not to include headers containing rate limiter information, defaults to true
+spring.cloud.gateway.redis-rate-limiter.remaining-header	String	X-RateLimit-Remaining	w:spring.cloud.gateway.server.webflux.redis-rate-limiter.remaining-header	The name of the header that returns number of remaining requests during the current second
+spring.cloud.gateway.redis-rate-limiter.replenish-rate-header	String	X-RateLimit-Replenish-Rate	w:spring.cloud.gateway.server.webflux.redis-rate-limiter.replenish-rate-header	The name of the header that returns the replenish rate configuration
+spring.cloud.gateway.redis-rate-limiter.requested-tokens-header	String	X-RateLimit-Requested-Tokens	w:spring.cloud.gateway.server.webflux.redis-rate-limiter.requested-tokens-header	The name of the header that returns the requested tokens configuration
+spring.cloud.gateway.redis-route-definition-repository.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.redis-route-definition-repository.enabled	If RedisRouteDefinitionRepository should be enabled
+spring.cloud.gateway.restrictive-property-accessor.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.restrictive-property-accessor.enabled	Restricts method and property access in SpEL
+spring.cloud.gateway.route-filter-cache-enabled	Boolean	false	w:spring.cloud.gateway.server.webflux.route-filter-cache-enabled	Enables the route filter cache, defaults to false
+spring.cloud.gateway.route-refresh-listener.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.route-refresh-listener.enabled	If RouteRefreshListener should be turned on
+spring.cloud.gateway.routes	List<RouteDefinition>		w:spring.cloud.gateway.server.webflux.routes	List of Routes
+spring.cloud.gateway.server.webflux.default-filters	List<FilterDefinition>			List of filter definitions that are applied to every route
+spring.cloud.gateway.server.webflux.discovery.locator.enabled	Boolean	false		Flag that enables DiscoveryClient gateway integration
+spring.cloud.gateway.server.webflux.discovery.locator.filters	List<FilterDefinition>			
+spring.cloud.gateway.server.webflux.discovery.locator.include-expression	String	true		SpEL expression that will evaluate whether to include a service in gateway integration or not, defaults to: t…
+spring.cloud.gateway.server.webflux.discovery.locator.lower-case-service-id	Boolean	false		Option to lower case serviceId in predicates and filters, defaults to false
+spring.cloud.gateway.server.webflux.discovery.locator.predicates	List<PredicateDefinition>			
+spring.cloud.gateway.server.webflux.discovery.locator.route-id-prefix	String			The prefix for the routeId, defaults to discoveryClient.getClass().getSimpleName() + "_"
+spring.cloud.gateway.server.webflux.discovery.locator.url-expression	String	'lb://'+serviceId		SpEL expression that create the uri for each route, defaults to: 'lb://'+serviceId
+spring.cloud.gateway.server.webflux.enabled	Boolean	true		Enables gateway functionality
+spring.cloud.gateway.server.webflux.fail-on-route-definition-error	Boolean	true		Option to fail on route definition errors, defaults to true
+spring.cloud.gateway.server.webflux.filter.add-request-header.enabled	Boolean	true		Enables the add-request-header filter
+spring.cloud.gateway.server.webflux.filter.add-request-parameter.enabled	Boolean	true		Enables the add-request-parameter filter
+spring.cloud.gateway.server.webflux.filter.add-response-header.enabled	Boolean	true		Enables the add-response-header filter
+spring.cloud.gateway.server.webflux.filter.circuit-breaker.enabled	Boolean	true		Enables the circuit-breaker filter
+spring.cloud.gateway.server.webflux.filter.dedupe-response-header.enabled	Boolean	true		Enables the dedupe-response-header filter
+spring.cloud.gateway.server.webflux.filter.fallback-headers.enabled	Boolean	true		Enables the fallback-headers filter
+spring.cloud.gateway.server.webflux.filter.hystrix.enabled	Boolean	true		Enables the hystrix filter
+spring.cloud.gateway.server.webflux.filter.json-to-grpc.enabled	Boolean	true		Enables the JSON to gRPC filter
+spring.cloud.gateway.server.webflux.filter.local-response-cache.enabled	Boolean	false		Enables the local-response-cache filter
+spring.cloud.gateway.server.webflux.filter.local-response-cache.request.no-cache-strategy	LocalResponseCacheProperties.NoCacheStrategy	skip-update-cache-entry		
+spring.cloud.gateway.server.webflux.filter.local-response-cache.size	DataSize			Maximum size of the cache to evict entries for this route (in KB, MB and GB)
+spring.cloud.gateway.server.webflux.filter.local-response-cache.time-to-live	Duration	5m		Time to expire a cache entry (expressed in s for seconds, m for minutes, and h for hours)
+spring.cloud.gateway.server.webflux.filter.map-request-header.enabled	Boolean	true		Enables the map-request-header filter
+spring.cloud.gateway.server.webflux.filter.modify-request-body.enabled	Boolean	true		Enables the modify-request-body filter
+spring.cloud.gateway.server.webflux.filter.modify-response-body.enabled	Boolean	true		Enables the modify-response-body filter
+spring.cloud.gateway.server.webflux.filter.prefix-path.enabled	Boolean	true		Enables the prefix-path filter
+spring.cloud.gateway.server.webflux.filter.preserve-host-header.enabled	Boolean	true		Enables the preserve-host-header filter
+spring.cloud.gateway.server.webflux.filter.redirect-to.enabled	Boolean	true		Enables the redirect-to filter
+spring.cloud.gateway.server.webflux.filter.remove-hop-by-hop.headers	Set<String>			
+spring.cloud.gateway.server.webflux.filter.remove-hop-by-hop.order	Integer			
+spring.cloud.gateway.server.webflux.filter.remove-request-header.enabled	Boolean	true		Enables the remove-request-header filter
+spring.cloud.gateway.server.webflux.filter.remove-request-parameter.enabled	Boolean	true		Enables the remove-request-parameter filter
+spring.cloud.gateway.server.webflux.filter.remove-response-header.enabled	Boolean	true		Enables the remove-response-header filter
+spring.cloud.gateway.server.webflux.filter.request-header-size.enabled	Boolean	true		Enables the request-header-size filter
+spring.cloud.gateway.server.webflux.filter.request-header-to-request-uri.enabled	Boolean	true		Enables the request-header-to-request-uri filter
+spring.cloud.gateway.server.webflux.filter.request-rate-limiter.default-key-resolver	KeyResolver			
+spring.cloud.gateway.server.webflux.filter.request-rate-limiter.default-rate-limiter	RateLimiter			
+spring.cloud.gateway.server.webflux.filter.request-rate-limiter.enabled	Boolean	true		Enables the request-rate-limiter filter
+spring.cloud.gateway.server.webflux.filter.request-size.enabled	Boolean	true		Enables the request-size filter
+spring.cloud.gateway.server.webflux.filter.retry.enabled	Boolean	true		Enables the retry filter
+spring.cloud.gateway.server.webflux.filter.rewrite-location-response-header.enabled	Boolean	true		Enables the rewrite-location-response-header filter
+spring.cloud.gateway.server.webflux.filter.rewrite-location.enabled	Boolean	true		Enables the rewrite-location filter
+spring.cloud.gateway.server.webflux.filter.rewrite-path.enabled	Boolean	true		Enables the rewrite-path filter
+spring.cloud.gateway.server.webflux.filter.rewrite-request-parameter.enabled	Boolean	true		Enables the rewrite-request-parameter filter
+spring.cloud.gateway.server.webflux.filter.rewrite-response-header.enabled	Boolean	true		Enables the rewrite-response-header filter
+spring.cloud.gateway.server.webflux.filter.save-session.enabled	Boolean	true		Enables the save-session filter
+spring.cloud.gateway.server.webflux.filter.secure-headers.content-security-policy	String	default-src 'self' https:; font-src 'self' https: data:; im…		
+spring.cloud.gateway.server.webflux.filter.secure-headers.content-type-options	String	nosniff		
+spring.cloud.gateway.server.webflux.filter.secure-headers.default-headers	Set<String>			
+spring.cloud.gateway.server.webflux.filter.secure-headers.disable	List<String>			
+spring.cloud.gateway.server.webflux.filter.secure-headers.disabled-headers	Set<String>			
+spring.cloud.gateway.server.webflux.filter.secure-headers.download-options	String	noopen		
+spring.cloud.gateway.server.webflux.filter.secure-headers.enabled	Boolean	true		Enables the secure-headers filter
+spring.cloud.gateway.server.webflux.filter.secure-headers.enabled-headers	Set<String>			
+spring.cloud.gateway.server.webflux.filter.secure-headers.frame-options	String	DENY		
+spring.cloud.gateway.server.webflux.filter.secure-headers.permissions-policy	String	accelerometer=(), ambient-light-sensor=(), autoplay=(), bat…		
+spring.cloud.gateway.server.webflux.filter.secure-headers.permitted-cross-domain-policies	String	none		
+spring.cloud.gateway.server.webflux.filter.secure-headers.referrer-policy	String	no-referrer		
+spring.cloud.gateway.server.webflux.filter.secure-headers.strict-transport-security	String	max-age=631138519		
+spring.cloud.gateway.server.webflux.filter.secure-headers.xss-protection-header	String	1 ; mode=block		
+spring.cloud.gateway.server.webflux.filter.set-path.enabled	Boolean	true		Enables the set-path filter
+spring.cloud.gateway.server.webflux.filter.set-request-header.enabled	Boolean	true		Enables the set-request-header filter
+spring.cloud.gateway.server.webflux.filter.set-request-host-header.enabled	Boolean	true		Enables the set-request-host-header filter
+spring.cloud.gateway.server.webflux.filter.set-response-header.enabled	Boolean	true		Enables the set-response-header filter
+spring.cloud.gateway.server.webflux.filter.set-status.enabled	Boolean	true		Enables the set-status filter
+spring.cloud.gateway.server.webflux.filter.strip-prefix.enabled	Boolean	true		Enables the strip-prefix filter
+spring.cloud.gateway.server.webflux.forwarded.by.enabled	Boolean	false		Enables the Forwarded: by header part
+spring.cloud.gateway.server.webflux.forwarded.enabled	Boolean	true		Enables the ForwardedHeadersFilter
+spring.cloud.gateway.server.webflux.global-filter.adapt-cached-body.enabled	Boolean	true		Enables the adapt-cached-body global filter
+spring.cloud.gateway.server.webflux.global-filter.forward-path.enabled	Boolean	true		Enables the forward-path global filter
+spring.cloud.gateway.server.webflux.global-filter.forward-routing.enabled	Boolean	true		Enables the forward-routing global filter
+spring.cloud.gateway.server.webflux.global-filter.load-balancer-client.enabled	Boolean	true		Enables the load-balancer-client global filter
+spring.cloud.gateway.server.webflux.global-filter.local-response-cache.enabled	Boolean	true		Enables the local-response-cache filter for all routes, it allows to add a specific configuration at route le…
+spring.cloud.gateway.server.webflux.global-filter.netty-routing.enabled	Boolean	true		Enables the netty-routing global filter
+spring.cloud.gateway.server.webflux.global-filter.netty-write-response.enabled	Boolean	true		Enables the netty-write-response global filter
+spring.cloud.gateway.server.webflux.global-filter.reactive-load-balancer-client.enabled	Boolean	true		Enables the reactive-load-balancer-client global filter
+spring.cloud.gateway.server.webflux.global-filter.remove-cached-body.enabled	Boolean	true		Enables the remove-cached-body global filter
+spring.cloud.gateway.server.webflux.global-filter.route-to-request-url.enabled	Boolean	true		Enables the route-to-request-url global filter
+spring.cloud.gateway.server.webflux.global-filter.websocket-routing.enabled	Boolean	true		Enables the websocket-routing global filter
+spring.cloud.gateway.server.webflux.globalcors.add-to-simple-url-handler-mapping	Boolean	false		If global CORS config should be added to the URL handler
+spring.cloud.gateway.server.webflux.globalcors.cors-configurations	Map<String,CorsConfiguration>			
+spring.cloud.gateway.server.webflux.handler-mapping.order	Integer	1		The order of RoutePredicateHandlerMapping
+spring.cloud.gateway.server.webflux.httpclient.compression	Boolean	false		Enables compression for Netty HttpClient
+spring.cloud.gateway.server.webflux.httpclient.connect-timeout	Integer			The connect timeout in millis, the default is 30s
+spring.cloud.gateway.server.webflux.httpclient.max-header-size	DataSize			The max response header size
+spring.cloud.gateway.server.webflux.httpclient.max-initial-line-length	DataSize			The max initial line length
+spring.cloud.gateway.server.webflux.httpclient.pool.acquire-timeout	Long			Only for type FIXED, the maximum time in millis to wait for acquiring
+spring.cloud.gateway.server.webflux.httpclient.pool.eviction-interval	Duration	0		Perform regular eviction checks in the background at a specified interval
+spring.cloud.gateway.server.webflux.httpclient.pool.leasing-strategy	HttpClientProperties.Pool.LeasingStrategy	fifo		Configures the leasing strategy for the pool (fifo or lifo), defaults to FIFO which is Netty's default
+spring.cloud.gateway.server.webflux.httpclient.pool.max-connections	Integer			Only for type FIXED, the maximum number of connections before starting pending acquisition on existing ones
+spring.cloud.gateway.server.webflux.httpclient.pool.max-idle-time	Duration			Time in millis after which the channel will be closed
+spring.cloud.gateway.server.webflux.httpclient.pool.max-life-time	Duration			Duration after which the channel will be closed
+spring.cloud.gateway.server.webflux.httpclient.pool.metrics	Boolean	false		Enables channel pools metrics to be collected and registered in Micrometer
+spring.cloud.gateway.server.webflux.httpclient.pool.name	String	proxy		The channel pool map name, defaults to proxy
+spring.cloud.gateway.server.webflux.httpclient.pool.type	HttpClientProperties.Pool.PoolType	elastic		Type of pool for HttpClient to use (elastic, fixed or disabled)
+spring.cloud.gateway.server.webflux.httpclient.proxy.host	String			Hostname for proxy configuration of Netty HttpClient
+spring.cloud.gateway.server.webflux.httpclient.proxy.non-proxy-hosts-pattern	String			Regular expression (Java) for a configured list of hosts
+spring.cloud.gateway.server.webflux.httpclient.proxy.password	String			Password for proxy configuration of Netty HttpClient
+spring.cloud.gateway.server.webflux.httpclient.proxy.port	Integer			Port for proxy configuration of Netty HttpClient
+spring.cloud.gateway.server.webflux.httpclient.proxy.type	ProxyProvider.Proxy	http		proxyType for proxy configuration of Netty HttpClient (http, socks4 or socks5)
+spring.cloud.gateway.server.webflux.httpclient.proxy.username	String			Username for proxy configuration of Netty HttpClient
+spring.cloud.gateway.server.webflux.httpclient.response-timeout	Duration			The response timeout
+spring.cloud.gateway.server.webflux.httpclient.ssl.close-notify-flush-timeout	Duration	3000ms		SSL close_notify flush timeout
+spring.cloud.gateway.server.webflux.httpclient.ssl.close-notify-read-timeout	Duration	0		SSL close_notify read timeout
+spring.cloud.gateway.server.webflux.httpclient.ssl.handshake-timeout	Duration	10000ms		SSL handshake timeout
+spring.cloud.gateway.server.webflux.httpclient.ssl.key-password	String			Key password, default is same as keyStorePassword
+spring.cloud.gateway.server.webflux.httpclient.ssl.key-store	String			Keystore path for Netty HttpClient
+spring.cloud.gateway.server.webflux.httpclient.ssl.key-store-password	String			Keystore password
+spring.cloud.gateway.server.webflux.httpclient.ssl.key-store-provider	String			Keystore provider for Netty HttpClient, optional field
+spring.cloud.gateway.server.webflux.httpclient.ssl.key-store-type	String	JKS		Keystore type for Netty HttpClient, default is JKS
+spring.cloud.gateway.server.webflux.httpclient.ssl.ssl-bundle	String			The name of the SSL bundle to use
+spring.cloud.gateway.server.webflux.httpclient.ssl.trusted-x509-certificates	List<String>			Trusted certificates for verifying the remote endpoint's certificate
+spring.cloud.gateway.server.webflux.httpclient.ssl.use-insecure-trust-manager	Boolean	false		Installs the netty InsecureTrustManagerFactory
+spring.cloud.gateway.server.webflux.httpclient.websocket.max-frame-payload-length	Integer			Max frame payload length
+spring.cloud.gateway.server.webflux.httpclient.websocket.proxy-ping	Boolean	true		Proxy ping frames to downstream services, defaults to true
+spring.cloud.gateway.server.webflux.httpclient.wiretap	Boolean	false		Enables wiretap debugging for Netty HttpClient
+spring.cloud.gateway.server.webflux.httpserver.customizer-enabled	Boolean	false		Enables Gateway Customizer for Netty HttpServer, the default is false
+spring.cloud.gateway.server.webflux.httpserver.wiretap	Boolean	false		Enables wiretap debugging for Netty HttpServer
+spring.cloud.gateway.server.webflux.loadbalancer.use404	Boolean	false		
+spring.cloud.gateway.server.webflux.metrics.enabled	Boolean	false		Enables the collection of metrics data
+spring.cloud.gateway.server.webflux.metrics.path-tags.enabled	Boolean	false		Enables the gateway path tag provider
+spring.cloud.gateway.server.webflux.metrics.prefix	String	spring.cloud.gateway		The prefix of all metrics emitted by gateway
+spring.cloud.gateway.server.webflux.metrics.tags	Map<String,String>			Tags map that added to metrics
+spring.cloud.gateway.server.webflux.metrics.tags.path.enabled	Boolean	false	w:spring.cloud.gateway.server.webflux.metrics.path-tags.enabled	Enables the gateway path tag provider
+spring.cloud.gateway.server.webflux.observability.enabled	Boolean	true		If Micrometer Observability support should be turned on
+spring.cloud.gateway.server.webflux.predicate.after.enabled	Boolean	true		Enables the after predicate
+spring.cloud.gateway.server.webflux.predicate.before.enabled	Boolean	true		Enables the before predicate
+spring.cloud.gateway.server.webflux.predicate.between.enabled	Boolean	true		Enables the between predicate
+spring.cloud.gateway.server.webflux.predicate.cloud-foundry-route-service.enabled	Boolean	true		Enables the cloud-foundry-route-service predicate
+spring.cloud.gateway.server.webflux.predicate.cookie.enabled	Boolean	true		Enables the cookie predicate
+spring.cloud.gateway.server.webflux.predicate.header.enabled	Boolean	true		Enables the header predicate
+spring.cloud.gateway.server.webflux.predicate.host.enabled	Boolean	true		Enables the host predicate
+spring.cloud.gateway.server.webflux.predicate.host.include-port	Boolean	true		Include the port in matching the host name
+spring.cloud.gateway.server.webflux.predicate.method.enabled	Boolean	true		Enables the method predicate
+spring.cloud.gateway.server.webflux.predicate.path.enabled	Boolean	true		Enables the path predicate
+spring.cloud.gateway.server.webflux.predicate.query.enabled	Boolean	true		Enables the query predicate
+spring.cloud.gateway.server.webflux.predicate.read-body.enabled	Boolean	true		Enables the read-body predicate
+spring.cloud.gateway.server.webflux.predicate.remote-addr.enabled	Boolean	true		Enables the remote-addr predicate
+spring.cloud.gateway.server.webflux.predicate.weight.enabled	Boolean	true		Enables the weight predicate
+spring.cloud.gateway.server.webflux.predicate.xforwarded-remote-addr.enabled	Boolean	true		Enables the xforwarded-remote-addr predicate
+spring.cloud.gateway.server.webflux.redis-rate-limiter.burst-capacity-header	String	X-RateLimit-Burst-Capacity		The name of the header that returns the burst capacity configuration
+spring.cloud.gateway.server.webflux.redis-rate-limiter.config	Map<String,RedisRateLimiter.Config>			
+spring.cloud.gateway.server.webflux.redis-rate-limiter.include-headers	Boolean	true		Whether or not to include headers containing rate limiter information, defaults to true
+spring.cloud.gateway.server.webflux.redis-rate-limiter.remaining-header	String	X-RateLimit-Remaining		The name of the header that returns number of remaining requests during the current second
+spring.cloud.gateway.server.webflux.redis-rate-limiter.replenish-rate-header	String	X-RateLimit-Replenish-Rate		The name of the header that returns the replenish rate configuration
+spring.cloud.gateway.server.webflux.redis-rate-limiter.requested-tokens-header	String	X-RateLimit-Requested-Tokens		The name of the header that returns the requested tokens configuration
+spring.cloud.gateway.server.webflux.redis-route-definition-repository.enabled	Boolean	true		If RedisRouteDefinitionRepository should be enabled
+spring.cloud.gateway.server.webflux.restrictive-property-accessor.enabled	Boolean	true		Restricts method and property access in SpEL
+spring.cloud.gateway.server.webflux.route-filter-cache-enabled	Boolean	false		Enables the route filter cache, defaults to false
+spring.cloud.gateway.server.webflux.route-refresh-listener.enabled	Boolean	true		If RouteRefreshListener should be turned on
+spring.cloud.gateway.server.webflux.routes	List<RouteDefinition>			List of Routes
+spring.cloud.gateway.server.webflux.set-status.original-status-header-name	String			The name of the header which contains http code of the proxied request
+spring.cloud.gateway.server.webflux.streaming-media-types	List<MediaType>			
+spring.cloud.gateway.server.webflux.trusted-proxies	String			Regular expression defining proxies that are trusted when they appear in a Forwarded or X-Forwarded header
+spring.cloud.gateway.server.webflux.x-forwarded.enabled	Boolean	true		If the XForwardedHeadersFilter is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.for-append	Boolean	true		If appending X-Forwarded-For as a list is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.for-enabled	Boolean	true		If X-Forwarded-For is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.host-append	Boolean	true		If appending X-Forwarded-Host as a list is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.host-enabled	Boolean	true		If X-Forwarded-Host is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.order	Integer	0		The order of the XForwardedHeadersFilter
+spring.cloud.gateway.server.webflux.x-forwarded.port-append	Boolean	true		If appending X-Forwarded-Port as a list is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.port-enabled	Boolean	true		If X-Forwarded-Port is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.prefix-append	Boolean	true		If appending X-Forwarded-Prefix as a list is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.prefix-enabled	Boolean	true		If X-Forwarded-Prefix is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.proto-append	Boolean	true		If appending X-Forwarded-Proto as a list is enabled
+spring.cloud.gateway.server.webflux.x-forwarded.proto-enabled	Boolean	true		If X-Forwarded-Proto is enabled
+spring.cloud.gateway.set-status	SetStatusGatewayFilterFactory		w:spring.cloud.gateway.server.webflux.set-status	
+spring.cloud.gateway.set-status.original-status-header-name	String		w:spring.cloud.gateway.server.webflux.set-status.original-status-header-name	The name of the header which contains http code of the proxied request
+spring.cloud.gateway.streaming-media-types	List<MediaType>		w:spring.cloud.gateway.server.webflux.streaming-media-types	
+spring.cloud.gateway.trusted-proxies	String	true	w:spring.cloud.gateway.server.webflux.trusted-proxies	Regular expression defining proxies that are trusted when they appear in a Forwarded or X-Forwarded header
+spring.cloud.gateway.x-forwarded	XForwardedHeadersFilter		w:spring.cloud.gateway.server.webflux.x-forwarded	
+spring.cloud.gateway.x-forwarded.enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.enabled	If the XForwardedHeadersFilter is enabled
+spring.cloud.gateway.x-forwarded.for-append	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.for-append	If appending X-Forwarded-For as a list is enabled
+spring.cloud.gateway.x-forwarded.for-enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.for-enabled	If X-Forwarded-For is enabled
+spring.cloud.gateway.x-forwarded.host-append	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.host-append	If appending X-Forwarded-Host as a list is enabled
+spring.cloud.gateway.x-forwarded.host-enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.host-enabled	If X-Forwarded-Host is enabled
+spring.cloud.gateway.x-forwarded.order	Integer	0	w:spring.cloud.gateway.server.webflux.x-forwarded.order	The order of the XForwardedHeadersFilter
+spring.cloud.gateway.x-forwarded.port-append	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.port-append	If appending X-Forwarded-Port as a list is enabled
+spring.cloud.gateway.x-forwarded.port-enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.port-enabled	If X-Forwarded-Port is enabled
+spring.cloud.gateway.x-forwarded.prefix-append	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.prefix-append	If appending X-Forwarded-Prefix as a list is enabled
+spring.cloud.gateway.x-forwarded.prefix-enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.prefix-enabled	If X-Forwarded-Prefix is enabled
+spring.cloud.gateway.x-forwarded.proto-append	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.proto-append	If appending X-Forwarded-Proto as a list is enabled
+spring.cloud.gateway.x-forwarded.proto-enabled	Boolean	true	w:spring.cloud.gateway.server.webflux.x-forwarded.proto-enabled	If X-Forwarded-Proto is enabled
+spring.cloud.httpclientfactories.apache.enabled	Boolean	true		Enables creation of Apache Http Client factory beans
+spring.cloud.httpclientfactories.ok.enabled	Boolean	true		Enables creation of OK Http Client factory beans
+spring.cloud.hypermedia.refresh.fixed-delay	Integer	5000		
+spring.cloud.hypermedia.refresh.initial-delay	Integer	10000		
+spring.cloud.inetutils.default-hostname	String	localhost		The default hostname
+spring.cloud.inetutils.default-ip-address	String	127.0.0.1		The default IP address
+spring.cloud.inetutils.ignored-interfaces	List<String>			List of Java regular expressions for network interfaces that will be ignored
+spring.cloud.inetutils.preferred-networks	List<String>			List of Java regular expressions for network addresses that will be preferred
+spring.cloud.inetutils.timeout-seconds	Integer	1		Timeout, in seconds, for calculating hostname
+spring.cloud.inetutils.use-only-site-local-interfaces	Boolean	false		Whether to use only interfaces with site local addresses
+spring.cloud.kubernetes.client.api-version	String			
+spring.cloud.kubernetes.client.apiVersion	String	v1		Kubernetes API Version
+spring.cloud.kubernetes.client.ca-cert-data	String			
+spring.cloud.kubernetes.client.ca-cert-file	String			
+spring.cloud.kubernetes.client.caCertData	String			Kubernetes API CACertData
+spring.cloud.kubernetes.client.caCertFile	String			Kubernetes API CACertFile
+spring.cloud.kubernetes.client.client-cert-data	String			
+spring.cloud.kubernetes.client.client-cert-file	String			
+spring.cloud.kubernetes.client.client-key-algo	String			
+spring.cloud.kubernetes.client.client-key-data	String			
+spring.cloud.kubernetes.client.client-key-file	String			
+spring.cloud.kubernetes.client.client-key-passphrase	String			
+spring.cloud.kubernetes.client.clientCertData	String			Kubernetes API ClientCertData
+spring.cloud.kubernetes.client.clientCertFile	String			Kubernetes API ClientCertFile
+spring.cloud.kubernetes.client.clientKeyAlgo	String	RSA		Kubernetes API ClientKeyAlgo
+spring.cloud.kubernetes.client.clientKeyData	String			Kubernetes API ClientKeyData
+spring.cloud.kubernetes.client.clientKeyFile	String			Kubernetes API ClientKeyFile
+spring.cloud.kubernetes.client.clientKeyPassphrase	String	changeit		Kubernetes API ClientKeyPassphrase
+spring.cloud.kubernetes.client.connection-timeout	Duration			
+spring.cloud.kubernetes.client.connectionTimeout	Duration	10s		Connection timeout
+spring.cloud.kubernetes.client.http-proxy	String			
+spring.cloud.kubernetes.client.https-proxy	String			
+spring.cloud.kubernetes.client.logging-interval	Duration			
+spring.cloud.kubernetes.client.loggingInterval	Duration	20s		Logging interval
+spring.cloud.kubernetes.client.master-url	String			
+spring.cloud.kubernetes.client.masterUrl	String	https://kubernetes.default.svc		Kubernetes API Master Node URL
+spring.cloud.kubernetes.client.namespace	String	true		Kubernetes Namespace
+spring.cloud.kubernetes.client.no-proxy	String[]			
+spring.cloud.kubernetes.client.oauth-token	String			
+spring.cloud.kubernetes.client.oauthToken	String			Kubernetes API Oauth Token
+spring.cloud.kubernetes.client.password	String			Kubernetes API Password
+spring.cloud.kubernetes.client.proxy-password	String			
+spring.cloud.kubernetes.client.proxy-username	String			
+spring.cloud.kubernetes.client.request-timeout	Duration			
+spring.cloud.kubernetes.client.requestTimeout	Duration	10s		Request timeout
+spring.cloud.kubernetes.client.rolling-timeout	Duration		w:	
+spring.cloud.kubernetes.client.rollingTimeout	Duration	900s		Rolling timeout
+spring.cloud.kubernetes.client.service-account-namespace-path	String	/var/run/secrets/kubernetes.io/serviceaccount/namespace		
+spring.cloud.kubernetes.client.trust-certs	Boolean			
+spring.cloud.kubernetes.client.trustCerts	Boolean	false		Kubernetes API Trust Certificates
+spring.cloud.kubernetes.client.user-agent	String	Spring-Cloud-Kubernetes-Application		
+spring.cloud.kubernetes.client.username	String			Kubernetes API Username
+spring.cloud.kubernetes.client.watch-reconnect-interval	Duration			
+spring.cloud.kubernetes.client.watch-reconnect-limit	Duration			
+spring.cloud.kubernetes.client.watchReconnectInterval	Duration	1s		Reconnect Interval
+spring.cloud.kubernetes.client.watchReconnectLimit	Integer	-1		Reconnect Interval limit retries
+spring.cloud.kubernetes.config.enable-api	Boolean	true		
+spring.cloud.kubernetes.config.enabled	Boolean	true		
+spring.cloud.kubernetes.config.fail-fast	Boolean	false		
+spring.cloud.kubernetes.config.include-profile-specific-sources	Boolean	true		
+spring.cloud.kubernetes.config.labels	Map<String,String>			
+spring.cloud.kubernetes.config.name	String			
+spring.cloud.kubernetes.config.namespace	String			
+spring.cloud.kubernetes.config.paths	List<String>			
+spring.cloud.kubernetes.config.retry	RetryProperties			
+spring.cloud.kubernetes.config.sources	List<ConfigMapConfigProperties.Source>			
+spring.cloud.kubernetes.config.use-name-as-prefix	Boolean	false		
+spring.cloud.kubernetes.discovery.all-namespaces	Boolean	false		if discovery is enabled for all namespaces
+spring.cloud.kubernetes.discovery.cache-loading-timeout-seconds	Long	60		timeout for initializing discovery cache, will abort the application if exceeded
+spring.cloud.kubernetes.discovery.discovery-server-url	String			
+spring.cloud.kubernetes.discovery.enabled	Boolean	true		if kubernetes discovery is enabled
+spring.cloud.kubernetes.discovery.filter	String			SpEL expression to filter services after they have been retrieved from the Kubernetes API server
+spring.cloud.kubernetes.discovery.include-external-name-services	Boolean	false		should the discovery also search for services that have "type: ExternalName" in their spec
+spring.cloud.kubernetes.discovery.include-not-ready-addresses	Boolean	false		include as discovered if endpoint addresses is not marked with 'ready' by kubernetes
+spring.cloud.kubernetes.discovery.known-secure-ports	Set<Integer>	[443, 8443]		set of known secure ports
+spring.cloud.kubernetes.discovery.metadata.add-annotations	Boolean	true		include annotations as metadata
+spring.cloud.kubernetes.discovery.metadata.add-labels	Boolean	true		include labels as metadata
+spring.cloud.kubernetes.discovery.metadata.add-pod-annotations	Boolean	false		add pod annotations as part of the response
+spring.cloud.kubernetes.discovery.metadata.add-pod-labels	Boolean	false		add pod labels as part of the response
+spring.cloud.kubernetes.discovery.metadata.add-ports	Boolean	true		include ports as metadata
+spring.cloud.kubernetes.discovery.metadata.annotations-prefix	String			prefix for the annotations
+spring.cloud.kubernetes.discovery.metadata.labels-prefix	String			prefix for the labels
+spring.cloud.kubernetes.discovery.metadata.ports-prefix	String	port.		prefix for the ports, by default it is "port."
+spring.cloud.kubernetes.discovery.namespaces	Set<String>			If set and allNamespaces is false, then only the services and endpoints matching these namespaces will be fet…
+spring.cloud.kubernetes.discovery.order	Integer	0		
+spring.cloud.kubernetes.discovery.primary-port-name	String			If set then the port with a given name is used as primary when multiple ports are defined for a service
+spring.cloud.kubernetes.discovery.service-labels	Map<String,String>			if set, then only the services matching these labels will be fetched from the Kubernetes API server
+spring.cloud.kubernetes.discovery.use-endpoint-slices	Boolean	false		use EndpointSlice instead of Endpoints
+spring.cloud.kubernetes.discovery.wait-cache-ready	Boolean	true		wait for the discovery cache (service and endpoints) to be fully loaded, otherwise aborts the application on…
+spring.cloud.kubernetes.leader.auto-startup	Boolean	true		Should leader election be started automatically on startup
+spring.cloud.kubernetes.leader.config-map-name	String	leaders		Kubernetes ConfigMap where leaders information will be stored
+spring.cloud.kubernetes.leader.create-config-map	Boolean	true		Enable/disable creating ConfigMap if it does not exist
+spring.cloud.kubernetes.leader.enabled	Boolean	true		Should leader election be enabled
+spring.cloud.kubernetes.leader.leader-id-prefix	String	leader.id.		Leader id property prefix for the ConfigMap
+spring.cloud.kubernetes.leader.namespace	String			Kubernetes namespace where the leaders ConfigMap and candidates are located
+spring.cloud.kubernetes.leader.publish-failed-events	Boolean	false		Enable/disable publishing events in case leadership acquisition fails
+spring.cloud.kubernetes.leader.role	String			Role for which leadership this candidate will compete
+spring.cloud.kubernetes.leader.update-period	Duration	60000ms		Leadership status check period
+spring.cloud.kubernetes.loadbalancer.cluster-domain	String	cluster.local		cluster domain
+spring.cloud.kubernetes.loadbalancer.enabled	Boolean	true		Load balancer enabled,default true
+spring.cloud.kubernetes.loadbalancer.mode	KubernetesLoadBalancerMode	pod		{@link KubernetesLoadBalancerMode} setting load balancer server list with ip of pod or service name
+spring.cloud.kubernetes.loadbalancer.port-name	String	http		service port name
+spring.cloud.kubernetes.reload.enable-reload-filtering	Boolean	false		create an informer only for sources that have 'spring.cloud.kubernetes.config.informer.enabled=true' label
+spring.cloud.kubernetes.reload.enabled	Boolean	false		Enables the Kubernetes configuration reload on change
+spring.cloud.kubernetes.reload.max-wait-for-restart	Duration	2s		Restart or Shutdown strategies are used, Spring Cloud Kubernetes waits a random amount of time before restart…
+spring.cloud.kubernetes.reload.mode	ConfigReloadProperties.ReloadDetectionMode	EVENT		Sets the detection mode for Kubernetes configuration reload
+spring.cloud.kubernetes.reload.monitoring-config-maps	Boolean	true		Enables monitoring on secrets to detect changes
+spring.cloud.kubernetes.reload.monitoring-secrets	Boolean	false		Monitor secrets or not
+spring.cloud.kubernetes.reload.namespaces	Set<String>			namespaces where an informer will be set-up
+spring.cloud.kubernetes.reload.period	Duration	15000ms		Sets the polling period to use when the detection mode is POLLING
+spring.cloud.kubernetes.reload.strategy	ConfigReloadProperties.ReloadStrategy	REFRESH		Sets reload strategy for Kubernetes configuration reload on change
+spring.cloud.kubernetes.secrets.enable-api	Boolean	false		
+spring.cloud.kubernetes.secrets.enabled	Boolean	true		
+spring.cloud.kubernetes.secrets.fail-fast	Boolean	false		
+spring.cloud.kubernetes.secrets.include-profile-specific-sources	Boolean	true		
+spring.cloud.kubernetes.secrets.labels	Map<String,String>			
+spring.cloud.kubernetes.secrets.name	String			
+spring.cloud.kubernetes.secrets.namespace	String			
+spring.cloud.kubernetes.secrets.paths	List<String>			
+spring.cloud.kubernetes.secrets.retry	RetryProperties			
+spring.cloud.kubernetes.secrets.sources	List<SecretsConfigProperties.Source>			
+spring.cloud.kubernetes.secrets.use-name-as-prefix	Boolean	false		
+spring.cloud.loadbalancer.cache.caffeine.spec	String			The spec to use to create caches
+spring.cloud.loadbalancer.cache.capacity	Integer	256		Initial cache capacity expressed as int
+spring.cloud.loadbalancer.cache.enabled	Boolean	true		Enables Spring Cloud LoadBalancer caching mechanism
+spring.cloud.loadbalancer.cache.ttl	Duration	35s		Time To Live - time counted from writing of the record, after which cache entries are expired, expressed as a…
+spring.cloud.loadbalancer.call-get-with-request-on-delegates	Boolean	true		If this flag is set to {@code true}, {@code ServiceInstanceListSupplier#get(Request request)} method will be…
+spring.cloud.loadbalancer.clients	Map<String,LoadBalancerProperties>			
+spring.cloud.loadbalancer.configurations	String	default		Enables a predefined LoadBalancer configuration
+spring.cloud.loadbalancer.eager-load.clients	List<String>			
+spring.cloud.loadbalancer.enabled	Boolean	true		Enables Spring Cloud LoadBalancer
+spring.cloud.loadbalancer.eureka.approximate-zone-from-hostname	Boolean	false		Used to determine whether we should try to get the `zone` value from host name
+spring.cloud.loadbalancer.health-check.initial-delay	Duration	0		Initial delay value for the HealthCheck scheduler
+spring.cloud.loadbalancer.health-check.interval	Duration	25s		Interval for rerunning the HealthCheck scheduler
+spring.cloud.loadbalancer.health-check.path	Map<String,String>			Path at which the health-check request should be made
+spring.cloud.loadbalancer.health-check.port	Integer			Path at which the health-check request should be made
+spring.cloud.loadbalancer.health-check.refetch-instances	Boolean	false		Indicates whether the instances should be refetched by the `HealthCheckServiceInstanceListSupplier`
+spring.cloud.loadbalancer.health-check.refetch-instances-interval	Duration	25s		Interval for refetching available service instances
+spring.cloud.loadbalancer.health-check.repeat-health-check	Boolean	true		Indicates whether health checks should keep repeating
+spring.cloud.loadbalancer.health-check.update-results-list	Boolean	true		Indicates whether the {@code healthCheckFlux} should emit on each alive {@link ServiceInstance} that has been…
+spring.cloud.loadbalancer.hint	Map<String,String>			Allows setting the value of <code>hint</code> that is passed on to the LoadBalancer request and can subsequen…
+spring.cloud.loadbalancer.hint-header-name	String	X-SC-LB-Hint		Allows setting the name of the header used for passing the hint for hint-based service instance filtering
+spring.cloud.loadbalancer.retry.avoid-previous-instance	Boolean	true		Enables wrapping ServiceInstanceListSupplier beans with `RetryAwareServiceInstanceListSupplier` if Spring-Ret…
+spring.cloud.loadbalancer.retry.backoff.enabled	Boolean	false		Indicates whether Reactor Retry backoffs should be applied
+spring.cloud.loadbalancer.retry.backoff.jitter	Double	0.5		Used to set `RetryBackoffSpec.jitter`
+spring.cloud.loadbalancer.retry.backoff.max-backoff	Duration	Long.MAX ms		Used to set `RetryBackoffSpec.maxBackoff`
+spring.cloud.loadbalancer.retry.backoff.min-backoff	Duration	5 ms		Used to set `RetryBackoffSpec#minBackoff`
+spring.cloud.loadbalancer.retry.enabled	Boolean	true		Enables LoadBalancer retries
+spring.cloud.loadbalancer.retry.max-retries-on-next-service-instance	Integer	1		Number of retries to be executed on the next `ServiceInstance`
+spring.cloud.loadbalancer.retry.max-retries-on-same-service-instance	Integer	0		Number of retries to be executed on the same `ServiceInstance`
+spring.cloud.loadbalancer.retry.retry-on-all-exceptions	Boolean	false		Indicates retries should be attempted for all exceptions, not only those specified in `retryableExceptions`
+spring.cloud.loadbalancer.retry.retry-on-all-operations	Boolean	false		Indicates retries should be attempted on operations other than `HttpMethod.GET`
+spring.cloud.loadbalancer.retry.retryable-exceptions	Set<Class<?extendsThrowable>>	{}		A `Set` of `Throwable` classes that should trigger a retry
+spring.cloud.loadbalancer.retry.retryable-status-codes	Set<Integer>	{}		A `Set` of status codes that should trigger a retry
+spring.cloud.loadbalancer.service-discovery.timeout	String			String representation of Duration of the timeout for calls to service discovery
+spring.cloud.loadbalancer.stats.include-path	Boolean	true		Indicates whether the {@code path} should be added to {@code uri} tag in metrics
+spring.cloud.loadbalancer.stats.micrometer.enabled	Boolean	false		Enables micrometer metrics for load-balanced requests
+spring.cloud.loadbalancer.sticky-session.add-service-instance-cookie	Boolean	false		Indicates whether a cookie with the newly selected instance should be added by LoadBalancer
+spring.cloud.loadbalancer.sticky-session.instance-id-cookie-name	String	sc-lb-instance-id		The name of the cookie holding the preferred instance id
+spring.cloud.loadbalancer.subset.instance-id	String			Instance id of deterministic subsetting
+spring.cloud.loadbalancer.subset.size	Integer	100		Max subset size of deterministic subsetting
+spring.cloud.loadbalancer.x-forwarded.enabled	Boolean	false		To Enable X-Forwarded Headers
+spring.cloud.loadbalancer.zone	String			Spring Cloud LoadBalancer zone
+spring.cloud.openfeign.autoconfiguration.jackson.enabled	Boolean	true		If true, PageJacksonModule and SortJacksonModule bean will be provided for Jackson page decoding
+spring.cloud.openfeign.circuitbreaker.alphanumeric-ids.enabled	Boolean	true		If true, Circuit Breaker ids will only contain alphanumeric characters to allow for configuration via configu…
+spring.cloud.openfeign.circuitbreaker.enabled	Boolean	false		If true, an OpenFeign client will be wrapped with a Spring Cloud CircuitBreaker circuit breaker
+spring.cloud.openfeign.circuitbreaker.group.enabled	Boolean	false		If true, an OpenFeign client will be wrapped with a Spring Cloud CircuitBreaker circuit breaker with group
+spring.cloud.openfeign.client.config	Map<String,FeignClientProperties.FeignClientConfiguration>			
+spring.cloud.openfeign.client.decode-slash	Boolean	true		Feign clients do not encode slash `/` characters by default
+spring.cloud.openfeign.client.default-config	String	default		
+spring.cloud.openfeign.client.default-to-properties	Boolean	true		
+spring.cloud.openfeign.client.refresh-enabled	Boolean	false		Enables options value refresh capability for Feign
+spring.cloud.openfeign.client.remove-trailing-slash	Boolean	false		If {@code true}, trailing slashes at the end of request urls will be removed
+spring.cloud.openfeign.compression.request.content-encoding-types	String[]			The list of content encodings (applicable encodings depend on the used client)
+spring.cloud.openfeign.compression.request.enabled	Boolean	false		Enables the request sent by Feign to be compressed
+spring.cloud.openfeign.compression.request.mime-types	String[]	text/xml,application/xml,application/json		The list of supported mime types
+spring.cloud.openfeign.compression.request.min-request-size	Integer	2048		The minimum threshold content size
+spring.cloud.openfeign.compression.response.enabled	Boolean	false		Enables the response from Feign to be compressed
+spring.cloud.openfeign.encoder.charset-from-content-type	Boolean	false		Indicates whether the charset should be derived from the {@code Content-Type} header
+spring.cloud.openfeign.http2client.enabled	Boolean	false		Enables the use of the Java11 HTTP 2 Client by Feign
+spring.cloud.openfeign.httpclient.connection-timeout	Integer	2000		
+spring.cloud.openfeign.httpclient.connection-timer-repeat	Integer	3000		
+spring.cloud.openfeign.httpclient.disable-ssl-validation	Boolean	false		
+spring.cloud.openfeign.httpclient.follow-redirects	Boolean	true		
+spring.cloud.openfeign.httpclient.hc5.connection-request-timeout	Integer	3		Default value for connection request timeout
+spring.cloud.openfeign.httpclient.hc5.connection-request-timeout-unit	TimeUnit	minutes		Default value for connection request timeout unit
+spring.cloud.openfeign.httpclient.hc5.enabled	Boolean	true		Enables the use of the Apache HTTP Client 5 by Feign
+spring.cloud.openfeign.httpclient.hc5.pool-concurrency-policy	FeignHttpClientProperties.Hc5Properties.PoolConcurrencyPolicy	strict		Pool concurrency policies
+spring.cloud.openfeign.httpclient.hc5.pool-reuse-policy	FeignHttpClientProperties.Hc5Properties.PoolReusePolicy	fifo		Pool connection re-use policies
+spring.cloud.openfeign.httpclient.hc5.socket-timeout	Integer	5		Default value for socket timeout
+spring.cloud.openfeign.httpclient.hc5.socket-timeout-unit	TimeUnit	seconds		Default value for socket timeout unit
+spring.cloud.openfeign.httpclient.http2.version	String	HTTP_2		Configure the protocols used by this client to communicate with remote servers
+spring.cloud.openfeign.httpclient.max-connections	Integer	200		
+spring.cloud.openfeign.httpclient.max-connections-per-route	Integer	50		
+spring.cloud.openfeign.httpclient.ok-http.protocols	List<String>			Configure the protocols used by this client to communicate with remote servers
+spring.cloud.openfeign.httpclient.ok-http.read-timeout	Duration	60s		{@link OkHttpClient} read timeout; defaults to 60 seconds
+spring.cloud.openfeign.httpclient.time-to-live	Long	900		
+spring.cloud.openfeign.httpclient.time-to-live-unit	TimeUnit	seconds		
+spring.cloud.openfeign.lazy-attributes-resolution	Boolean	false		Switches @FeignClient attributes resolution mode to lazy
+spring.cloud.openfeign.micrometer.enabled	Boolean	true		Enables Micrometer capabilities for Feign
+spring.cloud.openfeign.oauth2.client-registration-id	String			Client registration id to be used to retrieve the OAuth2 access token
+spring.cloud.openfeign.oauth2.clientRegistrationId	String			Provides a clientId to be used with OAuth2
+spring.cloud.openfeign.oauth2.enabled	Boolean	false		Enables feign interceptor for managing oauth2 access token
+spring.cloud.openfeign.okhttp.enabled	Boolean	false		Enables the use of the OK HTTP Client by Feign
+spring.cloud.refresh.additional-property-sources-to-retain	List<String>			Additional property sources to retain during a refresh
+spring.cloud.refresh.enabled	Boolean	true		Enables autoconfiguration for the refresh scope and associated features
+spring.cloud.refresh.extra-refreshable	Set<String>	true		Additional bean names or class names for beans to post process into refresh scope
+spring.cloud.refresh.never-refreshable	String	true		Comma separated list of bean names or class names for beans to never be refreshed or rebound
+spring.cloud.refresh.on-restart.enabled	Boolean	true		Enable refreshing context on start
+spring.cloud.service-registry.auto-registration.enabled	Boolean	true		Whether service auto-registration is enabled
+spring.cloud.service-registry.auto-registration.fail-fast	Boolean	false		Whether startup fails if there is no AutoServiceRegistration
+spring.cloud.service-registry.auto-registration.register-management	Boolean	true		Whether to register the management as a service
+spring.cloud.service-registry.enabled	Boolean	true		Enables Service Registry functionality
+spring.cloud.stream.binders	Map<String,BinderProperties>			Additional per-binder properties (see {@link BinderProperties}) if more then one binder of the same type is u…
+spring.cloud.stream.binding-retry-interval	Integer	30		Retry interval (in seconds) used to schedule binding attempts
+spring.cloud.stream.bindings	Map<String,BindingProperties>			Additional binding properties (see {@link BinderProperties}) per binding name (e.g., 'input`)
+spring.cloud.stream.default-binder	String			The name of the binder to use by all bindings in the event multiple binders available (e.g., 'rabbit')
+spring.cloud.stream.default.binder	String	none		The name of the default binder to use when multiple binders are present
+spring.cloud.stream.default.consumer.concurrency	String	none		Default concurrency settings
+spring.cloud.stream.default.content-type	String	none		The name of the default content type to apply for Message conversion
+spring.cloud.stream.default.group	String	none		The name of the default consumer group
+spring.cloud.stream.dynamic-destination-cache-size	Integer	10		The maximum size of Least Recently Used (LRU) cache of dynamic destinations
+spring.cloud.stream.function.autodetect	Boolean	true		Auto-discovers and binds a single function
+spring.cloud.stream.function.bindings	Map<String,String>			
+spring.cloud.stream.input-bindings	String			A semi-colon delimited string to explicitly define input bindings (specifically for cases when there is no im…
+spring.cloud.stream.instance-count	Integer	1		The number of deployed instances of an application
+spring.cloud.stream.instance-index	Integer	0		The instance id of the application: a number from 0 to instanceCount-1
+spring.cloud.stream.instance-index-list	List<Integer>			A list of instance id's from 0 to instanceCount-1
+spring.cloud.stream.integration.message-handler-not-propagated-headers	String[]			Message header names that will NOT be copied from the inbound message
+spring.cloud.stream.kafka.binder.authorization-exception-retry-interval	Duration			
+spring.cloud.stream.kafka.binder.auto-add-partitions	Boolean			
+spring.cloud.stream.kafka.binder.auto-alter-topics	Boolean			
+spring.cloud.stream.kafka.binder.auto-create-topics	Boolean			
+spring.cloud.stream.kafka.binder.brokers	String[]			
+spring.cloud.stream.kafka.binder.certificate-store-directory	String			
+spring.cloud.stream.kafka.binder.configuration	Map<String,String>			
+spring.cloud.stream.kafka.binder.consider-down-when-any-partition-has-no-leader	Boolean			
+spring.cloud.stream.kafka.binder.consumer-properties	Map<String,String>			
+spring.cloud.stream.kafka.binder.enable-observation	Boolean			
+spring.cloud.stream.kafka.binder.header-mapper-bean-name	String			
+spring.cloud.stream.kafka.binder.headers	String[]			
+spring.cloud.stream.kafka.binder.health-indicator-consumer-group	String			
+spring.cloud.stream.kafka.binder.health-timeout	Integer			
+spring.cloud.stream.kafka.binder.jaas	JaasLoginModuleConfiguration			
+spring.cloud.stream.kafka.binder.metrics.default-offset-lag-metrics-enabled	Boolean			
+spring.cloud.stream.kafka.binder.metrics.offset-lag-metrics-interval	Duration			
+spring.cloud.stream.kafka.binder.min-partition-count	Integer			
+spring.cloud.stream.kafka.binder.producer-properties	Map<String,String>			
+spring.cloud.stream.kafka.binder.replication-factor	Short			
+spring.cloud.stream.kafka.binder.required-acks	String			
+spring.cloud.stream.kafka.binder.transaction.producer.batch-timeout	Integer			
+spring.cloud.stream.kafka.binder.transaction.producer.buffer-size	Integer			
+spring.cloud.stream.kafka.binder.transaction.producer.compression-type	KafkaProducerProperties.CompressionType			
+spring.cloud.stream.kafka.binder.transaction.producer.configuration	Map<String,String>			
+spring.cloud.stream.kafka.binder.transaction.producer.error-channel-enabled	Boolean			
+spring.cloud.stream.kafka.binder.transaction.producer.header-mode	HeaderMode			
+spring.cloud.stream.kafka.binder.transaction.producer.header-patterns	String[]			
+spring.cloud.stream.kafka.binder.transaction.producer.message-key-expression	Expression			
+spring.cloud.stream.kafka.binder.transaction.producer.partition-count	Integer			
+spring.cloud.stream.kafka.binder.transaction.producer.partition-key-expression	Expression			
+spring.cloud.stream.kafka.binder.transaction.producer.partition-key-extractor-name	String			
+spring.cloud.stream.kafka.binder.transaction.producer.partition-selector-expression	Expression			
+spring.cloud.stream.kafka.binder.transaction.producer.partition-selector-name	String			
+spring.cloud.stream.kafka.binder.transaction.producer.required-groups	String[]			
+spring.cloud.stream.kafka.binder.transaction.producer.sync	Boolean			
+spring.cloud.stream.kafka.binder.transaction.producer.topic	KafkaTopicProperties			
+spring.cloud.stream.kafka.binder.transaction.producer.use-native-encoding	Boolean			
+spring.cloud.stream.kafka.binder.transaction.transaction-id-prefix	String			
+spring.cloud.stream.kafka.streams.binder.application-id	String			
+spring.cloud.stream.kafka.streams.binder.authorization-exception-retry-interval	Duration			
+spring.cloud.stream.kafka.streams.binder.auto-add-partitions	Boolean			
+spring.cloud.stream.kafka.streams.binder.auto-alter-topics	Boolean			
+spring.cloud.stream.kafka.streams.binder.auto-create-topics	Boolean			
+spring.cloud.stream.kafka.streams.binder.brokers	String[]			
+spring.cloud.stream.kafka.streams.binder.certificate-store-directory	String			
+spring.cloud.stream.kafka.streams.binder.configuration	Map<String,String>			
+spring.cloud.stream.kafka.streams.binder.consider-down-when-any-partition-has-no-leader	Boolean			
+spring.cloud.stream.kafka.streams.binder.consumer-properties	Map<String,String>			
+spring.cloud.stream.kafka.streams.binder.deserialization-exception-handler	DeserializationExceptionHandler			{@link org.apache.kafka.streams.errors.DeserializationExceptionHandler} to use when there is a deserializatio…
+spring.cloud.stream.kafka.streams.binder.enable-observation	Boolean			
+spring.cloud.stream.kafka.streams.binder.functions	Map<String,KafkaStreamsBinderConfigurationProperties.Functions>			
+spring.cloud.stream.kafka.streams.binder.header-mapper-bean-name	String			
+spring.cloud.stream.kafka.streams.binder.headers	String[]			
+spring.cloud.stream.kafka.streams.binder.health-indicator-consumer-group	String			
+spring.cloud.stream.kafka.streams.binder.health-timeout	Integer			
+spring.cloud.stream.kafka.streams.binder.include-stopped-processors-for-health-check	Boolean	false		
+spring.cloud.stream.kafka.streams.binder.jaas	JaasLoginModuleConfiguration			
+spring.cloud.stream.kafka.streams.binder.metrics.default-offset-lag-metrics-enabled	Boolean			
+spring.cloud.stream.kafka.streams.binder.metrics.offset-lag-metrics-interval	Duration			
+spring.cloud.stream.kafka.streams.binder.min-partition-count	Integer			
+spring.cloud.stream.kafka.streams.binder.producer-properties	Map<String,String>			
+spring.cloud.stream.kafka.streams.binder.replication-factor	Short			
+spring.cloud.stream.kafka.streams.binder.required-acks	String			
+spring.cloud.stream.kafka.streams.binder.state-store-retry.backoff-period	Long	1000		
+spring.cloud.stream.kafka.streams.binder.state-store-retry.max-attempts	Integer	1		
+spring.cloud.stream.kafka.streams.binder.transaction.producer.batch-timeout	Integer			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.buffer-size	Integer			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.compression-type	KafkaProducerProperties.CompressionType			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.configuration	Map<String,String>			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.error-channel-enabled	Boolean			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.header-mode	HeaderMode			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.header-patterns	String[]			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.message-key-expression	Expression			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.partition-count	Integer			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.partition-key-expression	Expression			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.partition-key-extractor-name	String			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.partition-selector-expression	Expression			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.partition-selector-name	String			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.required-groups	String[]			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.sync	Boolean			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.topic	KafkaTopicProperties			
+spring.cloud.stream.kafka.streams.binder.transaction.producer.use-native-encoding	Boolean			
+spring.cloud.stream.kafka.streams.binder.transaction.transaction-id-prefix	String			
+spring.cloud.stream.kafka.streams.bindings	Map<String,KafkaStreamsBindingProperties>			
+spring.cloud.stream.output-bindings	String			A semi-colon delimited string to explicitly define output bindings (specifically for cases when there is no i…
+spring.cloud.stream.override-cloud-connectors	Boolean	false		This property is only applicable when the cloud profile is active and Spring Cloud Connectors are provided wi…
+spring.cloud.stream.pollable-source	String	none		A semi-colon delimited list of binding names of pollable sources
+spring.cloud.stream.sendto.destination	String	none		The name of the header used to determine the name of the output destination
+spring.cloud.task.closecontext-enabled	Boolean	false		When set to true the context is closed at the end of the task
+spring.cloud.task.executionid	Long			An id that will be used by the task when updating the task execution
+spring.cloud.task.external-execution-id	String			An id that can be associated with a task
+spring.cloud.task.initialize-enabled	Boolean			If set to true then tables are initialized
+spring.cloud.task.parent-execution-id	Long			The id of the parent task execution id that launched this task execution
+spring.cloud.task.single-instance-enabled	Boolean	false		This property is used to determine if a task will execute if another task with the same app name is running
+spring.cloud.task.single-instance-lock-check-interval	Integer	500		Declares the time (in millis) that a task execution will wait between checks
+spring.cloud.task.single-instance-lock-ttl	Integer			Declares the maximum amount of time (in millis) that a task execution can hold a lock to prevent another task…
+spring.cloud.task.table-prefix	String	TASK_		The prefix to append to the table names created by Spring Cloud Task
+spring.cloud.task.transaction-manager	String	springCloudTaskTransactionManager		This property is used to specify the transaction manager for TaskRepository
+spring.cloud.util.enabled	Boolean	true		Enables creation of Spring Cloud utility beans
+spring.cloud.vault.app-id.app-id-path	String	app-id		Mount path of the AppId authentication backend
+spring.cloud.vault.app-id.network-interface	String			Network interface hint for the "MAC_ADDRESS" UserId mechanism
+spring.cloud.vault.app-id.user-id	String	MAC_ADDRESS		UserId mechanism
+spring.cloud.vault.app-role.app-role-path	String	approle		Mount path of the AppRole authentication backend
+spring.cloud.vault.app-role.role	String			Name of the role, optional, used for pull-mode
+spring.cloud.vault.app-role.role-id	String			The RoleId
+spring.cloud.vault.app-role.secret-id	String			The SecretId
+spring.cloud.vault.application-name	String	application		Application name for AppId authentication
+spring.cloud.vault.authentication	VaultProperties.AuthenticationMethod	token		
+spring.cloud.vault.aws-ec2.aws-ec2-path	String	aws-ec2		Mount path of the AWS-EC2 authentication backend
+spring.cloud.vault.aws-ec2.identity-document	URI	http://169.254.169.254/latest/dynamic/instance-identity/pkc…		URL of the AWS-EC2 PKCS7 identity document
+spring.cloud.vault.aws-ec2.nonce	String			Nonce used for AWS-EC2 authentication
+spring.cloud.vault.aws-ec2.role	String			Name of the role, optional
+spring.cloud.vault.aws-iam.aws-path	String	aws		Mount path of the AWS authentication backend
+spring.cloud.vault.aws-iam.endpoint-uri	URI			STS server URI
+spring.cloud.vault.aws-iam.region	String			Name of the region, optional
+spring.cloud.vault.aws-iam.role	String			Name of the role, optional
+spring.cloud.vault.aws-iam.server-name	String			Name of the server used to set {@code X-Vault-AWS-IAM-Server-ID} header in the headers of login requests
+spring.cloud.vault.azure-msi.azure-path	String	azure		Mount path of the Azure MSI authentication backend
+spring.cloud.vault.azure-msi.identity-token-service	URI			Identity token service URI
+spring.cloud.vault.azure-msi.metadata-service	URI			Instance metadata service URI
+spring.cloud.vault.azure-msi.role	String			Name of the role
+spring.cloud.vault.config.lifecycle.enabled	Boolean	true		Enable lifecycle management
+spring.cloud.vault.config.lifecycle.expiry-threshold	Duration			The expiry threshold
+spring.cloud.vault.config.lifecycle.lease-endpoints	LeaseEndpoints			Set the {@link LeaseEndpoints} to delegate renewal/revocation calls to
+spring.cloud.vault.config.lifecycle.lease-strategy	VaultProperties.PredefinedLeaseStrategy			Sets the {@link LeaseStrategy} to be used with {@link org.springframework.vault.core.lease.SecretLeaseContain…
+spring.cloud.vault.config.lifecycle.min-renewal	Duration			The time period that is at least required before renewing a lease
+spring.cloud.vault.config.order	Integer	0	w:	Used to set a {@link org.springframework.core.env.PropertySource} priority
+spring.cloud.vault.connection-timeout	Integer	5000		Connection timeout
+spring.cloud.vault.discovery.enabled	Boolean	false		Flag to indicate that Vault server discovery is enabled (vault server URL will be looked up via discovery)
+spring.cloud.vault.discovery.service-id	String	vault		Service id to locate Vault
+spring.cloud.vault.enabled	Boolean	true		Enable Vault config server
+spring.cloud.vault.fail-fast	Boolean	false		Fail fast if data cannot be obtained from Vault
+spring.cloud.vault.gcp-gce.gcp-path	String	gcp		Mount path of the Kubernetes authentication backend
+spring.cloud.vault.gcp-gce.role	String			Name of the role against which the login is being attempted
+spring.cloud.vault.gcp-gce.service-account	String			Optional service account id
+spring.cloud.vault.gcp-iam.credentials.encoded-key	String			The base64 encoded contents of an OAuth2 account private key in JSON format
+spring.cloud.vault.gcp-iam.credentials.location	Resource			Location of the OAuth2 credentials private key
+spring.cloud.vault.gcp-iam.gcp-path	String	gcp		Mount path of the Kubernetes authentication backend
+spring.cloud.vault.gcp-iam.jwt-validity	Duration	15m		Validity of the JWT token
+spring.cloud.vault.gcp-iam.project-id	String			Overrides the GCP project Id
+spring.cloud.vault.gcp-iam.role	String			Name of the role against which the login is being attempted
+spring.cloud.vault.gcp-iam.service-account-id	String			Overrides the GCP service account Id
+spring.cloud.vault.host	String	localhost		Vault server host
+spring.cloud.vault.kubernetes.kubernetes-path	String	kubernetes		Mount path of the Kubernetes authentication backend
+spring.cloud.vault.kubernetes.role	String			Name of the role against which the login is being attempted
+spring.cloud.vault.kubernetes.service-account-token-file	String	/var/run/secrets/kubernetes.io/serviceaccount/token		Path to the service account token file
+spring.cloud.vault.kv.application-name	String	application		Application name to be used for the context
+spring.cloud.vault.kv.backend	String	secret		Name of the default backend
+spring.cloud.vault.kv.backend-version	Integer	2	w:	Key-Value backend version
+spring.cloud.vault.kv.default-context	String	application		Name of the default context
+spring.cloud.vault.kv.enabled	Boolean	true		Enable the key-value backend
+spring.cloud.vault.kv.profile-separator	String	/		Profile-separator to combine application name and profile
+spring.cloud.vault.kv.profiles	List<String>			List of active profiles
+spring.cloud.vault.namespace	String			Vault namespace (requires Vault Enterprise)
+spring.cloud.vault.pcf.instance-certificate	Resource			Path to the instance certificate (PEM)
+spring.cloud.vault.pcf.instance-key	Resource			Path to the instance key (PEM)
+spring.cloud.vault.pcf.pcf-path	String	pcf		Mount path of the Kubernetes authentication backend
+spring.cloud.vault.pcf.role	String			Name of the role against which the login is being attempted
+spring.cloud.vault.port	Integer	8200		Vault server port
+spring.cloud.vault.reactive.enabled	Boolean	true		Flag to indicate that reactive discovery is enabled
+spring.cloud.vault.read-timeout	Integer	15000		Read timeout
+spring.cloud.vault.scheme	String	https		Protocol scheme
+spring.cloud.vault.session.lifecycle.enabled	Boolean	true		Enable session lifecycle management
+spring.cloud.vault.session.lifecycle.expiry-threshold	Duration	7s		The expiry threshold for a {@link LoginToken}
+spring.cloud.vault.session.lifecycle.refresh-before-expiry	Duration	5s		The time period that is at least required before renewing the {@link LoginToken}
+spring.cloud.vault.ssl.cert-auth-path	String	cert		Mount path of the TLS cert authentication backend
+spring.cloud.vault.ssl.enabled-cipher-suites	List<String>			List of enabled SSL/TLS cipher suites
+spring.cloud.vault.ssl.enabled-protocols	List<String>			List of enabled SSL/TLS protocol
+spring.cloud.vault.ssl.key-store	Resource			Trust store that holds certificates and private keys
+spring.cloud.vault.ssl.key-store-password	String			Password used to access the key store
+spring.cloud.vault.ssl.key-store-type	String			Type of the key store
+spring.cloud.vault.ssl.trust-store	Resource			Trust store that holds SSL certificates
+spring.cloud.vault.ssl.trust-store-password	String			Password used to access the trust store
+spring.cloud.vault.ssl.trust-store-type	String			Type of the trust store
+spring.cloud.vault.token	String			Static vault token
+spring.cloud.vault.uri	String			Vault URI
+spring.cloud.zookeeper.base-sleep-time-ms	Integer	50		Initial amount of time to wait between retries
+spring.cloud.zookeeper.block-until-connected-unit	TimeUnit	seconds		The unit of time related to blocking on connection to Zookeeper
+spring.cloud.zookeeper.block-until-connected-wait	Integer	10		Wait time to block on connection to Zookeeper
+spring.cloud.zookeeper.config.default-context	String	application		The name of the default context
+spring.cloud.zookeeper.config.enabled	Boolean	true		
+spring.cloud.zookeeper.config.fail-fast	Boolean	true		Throw exceptions during config lookup if true, otherwise, log warnings
+spring.cloud.zookeeper.config.name	String			Alternative to spring.application.name to use in looking up values in zookeeper
+spring.cloud.zookeeper.config.profile-separator	String	,		Separator for profile appended to the application name
+spring.cloud.zookeeper.config.root	String	config		Root folder where the configuration for Zookeeper is kept
+spring.cloud.zookeeper.connect-string	String	localhost:2181		Connection string to the Zookeeper cluster
+spring.cloud.zookeeper.connection-timeout	Duration			The configured connection timeout in milliseconds
+spring.cloud.zookeeper.dependencies	Map<String,ZookeeperDependency>			Mapping of alias to ZookeeperDependency
+spring.cloud.zookeeper.dependency-configurations	Collection<ZookeeperDependency>			
+spring.cloud.zookeeper.dependency-names	Collection<String>			
+spring.cloud.zookeeper.discovery.enabled	Boolean	true		
+spring.cloud.zookeeper.discovery.initial-status	String			The initial status of this instance (defaults to {@link StatusConstants#STATUS_UP})
+spring.cloud.zookeeper.discovery.instance-host	String			Predefined host with which a service can register itself in Zookeeper
+spring.cloud.zookeeper.discovery.instance-id	String			Id used to register with zookeeper
+spring.cloud.zookeeper.discovery.instance-port	Integer			Port to register the service under (defaults to listening port)
+spring.cloud.zookeeper.discovery.instance-ssl-port	Integer			Ssl port of the registered service
+spring.cloud.zookeeper.discovery.metadata	Map<String,String>			Gets the metadata name/value pairs associated with this instance
+spring.cloud.zookeeper.discovery.order	Integer	0		Order of the discovery client used by `CompositeDiscoveryClient` for sorting available clients
+spring.cloud.zookeeper.discovery.register	Boolean	true		Register as a service in zookeeper
+spring.cloud.zookeeper.discovery.root	String	/services		Root Zookeeper folder in which all instances are registered
+spring.cloud.zookeeper.discovery.uri-spec	String	{scheme}://{address}:{port}		The URI specification to resolve during service registration in Zookeeper
+spring.cloud.zookeeper.enabled	Boolean	true		Is Zookeeper enabled
+spring.cloud.zookeeper.max-retries	Integer	10		Max number of times to retry
+spring.cloud.zookeeper.max-sleep-ms	Integer	500		Max time in ms to sleep on each retry
+spring.cloud.zookeeper.prefix	String			Common prefix that will be applied to all Zookeeper dependencies' paths
+spring.cloud.zookeeper.session-timeout	Duration			The configured/negotiated session timeout in milliseconds
 spring.codec.log-request-details	Boolean	false	w:spring.http.codecs.log-request-details	Whether to log form data at DEBUG level, and headers at TRACE level
 spring.codec.max-in-memory-size	DataSize		w:spring.http.codecs.max-in-memory-size	Limit on the number of bytes that can be buffered whenever the input stream needs to be aggregated
 spring.config.activate.on-cloud-platform	CloudPlatform			Required cloud platform for the document to be included
@@ -2444,6 +3790,39 @@ spring.webservices.path	String	/services		Path that serves as the base URI for t
 spring.webservices.servlet.init	Map<String,String>			Servlet init parameters to pass to Spring Web Services
 spring.webservices.servlet.load-on-startup	Integer	-1		Load on startup priority of the Spring Web Services servlet
 spring.webservices.wsdl-locations	List<String>			Comma-separated list of locations of WSDLs and accompanying XSDs to be exposed as beans
+stubrunner.amqp.enabled	Boolean	false		Whether to enable support for Stub Runner and AMQP
+stubrunner.amqp.mockCOnnection	Boolean	true		Whether to enable support for Stub Runner and AMQP mocked connection factory
+stubrunner.classifier	String	stubs		The classifier to use by default in ivy co-ordinates for a stub
+stubrunner.cloud.consul.enabled	Boolean	true		Whether to enable stubs registration in Consul
+stubrunner.cloud.delegate.enabled	Boolean	true		Whether to enable DiscoveryClient's Stub Runner implementation
+stubrunner.cloud.enabled	Boolean	true		Whether to enable Spring Cloud support for Stub Runner
+stubrunner.cloud.eureka.enabled	Boolean	true		Whether to enable stubs registration in Eureka
+stubrunner.cloud.loadbalancer.enabled	Boolean	true		Whether to enable Stub Runner's Spring Cloud Load Balancer integration
+stubrunner.cloud.stubbed.discovery.enabled	Boolean	true		Whether Service Discovery should be stubbed for Stub Runner
+stubrunner.cloud.zookeeper.enabled	Boolean	true		Whether to enable stubs registration in Zookeeper
+stubrunner.consumer-name	String			You can override the default {@code spring.application.name} of this field by setting a value to this paramet…
+stubrunner.delete-stubs-after-test	Boolean	true		If set to {@code false} will NOT delete stubs from a temporary folder after running tests
+stubrunner.fail-on-no-stubs	Boolean	true		When enabled, this flag will tell stub runner to throw an exception when no stubs / contracts were found
+stubrunner.generate-stubs	Boolean	false		When enabled, this flag will tell stub runner to not load the generated stubs, but convert the found contract…
+stubrunner.http-server-stub-configurer	Class			Configuration for an HTTP server stub
+stubrunner.ids	String[]			The ids of the stubs to run in "ivy" notation ([groupId]:artifactId:[version]:[classifier][:port])
+stubrunner.ids-to-service-ids	Map<String,String>			Mapping of Ivy notation based ids to serviceIds inside your application
+stubrunner.integration.enabled	Boolean	true		Whether to enable Stub Runner integration with Spring Integration
+stubrunner.jms.enabled	Boolean	true		Whether to enable Stub Runner integration with Spring JMS
+stubrunner.kafka.enabled	Boolean	true		Whether to enable Stub Runner integration with Spring Kafka
+stubrunner.kafka.initializer.enabled	Boolean	true		Whether to allow Stub Runner to take care of polling for messages instead of the KafkaStubMessages component
+stubrunner.mappings-output-folder	String			Dumps the mappings of each HTTP server to the selected folder
+stubrunner.max-port	Integer	15000		Max value of a port for the automatically started WireMock server
+stubrunner.min-port	Integer	10000		Min value of a port for the automatically started WireMock server
+stubrunner.password	String			Repository password
+stubrunner.properties	Map<String,String>			Map of properties that can be passed to custom {@link org.springframework.cloud.contract.stubrunner.StubDownl…
+stubrunner.proxy-host	String			Repository proxy host
+stubrunner.proxy-port	Integer			Repository proxy port
+stubrunner.server-id	String			
+stubrunner.stream.enabled	Boolean	true		Whether to enable Stub Runner integration with Spring Cloud Stream
+stubrunner.stubs-mode	StubRunnerProperties.StubsMode			Pick where the stubs should come from
+stubrunner.stubs-per-consumer	Boolean	false		Should only stubs for this particular consumer get registered in HTTP server stub
+stubrunner.username	String			Repository username
 trace	Boolean	false		Enable trace logs
 @logging.level.keys	root	sql	web
 @logging.level.values	trace	debug	info	warn	error	fatal	off

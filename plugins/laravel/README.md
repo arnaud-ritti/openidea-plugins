@@ -12,6 +12,12 @@ everything below still works in them.
 
 ## Completion and go to definition (⌘B)
 
+Typing `@` (or `@fo`) in a Blade file completes Laravel's and Livewire's own
+directives (`@if`, `@foreach`, `@section`, `@livewire`, `@vite`, the `@end…`
+closers) and the custom ones the project registers with `Blade::directive('name'`
+in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
+`{{ }}` are left alone. Directives registered by vendor packages aren't known.
+
 | Names           | Indexed from                                                                                    | Referenced in                                                                                                                                 |
 | --------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Routes          | `->name()`, `['as' => …]`, `Route::resource` (`only`, `except`, `names`) in `routes/`, with the name prefixes of the groups around them | `route()`, `to_route()`, `redirect()->route()`, `Redirect::route()`, `URL::signedRoute()`, `Route::has()`, `routeIs()`                       |
@@ -40,6 +46,11 @@ everything below still works in them.
   opened or saved.
 - Quick fix (⌥⏎) on a missing `file.key` translation key: add `'key' => 'key'`
   to the main locale's lang file.
+- Intentions (⌥⏎): `'required|email'` in a validation call or `rules()` becomes
+  `['required', 'email']` (not offered when a rule is `regex:`);
+  `'UserController@index'` becomes `[UserController::class, 'index']` when the
+  file is in `App\Http\Controllers` or already imports the class (no import is
+  added); in a `.blade.php` file `{{ $x }}` and `{!! $x !!}` toggle.
 - Gutter: `view()` → view file; controller method → its route; view → views
   extending or including it and the controllers rendering it; `@section` →
   parent section and the views filling it; `@push` ↔ `@stack`.
@@ -50,16 +61,54 @@ The _Laravel_ tool window lists routes (method, URI, name and action), views,
 config keys, translations, middleware and env keys; double-click opens the
 definition. Commands, all under the _Laravel_ category: Reindex Project, Clear
 All Caches (`optimize:clear`), Clear Application / Config / Route Cache,
-Clear Compiled Views, Run Migrations, Link Storage and Show Route List. They
-run `php artisan` (optional `process:php` capability, trusted projects only)
-and the first seven reindex afterwards. Saving a file under `routes/`,
+Clear Compiled Views, Run Migrations, Link Storage, Seed Database, Fresh
+Migration and Show Route List. Fresh Migration drops all tables, so it asks
+for a second run within 30 seconds. They run `php artisan` (optional
+`process:php` capability, trusted projects only) and all but Show Route List
+reindex afterwards. Run configurations (`php artisan serve`, `test`,
+`queue:work`, `schedule:work`) are offered for any project with an `artisan`
+file. Saving a file under `routes/`,
 `config/`, `lang/`, `resources/views/`, `app/Http/Controllers/` or `app/Mail/`,
 `.env`, `.env.example`, `bootstrap/app.php`, `app/Http/Kernel.php` or
 `composer.json` also rebuilds the index.
 
 A project counts as Laravel when it has an `artisan` file or requires
-`laravel/framework`. Settings: problems on/off, route problems, extra view
+`laravel/framework`. Settings: problems on/off, route problems, one switch each
+for unknown Blade components, Livewire components (tag and `@livewire`),
+Inertia pages and `Model::factory()` without a factory, extra view
 directories, main locale, public directory.
+
+Problems for names that don't exist (warnings): `<x-name>` with no file under
+`resources/views/components` or class under `app/View/Components`;
+`<livewire:name>` / `@livewire('name')` with no class under `app/Livewire` and
+no `livewire.name` view; `Inertia::render('Page')`, `inertia('Page')` and
+`Route::inertia()` naming a page missing from `resources/js/Pages` or
+`resources/js/pages` (`vue`, `jsx`, `tsx`, `svelte`); `Model::factory()` of a
+model of the project without `database/factories/<Model>Factory.php`. Names in
+a package namespace (`<x-package::alert>`), names built at run time, and
+projects where a provider registers component paths or namespaces
+(`anonymousComponentPath`, `componentNamespace`) stay quiet. Component
+checks are also off when `composer.json` lists a package that ships
+un-namespaced components: any `*/blade-*` package (icon packs such as
+`blade-ui-kit/blade-heroicons`), `laravel/jetstream`, `filament/*` or
+`livewire/flux`. Livewire checks are off when a provider calls
+`Livewire::component()`, `componentNamespace()`, `addNamespace()` or
+`addLocation()`. `Blade::component(Alert::class)` registers `alert`; a
+`Blade::component()` call with no literal alias or class makes the component
+check quiet. None of the five checks reports while the index is partial (the
+3 s reading budget ran out).
+
+## New file templates
+
+New › Laravel Controller, Resource Controller, Job, Event, Listener, Mailable,
+Middleware, Form Request, Policy, Observer, Enum, Seeder, Factory, Migration
+(anonymous class), Pest Feature Test and Pest Unit Test, written from Laravel's
+documentation and default stubs. The host gives a template only the file name
+and the caret position, so each uses the default namespace of its type
+(`App\Http\Controllers`, `App\Jobs`, ...) and has no prompts for a model or
+table; edit the namespace by hand when the file lives in a subfolder. A
+migration file name needs its timestamp prefix typed by hand (see
+`LIMITATIONS.md`).
 
 ## Not ported
 
@@ -67,7 +116,7 @@ These rely on PhpStorm's PHP PSI and type inference, which the OpenIDEA plugin
 API has no equivalent for (see `LIMITATIONS.md`):
 
 - the service container (`app('…')`, `App::make`, facade resolution, `@inject`
-  classes), custom Blade directives from `Blade::directive()`, and component
+  classes), custom Blade directives registered outside `app/`, and component
   slots and attributes;
 - Eloquent relations and attributes added by accessors, and `where('column')`
   on a query whose model is lost (`$user->posts()->where(...)`); dropped and

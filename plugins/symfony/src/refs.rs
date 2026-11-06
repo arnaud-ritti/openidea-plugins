@@ -64,7 +64,7 @@ fn line_bounds(text: &str, at: usize) -> (usize, usize) {
 
 /// Start of the Twig code the position is in on its line: after the last
 /// `{{` / `{%`, unless it was closed again.
-fn twig_code_start(text: &str, at: usize) -> Option<usize> {
+pub(crate) fn twig_code_start(text: &str, at: usize) -> Option<usize> {
     let (line_start, _) = line_bounds(text, at);
     let line = &text[line_start..at];
     let open = line.rfind("{{").into_iter().chain(line.rfind("{%")).max()?;
@@ -75,7 +75,7 @@ fn twig_code_start(text: &str, at: usize) -> Option<usize> {
 /// The quoted string `at` is in, on its line: (contents start, contents end,
 /// closed). In Twig only quotes in Twig code count: it may sit inside an HTML
 /// attribute.
-fn literal_at(language: &str, text: &str, at: usize) -> Option<(usize, usize, bool)> {
+pub(crate) fn literal_at(language: &str, text: &str, at: usize) -> Option<(usize, usize, bool)> {
     let (mut line_start, line_end) = line_bounds(text, at);
     if line_end - line_start > MAX_LINE {
         return None;
@@ -116,7 +116,7 @@ fn literal_at(language: &str, text: &str, at: usize) -> Option<(usize, usize, bo
 }
 
 /// The identifier-ish word around `at` made of `allowed` bytes.
-fn word_at(text: &str, at: usize, allowed: fn(u8) -> bool) -> (usize, usize) {
+pub(crate) fn word_at(text: &str, at: usize, allowed: fn(u8) -> bool) -> (usize, usize) {
     let bytes = text.as_bytes();
     let start = (0..at).rev().take_while(|&i| allowed(bytes[i])).last().unwrap_or(at);
     let end = (at..bytes.len()).take_while(|&i| allowed(bytes[i])).last().map_or(at, |i| i + 1);

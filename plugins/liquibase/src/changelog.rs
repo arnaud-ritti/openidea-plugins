@@ -230,6 +230,66 @@ fn changeset_token(args: &str) -> (Option<String>, Option<String>) {
     (non_empty(author), non_empty(id))
 }
 
+/// A short description of `log.change_sets[index]`: its comment, else its first change type (formatted SQL: its first statement words).
+pub fn describe(log: &Changelog, text: &str, index: usize) -> Option<String> {
+    let set = &log.change_sets[index];
+    let next = log.change_sets.get(index + 1).map_or(text.len(), |next| next.at);
+    let body = text.get(set.at..next)?;
+    let found = match log.format {
+        Format::Xml => describe_xml(body),
+        Format::Yaml => comment_line(body, "comment:").or_else(|| {
+            log.changes.iter().find(|change| change.at >= set.at && change.at < next).map(|change| change.name.clone())
+        }),
+        Format::Sql => comment_line(body, "--comment:").or_else(|| {
+            let statement = body.lines().skip(1).map(str::trim).find(|line| !line.is_empty() && !line.starts_with("--"))?;
+            Some(statement.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
+        }),
+    };
+    found.filter(|description| !description.is_empty())
+}
+
+fn comment_line(body: &str, key: &str) -> Option<String> {
+    let line = body.lines().map(str::trim).find(|line| line.starts_with(key))?;
+    Some(line[key.len()..].trim().trim_matches(['"', '\'']).to_owned())
+}
+
+fn describe_xml(body: &str) -> Option<String> {
+    let open_end = body.find('>')?;
+    if body[..open_end].ends_with('/') {
+        return None;
+    }
+    let body = &body[open_end + 1..];
+    let body = &body[..body.find("</changeSet").unwrap_or(body.len())];
+    if let Some(start) = body.find("<comment>") {
+        let text = &body[start + "<comment>".len()..];
+        return Some(text[..text.find("</comment>").unwrap_or(text.len())].trim().to_owned());
+    }
+    let body = strip_block(&strip_block(body, "preConditions"), "rollback");
+    let mut rest = body.as_str();
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start + 1..];
+        let name = rest.split(|c: char| c.is_whitespace() || c == '>' || c == '/').next().unwrap_or_default();
+        if !name.is_empty() && !name.starts_with(['!', '?', '/']) && !["comment", "preConditions", "validCheckSum", "rollback"].contains(&xml::local(name)) {
+            return Some(xml::local(name).to_owned());
+        }
+    }
+    None
+}
+
+fn strip_block(body: &str, name: &str) -> String {
+    let Some(start) = body.find(&format!("<{name}")) else {
+        return body.to_owned();
+    };
+    let close = format!("</{name}>");
+    let end = body[start..].find(&close).map_or(body.len(), |i| start + i + close.len());
+    format!("{}{}", &body[..start], &body[end..])
+}
+
+/// 0-based line of byte `offset` in `text`.
+pub fn line_of(text: &str, offset: usize) -> u32 {
+    text.as_bytes()[..offset.min(text.len())].iter().filter(|b| **b == b'\n').count() as u32
+}
+
 /// Absolute paths `include` may mean, most likely first; empty when it can't be known
 /// (a `${property}`, or a path leaving `root`).
 pub fn candidates(changelog: &str, root: &str, include: &Include) -> Vec<String> {

@@ -8,7 +8,7 @@ change-notes = "0.1.0: first release. Migration name and duplicate version check
 categories = ["frameworks", "linters"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-event:file-opened", "on-event:file-saved"]
+activation = ["on-event:file-opened", "on-event:file-saved", "on-view:migrations"]
 
 [capabilities]
 required = ["project.read", "events"]
@@ -54,6 +54,12 @@ category = "Flyway"
 id = "clean"
 title = "Flyway: Clean (Drops All Objects)…"
 category = "Flyway"
+
+[[contributes.views]]
+id = "migrations"
+title = "Flyway Migrations"
+icon = "database"
+location = "bottom"
 
 [contributes.settings]
 title = "Flyway Migrations"

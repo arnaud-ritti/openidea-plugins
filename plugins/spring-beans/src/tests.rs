@@ -403,3 +403,122 @@ fn graph_says_when_it_is_capped() {
     let status = graph.status.unwrap();
     assert!(status.starts_with(&format!("{MAX_GRAPH} of {} beans shown · ", MAX_GRAPH + 2)), "{status}");
 }
+
+#[test]
+fn p_and_c_namespace_refs_are_followed() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/AppConfig.java", CONFIG);
+    let text = r#"<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:p="http://www.springframework.org/schema/p"
+       xmlns:c="http://www.springframework.org/schema/c"
+       xmlns:x="http://example.com/x">
+  <bean id="a" class="x.A" p:dao-ref="clock" c:repo-ref="guard" c:_0-ref="clock" p:name="literal" x:thing-ref="guard"/>
+</beans>
+"#;
+    let model = parse("beans.xml", text).unwrap();
+    let refs: Vec<_> = model.injections.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(refs, ["clock", "guard", "clock"]);
+
+    let mut n = Navigator::default();
+    let xml = doc("/project/src/main/resources/beans.xml", text);
+    assert_eq!(n_definition(&mut n, &xml, after(text, "dao-ref=\"clo", 1)), [("AppConfig.java", 5)]);
+    assert_eq!(n_definition(&mut n, &xml, after(text, "repo-ref=\"gua", 1)), [("AppConfig.java", 12)]);
+    assert_eq!(n_definition(&mut n, &xml, after(text, "_0-ref=\"clo", 1)), [("AppConfig.java", 5)]);
+    assert!(n_definition(&mut n, &xml, after(text, "p:name=\"lit", 1)).is_empty());
+    assert!(n_definition(&mut n, &xml, after(text, "x:thing-ref=\"gua", 1)).is_empty());
+}
+
+#[test]
+fn kotlin_bean_fun_without_return_type_uses_expression_type_when_obvious() {
+    let text = r#"package com.acme.kt
+
+@Configuration
+class C {
+    @Bean fun a() = Foo()
+    @Bean fun b(x: X) = FooImpl(x, 1)
+    @Bean fun c() = someCall()
+    @Bean fun d() = foo.bar()
+    @Bean fun e() = Foo().with(1)
+    @Bean fun f() = if (x) A() else B()
+    @Bean fun g() = com.acme.Foo()
+    @Bean fun h(): Typed = Other()
+}
+"#;
+    let model = parse("C.kt", text).unwrap();
+    let types: Vec<_> = model.beans.iter().skip(1).map(|b| (b.name.as_str(), b.ty.as_str())).collect();
+    assert_eq!(types, [("a", "Foo"), ("b", "FooImpl"), ("c", ""), ("d", ""), ("e", ""), ("f", ""), ("g", ""), ("h", "Typed")]);
+}
+
+fn apply(text: &str, mut edits: Vec<TextEdit>) -> String {
+    edits.sort_by_key(|e| std::cmp::Reverse(offset(text, e.range.start)));
+    let mut fixed = text.to_owned();
+    for e in edits {
+        let (s, t) = (offset(&fixed, e.range.start).unwrap(), offset(&fixed, e.range.end).unwrap());
+        fixed.replace_range(s..t, &e.text);
+    }
+    fixed
+}
+
+#[test]
+fn use_constructor_injection_merges_into_existing_constructor() {
+    let class = |members: &str| format!("package com.acme;\n\n@Service\nclass S {{\n    @Autowired\n    private Foo foo;\n\n{members}}}\n");
+    let fix = |text: &str| constructor_injection(text, 4).map(|e| apply(text, e));
+
+    let text = class("    private int n;\n\n    S(Bar bar) {\n        this.bar = bar;\n    }\n");
+    let fixed = fix(&text).unwrap();
+    assert!(fixed.contains("    private final Foo foo;\n"), "{fixed}");
+    assert!(fixed.contains("    S(Bar bar, Foo foo) {\n        this.bar = bar;\n        this.foo = foo;\n    }\n"), "{fixed}");
+
+    let fixed = fix(&class("    S() {}\n")).unwrap();
+    assert!(fixed.contains("    S(Foo foo) {\n        this.foo = foo;\n    }\n"), "{fixed}");
+
+    assert_eq!(fix(&class("    S() {}\n    S(int a) {}\n")), None, "several constructors");
+    assert_eq!(fix(&class("    S() {\n        if (x) {\n    }\n")), None, "braces mismatch");
+    assert_eq!(fix(&class("    S() {\n        this.foo = new Foo();\n    }\n")), None, "already assigned");
+    assert_eq!(fix(&class("    S() {}\n    @Autowired void setBar(Bar bar) {}\n")), None, "autowired setter");
+}
+
+#[test]
+fn merge_into_multiline_parameter_list() {
+    let class = |ctor: &str| format!("package com.acme;\n\n@Service\nclass S {{\n    @Autowired\n    private Foo foo;\n\n{ctor}}}\n");
+    let fix = |text: &str| constructor_injection(text, 4).map(|e| apply(text, e));
+
+    let fixed = fix(&class("    S(\n        Bar bar\n    ) {\n        this.bar = bar;\n    }\n")).unwrap();
+    assert!(fixed.contains("    S(\n        Bar bar,\n        Foo foo\n    ) {\n        this.bar = bar;\n        this.foo = foo;\n    }\n"), "{fixed}");
+
+    let fixed = fix(&class("    S(Bar bar) {\n        super(bar);\n    }\n")).unwrap();
+    assert!(fixed.contains("    S(Bar bar, Foo foo) {\n        super(bar);\n        this.foo = foo;\n    }\n"), "{fixed}");
+
+    assert_eq!(fix(&class("    S(Foo foo) {\n        this.foo = foo;\n    }\n")), None, "parameter name clash");
+    assert_eq!(fix(&class("    S() {\n        foo = new Foo();\n    }\n")), None, "bare assignment");
+
+    let text = "package com.acme;\n\n@Service\nclass S {\n    @Autowired\n    private final Foo foo;\n\n    S() {}\n}\n";
+    let fixed = fix(text).unwrap();
+    assert!(fixed.contains("    private final Foo foo;\n") && !fixed.contains("final final"), "{fixed}");
+    assert!(fixed.contains("    S(Foo foo) {\n        this.foo = foo;\n    }\n"), "{fixed}");
+}
+
+#[test]
+fn kotlin_string_body_is_not_a_constructor_call() {
+    let text = "@Configuration\nclass C {\n    @Bean fun a() = \"Foo()\"\n}\n";
+    let model = parse("C.kt", text).unwrap();
+    assert_eq!(model.beans[1].ty, "");
+}
+
+#[test]
+fn merge_after_a_trailing_line_comment() {
+    let class = |ctor: &str| format!("package com.acme;\n\n@Service\nclass S {{\n    @Autowired\n    private Foo foo;\n\n{ctor}}}\n");
+    let fix = |text: &str| constructor_injection(text, 4).map(|e| apply(text, e));
+
+    let fixed = fix(&class("    S(\n        Bar bar // the bar\n    ) {\n        this.bar = bar;\n    }\n")).unwrap();
+    assert!(fixed.contains("    S(\n        Bar bar, // the bar\n        Foo foo\n    ) {\n"), "{fixed}");
+
+    let fixed = fix(&class("    S(\n        Bar bar /* the bar */\n    ) {\n        this.bar = bar;\n    }\n")).unwrap();
+    assert!(fixed.contains("    S(\n        Bar bar, /* the bar */\n        Foo foo\n    ) {\n"), "{fixed}");
+}
+
+#[test]
+fn parameter_name_clash_is_refused_by_the_clash_check() {
+    let text = "package com.acme;\n\n@Service\nclass S {\n    @Autowired\n    private Foo foo;\n\n    S(Foo foo) {}\n}\n";
+    assert_eq!(constructor_injection(text, 4), None);
+}

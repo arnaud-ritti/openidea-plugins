@@ -180,6 +180,32 @@ fn docker_declarations(path: &str, text: &str, entries: Vec<docker::Entry>) -> V
         .collect()
 }
 
+fn normalise(path: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts)
+}
+
+/// `file` (absolute, or relative to `folder`) with `.` and `..` resolved, or
+/// `None` when it ends up outside `root`.
+fn confined_path(root: &str, folder: &str, file: &str) -> Option<String> {
+    let joined = if file.starts_with('/') { file.to_owned() } else { format!("{folder}/{file}") };
+    let root = normalise(root)?;
+    let parts = normalise(&joined)?;
+    if parts.len() <= root.len() || parts[..root.len()] != root[..] {
+        return None;
+    }
+    Some(format!("/{}", parts.join("/")))
+}
+
 impl Index {
     fn add(&mut self, path: &str, text: &str) {
         match source(path) {
@@ -191,6 +217,25 @@ impl Index {
             Some(Source::Compose) => self.declarations.extend(docker_declarations(path, text, docker::compose(text))),
             Some(Source::Code) => self.usages.extend(code_usages(path, text)),
             None => {}
+        }
+    }
+
+    /// Reads the files a compose file names in `env_file:` and declares their
+    /// keys, unless the index already has that file. `read_file` fails for a
+    /// missing file (`NotFound` or `Invalid`): then there is nothing to add.
+    pub fn add_compose_env_files(&mut self, project: &Project, root: &str, compose_path: &str, text: &str) {
+        if source(compose_path) != Some(Source::Compose) {
+            return;
+        }
+        let folder = compose_path.rsplit_once(['/', '\\']).map_or("", |(folder, _)| folder);
+        for file in docker::compose_env_files(text) {
+            let Some(path) = confined_path(root, folder, &file) else { continue };
+            if self.declarations.iter().any(|d| d.location.path == path) {
+                continue;
+            }
+            if let Ok(env) = project.read_file(&path) {
+                self.declarations.extend(env_declarations(&path, &env).into_iter().map(|d| Declaration { primary: true, ..d }));
+            }
         }
     }
 
@@ -247,6 +292,7 @@ impl Index {
             }
             if let Ok(text) = project.read_file(&path) {
                 index.add(&path, &text);
+                index.add_compose_env_files(project, root, &path, &text);
             }
         }
         index
@@ -268,7 +314,8 @@ mod tests {
         host.add_file("api/composer.json", "{}");
         host.add_file("api/.env.example", "C=3\n");
         host.add_file("Dockerfile", "ENV D=4\n");
-        host.add_file("deploy/docker-compose.yml", "services:\n  x:\n    environment:\n      - E=5\n");
+        host.add_file("deploy/docker-compose.yml", "services:\n  x:\n    env_file: [\"./conf/vars\", missing.env]\n    environment:\n      - E=5\n");
+        host.add_file("deploy/conf/vars", "F=6\n");
         host.add_file("api/index.php", "<?php\necho getenv('A') . $_ENV['C'];\n");
         host.add_file("README.md", "getenv('NOPE')");
         let project = host.invocation().project().unwrap();
@@ -276,12 +323,47 @@ mod tests {
         let index = Index::full(&project, "/p", Instant::now() + Duration::from_secs(5));
         let mut keys: Vec<_> = index.declarations.iter().map(|d| (d.key.as_str(), d.primary)).collect();
         keys.sort();
-        assert_eq!(keys, [("A", true), ("B", true), ("C", false), ("D", true), ("E", true)]);
+        assert_eq!(keys, [("A", true), ("B", true), ("C", false), ("D", true), ("E", true), ("F", true)]);
         let usages: Vec<_> = index.usages.iter().map(|u| (u.key.as_str(), file_name(&u.location.path))).collect();
         assert_eq!(usages, [("A", ".env"), ("A", "index.php"), ("C", "index.php")]);
         assert_eq!(index.usages[1].location.range, Range::new(Position::new(1, 13), Position::new(1, 14)));
 
         let quick = Index::quick(&project, "/p");
         assert_eq!(quick.declarations.len(), 2, "only the root's .env");
+    }
+
+    #[test]
+    fn env_file_paths_are_confined_to_the_root() {
+        assert_eq!(confined_path("/p", "/p/deploy", "../.env").as_deref(), Some("/p/.env"));
+        assert_eq!(confined_path("/p/", "/p/deploy", "./a/../x.env").as_deref(), Some("/p/deploy/x.env"));
+        assert_eq!(confined_path("/p", "/p/deploy", "/p/y.env").as_deref(), Some("/p/y.env"));
+        assert_eq!(confined_path("/p", "/p/deploy", "../../outside.env"), None);
+        assert_eq!(confined_path("/p", "/p/deploy", "/etc/passwd"), None);
+        assert_eq!(confined_path("/p", "/p/deploy", "../../../x"), None);
+    }
+
+    fn compose_index(env_file: &str) -> Index {
+        let host = MockHost::install();
+        host.set_project_root(Some("/p"));
+        host.add_file(".env", "A=1\n");
+        host.add_file("/outside.env", "OUT=1\n");
+        host.add_file("deploy/docker-compose.yml", &format!("services:\n  x:\n    env_file: {env_file}\n"));
+        let project = host.invocation().project().unwrap();
+        Index::full(&project, "/p", Instant::now() + Duration::from_secs(5))
+    }
+
+    #[test]
+    fn env_file_parent_dir_path_is_normalised_and_deduped() {
+        let index = compose_index("../.env");
+        let found: Vec<_> = index.declarations.iter().map(|d| (d.key.as_str(), d.location.path.as_str())).collect();
+        assert_eq!(found, [("A", "/p/.env")]);
+    }
+
+    #[test]
+    fn env_file_escaping_the_root_is_ignored() {
+        for path in ["../../outside.env", "/outside.env", "/p/../outside.env"] {
+            let index = compose_index(path);
+            assert!(index.declarations.iter().all(|d| d.key != "OUT"), "{path}");
+        }
     }
 }

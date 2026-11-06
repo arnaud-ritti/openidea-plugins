@@ -8,8 +8,9 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
 };
+use spring_text::diagram::{self, Edge, Node};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::java::{self, Annotation, JavaFile, Str};
 use spring_text::tree::Expansion;
@@ -17,6 +18,8 @@ use spring_text::{contains, range};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+const DIAGRAM_VIEW: &str = "diagram";
+const TITLE: &str = "Spring Modulith";
 const OPEN: &str = "type = ApplicationModule.Type.OPEN";
 
 /// What the model needs of a `package-info.java`.
@@ -349,6 +352,74 @@ fn key(open: &str, rest: &str) -> String {
     format!("open:{open}#{rest}")
 }
 
+type Dependencies<'m> = BTreeMap<&'m str, BTreeMap<&'m str, Option<Violation>>>;
+
+/// For each module, the modules it imports from and the worst violation of those imports.
+fn dependencies<'m>(model: &'m Model, index: &Index<Unit>) -> Dependencies<'m> {
+    let mut dependencies: Dependencies = BTreeMap::new();
+    for (_, u) in index.iter().filter(|(p, _)| !is_test(p)) {
+        let Some((from, _)) = model.module_of(&u.package) else { continue };
+        let Some(a) = model.modules.get(&from) else { continue };
+        let found = dependencies.entry(a.name.as_str()).or_default();
+        for i in &u.imports {
+            if let Some((b, v)) = model.check(&from, i) {
+                let worst = found.entry(b.name.as_str()).or_insert(None);
+                if worst.is_none() {
+                    *worst = v;
+                }
+            }
+        }
+    }
+    dependencies
+}
+
+fn violation_label(v: &Violation) -> String {
+    match v {
+        Violation::Internal => "internal types".into(),
+        Violation::NotAllowed(d) => format!("{d} not allowed"),
+    }
+}
+
+/// Modules as nodes, one edge per module importing from another; violations are warning edges.
+fn diagram_of(model: &Model, index: &Index<Unit>) -> (Vec<Node>, Vec<Edge>) {
+    let nodes = model
+        .modules
+        .values()
+        .map(|m| Node::new(&key(&m.name, ""), &m.name).detail(if m.open { "open" } else { "closed" }))
+        .collect();
+    let edges = dependencies(model, index)
+        .into_iter()
+        .flat_map(|(from, found)| {
+            found.into_iter().map(move |(to, v)| {
+                let edge = Edge::new(&key(from, ""), &key(to, "")).warning(v.is_some());
+                match v {
+                    Some(v) => edge.label(&violation_label(&v)),
+                    None => edge,
+                }
+            })
+        })
+        .collect();
+    (nodes, edges)
+}
+
+/// PlantUML component diagram of the modules and their dependencies.
+pub fn plantuml(model: &Model, index: &Index<Unit>) -> String {
+    let mut out = String::from("@startuml\n");
+    for m in model.modules.values() {
+        out.push_str(&format!("component [{}]\n", m.name));
+    }
+    for (from, found) in dependencies(model, index) {
+        for (to, v) in found {
+            match v {
+                Some(v) => out.push_str(&format!("[{from}] -[#red]-> [{to}] : {}\n", violation_label(&v))),
+                None => out.push_str(&format!("[{from}] --> [{to}]\n")),
+            }
+        }
+    }
+    out.push_str("@enduml\n");
+    out
+}
+
 impl Views for ModulithTools {
     fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
         let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its application modules.")) };
@@ -369,20 +440,12 @@ impl Views for ModulithTools {
             };
             return Ok(View::message(text).button(refresh));
         }
-        let mut dependencies: BTreeMap<&str, BTreeMap<&str, Option<Violation>>> = BTreeMap::new();
-        for (_, u) in index.iter().filter(|(p, _)| !is_test(p)) {
-            let Some((from, _)) = model.module_of(&u.package) else { continue };
-            let Some(a) = model.modules.get(&from) else { continue };
-            let found = dependencies.entry(a.name.as_str()).or_default();
-            for i in &u.imports {
-                if let Some((b, v)) = model.check(&from, i) {
-                    let worst = found.entry(b.name.as_str()).or_insert(None);
-                    if worst.is_none() {
-                        *worst = v;
-                    }
-                }
-            }
+        if view == DIAGRAM_VIEW {
+            let (nodes, edges) = diagram_of(&model, index);
+            let status = format!("{} modules · {} dependencies", nodes.len(), edges.len());
+            return Ok(View::new(Body::Html(diagram::html(&nodes, &edges, "No application modules."))).button(refresh).status(&status));
         }
+        let dependencies = dependencies(&model, index);
         let mut items = Vec::new();
         for m in model.modules.values() {
             let mut detail = if m.open { "open".to_owned() } else { "closed".to_owned() };
@@ -431,7 +494,7 @@ impl Views for ModulithTools {
                 }
                 host::refresh_view(view);
             }
-            ViewEvent::Activate(key) => {
+            ViewEvent::Activate(key) | ViewEvent::Message(key) => {
                 let Some(name) = key.strip_prefix("open:").and_then(|k| k.split('#').next()) else { return Ok(()) };
                 let Some(project) = ctx.project() else { return Ok(()) };
                 let model = Model::build(self.indexes.get(&project, COMMAND_BUDGET));
@@ -446,8 +509,27 @@ impl Views for ModulithTools {
 }
 
 impl Plugin for ModulithTools {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        if id != "copy-docs" {
+            return Err(Error::NotFound(format!("command {id}")));
+        }
+        let project = ctx.project().ok_or_else(|| Error::Invalid("Open a project first.".into()))?;
+        let index = self.indexes.get(&project, COMMAND_BUDGET);
+        let model = Model::build(index);
+        if model.modules.is_empty() {
+            host::notify(NotificationLevel::Info, TITLE, "No application modules found.");
+            return Ok(None);
+        }
+        match host::copy_to_clipboard(&plantuml(&model, index)) {
+            Ok(()) => host::notify(NotificationLevel::Info, TITLE, "PlantUML module diagram copied to the clipboard."),
+            Err(Error::Denied(_)) => host::notify(
+                NotificationLevel::Warning,
+                TITLE,
+                "Allow the clipboard for Spring Modulith Tools in Settings › Plugins to copy the module diagram.",
+            ),
+            Err(e) => return Err(e),
+        }
+        Ok(None)
     }
 }
 
@@ -652,4 +734,59 @@ class Shipper {}
         tools.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
         assert!(tools.indexes.get(&project, Duration::ZERO).files().is_empty(), "a complete index starts over");
     }
+
+    #[test]
+    fn modulith_diagram_has_expected_nodes_and_edges() {
+        let host = setup();
+        let mut tools = ModulithTools::default();
+        let index = tools.indexes.get(&host.invocation().project().unwrap(), COMMAND_BUDGET);
+        let model = Model::build(index);
+        let (nodes, edges) = diagram_of(&model, index);
+        let nodes: Vec<_> = nodes.iter().map(|n| (n.id.as_str(), n.label.as_str(), n.detail.as_deref())).collect();
+        assert_eq!(nodes, [
+            ("open:inventory#", "inventory", Some("closed")),
+            ("open:order#", "order", Some("closed")),
+            ("open:shipping#", "shipping", Some("closed")),
+        ]);
+        let edges: Vec<_> = edges.iter().map(|e| (e.from.as_str(), e.to.as_str(), e.label.as_deref(), e.warning)).collect();
+        assert_eq!(edges, [
+            ("open:shipping#", "open:inventory#", Some("inventory not allowed"), true),
+            ("open:shipping#", "open:order#", Some("internal types"), true),
+        ]);
+
+        let view = tools.render(DIAGRAM_VIEW, None, &host.invocation()).unwrap();
+        let Body::Html(page) = view.body else { panic!("html expected") };
+        assert!(page.contains("data-id=\"open:order#\""));
+        assert_eq!(view.status.as_deref(), Some("3 modules · 2 dependencies"));
+        tools.handle(DIAGRAM_VIEW, ViewEvent::Message("open:order#".into()), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations(), [(format!("{SRC}order/package-info.java"), 0, 0)]);
+
+        let empty = MockHost::install();
+        let view = ModulithTools::default().render(DIAGRAM_VIEW, None, &empty.invocation()).unwrap();
+        assert_eq!(view.body, Body::Message("No @SpringBootApplication or @Modulithic class found.".into()));
+    }
+
+    #[test]
+    fn modulith_plantuml_text_lists_modules_and_dependencies() {
+        let host = setup();
+        let mut tools = ModulithTools::default();
+        tools.run_command("copy-docs", &host.invocation(), None).unwrap();
+        assert_eq!(host.clipboard().as_deref(), Some(PLANTUML));
+
+        let denied = MockHost::install().with_capabilities(&["project.read"]);
+        denied.add_file("src/main/java/com/acme/Application.java", "package com.acme;\n@SpringBootApplication\nclass Application {}\n");
+        denied.add_file("src/main/java/com/acme/order/Order.java", "package com.acme.order;\nclass Order {}\n");
+        ModulithTools::default().run_command("copy-docs", &denied.invocation(), None).unwrap();
+        assert_eq!(denied.clipboard(), None);
+        assert!(denied.notifications().iter().any(|n| n.body.contains("Allow the clipboard")));
+    }
+
+    const PLANTUML: &str = "@startuml
+component [inventory]
+component [order]
+component [shipping]
+[shipping] -[#red]-> [inventory] : inventory not allowed
+[shipping] -[#red]-> [order] : internal types
+@enduml
+";
 }

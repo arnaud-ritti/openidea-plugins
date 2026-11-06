@@ -7,9 +7,32 @@
 use fancy_regex::Regex;
 use openidea_plugin::syntax::Highlight;
 use std::ops::Range;
+use std::sync::LazyLock;
 
 const DETECTION_LINES: usize = 25;
 const MAX_PARSING_LENGTH: usize = 10_000;
+
+macro_rules! level {
+    () => {
+        "(?i:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|ERR|FATAL|CRIT(?:ICAL)?|SEVERE|ALERT|EMERG(?:ENCY)?)"
+    };
+}
+
+const SYSLOG_UUID: &str = "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0005";
+const DOCKER: &str = concat!(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?)\s+(", level!(), r")\s+(.*)$");
+const PYTHON_BASIC: &str = r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL):([^:\s]+):(.*)$";
+const PYTHON_DASH: &str = concat!(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) - (\S+) - (", level!(), r") - (.*)$");
+const NGINX: &str = r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) \[(\w+)] (\d+#\d+): (.*)$";
+const SYSLOG: &str = r"^([A-Z][a-z]{2}\s+\d{1,2}\s\d\d:\d\d:\d\d)\s(\S+)\s([^:\s]+(?:\[\d+])?):\s(.*)$";
+const MONOLOG: &str = concat!(
+    r"^\[(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?)]\s+([\w-]+)\.(",
+    level!(),
+    r"):\s*(.*)$"
+);
+const SERILOG: &str =
+    r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?\s[+-]\d\d:\d\d)\s\[(VRB|DBG|INF|WRN|ERR|FTL)]\s(.*)$";
+const ERROR_WORDS: &str = r"\b(error|fatal|fail(ed|ure)?|critical|panic)\b";
+const WARN_WORDS: &str = r"\bwarn(ing)?\b";
 
 pub struct Format {
     pub uuid: String,
@@ -18,6 +41,8 @@ pub struct Format {
     pub time_column: Option<usize>,
     pub severity_column: Option<usize>,
     pub category_column: Option<usize>,
+    /// Formats without a level column (syslog): the level comes from keywords in the message.
+    pub level_from_message: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,20 +124,33 @@ impl Default for Config {
                 r"^\d",
                 [0, 1, 2],
             ),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0001", DOCKER, r"^\d{4}-\d\d-\d\dT", [0, 1, -1]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0002", PYTHON_BASIC, r"^[A-Z]+:", [-1, 0, 1]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0003", PYTHON_DASH, r"^\d{4}-\d\d-\d\d ", [0, 2, 1]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0004", NGINX, r"^\d{4}/\d\d/\d\d ", [0, 1, 2]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0006", MONOLOG, r"^\[\d{4}-", [0, 2, 1]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0007", SERILOG, r"^\d{4}-\d\d-\d\d[ T]", [0, 1, -1]),
+            (SYSLOG_UUID, SYSLOG, r"^[A-Z][a-z]{2}\s+\d", [0, -1, 2]),
         ]
         .into_iter()
         .map(|(uuid, pattern, line_start, [time, severity, category])| {
-            Format::new(uuid, pattern, line_start, time, severity, category).unwrap()
+            let mut format = Format::new(uuid, pattern, line_start, time, severity, category).unwrap();
+            format.level_from_message = uuid == SYSLOG_UUID;
+            format
         })
         .collect();
 
         let rules = [
-            (r"^\s*(e(rror)?|severe)\s*$", Highlight::Keyword),
-            (r"^\s*w(arn(ing)?)?\s*$", Highlight::Tag),
-            (r"^\s*i(nfo)?\s*$", Highlight::String),
+            (r"^\s*(e(rr(or)?)?|severe|fatal|ftl|crit(ical)?|alert|emerg(ency)?)\s*$", Highlight::Keyword, None, None),
+            (r"^\s*w(arn(ing)?|rn)?\s*$", Highlight::Tag, None, None),
+            (r"^\s*i(nfo|nf)?\s*$", Highlight::String, None, None),
+            (ERROR_WORDS, Highlight::Keyword, Some(SYSLOG_UUID), Some(3)),
+            (WARN_WORDS, Highlight::Tag, Some(SYSLOG_UUID), Some(3)),
         ]
         .into_iter()
-        .map(|(pattern, kind)| Rule::new(pattern, None, None, Action::Line, kind).unwrap())
+        .map(|(pattern, kind, format, column)| {
+            Rule::new(pattern, format.map(str::to_owned), column, Action::Line, kind).unwrap()
+        })
         .collect();
 
         Self { formats, rules, errors: Vec::new() }
@@ -130,6 +168,7 @@ impl Format {
             time_column: column(time),
             severity_column: column(severity),
             category_column: column(category),
+            level_from_message: false,
         })
     }
 }
@@ -156,6 +195,7 @@ impl Config {
     /// out and listed in `errors`.
     pub fn with_custom(xml: &str) -> Self {
         let mut config = Self::default();
+        let mut custom_formats = Vec::new();
         for (element, attrs) in elements(xml) {
             if attr(&attrs, "enabled") == Some("false") {
                 continue;
@@ -171,13 +211,15 @@ impl Config {
                     int("severityId"),
                     int("categoryId"),
                 )
-                .map(|format| config.formats.push(format)),
+                .map(|format| custom_formats.push(format)),
                 _ => custom_rule(&attrs).map(|rule| config.rules.extend(rule)),
             };
             if let Err(e) = result {
                 config.errors.push(e);
             }
         }
+        // Ahead of the built-ins: the first of equally good formats wins.
+        config.formats.splice(0..0, custom_formats);
         config
     }
 
@@ -314,16 +356,55 @@ impl<'a> Parsed<'a> {
     /// From the severity column (the first column of plain logs), normalized
     /// like Ideolog's `LogEvent.level`.
     pub fn severity(&self, format: Option<&Format>) -> Option<Severity> {
+        if format.is_some_and(|f| f.level_from_message) {
+            return message_severity(self.message());
+        }
+
         let column = format.map_or(Some(0), |f| f.severity_column);
         let level = self.value(column)?.to_ascii_uppercase();
         match level.trim_matches(|c: char| !c.is_ascii_alphabetic()) {
-            "E" | "ERR" | "ERROR" | "SEVERE" | "FATAL" | "CRIT" | "CRITICAL" | "ALERT" | "EMERG" | "EMERGENCY" => {
+            "E" | "ERR" | "ERROR" | "FTL" | "SEVERE" | "FATAL" | "CRIT" | "CRITICAL" | "ALERT" | "EMERG" | "EMERGENCY" => {
                 Some(Severity::Error)
             }
             "W" | "WRN" | "WARN" | "WARNING" => Some(Severity::Warning),
             _ => None,
         }
     }
+}
+
+fn message_severity(message: &str) -> Option<Severity> {
+    let words = || message.split(|c: char| !c.is_alphanumeric()).map(str::to_ascii_lowercase);
+    if words().any(|w| matches!(w.as_str(), "error" | "fatal" | "fail" | "failed" | "failure" | "critical" | "panic")) {
+        return Some(Severity::Error);
+    }
+    words().any(|w| matches!(w.as_str(), "warn" | "warning")).then_some(Severity::Warning)
+}
+
+static EXCEPTION_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:\b[A-Z][A-Za-z0-9_$]*(?:Exception|Error)|[A-Za-z0-9_$]\.(?:Exception|Error))[:(]").unwrap()
+});
+
+fn is_continuation_frame_line(line: &str) -> bool {
+    let after_hash = line.strip_prefix('#').and_then(|rest| rest.chars().next());
+    line.starts_with(char::is_whitespace)
+        || after_hash.is_some_and(|c| c.is_ascii_digit())
+        || line.starts_with("at ")
+        || line.starts_with("File \"")
+        || line.starts_with("from ")
+}
+
+/// Whether the event shows an exception: a `FooException:` / `Foo.Error(` name, a `Caused by:` or Python
+/// traceback line anywhere, or a stack frame on a continuation line (on the first line only when the
+/// event is error-level, as plain messages mention `host:port` and `file.ext:N`).
+pub fn has_exception(event: &str, first_line_is_error: bool) -> bool {
+    event.lines().enumerate().any(|(index, line)| {
+        let trimmed = line.trim_start();
+        let frame_allowed = if index == 0 { first_line_is_error } else { is_continuation_frame_line(line) };
+        trimmed.starts_with("Caused by:")
+            || trimmed.starts_with("Traceback (most recent call last)")
+            || is_match(&EXCEPTION_NAME, line)
+            || frame_allowed && !crate::source::frames(line).is_empty()
+    })
 }
 
 /// Lines without their terminator, with their byte offset.
@@ -551,6 +632,47 @@ mod tests {
     <LogParsingPattern enabled="true" name="Serilog" pattern="^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [+-]?\d{2}:\d{2}) \[([A-Z]+)\] (.*)$" timePattern="yyyy-MM-dd HH:mm:ss.SSS XXX" linePattern="^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}" timeId="0" severityId="1" categoryId="-1" fullmatch="false" uuid="496412b0-aed0-4b48-a539-30522f90d3ce" />
   </parsingPatterns>
 </State>"#;
+
+    #[test]
+    fn exception_detection_finds_signals_anywhere_in_the_event() {
+        let positives = [
+            r#"[2026-11-06 10:00:00] local.ERROR: boom {"exception":"[object] (Foo\\BarException(code: 0): msg at /x.php:12)"}"#,
+            "2026-11-06 10:00:00 ERROR - #X - java.io.IOException: x",
+            "2026-11-06 10:00:00 ERROR - boom\nCaused by: java.lang.Foo",
+            "2026-11-06 10:00:00 ERROR - boom\nTraceback (most recent call last):\n  line",
+            "[2026-11-06 10:00:00] local.ERROR: boom\n#0 /var/www/Foo.php(12): fn()",
+            "failed with Foo.Error: nope",
+        ];
+        for event in positives {
+            assert!(has_exception(event, false), "{event}");
+        }
+    }
+
+    #[test]
+    fn exception_detection_accepts_a_frame_on_an_error_first_line() {
+        let fatal = "Fatal error: boom: file /Users/me/App/Sources/main.swift, line 12";
+        assert!(has_exception(fatal, true));
+        assert!(!has_exception(fatal, false));
+    }
+
+    #[test]
+    fn exception_detection_ignores_plain_messages() {
+        let negatives = [
+            "2026-11-06 10:00:00 ERROR Error: x",
+            "Error: x",
+            "ExceptionHandler started",
+            "no errors found",
+            "error-free build",
+            "profile x.txt, line 3",
+            "see foo.txt:3",
+            "Connecting to redis.internal:6379",
+            "https://example.com:8080/",
+            "Loaded app/Models/User.php:45",
+        ];
+        for event in negatives {
+            assert!(!has_exception(event, false), "{event}");
+        }
+    }
 
     fn kinds(config: &Config, text: &str) -> Vec<(String, Highlight)> {
         let format = config.detect(text);

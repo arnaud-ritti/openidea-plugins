@@ -10,14 +10,25 @@ pub enum Ecosystem {
     Maven,
     Npm,
     Packagist,
+    CratesIo,
+    PyPI,
 }
 
 impl Ecosystem {
+    pub fn osv_name(self, name: &str) -> String {
+        match self {
+            Ecosystem::PyPI => normalise_pypi(name),
+            _ => name.to_owned(),
+        }
+    }
+
     pub fn osv(self) -> &'static str {
         match self {
             Ecosystem::Maven => "Maven",
             Ecosystem::Npm => "npm",
             Ecosystem::Packagist => "Packagist",
+            Ecosystem::CratesIo => "crates.io",
+            Ecosystem::PyPI => "PyPI",
         }
     }
 }
@@ -30,6 +41,12 @@ pub enum Kind {
     PackageLock,
     ComposerJson,
     ComposerLock,
+    VersionCatalog,
+    YarnLock,
+    PnpmLock,
+    CargoLock,
+    PoetryLock,
+    Requirements,
 }
 
 pub const GLOBS: &[&str] = &[
@@ -40,7 +57,34 @@ pub const GLOBS: &[&str] = &[
     "**/composer.json",
     "**/package-lock.json",
     "**/composer.lock",
+    "**/libs.versions.toml",
+    "**/yarn.lock",
+    "**/pnpm-lock.yaml",
+    "**/Cargo.lock",
+    "**/poetry.lock",
+    "**/requirements.txt",
 ];
+
+/// PyPI names compare case-insensitively with runs of `-`, `_` and `.` equal (PEP 503).
+pub fn normalise_pypi(name: &str) -> String {
+    let mut normalised = String::new();
+    let mut separator = false;
+
+    for c in name.chars() {
+        match "-_.".contains(c) {
+            true => separator = true,
+            false => {
+                if separator {
+                    normalised.push('-');
+                    separator = false;
+                }
+                normalised.push(c.to_ascii_lowercase());
+            }
+        }
+    }
+
+    normalised
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dep {
@@ -66,6 +110,12 @@ pub fn kind(path: &str) -> Option<Kind> {
         "package-lock.json" => Some(Kind::PackageLock),
         "composer.json" => Some(Kind::ComposerJson),
         "composer.lock" => Some(Kind::ComposerLock),
+        "libs.versions.toml" => Some(Kind::VersionCatalog),
+        "yarn.lock" => Some(Kind::YarnLock),
+        "pnpm-lock.yaml" => Some(Kind::PnpmLock),
+        "Cargo.lock" => Some(Kind::CargoLock),
+        "poetry.lock" => Some(Kind::PoetryLock),
+        "requirements.txt" => Some(Kind::Requirements),
         _ => None,
     }
 }
@@ -88,7 +138,13 @@ pub fn parse(path: &str, text: &str, lock: Option<&str>) -> Vec<Dep> {
         Some(Kind::PackageLock) => package_lock(path, text),
         Some(Kind::ComposerJson) => composer_json(path, text, lock),
         Some(Kind::ComposerLock) => composer_lock(path, text),
-        _ => Vec::new(),
+        Some(Kind::VersionCatalog) => version_catalog(path, text),
+        Some(Kind::YarnLock) => yarn_lock(path, text),
+        Some(Kind::PnpmLock) => pnpm_lock(path, text),
+        Some(Kind::CargoLock) => toml_lock(path, text, Ecosystem::CratesIo, true),
+        Some(Kind::PoetryLock) => toml_lock(path, text, Ecosystem::PyPI, false),
+        Some(Kind::Requirements) => requirements(path, text),
+        None => Vec::new(),
     }
 }
 
@@ -459,6 +515,243 @@ fn composer_lock(path: &str, text: &str) -> Vec<Dep> {
     deps
 }
 
+/// `(offset, line without its line break)` for every line.
+fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut offset = 0;
+
+    text.split_inclusive('\n').map(move |raw| {
+        let start = offset;
+        offset += raw.len();
+
+        (start, raw.trim_end_matches(['\n', '\r']))
+    })
+}
+
+fn lock_dep(path: &str, ecosystem: Ecosystem, name: &str, version: &str, at: usize) -> Dep {
+    Dep {
+        path: path.to_owned(),
+        ecosystem,
+        name: name.to_owned(),
+        version: version.to_owned(),
+        at: (at, at + name.len()),
+        version_at: None,
+    }
+}
+
+fn is_version(version: &str) -> bool {
+    version.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// Contents of the leading `"..."` or `'...'` of `text` and the offset of the contents within it.
+fn quoted(text: &str) -> Option<(&str, usize)> {
+    let quote = text.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let rest = &text[1..];
+
+    Some((&rest[..rest.find(quote)?], 1))
+}
+
+/// Contents and absolute offset of the string in `key = "value"` found in `line`.
+fn toml_string<'a>(line: &'a str, line_at: usize, key: &str) -> Option<(&'a str, usize)> {
+    let mut from = 0;
+    while let Some(found) = line[from..].find(key) {
+        let start = from + found;
+        from = start + key.len();
+
+        let boundary = line[..start].chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || "_-".contains(c)));
+        let Some(rest) = line[from..].trim_start().strip_prefix('=').filter(|_| boundary) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let (value, inside) = quoted(rest)?;
+
+        return Some((value, line_at + line.len() - rest.len() + inside));
+    }
+
+    None
+}
+
+fn version_catalog(path: &str, text: &str) -> Vec<Dep> {
+    let mut versions: HashMap<&str, &str> = HashMap::new();
+    let mut section = "";
+    let mut libraries: Vec<(usize, &str)> = Vec::new();
+    for (at, line) in lines(text) {
+        let trimmed = line.trim();
+        if let Some(header) = trimmed.strip_prefix('[') {
+            section = header.trim_end_matches(']').trim();
+
+            continue;
+        }
+        match section {
+            "versions" => {
+                if let Some((key, value)) = trimmed.split_once('=')
+                    && let Some((version, _)) = quoted(value.trim_start())
+                {
+                    versions.insert(key.trim(), version);
+                }
+            }
+            "libraries" if !trimmed.starts_with('#') => libraries.push((at, line)),
+            _ => {}
+        }
+    }
+
+    let mut deps = Vec::new();
+    for (at, line) in libraries {
+        let Some((_, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value_at = at + line.len() - value.trim_start().len();
+        let entry = |key: &str| toml_string(line, at, key);
+
+        let (name, name_at, literal) = match (entry("module"), entry("group"), entry("name")) {
+            (Some((module, module_at)), ..) => (module.to_owned(), module_at, None),
+            (None, Some((group, group_at)), Some((artifact, _))) => (format!("{group}:{artifact}"), group_at, None),
+            _ => match quoted(value.trim_start()) {
+                Some((coordinates, inside)) => {
+                    let parts: Vec<&str> = coordinates.split(':').collect();
+                    let [group, artifact, version] = parts[..] else {
+                        continue;
+                    };
+
+                    (format!("{group}:{artifact}"), value_at + inside, Some(version))
+                }
+                None => continue,
+            },
+        };
+        let version = literal
+            .or_else(|| entry("version").map(|(version, _)| version))
+            .or_else(|| entry("version.ref").or_else(|| entry("ref")).and_then(|(key, _)| versions.get(key).copied()));
+        let Some(version) = version.filter(|v| is_version(v)) else {
+            continue;
+        };
+
+        let mut dep = lock_dep(path, Ecosystem::Maven, &name, version, name_at);
+        dep.at.1 = name_at + name.len().max(1);
+        deps.push(dep);
+    }
+
+    deps
+}
+
+fn yarn_lock(path: &str, text: &str) -> Vec<Dep> {
+    let mut deps = Vec::new();
+    let mut header: Option<(&str, usize)> = None;
+    for (at, line) in lines(text) {
+        if !line.starts_with([' ', '#']) && line.ends_with(':') {
+            header = line.split(',').next().and_then(|first| {
+                let first = first.trim_end_matches(':');
+                let (spec, inside) = quoted(first).unwrap_or((first, 0));
+                let split = spec.rfind('@').filter(|&i| i > 0)?;
+                let range = &spec[split + 1..];
+                if range.contains(':') && !range.starts_with("npm:") {
+                    return None;
+                }
+
+                Some((&spec[..split], at + inside))
+            });
+
+            continue;
+        }
+
+        let Some(rest) = line.strip_prefix("  version") else {
+            continue;
+        };
+        let Some((name, name_at)) = header else {
+            continue;
+        };
+        let version = rest.trim_start_matches(':').trim().trim_matches('"');
+        if is_version(version) {
+            deps.push(lock_dep(path, Ecosystem::Npm, name, version, name_at));
+        }
+    }
+
+    deps
+}
+
+fn pnpm_lock(path: &str, text: &str) -> Vec<Dep> {
+    let mut deps = Vec::new();
+    let mut in_packages = false;
+    for (at, line) in lines(text) {
+        if !line.starts_with([' ', '#']) && !line.is_empty() {
+            in_packages = line.trim_end() == "packages:";
+
+            continue;
+        }
+        if !in_packages || line.starts_with("   ") {
+            continue;
+        }
+        let Some(key) = line.strip_prefix("  ").and_then(|k| k.strip_suffix(':')) else {
+            continue;
+        };
+        let (key, inside) = quoted(key).unwrap_or((key, 0));
+        let slash = usize::from(key.starts_with('/'));
+        let key = key[slash..].split('(').next().unwrap_or_default();
+        let Some(split) = key.rfind('@').filter(|&i| i > 0) else {
+            continue;
+        };
+        let version = &key[split + 1..];
+        if is_version(version) {
+            deps.push(lock_dep(path, Ecosystem::Npm, &key[..split], version, at + 2 + inside + slash));
+        }
+    }
+
+    deps
+}
+
+/// `[[package]]` tables of `Cargo.lock` and `poetry.lock`; Cargo members and path or git packages have no registry source.
+fn toml_lock(path: &str, text: &str, ecosystem: Ecosystem, registry_only: bool) -> Vec<Dep> {
+    let mut deps = Vec::new();
+    let mut current: Option<(&str, usize, &str, bool)> = None;
+    let mut flush = |current: &mut Option<(&str, usize, &str, bool)>| {
+        if let Some((name, at, version, sourced)) = current.take()
+            && !name.is_empty()
+            && is_version(version)
+            && (sourced || !registry_only)
+        {
+            deps.push(lock_dep(path, ecosystem, name, version, at));
+        }
+    };
+    for (at, line) in lines(text) {
+        if line.trim() == "[[package]]" {
+            flush(&mut current);
+            current = Some(("", 0, "", false));
+
+            continue;
+        }
+        let Some(package) = current.as_mut() else {
+            continue;
+        };
+        if let Some((name, name_at)) = toml_string(line, at, "name") {
+            (package.0, package.1) = (name, name_at);
+        } else if let Some((version, _)) = toml_string(line, at, "version") {
+            package.2 = version;
+        } else if let Some((source, _)) = toml_string(line, at, "source") {
+            package.3 = source.starts_with("registry+");
+        }
+    }
+    flush(&mut current);
+
+    deps
+}
+
+fn requirements(path: &str, text: &str) -> Vec<Dep> {
+    let mut deps = Vec::new();
+    for (at, line) in lines(text) {
+        let spec = line.split(['#', ';']).next().unwrap_or_default();
+        let Some((name, version)) = spec.split_once("==") else {
+            continue;
+        };
+        let name = name.trim();
+        let name = name.split('[').next().unwrap_or(name);
+        let version = version.split_whitespace().next().unwrap_or_default();
+        let is_name = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
+        if is_name && is_version(version) && !version.contains('*') {
+            deps.push(lock_dep(path, Ecosystem::PyPI, name, version, at + line.len() - line.trim_start().len()));
+        }
+    }
+
+    deps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,6 +930,88 @@ mod tests {
             let text = format!("{text}é\"é");
             for end in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
                 parse(path, &text[..end], Some(COMPOSER_LOCK));
+            }
+        }
+    }
+
+    #[test]
+    fn reads_libs_versions_toml_aliases() {
+        let text = "[versions]\njackson = \"2.12.3\"\n[libraries]\na = { module = \"com.fasterxml.jackson.core:jackson-databind\", version.ref = \"jackson\" }\nb = { group = \"org.yaml\", name = \"snakeyaml\", version = \"1.33\" }\nc = \"com.google.guava:guava:31.0-jre\"\nd = { module = \"x:managed\" }\n# old = { module = \"x:old\", version = \"1.0.0\" }\n  #g = \"x:older:2.0.0\"\ne = { module = \"x:dangling\", version = { ref = \"nope\" } }\nf = { module = \"x:ref\", version = { ref = \"jackson\" } }\n[plugins]\np = { id = \"x\", version = \"1.0\" }\n";
+        let deps = parse("/p/gradle/libs.versions.toml", text, None);
+
+        assert_eq!(
+            found(&deps),
+            [
+                ("com.fasterxml.jackson.core:jackson-databind", "2.12.3"),
+                ("org.yaml:snakeyaml", "1.33"),
+                ("com.google.guava:guava", "31.0-jre"),
+                ("x:ref", "2.12.3")
+            ]
+        );
+        assert_eq!(deps[0].ecosystem, Ecosystem::Maven);
+        assert_eq!(&text[deps[0].at.0..deps[0].at.1], "com.fasterxml.jackson.core:jackson-databind");
+        assert_eq!(&text[deps[2].at.0..deps[2].at.1], "com.google.guava:guava");
+    }
+
+    #[test]
+    fn reads_yarn_lock_v1_and_berry() {
+        let v1 = "# yarn lockfile v1\n\n\"@babel/core@^7.0.0\", \"@babel/core@^7.1.0\":\n  version \"7.1.2\"\n  resolved \"x\"\n\nlodash@^4.17.15:\n  version \"4.17.15\"\n\nlocal@file:../x:\n  version \"1.0.0\"\n";
+        let deps = parse("/p/yarn.lock", v1, None);
+        assert_eq!(found(&deps), [("@babel/core", "7.1.2"), ("lodash", "4.17.15")]);
+        assert_eq!(&v1[deps[1].at.0..deps[1].at.1], "lodash");
+        assert_eq!(&v1[deps[0].at.0..deps[0].at.1], "@babel/core");
+
+        let berry = "__metadata:\n  version: 6\n\n\"lodash@npm:^4.17.15\":\n  version: 4.17.21\n  resolution: \"lodash@npm:4.17.21\"\n\n\"app@workspace:.\":\n  version: 0.0.0-use.local\n";
+        let deps = parse("/p/yarn.lock", berry, None);
+        assert_eq!(found(&deps), [("lodash", "4.17.21")]);
+        assert_eq!(&berry[deps[0].at.0..deps[0].at.1], "lodash");
+    }
+
+    #[test]
+    fn reads_pnpm_lock() {
+        let text = "lockfileVersion: '6.0'\n\nimporters:\n  .:\n    dependencies:\n      lodash:\n        version: 4.17.15\n\npackages:\n\n  /lodash@4.17.15:\n    resolution: {integrity: x}\n\n  /@babel/traverse@7.22.5(supports-color@5.5.0):\n    dev: true\n\n  '@scope/pkg@1.0.0':\n    dev: false\n\n  vue@3.2.0:\n    dev: false\n\nsnapshots:\n  other@9.9.9:\n    dev: false\n";
+        let deps = parse("/p/pnpm-lock.yaml", text, None);
+
+        assert_eq!(found(&deps), [("lodash", "4.17.15"), ("@babel/traverse", "7.22.5"), ("@scope/pkg", "1.0.0"), ("vue", "3.2.0")]);
+        for dep in &deps {
+            assert_eq!(&text[dep.at.0..dep.at.1], dep.name);
+        }
+    }
+
+    #[test]
+    fn reads_cargo_lock() {
+        let text = "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n[[package]]\nname = \"local\"\nversion = \"0.2.0\"\nsource = \"path+file:///x\"\n";
+        let deps = parse("/p/Cargo.lock", text, None);
+
+        assert_eq!(found(&deps), [("serde", "1.0.1")]);
+        assert_eq!(deps[0].ecosystem, Ecosystem::CratesIo);
+        assert_eq!(&text[deps[0].at.0..deps[0].at.1], "serde");
+    }
+
+    #[test]
+    fn reads_pypi_pins_and_poetry_lock() {
+        let reqs = "# deps\nDjango==3.2.0  # pinned\nrequests[security]==2.0.0 ; python_version > '3'\nflask>=1.0\n-r other.txt\n";
+        let deps = parse("/p/requirements.txt", reqs, None);
+        assert_eq!(found(&deps), [("Django", "3.2.0"), ("requests", "2.0.0")]);
+        assert_eq!(&reqs[deps[0].at.0..deps[0].at.1], "Django");
+        assert_eq!(deps[0].ecosystem, Ecosystem::PyPI);
+
+        let poetry = "[[package]]\nname = \"django\"\nversion = \"3.2.0\"\n\n[metadata]\nlock-version = \"2.0\"\n";
+        assert_eq!(found(&parse("/p/poetry.lock", poetry, None)), [("django", "3.2.0")]);
+    }
+
+    #[test]
+    fn new_formats_never_panic_on_half_typed_text() {
+        for (path, text) in [
+            ("/p/libs.versions.toml", "[versions]\nj = \"é\"\n[libraries]\na = { module = \"é:é\", version.ref = \"j\" }\nb = \"é:é:1\"\n"),
+            ("/p/yarn.lock", "\"é@npm:^1\", \"é@^1\":\n  version: 1.0.0\n"),
+            ("/p/pnpm-lock.yaml", "packages:\n  '/é@1.0.0(é@1)':\n    dev: true\n"),
+            ("/p/Cargo.lock", "[[package]]\nname = \"é\"\nversion = \"1.0.0\"\nsource = \"registry+é\"\n"),
+            ("/p/requirements.txt", "é[é]==1.0 ; é # é\n"),
+        ] {
+            let text = format!("{text}é\"é'");
+            for end in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+                parse(path, &text[..end], None);
             }
         }
     }

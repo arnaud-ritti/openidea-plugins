@@ -1,0 +1,130 @@
+# Parity with IntelliJ IDEA plugins
+
+How far each plugin in `plugins/` reaches the feature set of the IntelliJ plugin it stands in for.
+
+Method: derived from each `plugin.toml` and from [LIMITATIONS.md](LIMITATIONS.md), which records the gaps found while porting (last checked 2026-11-05 against OpenIDEA v0.1.37; the parity-improvement pass of 2026-11-06 is recorded in "Status 2026-11-06" below). Nothing here was measured by running the original plugins side by side, so the ratings are judgement calls, not test results. Closed-source originals were judged from their Marketplace descriptions only.
+
+Rating: a trailing **+** means a gap listed in the previous review was closed without a full step up. **High** = the everyday workflow works, gaps are edge features. **Medium** = core navigation and checks work, an important piece is missing or approximated. **Low** = a small slice of the original.
+
+Path: **Source** = ported from an open-source repo, licence files kept. **Clean-room** = behaviour only, original is proprietary.
+
+## Summary
+
+| Plugin | IntelliJ counterpart | Path | Parity | Main gaps |
+|---|---|---|---|---|
+| `dotenv` | .env files support (`ru.adelf.idea.dotenv`) | Source | High | Hide values, `$` auto-popup, Find Usages/Rename UI, plugin extension points; compose anchors/aliases are skipped (not resolved) and multi-line flow collections are not read. Compose `environment:` one-line flow collections and `env_file:` (scalar, list, flow, long form, paths confined to the project) are read |
+| `ignore` | .ignore (`mobi.hsz.idea.gitignore`) | Source | High | Audited 2026-11-06 (LIMITATIONS.md section added). Gaps: Project-view/editor context-menu commands (code action "Add to .gitignore" instead), highlighting of built-in `.gitignore`/`.dockerignore`, bracket matching, rename, show/close ignored files, template filter, unused-entry inspection. Redundant check now includes globs inside a literal ignored directory; New > Ignore File creates `<name>.ignore` |
+| `properties` | Properties (`com.intellij.properties`) | Source | Medium-High | No references/rename between bundles; key navigation and missing-key warnings cover Java/Kotlin, Thymeleaf `.html`, JSP and `.xhtml` but not FreeMarker (no language id); warnings only with one unambiguous bundle layout and refreshed on open/save of the code file |
+| `tasks` | Tasks & Contexts (`com.intellij.tasks`) | Source | Medium | Switch/Go-to-Task popups, self-hosted trackers (fixed `net:` hosts), changelists, context clearing, bookmarks/breakpoints, commit dialog |
+| `gitlab` | GitLab (`org.jetbrains.plugins.gitlab`) | Source | Medium | Fixed hosts (gitlab.com only), no clone/push/commit API, no IDE diff viewer, no inline comment decorations, no secret writes, no fork-remote checkout, no markdown rendering. Added: Apply suggestion quick fix (guarded by the cached diff only when the Changes view was opened), paging up to 10 pages / 35 s per task, viewed until a later commit touches the file (marking needs page scripts the desktop IDE blocks) |
+| `ideolog` | Ideolog (log viewer) | Source | Medium | Log language can't take a plugin syntax, no line hiding, no scrollbar marks, caret can't move (no extended selection), no time-gap highlighting, no banners. Added: level detection for 11 built-in formats plus custom, Next Warning / Next Exception, more stack-frame formats (Ruby, PHP, Go, Dart, Swift) |
+| `quarkus` | Quarkus Tools (`com.redhat.devtools.intellij.quarkus`) | Source | Low-Medium | LSP4MP and qute-ls unusable (hover, code lens, Qute, JAX-RS, Java diagnostics), no wrapper runs, bundled metadata only (about 170 `io.quarkus` extensions, 2,797 keys, was 42; no Quarkiverse), no project wizard |
+| `spring-osgi` | Spring OSGi (`com.intellij.spring.osgi`) | Source | Medium | Checks needing real type resolution, no Generate-menu API |
+| `laravel` | Laravel Plugin (`de.espend.idea.laravel` 0.15.4, free) | Source (partial) + Laravel docs | High vs the free plugin; Medium vs Laravel Idea (paid) | Service container and facades, Eloquent relations and accessors, `Blade::directive()` in vendor code (project `app/**` ones complete), component slots/attributes, `make:*` artisan commands (no input dialog), `artisan` run configurations are fixed commands (serve, test, queue:work, schedule:work, shown in every project with an `artisan` file; db:seed and migrate:fresh commands), Extract partial view, `ide-blade.json` namespaces; the 16 New-menu file templates have fixed namespaces and no prompts. Added since the first rating: missing-name problems for Blade and Livewire components, Livewire directives, Inertia pages and model factories, `@` directive completion in Blade (core, Livewire, project `Blade::directive`), intentions (validation string to array, controller string to class array, Blade `{{ }}` / `{!! !!}` toggle), New-menu templates, artisan run detectors. Features the free plugin lacks: env, middleware, Vite, validation rules, gates, migration columns, tool window. Not run in a Laravel project in the IDE |
+| `blade` | Blade support (PhpStorm) | Clean-room | Low-Medium | Highlight, structure, folding; `@` directive completion (core, Livewire, project `Blade::directive`), the `{{ }}` / `{!! !!}` toggle and the unknown-component checks come from `aritti.laravel`, so a blade-only install lacks them. No PHP/HTML injection (own approximate lexer), custom directives not highlighted, no formatter; `*.blade.php` resolving to the `blade` language is read in the host source but not run in the IDE |
+| `symfony` | Symfony Support (Espendiller/Brault) | Source | Medium | No references/rename/hover, no Twig-in-PHP injection, no file-creating quick fixes. Added: Twig `paths:` namespaces (twig.yaml only), Profiler view (latest 100 requests, rows not clickable), duplicate `<service id>` in one XML file, unquoted `@`/`%` YAML values with a quote quick fix, Twig completion and unclosed-tag problem (see `twig`) |
+| `twig` | Twig support (PhpStorm) | Clean-room | Low-Medium | Highlighting, structure and folding from `aritti.twig`; completion of tags, filters, functions and tests (static lists) and the unclosed-block-tag problem come from `aritti.symfony`, in Symfony projects only. No custom-extension names, no macro completion/navigation, no formatter, no auto-close, no HTML intelligence inside Twig |
+| `spring-beans` | Spring core (`com.intellij.spring`) | Clean-room | Medium | Text-matched types, no library/auto-configured beans, no profiles/conditions, no SpEL/JPQL injection, single-target gutter, no rename. Added: `p:`/`c:` `-ref` attributes followed, Kotlin `@Bean fun x() = Foo(...)` typed, constructor injection merges into a single existing Java constructor |
+| `spring-boot` | Spring Boot (`com.intellij.spring.boot`) | Clean-room | Medium+ | Bundled metadata covers Boot 3.5.16 and Spring Cloud 2025.0.3 (about 3,800 keys, 1,290 Cloud), version-pinned; no starter/jar metadata, no hover docs, no run-config awareness |
+| `spring-data` | Spring Data (`com.intellij.spring.data`) | Clean-room | Medium+ | `@Query` JPQL: entity names and alias properties completed, typo-only entity warnings and whole-project-chain property warnings (library entities, native queries and SpEL stay quiet); no query injection/highlighting or preview, no repository generators, simple-name entity matching. Kotlin repositories, entities and `@Query` supported |
+| `spring-security` | Spring Security | Clean-room | Medium | Checks only (no quick fixes for the XML ones): Java, Kotlin and the security XML namespace; custom `SecurityExpressionRoot` functions can warn falsely; no SpEL highlighting/navigation, no OAuth2/SAML assistance |
+| `spring-web` | Spring MVC (`com.intellij.spring.mvc`) | Clean-room | Low-Medium | PathVariable and view-name links, WebFlux functional routes (Java and Kotlin, plain path prefixes) as endpoints, and test URLs (MockMvc, WebTestClient/WebClient/RestClient, RestTemplate) linked to mappings; still no Endpoints window, no request generation, no URL completion. Closer to Medium than before, left unchanged because the Endpoints window and generation are still missing |
+| `spring-websocket` | Spring WebSocket | Clean-room | Medium+ | JavaScript/TypeScript STOMP clients linked (literal destinations; receiver named `stomp*` or created with `new Client`/`Stomp.over`/`Stomp.client` in the same file); Kotlin supported; gutter one target |
+| `spring-messaging` | Spring Kafka/AMQP/JMS | Clean-room | Medium+ | `${…}` placeholders resolved from application*/bootstrap* config, XML `<jms:listener>`/`<rabbit:listener queue-names>` linked by destination (no bean link), Kotlin supported (nested annotations Java-only); no SpEL/constants/Cloud Stream, no unmatched-destination warnings |
+| `spring-graphql` | Spring GraphQL | Clean-room | Medium+ | Client documents (`graphql-documents/`, inline `.document(...)`) and Kotlin controllers navigate to the schema; no checks or completion in documents, no GraphQL endpoints list |
+| `spring-cloud` | Spring Cloud | Clean-room | Low-Medium | Feign/Stream links (Kotlin supported); Cloud property metadata comes from `spring-boot`, not from this plugin |
+| `spring-integration` | Spring Integration | Clean-room | Medium | Channel/endpoint diagram (tool window, not an IDE diagram; Java DSL chains show channels only), no `int:` namespace typing |
+| `spring-batch` | Spring Batch | Clean-room | Medium | Job/step/flow diagram from XML (transitions not drawn for Java config), Java config only partly |
+| `spring-webflow` | Spring Web Flow | Clean-room | Medium | Flow diagram existed already (tool window, not an IDE diagram) |
+| `spring-shell` | Spring Shell | Clean-room | Medium | Checks on availability/duplicates only; Kotlin supported |
+| `spring-ws` | Spring Web Services | Clean-room | Medium | XSD/WSDL top-level elements only; Kotlin supported (a `namespace = "$x"` template still reads as a literal) |
+| `spring-modulith` | Spring Modulith | Clean-room | Medium | Module Diagram tool window and PlantUML copy added; no module structure in Structure view, no Project view badges, no Documenter file export |
+| `spring-initializr` | Spring Initializr wizard | Clean-room | Low | Browser download (default) or `spring init` in a terminal via the optional `process:spring`; no project creation or import in the IDE, result not visible to the plugin |
+| `spring-runtime` | Spring Debugger / Boot dashboard | Clean-room | Low | Actuator snapshot (now with bearer/Basic auth via secret, loggers and caches), localhost only, no debugger integration, no inline values |
+| `jpa-assist` | JPA support (Ultimate) + JPA-generator tooling | Clean-room | Low-Medium | No new-file generation (output goes to clipboard), no wizards, no database/schema access, no refactoring hooks; JPQL checks live in `spring-data`, not here. Added: entity -> repositories gutter arrow, Copy DDL/DTO/Entity editor menu entries scoped by language |
+| `flyway` | Flyway support (Database Tools) | Clean-room | Low-Medium | Naming checks and CLI commands plus a read-only Migrations view (state per migration from `flyway info`, Flyway 10+ and a reachable database); no wrapper runs, no rename fix, no confirm dialog, no DB connection or actions in the view |
+| `liquibase` | Liquibase support (Database Tools) | Clean-room | Low-Medium | Changelog checks and CLI commands plus a text-only Changesets view (execution order across includes, open at changeset; no master-changelog concept); fixed run-config args, no classpath resolution |
+| `openapi` | OpenAPI Specifications (`com.intellij.swagger`) | Clean-room | Medium | YAML and JSON specs, `$ref` file-name completion (cached list) and a preview that resolves relative `$ref` files one level deep (web side unverified in the IDE); no rename/usages/hover, no structure view, preview only by Open With |
+| `dependency-audit` | Vulnerable dependency checks | Clean-room | Medium | Lockfiles read: Gradle version catalogs, yarn, pnpm (v6/v9), Cargo, PyPI pins and poetry.lock, plus an `ignoredAdvisories` setting. No resolved build model (BOM/parent skipped), no advisory link from the squiggle, no Go modules |
+| `kube-explorer` | Kubernetes (`com.intellij.kubernetes`) | Clean-room | Medium | Custom resources by API group added; still no context-menu actions (`tree-item.actions` is absent from the pinned SDK; upstream #1746), no streaming logs or watch, no custom-resource schemas, no Helm template language |
+| `devcontainer` | Dev Containers (Gateway) | Clean-room | Low | Start/rebuild/stop/shell in a terminal, Show Configuration (`read-configuration` summary) and templates for Node/Python/Java/PHP/Rust/Compose; no open-inside-container, no result tracking, no features browser |
+
+## Status 2026-11-06
+
+The parity-improvement pass (33 tasks, branch `parity-improvement`) shipped, with unit tests against the mock host:
+
+- **Laravel/Blade:** missing-name problems (Blade and Livewire components, Livewire directives, Inertia pages, factories), three intentions, `@` directive completion, 16 New-menu templates, artisan run detectors and two commands. **Properties:** HTML/JSP navigation and missing-key warnings. **dotenv:** compose flow style, anchors skipped, `env_file`. **dependency-audit:** version catalogs, yarn, pnpm, Cargo, PyPI, ignore list. **tasks:** no change (already complete for its hosts).
+- **Tooling plugins:** `ignore` (glob redundancy, New menu entry), `openapi` (JSON, `$ref` file completion, multi-file preview), `flyway` (Migrations view), `liquibase` (Changesets view), `gitlab` (suggestions, paging, viewed state), `ideolog` (formats, Next Warning/Exception), `symfony`/`twig` (Twig namespaces, profiler, completion, unclosed tags, YAML quotes, duplicate service ids), `jpa-assist` (entity -> repositories arrow, menus), `kube-explorer` (custom resources), `devcontainer` (templates, Show Configuration), `quarkus` (about 170 extensions), `spring-boot` (Spring Cloud metadata), `spring-initializr` (CLI), `spring-runtime` (auth, loggers, caches).
+- **Spring:** JPQL checks, WebFlux routes and test URLs, security XML and Kotlin, JS STOMP clients, messaging placeholders and XML listeners, GraphQL client documents, Integration/Batch/Modulith diagrams, `spring-beans` p:/c:/Kotlin/constructor merge, and a Kotlin sweep over cloud, shell, ws, messaging and websocket (Kotlin string templates are no longer plain literals).
+
+Ratings moved only where a listed main gap closed: `twig` (Low to Low-Medium), `spring-security` (Low-Medium to Medium), and a `+` on `spring-boot`, `spring-data`, `spring-websocket`, `spring-messaging` and `spring-graphql`. `spring-web` stays Low-Medium although two of its three listed gaps closed. These are judgement calls, not measurements.
+
+**Track U upstream gaps still open** (none was started here): references/rename/hover providers (U1), file creation in code-action edits (U2), `find_files` include-ignored and a `files-changed` event (U3), Java/PHP type resolution (U4), quick-pick, input and `views.reveal` (U5), provider `patterns`/`trigger-characters` and syntax for built-in languages (U6), a diagnostics provider or `document-changed` event (U7). `tree-item.actions` is a further gap for `kube-explorer` (skipped, absent from the pinned SDK).
+
+**Unverified items.** Not possible without the IDE, so open:
+- that `.blade.php` opens as the `blade` language (Task 0 step 4);
+- everything built on web or `Html` views: the openapi preview (fetch override, postMessage round trip, id filter), and the gitlab viewed marking (needs page scripts);
+- the Flyway state spellings and the Flyway view, the `kubectl` custom-resource listing, the `devcontainer read-configuration` output shape and template image tags, the `spring` CLI terminal arguments, the XML provider routing for `spring-messaging`, and secret substitution for `spring-runtime`, all tested against the mock host only;
+- whether the New > Ignore File template accepts an empty name, and whether prefilled code-action edits apply without a resolve step (Laravel intentions);
+- the node click in the Integration, Batch, Modulith, Web Flow and Bean diagrams (they share `spring_text::diagram`, whose click handler is an inline script the desktop IDE is documented to block), so clicking a node may not navigate;
+- the host language ids `jsp`, `vue`, `javascriptreact` and `typescriptreact`, used by activation and provider languages of several plugins;
+- indexing cost of the added `**/*.kt` and script globs on large projects.
+
+## Cross-cutting gaps (largest effect first)
+
+These explain most of the "Medium" and "Low" ratings. Each is an OpenIDEA API gap, not a plugin bug.
+
+1. **No semantic model of Java/Kotlin/PHP.** Every Spring and Symfony plugin is text-based: simple-name type matching, no meta-annotations, no library beans. Affects ~22 plugins, Laravel and Blade included (no container/facade/Eloquent types).
+2. **No references, rename or hover providers.** Find Usages, Rename and quick documentation are missing everywhere. Providers are only completion, inline-completion, code-actions, definition and line-markers.
+3. **No file creation from plugins.** No new-class/new-file quick fixes, generators fall back to the clipboard, no project wizards (Initializr, Quarkus, JPA, Flyway).
+4. **No popup, quick-pick or input dialog, and commands cannot open a view.** Switch Task, bean choosers, confirmations and wizard-style flows become forms or fixed commands.
+5. **No language injection.** SpEL, JPQL/SQL, Helm/Go templates and Qute cannot be highlighted inside Java strings, YAML or XML.
+6. **Diagnostics only on open/save.** No provider of their own and no document-changed event; problems lag edits.
+7. **No file-change events, `find_files` skips hidden/ignored paths, no classpath or jar reading.** Indexes go stale (120 s rescan), `target/`/`build/` metadata and library metadata are unreachable.
+8. **Fixed capabilities.** `net:` hosts and `process:` programs are pinned in the manifest: no self-hosted trackers or GitLab, no `./mvnw`/`./gradlew`, no user-chosen `kubectl` path.
+9. **No streaming processes or background work.** Provider budget 50 ms, commands 5 s; no log tailing, no async indexing.
+10. **Single-target gutter markers with a fixed icon set.** Multi-candidate beans/listeners open only the first.
+
+## Not covered by any plugin here
+
+Original features with no OpenIDEA equivalent, so no port is possible yet: Spring Debugger inspection, bean/flow diagrams as IDE diagrams (the plugins draw them in tool windows), database console integration, inlay hints, Structure view for built-in languages, Project view decorations, Endpoints tool window and HTTP client integration, run configurations computed by code.
+
+## Laravel Idea 13.4.1 feature inventory (paid baseline)
+
+Source: the extension descriptors, action ids, inspection/intention names and template names of `laravel-idea-13.4.1.261.jar`, the feature list was compiled at the owner's request on 2026-11-06 from the plugin's descriptor and action and template names. No code, strings or icons were copied. This deviates from the repo's clean-room default for paid plugins.
+
+Scale: about 3,300 classes, 15 descriptors (Blade, JS/Inertia, Twig, YAML, CSS, dotenv, database, terminal, endpoints, MCP, LLM, Qodana, git), 33 actions, 11 intentions, 14 inspections, ~50 file templates.
+
+| Area in Laravel Idea | In `aritti.laravel` / `aritti.blade` today | Possible with the current API? |
+|---|---|---|
+| Completion and navigation: routes, views, config, translations, env, middleware, assets, validation, gates, columns, Blade/Livewire components, Vite | Done (see README) | Done |
+| Eloquent "magic" (relations, accessors, scopes, `$user->posts()->where`), container and facade types, `typeProvider`s | Missing | **No**: needs a PHP type model |
+| Inspections: unknown view, config key, route name | Done | Done |
+| Inspections: unknown Inertia page, Eloquent factory, Blade component, Livewire component/directive | Done (Livewire method checks not done) | Done; methods need types |
+| Inspections: guarded-attribute assignment, unscheduled prunable model, simplify `orderBy`, routes inspection | Missing | Partly: the text-matchable ones |
+| Intentions: validation string to array, controller call to class array | Done | Done |
+| Intention: rule string to rule object | Missing | No: needs a new class file |
+| Intentions: Blade braces escaped/unescaped | Done | Done |
+| Intentions: facade to dependency injection, move injection to constructor, scope call to attribute | Missing | No: needs types |
+| Intention: promote request to FormRequest, ~29 generators (controller, model, migration, policy, observer, resource, factory, listener, Livewire form, Nova/Filament/Fractal) | Missing | **No** for generation: plugins can't create files. **Partly** via `[[contributes.fileTemplates]]` (New menu) written from scratch |
+| ~50 file templates (controllers, jobs, events, mailables, middleware, Pest/Dusk tests, Livewire/Volt, Inertia pages in Vue/React/Svelte) | 16 done (controller, resource controller, job, event, listener, mailable, middleware, form request, policy, observer, enum, seeder, factory, migration, Pest feature and unit test); fixed namespaces, no prompts | Partly: the rest (Dusk, Livewire/Volt, Inertia pages) are possible as New-menu templates; no package/name prompts |
+| Extract view / extract Blade component, rename of views, usages of a view | View usages via gutter only | No (needs refactoring and file creation) |
+| Go to symbol contributors, route search action (⇧ search) | Tool window lists routes | No Search Everywhere hook; tool window covers it |
+| Code vision, declarative inlay hints, documentation provider, folding | Missing | No (no hover, inlay or code-vision API) |
+| Database: models from tables, DB connections from `.env`/YAML, schema dumps | Missing | No (no database API) |
+| Artisan: run command, terminal command specs | Run detectors (serve, test, queue:work, schedule:work) and commands db:seed and migrate:fresh (double-run confirmation); no arbitrary command | Partly: one command per common task; arbitrary command needs an input dialog |
+| Postfix templates (`dd`, `dump`, `ray`), surround, spellcheck dictionary, reader mode | Missing | No |
+| Blade: unknown-component and Livewire checks, custom directives, Vue-in-Blade context, PHP/HTML injection | Highlight, outline, fold in `aritti.blade`; unknown-component/Livewire checks and `@` directive completion (core, Livewire, project `Blade::directive`) in `aritti.laravel` | Custom directives from vendor code, highlighting of custom directives and injection: no |
+| JS side: Ziggy/route and Inertia completion, line markers, library roots | Missing | Partly: completion in `javascript`/`typescript` providers is possible; library roots no |
+| Twig, YAML, CSS, dotenv integration | Missing | Partly (dotenv link via `aritti.dotenv` is a separate plugin) |
+| Project wizard, module builder, Endpoints, MCP server, LLM hooks, Qodana, git hook | Missing | No |
+
+Done from the cheapest-wins list of 2026-11-06: the Blade/Livewire/Inertia/factory unknown-name inspections, the string-to-array and controller-call intentions, the braces conversion, 16 from-scratch New-menu file templates and the artisan run detectors. Still open and possible: the remaining templates and the Inertia/Ziggy completion in `javascript`/`typescript` providers.
+
+## Caveats
+
+- `laravel` is rated against two baselines. The free Espendiller plugin is the one it ports and the only one whose source was read; Laravel Idea is proprietary and was judged from its Marketplace description, so that rating is rougher.
+- The Laravel and Blade rows are backed by the new section in LIMITATIONS.md (checked 2026-11-06) and the READMEs, not by running a Laravel project in the IDE.
+
+- `ignore`, `properties` and `twig` were audited on 2026-11-06 (task 0 audit, from Marketplace pages and READMEs; the PhpStorm Twig help pages were not fetchable, so Twig details beyond the Marketplace blurb are unverified). `ignore` and `properties` now have sections in LIMITATIONS.md; Twig's gaps live in the Symfony/Twig section.
+- To turn the ratings into measured numbers, list the original's features per plugin and tick each as done, workaround or missing; LIMITATIONS.md already holds most of the missing/workaround rows.

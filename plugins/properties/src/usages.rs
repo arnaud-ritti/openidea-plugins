@@ -3,7 +3,7 @@
 //! calls that complete and navigate to keys (`PropertiesCompletionContributor`,
 //! `PropertyReference`).
 
-use crate::props::{file_name, parse, range_of, suffix, unescape};
+use crate::props::{dir, file_name, parse, range_of, split_locale, stem, suffix, unescape};
 use openidea_plugin::{Error, Location, Project};
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range as Span;
@@ -73,6 +73,163 @@ pub fn is_i18n_argument(text: &str, literal: &Span<usize>) -> bool {
     I18N_METHODS.contains(&&callee[name_start..])
 }
 
+/// A key used in code or a template, and whether a missing declaration is worth a warning.
+pub struct KeyUse {
+    pub span: Span<usize>,
+    /// The literal base name of the bundle the call reads, when it names one.
+    pub bundle: Option<String>,
+    pub report: bool,
+}
+
+fn comment_line(text: &str, at: usize) -> bool {
+    let line = text[..at].rsplit('\n').next().unwrap_or_default().trim_start();
+    line.starts_with("//") || line.starts_with('*') || line.starts_with("/*")
+}
+
+fn string_end(text: &str, from: usize) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut i = from;
+    while i < b.len() && b[i] != b'\n' {
+        match b[i] {
+            b'\\' => i += 1,
+            b'"' => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The top-level arguments of the call whose `(` ends just before `from`.
+fn call_arguments(text: &str, from: usize) -> Vec<&str> {
+    let b = text.as_bytes();
+    let (mut args, mut depth, mut start, mut i) = (Vec::new(), 0, from, from);
+    while i < b.len() {
+        match b[i] {
+            b'"' => match string_end(text, i + 1) {
+                Some(end) => i = end,
+                None => break,
+            },
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth == 0 => {
+                args.push(text[start..i].trim());
+                return args;
+            }
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                args.push(text[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    args
+}
+
+fn string_literal(arg: &str) -> Option<&str> {
+    arg.strip_prefix('"')?.strip_suffix('"').filter(|s| !s.contains('"'))
+}
+
+/// Whether the text before `.getMessage` ends in an identifier that looks like a
+/// `MessageSource`: library bundles and custom helpers aren't in the project's files.
+fn message_source_receiver(before: &str) -> bool {
+    let Some(receiver) = before.strip_suffix('.') else { return false };
+    let name = receiver.rsplit(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or_default();
+    let lower = name.to_lowercase();
+    lower.contains("messagesource") || lower.contains("messages") || name.ends_with("Accessor")
+}
+
+/// Keys read through `MessageSource.getMessage("k", …)` and through
+/// `ResourceBundle.getBundle("name")…getString("k")` in Java/Kotlin source.
+/// Only calls whose key is a plain literal are reported; a default message
+/// argument or a bundle that can't be told stay quiet.
+// ponytail: text scan, no types: `getMessage` of any receiver counts, `message(…)` (IntelliJ's helper) is never reported.
+pub fn source_uses(text: &str) -> Vec<KeyUse> {
+    let mut uses = Vec::new();
+
+    for name in ["getMessage", "getString", "getObject", "getStringArray"] {
+        for (at, _) in text.match_indices(name) {
+            let after = at + name.len();
+            if text[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') || comment_line(text, at) {
+                continue;
+            }
+            let Some(rest) = text[after..].strip_prefix('(') else { continue };
+            let Some(literal) = rest.trim_start().strip_prefix('"') else { continue };
+            let start = text.len() - literal.len();
+            let Some(end) = string_end(text, start) else { continue };
+            let key = &text[start..end];
+            if key.is_empty() || !key.chars().all(key_char) {
+                continue;
+            }
+            let args = call_arguments(text, after + 1);
+            if !matches!(text[end + 1..].trim_start().chars().next(), Some(',' | ')')) {
+                continue;
+            }
+
+            let bundle = if name == "getMessage" {
+                let third_is_locale = args.get(2).is_none_or(|a| ["Locale", "locale", "LocaleContextHolder"].iter().any(|p| a.starts_with(p)));
+                if args.len() >= 4 || !third_is_locale || !message_source_receiver(&text[..at]) {
+                    continue;
+                }
+                None
+            } else {
+                let statement = text[..at].rfind([';', '{', '}']).map_or(0, |i| i + 1);
+                let Some(call) = text[statement..at].rfind("getBundle(") else { continue };
+                let opened = statement + call + "getBundle(".len();
+                let Some(literal) = call_arguments(text, opened).first().and_then(|a| string_literal(a)) else { continue };
+                Some(literal.to_owned())
+            };
+
+            uses.push(KeyUse { span: start..end, bundle, report: true });
+        }
+    }
+
+    uses
+}
+
+/// Keys in a template: `#{a.b}` (Thymeleaf messages; Java EL in `.xhtml`/JSP
+/// is only navigated), `<spring:message code="a.b"/>` and `<fmt:message key="a.b"/>`.
+pub fn markup_uses(text: &str, path: &str) -> Vec<KeyUse> {
+    let mut uses = Vec::new();
+    let thymeleaf = path.ends_with(".html") || path.ends_with(".htm");
+
+    for (at, _) in text.match_indices("#{") {
+        let start = at + 2;
+        let len = text[start..].find(|c: char| !key_char(c)).unwrap_or(text.len() - start);
+        if len > 0 && matches!(text[start + len..].chars().next(), Some('}' | '(')) {
+            uses.push(KeyUse { span: start..start + len, bundle: None, report: thymeleaf });
+        }
+    }
+
+    let basenames: Vec<&str> = text
+        .match_indices("basename=")
+        .filter_map(|(at, _)| text[at + 9..].strip_prefix(['"', '\'']).and_then(|v| v.split(['"', '\'']).next()))
+        .collect();
+
+    for (tag, attribute, quiet_attribute) in [("<spring:message", "code", "text"), ("<s:message", "code", "text"), ("<fmt:message", "key", "bundle")] {
+        for (at, _) in text.match_indices(tag) {
+            let end = text[at..].find('>').map_or(text.len(), |i| at + i);
+            let element = &text[at..end];
+            let Some(found) = element.find(&format!(" {attribute}=")) else { continue };
+            let value_at = at + found + attribute.len() + 2;
+            let Some(quote) = text[value_at..].chars().next().filter(|c| matches!(c, '"' | '\'')) else { continue };
+            let start = value_at + 1;
+            let Some(len) = text[start..end].find(quote) else { continue };
+            if len == 0 || !text[start..start + len].chars().all(key_char) {
+                continue;
+            }
+
+            let mixed_bundles = basenames.iter().any(|b| *b != basenames[0]);
+            let report = !element.contains(&format!(" {quiet_attribute}=")) && !(tag == "<fmt:message" && mixed_bundles);
+            let bundle = (tag == "<fmt:message").then(|| basenames.first().map(|b| (*b).to_owned())).flatten();
+            uses.push(KeyUse { span: start..start + len, bundle, report });
+        }
+    }
+
+    uses
+}
+
 pub struct Declaration {
     pub location: Location,
     pub value: String,
@@ -83,6 +240,7 @@ pub struct Declaration {
 #[derive(Default)]
 pub struct KeyIndex {
     pub keys: BTreeMap<String, Vec<Declaration>>,
+    pub files: Vec<String>,
 }
 
 impl KeyIndex {
@@ -90,6 +248,7 @@ impl KeyIndex {
         let mut index = Self::default();
         for path in project.find_files("**/*.properties", 5000)? {
             let Ok(text) = project.read_file(&path) else { continue };
+            index.files.push(path.clone());
             for p in parse(&text) {
                 index.keys.entry(p.unescaped_key(&text)).or_default().push(Declaration {
                     location: Location { path: path.clone(), range: range_of(&text, &p.key) },
@@ -99,6 +258,34 @@ impl KeyIndex {
             }
         }
         Ok(index)
+    }
+
+    /// The base name of the project's only MessageSource-style bundle
+    /// (`messages`, `ValidationMessages`, or anything under `i18n/`), if there is exactly one.
+    pub fn conventional_bundle(&self) -> Option<&str> {
+        let mut found: Vec<(&str, &str)> = Vec::new();
+        for path in &self.files {
+            let base = split_locale(stem(path)).0;
+            let folder = dir(path);
+            let conventional = matches!(base, "messages" | "message" | "ValidationMessages") || folder.rsplit('/').next() == Some("i18n");
+            if conventional && !found.contains(&(folder, base)) {
+                found.push((folder, base));
+            }
+        }
+        match found.as_slice() {
+            [(_, base)] => Some(base),
+            _ => None,
+        }
+    }
+
+    /// The uses whose key no `.properties` file declares, in a project with one unambiguous bundle.
+    pub fn undeclared<'a>(&self, uses: &'a [KeyUse], text: &str) -> Vec<&'a KeyUse> {
+        let Some(base) = self.conventional_bundle() else { return Vec::new() };
+        uses.iter()
+            .filter(|u| u.report)
+            .filter(|u| u.bundle.as_deref().is_none_or(|name| name.rsplit(['.', '/']).next() == Some(base)))
+            .filter(|u| !self.keys.contains_key(&text[u.span.clone()]))
+            .collect()
     }
 
     /// The value shown next to a key: the default locale's, else any.

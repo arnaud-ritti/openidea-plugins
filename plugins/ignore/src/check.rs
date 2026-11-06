@@ -141,15 +141,15 @@ fn covered_entries(entries: &[Entry]) -> Vec<Problem> {
     let mut problems = Vec::new();
 
     for (i, (entry, rule)) in entries.iter().zip(&rules).enumerate() {
-        let Some(rule) = rule.as_ref().filter(|r| r.is_literal()) else { continue };
-        let path = rule.literal_path();
+        let Some(rule) = rule.as_ref() else { continue };
+        let Some((path, dir_only)) = covered_path(rule) else { continue };
         let cover = entries.iter().zip(&rules).enumerate().find_map(|(j, (other, other_rule))| {
             let other_rule = other_rule.as_ref()?;
             let same_kind_between = rules[i.min(j)..=i.max(j)].iter().flatten().all(|r| r.negated == rule.negated);
             let covers = other.text != entry.text
                 && same_kind_between
                 && (rule.anchored || !other_rule.anchored)
-                && other_rule.matches(&path, rule.dir_only);
+                && other_rule.matches(&path, dir_only);
             covers.then_some(other.text)
         });
 
@@ -166,6 +166,32 @@ fn covered_entries(entries: &[Entry]) -> Vec<Problem> {
     }
 
     problems
+}
+
+/// The path another entry must match to cover `rule`: the entry itself when it
+/// names one path, else its literal leading directories (`build/` for
+/// `build/*.o`). `None` when no such path exists.
+fn covered_path(rule: &Rule) -> Option<(String, bool)> {
+    if rule.is_literal() {
+        return Some((rule.literal_path(), rule.dir_only));
+    }
+    if !rule.anchored {
+        return None;
+    }
+
+    let mut directories = Vec::new();
+    for segment in rule.pattern.split('/') {
+        if !Rule::parse(segment).is_some_and(|r| r.is_literal()) {
+            break;
+        }
+        directories.push(segment);
+    }
+    // the last segment is never a directory prefix of the entry unless a wildcard follows it
+    if directories.is_empty() || directories.len() == rule.pattern.split('/').count() {
+        return None;
+    }
+
+    Some((crate::check::unescape(&directories.join("/")), true))
 }
 
 /// The line with its line break; the last line takes the break before it.
@@ -366,6 +392,20 @@ mod tests {
                 ("`/x/build` is redundant: `build` matches it too.", true),
             ]
         );
+    }
+
+    #[test]
+    fn glob_entries_inside_an_ignored_directory_are_covered() {
+        let messages: Vec<String> = check("build/\nbuild/*.o\n/x/**/y\n/x/\n!/z/*.c\n/z/\nsrc/*.o\n*.o\n", GIT).into_iter().map(|p| p.message).collect();
+        assert_eq!(
+            messages,
+            [
+                "`build/*.o` is redundant: `build/` matches it too.",
+                "`/x/**/y` is redundant: `/x/` matches it too.",
+            ]
+        );
+        assert_eq!(codes("*.log\ndebug.log\n", GIT), ["cover-entry"]);
+        assert!(codes("!debug.log\n*.log\n", GIT).is_empty());
     }
 
     #[test]

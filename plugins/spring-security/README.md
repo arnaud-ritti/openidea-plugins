@@ -11,9 +11,11 @@ Spring Security support for Java projects in OpenIDEA:
 - **Plain-text passwords**: `NoOpPasswordEncoder.getInstance()` (warning), `{noop}` passwords passed to `.password(…)` (info).
 - **Completion** in the four method security annotations: `hasRole('…')`, `hasAnyRole(…)`, `hasAuthority('…')`, `hasAnyAuthority(…)`, `hasPermission(…, '…')`, `isAuthenticated()`, `isAnonymous()`, `isFullyAuthenticated()`, `isRememberMe()`, `permitAll`, `denyAll`, `principal`, `authentication`, `returnObject` (`@PostAuthorize`/`@PostFilter`), `filterObject` (`@PreFilter`/`@PostFilter`); inside `hasRole('…')`/`hasAnyRole('…')`, the role names the project already uses (`hasRole`/`hasAnyRole`, `@Secured`, `@RolesAllowed`, `ROLE_` stripped).
 
-Text-based, Java only. Calls match by method name; the matcher, `authorizeRequests` and `hasRole`/`hasAnyRole` call checks only run in files that import from `org.springframework.security`.
+Text-based: Java and Kotlin sources (the same migration, `ROLE_` and password checks, including the Kotlin DSL's `authorizeRequests { … }`; completion stays Java-only) and Spring XML files. Calls match by method name; the matcher, `authorizeRequests` and `hasRole`/`hasAnyRole` call checks only run in files that import from `org.springframework.security`.
 
-Not ported: the XML security namespace, SpEL language support beyond completion (highlighting, validation, navigation), OAuth2/SAML configuration assistance, the Kotlin DSL.
+- **Security XML namespace** (`http://www.springframework.org/schema/security`, any prefix): `<intercept-url access>` expressions (unbalanced quotes/parentheses, `hasRole()` without argument, unknown `has…`/`is…` function names, redundant `ROLE_`), duplicate `pattern`s within one `<http>`, a `/**` catch-all placed before more specific patterns (not reported when the catch-all has a `method` or `servlet-path`, or `<http>` sets a regex `request-matcher` or a `request-matcher-ref`), `use-expressions="false"` and `<global-method-security>` (deprecated; use `<method-security>`). `unknown-security-function` is a warning only and can be a false positive for a custom `SecurityExpressionRoot` (methods such as `isOwner(#id)`); there is nothing to configure, ignore it. Plain role lists are not checked when `use-expressions="false"`.
+
+Not ported: SpEL language support beyond completion and these checks (highlighting, navigation), OAuth2/SAML configuration assistance, quick fixes for the XML checks.
 
 ```sh
 cargo test

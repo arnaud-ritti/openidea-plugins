@@ -17,19 +17,23 @@ mod model;
 mod queries;
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use openidea_plugin::host;
-use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project, Range, register_plugin,
+    Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Location, Position, Project, Range, register_plugin,
 };
 
 use checks::{Finding, inspect_entity, inspect_repository};
 use generate::{Dialect, Known, ddl, dto, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
 use model::{Class, Edit, Kind, Relation, has_word, language_of, mask, parse_class};
 use queries::{ItemKind, Prop, complete, parse_repository};
+
+/// Time one provider call may spend reading repositories.
+const REPOSITORY_BUDGET: Duration = Duration::from_millis(30);
 
 /// Source files listed per pattern.
 const MAX_SOURCES: u32 = 50_000;
@@ -89,9 +93,62 @@ pub struct JpaAssist {
     locations: HashMap<String, (String, Position)>,
     /// Expanded entities of the structure tree.
     expanded: HashSet<String>,
+    /// Repositories per project root, read lazily.
+    repositories: HashMap<String, RepositoryIndex>,
+}
+
+/// Repositories by entity simple name, filled within the provider budget.
+#[derive(Default)]
+struct RepositoryIndex {
+    listed: bool,
+    unread: Vec<String>,
+    by_entity: HashMap<String, Vec<(String, Location)>>,
+}
+
+impl RepositoryIndex {
+    fn add(&mut self, path: &str, text: &str) {
+        for found in self.by_entity.values_mut() {
+            found.retain(|(_, location)| location.path != path);
+        }
+
+        let Some(kotlin) = language_of(path) else { return };
+        let Some(repository) = parse_repository(text, kotlin) else { return };
+
+        let at = position(text, repository.name_start);
+        let location = Location { path: path.into(), range: Range::new(at, at) };
+        self.by_entity.entry(repository.entity).or_default().push((repository.name, location));
+    }
+}
+
+fn is_repository_file(path: &str) -> bool {
+    path.ends_with("Repository.java") || path.ends_with("Repository.kt")
 }
 
 impl JpaAssist {
+    /// Repositories declaring `entity`, from the index; reads at most one budget's worth of unread files.
+    fn repositories_of(&mut self, project: &Project, entity: &str) -> Vec<(String, Location)> {
+        let index = self.repositories.entry(project.root().unwrap_or_default()).or_default();
+
+        if !index.listed {
+            index.listed = true;
+            for pattern in ["**/*Repository.java", "**/*Repository.kt"] {
+                index.unread.extend(project.find_files(pattern, MAX_SOURCES).unwrap_or_default());
+            }
+        }
+
+        let start = Instant::now();
+        while start.elapsed() < REPOSITORY_BUDGET {
+            let Some(path) = index.unread.pop() else { break };
+            if let Ok(text) = project.read_file(&path) {
+                index.add(&path, &text);
+            }
+        }
+
+        let mut found = index.by_entity.get(entity).cloned().unwrap_or_default();
+        found.sort_by(|a, b| a.1.path.cmp(&b.1.path));
+        found
+    }
+
     fn class(&self, name: &str) -> Option<&Class> {
         self.classes.get(name)?.as_ref()
     }
@@ -304,6 +361,12 @@ impl Plugin for JpaAssist {
             let Some(project) = project_of(path) else { continue };
             let Ok(text) = project.read_file(path) else { continue };
 
+            if is_repository_file(path)
+                && let Some(index) = self.repositories.get_mut(&project.root().unwrap_or_default())
+            {
+                index.add(path, &text);
+            }
+
             let diagnostics: Vec<Diagnostic> =
                 self.findings(&project, path, &text, kotlin).iter().map(|f| f.diagnostic(&text)).collect();
             let _ = host::publish_diagnostics(path, &diagnostics);
@@ -338,6 +401,25 @@ impl Providers for JpaAssist {
                 completion
             })
             .collect()
+    }
+
+    fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        let Some(class) = parse_class(&doc.text, &doc.path) else { return Vec::new() };
+        if class.kind != Kind::Entity {
+            return Vec::new();
+        }
+        let Some(project) = project_of(&doc.path) else { return Vec::new() };
+
+        let repositories = self.repositories_of(&project, &class.name);
+        let Some((_, first)) = repositories.first() else { return Vec::new() };
+        let names: Vec<&str> = repositories.iter().map(|(name, _)| name.as_str()).collect();
+
+        vec![LineMarker {
+            line: class.pos.line,
+            icon: Some("navigate".into()),
+            tooltip: format!("Repositories: {}", names.join(", ")),
+            target: Some(first.clone()),
+        }]
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
@@ -564,6 +646,62 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         host.open_editor("/project/db.sql", "sql", "create table tag (id bigint primary key, label text);", &[(0, 20, 0, 20)]);
         plugin.run_command("copy-entity", &host.invocation(), None).unwrap();
         assert!(host.clipboard().unwrap().contains("public class Tag {"));
+    }
+
+    #[test]
+    fn entity_marker_targets_repository() {
+        let _host = host();
+        let mut plugin = JpaAssist::default();
+        let doc = Document { path: "/project/src/shop/Order.java".into(), language: "java".into(), version: 1, text: ORDER.into() };
+
+        let markers = plugin.line_markers(&doc);
+
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].line, 5);
+        assert_eq!(markers[0].icon.as_deref(), Some("navigate"));
+        assert_eq!(markers[0].tooltip, "Repositories: OrderRepository");
+        assert_eq!(markers[0].target.as_ref().unwrap().path, "/project/src/shop/data/OrderRepository.java");
+
+        let customer = Document { path: "/project/src/shop/Customer.java".into(), language: "java".into(), version: 1, text: "@Entity\nclass Customer {}".into() };
+        assert!(plugin.line_markers(&customer).is_empty());
+    }
+
+    #[test]
+    fn entity_marker_does_not_rescan_repositories_per_request() {
+        let host = host();
+        let mut plugin = JpaAssist::default();
+        let doc = Document { path: "/project/src/shop/Order.java".into(), language: "java".into(), version: 1, text: ORDER.into() };
+        assert_eq!(plugin.line_markers(&doc).len(), 1);
+
+        host.add_file("src/shop/data/OrderRepository.java", "interface OrderRepository {}");
+        host.add_file("src/shop/data/OtherRepository.java", REPOSITORY);
+        assert_eq!(plugin.line_markers(&doc)[0].tooltip, "Repositories: OrderRepository", "served from the index");
+
+        plugin.handle_events(&[Event::FileSaved("/project/src/shop/data/OrderRepository.java".into())], &host.invocation());
+        assert!(plugin.line_markers(&doc).is_empty(), "a saved repository is read again");
+    }
+
+    #[test]
+    fn menu_entries_have_when_clauses() {
+        let value = |block: &str, key: &str| {
+            block.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(" = \"")?.strip_suffix('"')).unwrap_or_default().to_owned()
+        };
+        let editor_menus: Vec<(String, String)> = include_str!("../plugin.toml")
+            .split("[[contributes.menus]]")
+            .skip(1)
+            .map(|block| block.split("\n[").next().unwrap_or(block))
+            .filter(|block| value(block, "menu") == "editor.context")
+            .map(|block| (value(block, "command"), value(block, "when")))
+            .collect();
+
+        assert_eq!(
+            editor_menus,
+            [
+                ("copy-ddl".to_owned(), "editorLangId == java || editorLangId == kotlin".to_owned()),
+                ("copy-dto".to_owned(), "editorLangId == java || editorLangId == kotlin".to_owned()),
+                ("copy-entity".to_owned(), "editorLangId == sql".to_owned()),
+            ]
+        );
     }
 
     #[test]

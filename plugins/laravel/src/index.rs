@@ -2,7 +2,7 @@
 //! translation keys, env keys, middleware aliases, assets, controllers and
 //! their methods, each with where it is defined.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use openidea_plugin::Position;
@@ -80,6 +80,8 @@ pub struct Index {
     pub vite: Names,
     /// Gate abilities (`Gate::define`) and policy methods.
     pub abilities: Names,
+    /// Custom Blade directives (`Blade::directive('name'`) found in `app/`.
+    pub directives: Names,
     /// Validation rule names.
     pub rules: Names,
     /// Columns by table, from the migrations.
@@ -88,6 +90,16 @@ pub struct Index {
     pub models: BTreeMap<String, String>,
     pub model_files: BTreeMap<String, String>,
     pub renders: Vec<Render>,
+    /// Inertia pages by name (`Posts/Index`), from `resources/js/Pages` and `resources/js/pages`.
+    pub inertia_pages: Names,
+    /// File names without extension under `database/factories`.
+    pub factories: BTreeSet<String>,
+    /// Models that name their factory themselves (`newFactory`, `UseFactory`).
+    pub factory_overrides: BTreeSet<String>,
+    /// A provider registers component directories or namespaces the index can't follow.
+    pub open_components: bool,
+    /// A provider registers Livewire components or namespaces the index can't follow.
+    pub open_livewire: bool,
     /// Some files were skipped to stay within the call's time budget.
     pub partial: bool,
 }
@@ -98,6 +110,10 @@ const MAX_FILES: u32 = 5000;
 const VIEW_ROOTS: &[&str] = &["resources/views", "app/views", "resources/templates"];
 const LANG_ROOTS: &[&str] = &["lang", "resources/lang"];
 const VITE_EXTENSIONS: &[&str] = &["css", "scss", "sass", "less", "js", "jsx", "ts", "tsx", "vue"];
+const INERTIA_PAGE_ROOTS: &[&str] = &["resources/js/Pages", "resources/js/pages"];
+const INERTIA_PAGE_EXTENSIONS: &[&str] = &["vue", "jsx", "tsx", "svelte"];
+/// Composer packages that provide `<x-…>` components without a namespace (icon packs, Jetstream, Filament, Flux).
+const COMPONENT_PACKAGES: &[&str] = &["/blade-", "laravel/jetstream", "filament/", "livewire/flux"];
 const ROUTE_FILES: &[&str] = &["routes/**/*.php", "app/Http/routes.php", "app/routes.php"];
 
 /// Rules of Laravel's validator (the "Available Validation Rules" of the documentation).
@@ -383,7 +399,14 @@ impl Index {
             let relative_path = relative(&path);
             let inside = relative_path.trim_start_matches("resources/views/components/").trim_end_matches(".blade.php");
             let name = inside.replace('/', ".");
-            index.components.add(name.strip_suffix(".index").unwrap_or(&name), None, &path, Position::new(0, 0), 0);
+            let name = name.strip_suffix(".index").unwrap_or(&name);
+            index.components.add(name, None, &path, Position::new(0, 0), 0);
+
+            if let Some((parent, last)) = name.rsplit_once('.') {
+                if parent.rsplit('.').next() == Some(last) {
+                    index.components.add(parent, None, &path, Position::new(0, 0), 0);
+                }
+            }
         }
 
         for directory in ["app/Livewire", "app/Http/Livewire"] {
@@ -396,6 +419,21 @@ impl Index {
                     let short = class.class.rsplit('\\').next().map_or(0, str::len);
                     index.livewire.add(&tag_name(inside), None, &path, lines.position(class.class_offset), short);
                 }
+            }
+        }
+
+        for root in INERTIA_PAGE_ROOTS {
+            for extension in INERTIA_PAGE_EXTENSIONS {
+                for path in files(&[format!("{root}/**/*.{extension}")]) {
+                    let name = relative(&path).trim_start_matches(&format!("{root}/")).trim_end_matches(&format!(".{extension}")).to_owned();
+                    index.inertia_pages.add(&name, None, &path, Position::new(0, 0), 0);
+                }
+            }
+        }
+
+        for path in files(&globs(&["database/factories/**/*.php"])) {
+            if let Some(stem) = file_name(&path).strip_suffix(".php") {
+                index.factories.insert(stem.to_owned());
             }
         }
 
@@ -412,10 +450,48 @@ impl Index {
             let Some(text) = read(&path, &mut index) else { continue };
             let masked = php::mask_comments(&text);
             let lines = Lines::new(&text);
+            index.open_components |= ["anonymousComponentPath(", "anonymousComponentNamespace(", "componentNamespace(", "Blade::components("]
+                .iter()
+                .any(|call| masked.contains(call));
+            for (at, _) in masked.match_indices("Blade::component(") {
+                let arguments = php::arguments(&masked, at + "Blade::component".len());
+                let literals: Vec<_> = arguments.iter().take(2).filter_map(|range| php::literal(&masked, range.clone())).collect();
+                for (alias, offset) in &literals {
+                    index.components.add(alias, Some("Blade::component".into()), &path, lines.position(*offset), alias.len());
+                }
+
+                if !literals.is_empty() {
+                    continue;
+                }
+
+                let class = arguments.first().filter(|_| arguments.len() == 1).and_then(|range| php::class_constant(&masked, range.clone()));
+                match class {
+                    Some(class) => {
+                        let basename = class.rsplit('\\').next().unwrap_or(class);
+                        index.components.add(&kebab(basename), Some("Blade::component".into()), &path, Position::new(0, 0), 0);
+                    }
+                    None => index.open_components = true,
+                }
+            }
+            index.open_livewire |= ["Livewire::component(", "Livewire::componentNamespace(", "Livewire::addNamespace(", "Livewire::addLocation("]
+                .iter()
+                .any(|call| masked.contains(call));
             for (at, _) in masked.match_indices("Gate::define(") {
                 let first = php::arguments(&masked, at + "Gate::define".len()).into_iter().next();
                 if let Some((ability, offset)) = first.and_then(|range| php::literal(&masked, range)) {
                     index.abilities.add(ability, Some("Gate::define".into()), &path, lines.position(offset), ability.len());
+                }
+            }
+        }
+
+        for path in files(&globs(&["app/**/*.php"])) {
+            let Some(text) = read(&path, &mut index) else { continue };
+            let masked = php::mask_comments(&text);
+            let lines = Lines::new(&text);
+            for (at, _) in masked.match_indices("Blade::directive(") {
+                let first = php::arguments(&masked, at + "Blade::directive".len()).into_iter().next();
+                if let Some((name, offset)) = first.and_then(|range| php::literal(&masked, range)) {
+                    index.directives.add(name, Some("Blade::directive".into()), &path, lines.position(offset), name.len());
                 }
             }
         }
@@ -450,8 +526,15 @@ impl Index {
 
             let short = model.class.rsplit('\\').next().unwrap_or(&model.class).to_owned();
             let table = explicit_table(&masked).unwrap_or_else(|| table_name(&short));
+            if masked.contains("newFactory") || masked.contains("UseFactory") {
+                index.factory_overrides.insert(short.clone());
+            }
             index.model_files.insert(path, table.clone());
             index.models.insert(short, table);
+        }
+
+        if let Some(composer) = read(&format!("{root}/composer.json"), &mut index) {
+            index.open_components |= COMPONENT_PACKAGES.iter().any(|package| composer.contains(package));
         }
 
         for rule in VALIDATION_RULES {

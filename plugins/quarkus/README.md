@@ -16,7 +16,7 @@ The IDE itself provides Go to Definition and Find Usages between keys and Java c
 
 Where keys come from:
 
-- Quarkus 3.40.1's own configuration metadata for a curated set of extensions, bundled in `data/quarkus-properties.tsv` (Apache-2.0, see `NOTICE`). Regenerate it with `python3 -I scripts/gen-metadata.py 3.40.1 data/quarkus-properties.tsv [extra-artifact-id…]`.
+- Quarkus 3.40.1's own configuration metadata for about 170 of the most-used `io.quarkus` extensions (86 of them contribute their own keys: 2,797 properties), bundled in `data/quarkus-properties.tsv` (Apache-2.0, see `NOTICE`). Regenerate it with `python3 -I scripts/gen-metadata.py 3.40.1 data/quarkus-properties.tsv [extra-artifact-id…]`; the extension list is `EXTENSIONS` in the script, ids without metadata are reported and skipped.
 - The MicroProfile Config keys of the original plugin's static metadata.
 - `@ConfigProperty` and `@ConfigMapping` declarations in the project's Java sources.
 

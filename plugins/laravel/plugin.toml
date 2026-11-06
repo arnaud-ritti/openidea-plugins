@@ -71,6 +71,45 @@ id = "route-list"
 title = "Laravel: Show Route List"
 category = "Laravel"
 
+[[contributes.commands]]
+id = "db-seed"
+title = "Laravel: Seed Database"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "migrate-fresh"
+title = "Laravel: Fresh Migration (drops all tables)"
+category = "Laravel"
+
+[[contributes.runDetectors]]
+id = "serve"
+name = "Laravel: Serve"
+files = ["artisan"]
+command = "php"
+args = ["artisan", "serve"]
+
+[[contributes.runDetectors]]
+id = "test"
+name = "Laravel: Test"
+files = ["artisan"]
+command = "php"
+args = ["artisan", "test"]
+test = true
+
+[[contributes.runDetectors]]
+id = "queue-work"
+name = "Laravel: Queue Worker"
+files = ["artisan"]
+command = "php"
+args = ["artisan", "queue:work"]
+
+[[contributes.runDetectors]]
+id = "schedule-work"
+name = "Laravel: Schedule Worker"
+files = ["artisan"]
+command = "php"
+args = ["artisan", "schedule:work"]
+
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers", "code-actions"]
 languages = ["php", "blade"]
@@ -84,3 +123,100 @@ location = "right"
 [contributes.settings]
 schema = "settings.schema.json"
 title = "Laravel"
+
+[[contributes.fileTemplates]]
+id = "laravel-controller"
+name = "Laravel Controller"
+extension = "php"
+path = "templates/Controller.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-resource-controller"
+name = "Laravel Resource Controller"
+extension = "php"
+path = "templates/ResourceController.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-job"
+name = "Laravel Job"
+extension = "php"
+path = "templates/Job.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-event"
+name = "Laravel Event"
+extension = "php"
+path = "templates/Event.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-listener"
+name = "Laravel Listener"
+extension = "php"
+path = "templates/Listener.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-mailable"
+name = "Laravel Mailable"
+extension = "php"
+path = "templates/Mailable.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-middleware"
+name = "Laravel Middleware"
+extension = "php"
+path = "templates/Middleware.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-form-request"
+name = "Laravel Form Request"
+extension = "php"
+path = "templates/FormRequest.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-policy"
+name = "Laravel Policy"
+extension = "php"
+path = "templates/Policy.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-observer"
+name = "Laravel Observer"
+extension = "php"
+path = "templates/Observer.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-enum"
+name = "Laravel Enum"
+extension = "php"
+path = "templates/Enum.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-seeder"
+name = "Laravel Seeder"
+extension = "php"
+path = "templates/Seeder.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-factory"
+name = "Laravel Factory"
+extension = "php"
+path = "templates/Factory.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-migration"
+name = "Laravel Migration"
+extension = "php"
+path = "templates/Migration.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-pest-feature-test"
+name = "Pest Feature Test"
+extension = "php"
+path = "templates/FeatureTest.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-pest-unit-test"
+name = "Pest Unit Test"
+extension = "php"
+path = "templates/UnitTest.php"
+

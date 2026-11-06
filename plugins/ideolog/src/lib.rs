@@ -57,7 +57,13 @@ impl Plugin for Ideolog {
         match id {
             "jump-to-source" => jump_to_source(&config, ctx, &editor),
             "next-error" => go_to(&config, &editor, "No error below the caret.", |events, at| {
-                events.iter().skip(at + 1).find(|(_, severity)| *severity == Some(Severity::Error))
+                events.iter().skip(at + 1).find(|(_, severity, _)| *severity == Some(Severity::Error))
+            }),
+            "next-warning" => go_to(&config, &editor, "No warning below the caret.", |events, at| {
+                events.iter().skip(at + 1).find(|(_, severity, _)| *severity == Some(Severity::Warning))
+            }),
+            "next-exception" => go_to(&config, &editor, "No exception below the caret.", |events, at| {
+                events.iter().skip(at + 1).find(|(_, _, exception)| *exception)
             }),
             "next-entry" => go_to(&config, &editor, "Already at the last log entry.", |events, at| events.get(at + 1)),
             "previous-entry" => go_to(&config, &editor, "Already at the first log entry.", |events, at| at.checked_sub(1).map(|i| &events[i])),
@@ -223,7 +229,7 @@ fn caret(editor: &TextEditor, text: &str) -> Result<(u32, usize), Error> {
     Ok((selection.start.line, at - line_start))
 }
 
-type Entries = [(Range<u32>, Option<Severity>)];
+type Entries = [(Range<u32>, Option<Severity>, bool)];
 
 /// Moves the caret to the start of the event `pick` chooses, given the
 /// events and the index of the one at the caret.
@@ -231,15 +237,15 @@ fn go_to(
     config: &Config,
     editor: &TextEditor,
     none: &str,
-    pick: impl FnOnce(&Entries, usize) -> Option<&(Range<u32>, Option<Severity>)>,
+    pick: impl FnOnce(&Entries, usize) -> Option<&(Range<u32>, Option<Severity>, bool)>,
 ) -> Result<Option<String>, Error> {
     let text = editor.document()?.text;
     let (line, _) = caret(editor, &text)?;
     let (format, events) = parsed_events(config, &text);
-    let entries: Vec<_> = events.iter().map(|(e, p)| (e.lines.clone(), p.severity(format))).collect();
-    let at = entries.iter().position(|(lines, _)| lines.contains(&line)).unwrap_or(entries.len().saturating_sub(1));
+    let entries: Vec<_> = events.iter().map(|(e, p)| (e.lines.clone(), p.severity(format), log::has_exception(e.text, p.severity(format) == Some(Severity::Error)))).collect();
+    let at = entries.iter().position(|(lines, ..)| lines.contains(&line)).unwrap_or(entries.len().saturating_sub(1));
 
-    let Some((lines, _)) = pick(&entries, at) else {
+    let Some((lines, ..)) = pick(&entries, at) else {
         host::notify(NotificationLevel::Info, "Ideolog", none);
         return Ok(None);
     };
@@ -323,6 +329,87 @@ java.lang.IllegalStateException: boom
         assert!(config.detect("just some text\n").is_none());
     }
 
+    fn classify(line: &str) -> (Option<Severity>, Option<String>) {
+        let text = format!("{line}\n");
+        let config = Config::default();
+        let format = config.detect(&text);
+        assert!(format.is_some(), "no format detected for {line}");
+        let parsed = Parsed::new(format, line);
+        (parsed.severity(format), parsed.time(format).map(str::to_owned))
+    }
+
+    #[test]
+    fn more_default_formats_are_classified_by_level_and_time() {
+        let error = Some(Severity::Error);
+        let warning = Some(Severity::Warning);
+        let samples = [
+            ("2026-11-06T12:00:00Z ERROR msg", error, Some("2026-11-06T12:00:00Z")),
+            ("2026-11-06T12:00:00.123456789Z WARN msg", warning, Some("2026-11-06T12:00:00.123456789Z")),
+            ("2026-11-06T12:00:00+01:00 ERROR msg", error, Some("2026-11-06T12:00:00+01:00")),
+            ("ERROR:root:msg", error, None),
+            ("WARNING:app.db:slow", warning, None),
+            ("2026-11-06 12:00:00,123 - name - ERROR - msg", error, Some("2026-11-06 12:00:00,123")),
+            ("2026/11/06 12:00:00 [error] 29#29: msg", error, Some("2026/11/06 12:00:00")),
+            ("2026/11/06 12:00:00 [warn] 29#29: msg", warning, Some("2026/11/06 12:00:00")),
+            ("Nov  6 12:00:00 host proc[123]: connection failed", error, Some("Nov  6 12:00:00")),
+            ("Nov  6 12:00:00 host proc[123]: warning: low disk", warning, Some("Nov  6 12:00:00")),
+            ("Nov  6 12:00:00 host proc[123]: all fine", None, Some("Nov  6 12:00:00")),
+        ];
+        for (line, severity, time) in samples {
+            assert_eq!(classify(line), (severity, time.map(str::to_owned)), "{line}");
+        }
+    }
+
+    #[test]
+    fn more_default_formats_colour_the_event() {
+        assert!(kinds_on_line("2026-11-06T12:00:00Z ERROR msg\n", 0).contains(&("ERROR".to_owned(), Highlight::Keyword)));
+        assert!(kinds_on_line("Nov  6 12:00:00 host proc[1]: boom failed\n", 0).contains(&("boom failed".to_owned(), Highlight::Keyword)));
+    }
+
+    const LARAVEL: &str = "\
+[2026-11-06 10:00:00] local.ERROR: Division by zero {\"exception\":\"[object]\"}
+[stacktrace]
+#0 /var/www/app/Http/Foo.php(12): fn()
+#1 {main}
+[2026-11-06 10:00:01] local.INFO: fine
+";
+
+    #[test]
+    fn laravel_lines_colour_as_error_with_their_stack_trace() {
+        assert!(kinds_on_line(LARAVEL, 0).contains(&("ERROR".to_owned(), Highlight::Keyword)));
+        assert_eq!(kinds_on_line(LARAVEL, 2).len(), 1);
+        assert_eq!(kinds_on_line(LARAVEL, 2)[0].1, Highlight::Keyword);
+        assert!(kinds_on_line(LARAVEL, 4).contains(&("INFO".to_owned(), Highlight::String)));
+        assert_eq!(folding(&Config::default(), LARAVEL), [Fold { start_line: 0, end_line: 3, kind: FoldKind::Region }]);
+    }
+
+    #[test]
+    fn monolog_and_serilog_lines_are_classified() {
+        let error = Some(Severity::Error);
+        let warning = Some(Severity::Warning);
+        assert_eq!(
+            classify("[2026-11-06T10:00:00.123456+00:00] app.ERROR: boom {\"ctx\":1} []"),
+            (error, Some("2026-11-06T10:00:00.123456+00:00".to_owned()))
+        );
+        assert_eq!(
+            classify("2026-11-06 10:00:00.123 +00:00 [ERR] boom"),
+            (error, Some("2026-11-06 10:00:00.123 +00:00".to_owned()))
+        );
+        assert_eq!(classify("2026-11-06 10:00:00.123 +00:00 [WRN] hm").0, warning);
+        assert_eq!(classify("2026-11-06 10:00:00.123 +00:00 [FTL] dead").0, error);
+    }
+
+    #[test]
+    fn existing_formats_keep_their_detection() {
+        let config = Config::default();
+        let uuid = |text: &str| config.detect(text).map(|f| f.uuid.clone());
+        assert_eq!(uuid("10:00:00.000|INFO|main|started\n").as_deref(), Some("b5772998-bf1e-4d9d-ab41-da0b86451163"));
+        assert_eq!(uuid("05-01 10:00:00.000  1234  5678 E MyTag: failed\n").as_deref(), Some("b8fcb4d4-b1b8-4681-90f1-42f7c02aaf67"));
+        assert_eq!(uuid("[10:00:00]W: [Step 1/2] odd\n").as_deref(), Some("e9fa2755-8390-42f5-a41e-a909c58c8cf9"));
+        assert_eq!(uuid(IDEA).as_deref(), Some("8a0e8992-94cb-4f4c-8be2-42b03609626b"));
+        assert!(uuid("Nov is a month\nplain text 12:00\n").is_none());
+    }
+
     #[test]
     fn lines_are_coloured_by_level() {
         assert!(kinds_on_line(IDEA, 0).contains(&("INFO".to_owned(), Highlight::String)));
@@ -399,6 +486,34 @@ java.lang.IllegalStateException: boom
         let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
         open_log(&host, 0, 0);
         Ideolog::default().run_command("next-error", &host.invocation(), None).unwrap();
+        assert_eq!(host.opened_locations(), [("/p/logs/idea.log".to_owned(), 2, 0)]);
+    }
+
+    #[test]
+    fn next_warning_targets_the_next_warn_event() {
+        let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
+        open_log(&host, 0, 0);
+        Ideolog::default().run_command("next-warning", &host.invocation(), None).unwrap();
+        assert_eq!(host.opened_locations(), [("/p/logs/idea.log".to_owned(), 1, 0)]);
+    }
+
+    #[test]
+    fn next_exception_skips_errors_without_one() {
+        let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
+        let log = "2024-05-01 10:00:00,000 [   1]  INFO - #a.B - fine\n2024-05-01 10:00:00,123 [   1] ERROR - #a.B - plain failure\n2024-05-01 10:00:01,000 [   1] ERROR - #a.B - java.io.IOException: x\n";
+        host.set_project_root(Some("/p"));
+        host.open_editor("/p/a.log", "ideolog", log, &[(0, 0, 0, 0)]);
+        let mut plugin = Ideolog::default();
+        plugin.run_command("next-error", &host.invocation(), None).unwrap();
+        plugin.run_command("next-exception", &host.invocation(), None).unwrap();
+        assert_eq!(host.opened_locations(), [("/p/a.log".to_owned(), 1, 0), ("/p/a.log".to_owned(), 2, 0)]);
+    }
+
+    #[test]
+    fn next_exception_targets_the_next_event_with_an_exception() {
+        let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
+        open_log(&host, 0, 0);
+        Ideolog::default().run_command("next-exception", &host.invocation(), None).unwrap();
         assert_eq!(host.opened_locations(), [("/p/logs/idea.log".to_owned(), 2, 0)]);
     }
 

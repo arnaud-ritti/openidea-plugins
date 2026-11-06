@@ -40,6 +40,18 @@ category = "Ideolog"
 when = "editorFocus"
 
 [[contributes.commands]]
+id = "next-warning"
+title = "Ideolog: Go to Next Warning"
+category = "Ideolog"
+when = "editorFocus"
+
+[[contributes.commands]]
+id = "next-exception"
+title = "Ideolog: Go to Next Exception"
+category = "Ideolog"
+when = "editorFocus"
+
+[[contributes.commands]]
 id = "next-entry"
 title = "Ideolog: Go to Next Entry"
 category = "Ideolog"

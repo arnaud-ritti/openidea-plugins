@@ -42,6 +42,12 @@
       "title": "Report three dots used instead of an ellipsis",
       "default": false
     },
+    "reportMissingKeysInCode": {
+      "type": "boolean",
+      "title": "Report keys in code that no bundle declares",
+      "description": "Warn on a literal key in getMessage, ResourceBundle.getString, #{key}, <spring:message> and <fmt:message> when the project's only MessageSource bundle (messages, ValidationMessages or i18n/*) doesn't declare it. Dynamic keys, default messages and bundles outside the project are never reported.",
+      "default": true
+    },
     "inspections.alphaUnsorted": {
       "type": "boolean",
       "title": "Report alphabetically unsorted files",

@@ -16,9 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use api::{Approvals, Discussion, DraftNote, FileDiff, MergeRequest, ProjectInfo, TimelineEvent, User};
 use branch::BranchReview;
 use openidea_plugin::host::{self, storage};
-use openidea_plugin::providers::{Document, LineMarker, Providers};
+use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Error, Event, Invocation, LogLevel, NotificationLevel, Plugin, RepositoryStatus, register_plugin};
+use openidea_plugin::{Error, Event, Invocation, LogLevel, NotificationLevel, Plugin, Range, RepositoryStatus, register_plugin};
 
 const LIST: &str = "merge-requests";
 const DETAILS: &str = "merge-request";
@@ -876,6 +876,7 @@ fn create_snippet(ctx: &Invocation) -> Result<Option<String>, Error> {
 
 impl Plugin for GitLab {
     fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        api::begin_budget();
         match id {
             "new-token" => host::open_url(&api::new_token_url())?,
             "open-in-browser" => host::open_url(&file_link(ctx)?)?,
@@ -901,6 +902,7 @@ impl Plugin for GitLab {
     }
 
     fn handle_events(&mut self, events: &[Event], ctx: &Invocation) {
+        api::begin_budget();
         if !host::secret_is_set(api::TOKEN) {
             return;
         }
@@ -922,10 +924,15 @@ impl Providers for GitLab {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         self.branch_line_markers(doc)
     }
+
+    fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        self.suggestion_actions(doc, selection)
+    }
 }
 
 impl Views for GitLab {
     fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        api::begin_budget();
         if !host::secret_is_set(api::TOKEN) {
             return Ok(View::message(NO_TOKEN).button(Button::new("new-token", "Create Access Token")));
         }
@@ -942,6 +949,7 @@ impl Views for GitLab {
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        api::begin_budget();
         if let ViewEvent::Button(id) = &event {
             if id == "new-token" {
                 return host::open_url(&api::new_token_url());

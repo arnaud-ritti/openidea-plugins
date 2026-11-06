@@ -14,6 +14,7 @@ activation = [
     "on-file:**/application*.properties",
     "on-file:**/application*.yml",
     "on-file:**/application*.yaml",
+    "on-view:diagram",
 ]
 
 [capabilities]
@@ -26,3 +27,9 @@ languages = ["xml", "properties", "yaml"]
 [[contributes.providers]]
 kinds = ["line-markers"]
 languages = ["java"]
+
+[[contributes.views]]
+id = "diagram"
+title = "Batch Jobs"
+icon = "hierarchy"
+location = "bottom"

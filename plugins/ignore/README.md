@@ -12,6 +12,7 @@ commit `860a6855`, Apache-2.0) by Jakub Chrzanowski and JetBrains.
   file opens it.
 - _Add … to .gitignore_ quick fix (and an unignore variant with `!`) in any
   project file, when the project root has a .gitignore.
+- New › _Ignore File_: a starter `<name>.ignore` file (the `.ignore` file type). Dot-named files such as `.gitignore` are recognised when opened, not created from the New menu.
 - _Ignore Templates_ tool window: the github/gitignore templates and your
   own (_Create User Template_ saves the focused file). Double-click a template
   to add it to the open ignore file.
@@ -27,7 +28,8 @@ commit `860a6855`, Apache-2.0) by Jakub Chrzanowski and JetBrains.
 
 The redundant-entry check compares patterns. The original matched them against
 the files on disk, which plugins can't list once they are ignored. Only entries
-that name one path are checked.
+that name one path, or a glob inside a literal directory (`build/*.o` under
+`build/`), are checked.
 
 `templates/` is [github/gitignore](https://github.com/github/gitignore) at
 `53cf2971` (CC0-1.0, see `templates/LICENSE`), embedded in the component by

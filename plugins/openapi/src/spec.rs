@@ -19,8 +19,39 @@ pub struct Operation {
     pub operation_id: Option<String>,
 }
 
+pub fn scan(text: &str) -> Vec<Key> {
+    if is_json(text) {
+        return crate::json::keys(text);
+    }
+
+    spring_text::config::yaml(text)
+}
+
+pub fn is_json(text: &str) -> bool {
+    text.trim_start().starts_with(['{', '['])
+}
+
+/// A cheap test that runs before any scan: every other JSON or YAML file is left alone.
+pub fn maybe_spec(text: &str) -> bool {
+    text.contains("openapi") || text.contains("swagger")
+}
+
+/// A key's last segment as written, with JSON escapes undone.
+fn segment<'t>(text: &'t str, k: &Key, json: bool) -> std::borrow::Cow<'t, str> {
+    let raw = &text[k.at..k.end];
+    if json {
+        return std::borrow::Cow::Owned(crate::json::unescape(raw));
+    }
+
+    std::borrow::Cow::Borrowed(raw)
+}
+
 pub fn parse(text: &str) -> Option<Spec> {
-    let keys = spring_text::config::yaml(text);
+    if !maybe_spec(text) {
+        return None;
+    }
+
+    let keys = scan(text);
     let version = keys
         .iter()
         .find(|k| k.key == "openapi" || k.key == "swagger")
@@ -42,17 +73,18 @@ pub fn exact(keys: &[Key]) -> HashMap<&str, &Key> {
 
 pub fn operations(text: &str, keys: &[Key]) -> Vec<Operation> {
     let by_key = exact(keys);
+    let json = is_json(text);
 
     keys.iter()
         .filter_map(|k| {
-            let method = &text[k.at..k.end];
+            let method = &*segment(text, k, json);
             if !METHODS.contains(&method) {
                 return None;
             }
 
             let path_key = k.key.strip_suffix(method)?.strip_suffix('.')?;
             let path_item = by_key.get(path_key)?;
-            let path = &text[path_item.at..path_item.end];
+            let path = &*segment(text, path_item, json);
             if !path.starts_with('/') || path_key != format!("paths.{path}") {
                 return None;
             }
@@ -77,8 +109,9 @@ pub struct Ref {
 
 pub fn refs(text: &str) -> Vec<Ref> {
     let bytes = text.as_bytes();
+    let json = is_json(text);
     let skip_spaces = |mut i: usize| {
-        while bytes.get(i) == Some(&b' ') {
+        while bytes.get(i).is_some_and(|b| *b == b' ' || (json && b.is_ascii_whitespace())) {
             i += 1;
         }
         i
@@ -93,7 +126,8 @@ pub fn refs(text: &str) -> Vec<Ref> {
         from = i;
         let line_start = text[..found_at].rfind(['\n', '\r']).map_or(0, |n| n + 1);
         let before = &text[line_start..found_at];
-        if before.match_indices('#').any(|(j, _)| j == 0 || before.as_bytes()[j - 1].is_ascii_whitespace()) {
+        if !json
+            && before.match_indices('#').any(|(j, _)| j == 0 || before.as_bytes()[j - 1].is_ascii_whitespace()) {
             continue;
         }
         if matches!(bytes.get(i), Some(b'"' | b'\'')) {
@@ -117,7 +151,11 @@ pub fn refs(text: &str) -> Vec<Ref> {
                 (at, at + text[at..stop].trim_end_matches(' ').len())
             }
         };
-        found.push(Ref { target: text[at..end].to_string(), at, end });
+        let target = match json {
+            true => crate::json::unescape(&text[at..end]),
+            false => text[at..end].to_string(),
+        };
+        found.push(Ref { target, at, end });
         from = end.max(from);
     }
 
@@ -204,11 +242,12 @@ pub fn target<'k>(keys: &'k [Key], fragment: &str) -> Option<&'k Key> {
 }
 
 pub fn ref_targets(text: &str, keys: &[Key]) -> Vec<String> {
+    let json = is_json(text);
     let is_fragment = !keys.iter().any(|k| k.key == "openapi" || k.key == "swagger");
 
     keys.iter()
         .filter_map(|k| {
-            let segment = &text[k.at..k.end];
+            let segment = &*segment(text, k, json);
             let escaped = escape_segment(segment);
             let parent = k.key.strip_suffix(segment).and_then(|p| p.strip_suffix('.'));
             let Some(parent) = parent else {

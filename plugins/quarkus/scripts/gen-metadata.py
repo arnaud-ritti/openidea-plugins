@@ -21,15 +21,40 @@ import urllib.error
 import urllib.request
 import zipfile
 
-# ponytail: curated core extensions, pass more artifact ids on the command line or switch to the io.quarkus BOM
-EXTENSIONS = """quarkus-core quarkus-arc quarkus-vertx quarkus-vertx-http quarkus-rest quarkus-rest-jackson
-quarkus-rest-client quarkus-jackson quarkus-hibernate-orm quarkus-hibernate-orm-panache quarkus-hibernate-validator
-quarkus-datasource quarkus-agroal quarkus-jdbc-postgresql quarkus-jdbc-mysql quarkus-jdbc-h2
-quarkus-reactive-pg-client quarkus-flyway quarkus-liquibase quarkus-smallrye-health quarkus-smallrye-openapi
-quarkus-smallrye-fault-tolerance quarkus-smallrye-jwt quarkus-micrometer quarkus-opentelemetry quarkus-oidc
-quarkus-oidc-client quarkus-security quarkus-messaging-kafka quarkus-kafka-client quarkus-scheduler quarkus-cache
-quarkus-redis-client quarkus-mongodb-client quarkus-qute quarkus-mailer quarkus-grpc quarkus-websockets-next
-quarkus-container-image-jib quarkus-kubernetes quarkus-logging-json quarkus-config-yaml""".split()
+# Curated by popularity; ids without published config metadata are reported on stderr and skipped.
+# ponytail: extend the list or pass more artifact ids on the command line; the io.quarkus BOM would need a pom parser
+EXTENSIONS = """quarkus-core quarkus-arc quarkus-vertx quarkus-vertx-http quarkus-vertx-graphql quarkus-reactive-routes
+quarkus-undertow quarkus-web-dependency-locator quarkus-info quarkus-tls-registry
+quarkus-rest quarkus-rest-jackson quarkus-rest-jsonb quarkus-rest-jaxb quarkus-rest-client quarkus-rest-client-jackson
+quarkus-rest-client-oidc-filter quarkus-rest-client-oidc-token-propagation quarkus-rest-links quarkus-rest-qute
+quarkus-resteasy quarkus-resteasy-jackson quarkus-resteasy-client quarkus-websockets quarkus-websockets-next
+quarkus-jackson quarkus-jsonb quarkus-jaxb quarkus-grpc quarkus-smallrye-graphql quarkus-smallrye-graphql-client
+quarkus-hibernate-orm quarkus-hibernate-orm-panache quarkus-hibernate-orm-rest-data-panache quarkus-hibernate-envers
+quarkus-hibernate-reactive quarkus-hibernate-reactive-panache quarkus-hibernate-search-orm-elasticsearch
+quarkus-hibernate-validator quarkus-narayana-jta quarkus-narayana-lra
+quarkus-datasource quarkus-agroal quarkus-jdbc-postgresql quarkus-jdbc-mysql quarkus-jdbc-mariadb quarkus-jdbc-mssql
+quarkus-jdbc-oracle quarkus-jdbc-db2 quarkus-jdbc-derby quarkus-jdbc-h2 quarkus-reactive-datasource
+quarkus-reactive-pg-client quarkus-reactive-mysql-client quarkus-reactive-mssql-client quarkus-reactive-oracle-client
+quarkus-reactive-db2-client quarkus-flyway quarkus-liquibase quarkus-liquibase-mongodb
+quarkus-mongodb-client quarkus-mongodb-panache quarkus-redis-client quarkus-infinispan-client quarkus-neo4j
+quarkus-elasticsearch-rest-client quarkus-elasticsearch-java-client quarkus-cache quarkus-spring-data-jpa
+quarkus-smallrye-health quarkus-smallrye-openapi quarkus-smallrye-fault-tolerance quarkus-smallrye-jwt
+quarkus-smallrye-jwt-build quarkus-smallrye-context-propagation quarkus-smallrye-stork quarkus-smallrye-opentracing
+quarkus-smallrye-reactive-messaging quarkus-micrometer quarkus-micrometer-registry-prometheus quarkus-opentelemetry
+quarkus-opentelemetry-exporter-otlp quarkus-observability-devservices
+quarkus-oidc quarkus-oidc-client quarkus-oidc-client-filter quarkus-oidc-token-propagation quarkus-oidc-db-token-state-manager
+quarkus-oidc-redis-token-state-manager quarkus-keycloak-authorization quarkus-security quarkus-security-jpa
+quarkus-security-ldap quarkus-security-webauthn quarkus-elytron-security-properties-file quarkus-elytron-security-jdbc
+quarkus-elytron-security-oauth2
+quarkus-messaging-kafka quarkus-kafka-client quarkus-kafka-streams quarkus-messaging-amqp quarkus-messaging-rabbitmq
+quarkus-messaging-pulsar quarkus-scheduler quarkus-quartz quarkus-mailer quarkus-qute
+quarkus-funqy-http quarkus-funqy-knative-events quarkus-amazon-lambda quarkus-azure-functions-http
+quarkus-google-cloud-functions quarkus-container-image-jib quarkus-container-image-docker
+quarkus-container-image-buildpack quarkus-container-image-openshift quarkus-container-image-podman
+quarkus-kubernetes quarkus-kubernetes-client quarkus-kubernetes-config quarkus-kubernetes-service-binding
+quarkus-openshift quarkus-knative quarkus-minikube quarkus-kind quarkus-helm
+quarkus-logging-json quarkus-logging-gelf quarkus-logging-sentry quarkus-config-yaml quarkus-picocli quarkus-jacoco
+quarkus-cyclonedx""".split()
 MODEL = "META-INF/quarkus-config-doc/quarkus-config-model.json"
 JAVADOC = "META-INF/quarkus-config-doc/quarkus-config-javadoc.json"
 MAVEN = "https://repo1.maven.org/maven2/io/quarkus"
@@ -74,7 +99,7 @@ def default_value(v):
 
 
 def fetch(url):
-    with urllib.request.urlopen(url) as r:
+    with urllib.request.urlopen(url, timeout=60) as r:
         return r.read()
 
 
@@ -97,13 +122,19 @@ def property_name(item):
 
 
 def extension_records(artifact, version, props, hints, levels):
+    before = len(props)
+    read_extension(artifact, version, props, hints, levels)
+    if len(props) == before:
+        print(f"skipped {artifact}: no new configuration properties", file=sys.stderr)
+
+
+def read_extension(artifact, version, props, hints, levels):
     for jar_name in (artifact, f"{artifact}-deployment"):
         try:
             jar = zipfile.ZipFile(io.BytesIO(fetch(f"{MAVEN}/{jar_name}/{version}/{jar_name}-{version}.jar")))
         except urllib.error.HTTPError as e:
             if e.code != 404:
                 raise
-            print(f"skipped {jar_name}: not found", file=sys.stderr)
             continue
         names = set(jar.namelist())
         if MODEL not in names:
@@ -145,7 +176,7 @@ def microprofile(props, hints):
 
 def main(version, out, extra):
     props, hints, levels = {}, {}, []
-    for artifact in EXTENSIONS + extra:
+    for artifact in dict.fromkeys(EXTENSIONS + extra):
         extension_records(artifact, version, props, hints, levels)
     microprofile(props, hints)
     log_levels = json.loads(fetch(f"{STATIC}jboss-logmanager-metadata.json"))

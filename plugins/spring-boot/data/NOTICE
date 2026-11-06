@@ -4,6 +4,13 @@ additional-spring-configuration-metadata.json of the artifacts
 org.springframework.boot:spring-boot, spring-boot-autoconfigure and
 spring-boot-actuator-autoconfigure): property names, types, defaults,
 deprecations, value hints and the first sentence of each description.
+It also contains the configuration metadata of the Spring Cloud 2025.0.3
+release train (org.springframework.cloud: spring-cloud-commons, -context,
+-loadbalancer, -config-client, -config-server, -netflix-eureka-client/-server,
+-gateway-server, -openfeign-core, -stream and binders, -circuitbreaker-*,
+-bus, -consul-*, -zookeeper-*, -kubernetes-*, -vault-config, -contract-*,
+-task-core, -function-*), also Apache License 2.0, Copyright (c) the Spring
+Cloud authors, VMware, Inc. and contributors.
 Regenerate it with scripts/gen-metadata.py.
 
 Spring Boot 3.5.16

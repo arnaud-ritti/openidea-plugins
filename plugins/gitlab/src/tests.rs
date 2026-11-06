@@ -17,7 +17,7 @@ const CAPS: &[&str] = &[
 const MR: &str = r#"{
     "iid": 7, "title": "Add parser", "description": "Adds it", "state": "opened", "draft": false,
     "source_project_id": 5, "target_project_id": 5,
-    "diff_refs": {"base_sha": "base", "head_sha": "head", "start_sha": "start"},
+    "diff_refs": {"base_sha": "abcdef0", "head_sha": "abcdef1", "start_sha": "start"},
     "source_branch": "feature", "target_branch": "main", "author": {"id": 2, "username": "ann", "name": "Ann"},
     "reviewers": [], "web_url": "https://gitlab.com/g/p/-/merge_requests/7", "sha": "abc123",
     "detailed_merge_status": "mergeable", "head_pipeline": {"status": "success"},
@@ -462,7 +462,7 @@ fn comments_on_diff_lines_carry_the_position() {
     assert!(posted[0].1.ends_with("/merge_requests/7/discussions"));
     assert_eq!(
         posted[0].2,
-        r#"{"body":"gone?","position":{"base_sha":"base","head_sha":"head","new_line":null,"new_path":"src/a.rs","old_line":4,"old_path":"src/a.rs","position_type":"text","start_sha":"start"}}"#
+        r#"{"body":"gone?","position":{"base_sha":"abcdef0","head_sha":"abcdef1","new_line":null,"new_path":"src/a.rs","old_line":4,"old_path":"src/a.rs","position_type":"text","start_sha":"start"}}"#
     );
     assert!(posted[1].1.ends_with("/merge_requests/7/draft_notes"));
     assert!(posted[1].2.contains(r#""new_line":3"#) && posted[1].2.contains(r#""old_line":3"#));
@@ -500,7 +500,7 @@ fn viewed_files_are_remembered_for_the_head_commit() {
     plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
     let view = plugin.render(CHANGES, None, &host.invocation()).unwrap();
 
-    assert_eq!(host.storage().get("viewed:g/p:7").map(String::as_str), Some(r#"{"src/a.rs":"head"}"#));
+    assert_eq!(host.storage().get("viewed:g/p:7").map(String::as_str), Some(r#"{"src/a.rs":"abcdef1"}"#));
     let Body::Html(html) = &view.body else { panic!("{view:?}") };
     assert!(html.contains("class=\"file collapsed\""));
 }
@@ -680,4 +680,258 @@ fn tree_keys_round_trip() {
     assert_eq!(Key::parse("d:7:abc"), Some(Key::Thread(7, "abc")));
     assert_eq!(Key::parse("n:7:abc:12"), Some(Key::Note(7, "abc", 12)));
     assert_eq!(Key::parse("e:7:0"), None);
+}
+
+#[test]
+fn second_page_is_fetched_when_first_is_full() {
+    let host = setup();
+    host.on_fetch(|req| {
+        let item = r#"{"iid": 1}"#;
+        let count = if req.url.contains("page=1") { 50 } else { 1 };
+
+        ok(&format!("[{}]", vec![item; count].join(",")))
+    });
+
+    let merge_requests = api::Project("g/p").merge_requests("state=opened").unwrap();
+
+    assert_eq!(merge_requests.len(), 51);
+    assert_eq!(host.requests().len(), 2);
+}
+
+#[test]
+fn paging_stops_at_the_page_cap() {
+    let host = setup();
+    host.on_fetch(|_| ok(&format!("[{}]", vec![r#"{"id": "d"}"#; 100].join(","))));
+
+    let threads = api::Project("g/p").discussions(7).unwrap();
+
+    assert_eq!(threads.len(), 1000);
+    assert_eq!(host.requests().len(), 10);
+}
+
+fn file_changed_at_c1(args: &[String], _: Option<&str>) -> Result<ProcessOutput, Error> {
+    let stdout = match args.iter().any(|a| a == "log") {
+        true => "\u{1}c2\n\nsrc/b.rs\n\u{1}c1\n\nsrc/a.rs\nsrc/b.rs\n".to_owned(),
+        false => String::new(),
+    };
+
+    Ok(ProcessOutput { status: Some(0), stdout, stderr: String::new() })
+}
+
+fn changes_html(plugin: &mut GitLab, host: &MockHost) -> String {
+    let view = plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    let Body::Html(html) = view.body else { panic!("{view:?}") };
+
+    html
+}
+
+#[test]
+fn viewed_compares_file_last_commit() {
+    let host = setup();
+    host.on_process("git", file_changed_at_c1);
+    let mut plugin = selected(&host);
+
+    storage::set("viewed:g/p:7", r#"{"src/a.rs": "c1"}"#).unwrap();
+    assert!(changes_html(&mut plugin, &host).contains(" checked"), "a.rs last changed at c1, viewed at c1");
+
+    storage::set("viewed:g/p:7", r#"{"src/a.rs": "c0"}"#).unwrap();
+    assert!(!changes_html(&mut plugin, &host).contains(" checked"), "viewed before the last change to a.rs");
+
+    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"c1"}"#);
+}
+
+#[test]
+fn viewed_falls_back_to_the_head_without_local_history() {
+    let host = setup();
+    host.on_process("git", |_, _| Ok(ProcessOutput { status: Some(128), stdout: String::new(), stderr: "bad object".into() }));
+    let mut plugin = selected(&host);
+
+    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
+    assert!(changes_html(&mut plugin, &host).contains(" checked"));
+}
+
+#[test]
+fn non_hex_shas_are_not_passed_to_git() {
+    let host = setup();
+    let git_calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = git_calls.clone();
+    host.on_process("git", move |_, _| {
+        counter.set(counter.get() + 1);
+        Ok(ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+    });
+    host.on_fetch(|req| match req.url.ends_with("/merge_requests/7") {
+        true => ok(&MR.replace("\"abcdef0\"", "\"--output=/tmp/x\"")),
+        false => gitlab(req),
+    });
+    let mut plugin = selected(&host);
+
+    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+
+    assert_eq!(git_calls.get(), 0);
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
+}
+
+fn branch_with_suggestion(body: &str) -> (MockHost, GitLab) {
+    let host = setup();
+    host.set_vcs_status(Some(status("feature")));
+    let discussions = serde_json::json!([{"id": "d1", "notes": [
+        {"id": 11, "body": body, "author": {"username": "bob"}, "resolvable": true, "resolved": false,
+         "position": {"new_path": "src/a.rs", "new_line": 4}}
+    ]}])
+    .to_string();
+    host.on_fetch(move |req| match req.url.contains("/discussions") {
+        true => ok(&discussions),
+        false => gitlab(req),
+    });
+    let mut plugin = GitLab::default();
+    plugin.handle_events(&[Event::VcsChanged("/project".into())], &host.invocation());
+
+    (host, plugin)
+}
+
+fn document(path: &str) -> Document {
+    Document { path: path.into(), text: "a\nb\nc\nd\ne\nf\n".into(), ..Document::default() }
+}
+
+fn at_line(line: u32) -> openidea_plugin::Range {
+    openidea_plugin::Range::new(openidea_plugin::Position::new(line, 0), openidea_plugin::Position::new(line, 0))
+}
+
+#[test]
+fn suggestion_block_becomes_edit() {
+    let (_host, mut plugin) = branch_with_suggestion("Better:\n```suggestion:-1+1\nX\nY\n```\n");
+
+    let actions = plugin.code_actions(&document("/project/src/a.rs"), at_line(3));
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "GitLab: Apply suggestion");
+    let (path, edits) = &actions[0].edits[0];
+    assert_eq!(path, "/project/src/a.rs");
+    assert_eq!((edits[0].range.start.line, edits[0].range.end.line), (2, 5));
+    assert_eq!(edits[0].text, "X\nY\n");
+
+    assert!(plugin.code_actions(&document("/project/src/a.rs"), at_line(0)).is_empty(), "not on the commented line");
+    assert!(plugin.code_actions(&document("/project/src/b.rs"), at_line(3)).is_empty(), "not the commented file");
+}
+
+#[test]
+fn a_plain_suggestion_replaces_the_commented_line_and_an_empty_one_deletes_it() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\nD\n```\n```suggestion:-0+0\n```");
+
+    let actions = plugin.code_actions(&document("/project/src/a.rs"), at_line(3));
+
+    let edits: Vec<_> = actions.iter().map(|a| (a.edits[0].1[0].range.start.line, a.edits[0].1[0].range.end.line, a.edits[0].1[0].text.as_str())).collect();
+    assert_eq!(edits, [(3, 4, "D\n"), (3, 4, "")]);
+}
+
+#[test]
+fn a_suggestion_reaching_past_the_file_is_not_offered() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion:-0+9\nX\n```");
+
+    assert!(plugin.code_actions(&document("/project/src/a.rs"), at_line(3)).is_empty());
+}
+
+#[test]
+fn paging_stops_at_the_deadline() {
+    let host = setup();
+    host.on_fetch(|_| ok(&format!("[{}]", vec![r#"{"id": "d"}"#; 100].join(","))));
+    let clock = std::cell::Cell::new(0);
+    let now = || {
+        clock.set(clock.get() + 20);
+        clock.get()
+    };
+
+    let threads: Vec<Discussion> = api::paged_until("/projects/g%2Fp/merge_requests/7/discussions", 100, now, 45).unwrap();
+
+    assert_eq!(threads.len(), 200, "the deadline is 65 s; checks read 40 s, 60 s, 80 s");
+    assert_eq!(host.requests().len(), 2);
+}
+
+#[test]
+fn suggestion_edit_keeps_crlf() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\nX\nY\n```");
+    let doc = Document { text: "a\r\nb\r\nc\r\nd\r\ne\r\n".into(), ..document("/project/src/a.rs") };
+
+    let actions = plugin.code_actions(&doc, at_line(3));
+
+    assert_eq!(actions[0].edits[0].1[0].text, "X\r\nY\r\n");
+}
+
+#[test]
+fn suggestion_on_a_last_line_without_newline_adds_none() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\nX\n```");
+    let doc = Document { text: "a\nb\nc\nd".into(), ..document("/project/src/a.rs") };
+
+    let edit = &plugin.code_actions(&doc, at_line(3))[0].edits[0].1[0];
+
+    assert_eq!(edit.text, "X");
+    assert_eq!((edit.range.end.line, edit.range.end.character), (3, 1));
+}
+
+#[test]
+fn suggestion_is_not_offered_when_the_line_differs_from_the_cached_diff() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\nX\n```");
+    plugin.diffs = Some((7, vec![FileDiff {
+        old_path: "src/a.rs".into(),
+        new_path: "src/a.rs".into(),
+        diff: "@@ -3,2 +3,2 @@\n c\n+d\n".into(),
+        ..FileDiff::default()
+    }]));
+
+    assert_eq!(plugin.code_actions(&document("/project/src/a.rs"), at_line(3)).len(), 1, "line 4 is `d` in the diff and in the file");
+
+    let edited = Document { text: "a\nb\nc\nchanged\ne\nf\n".into(), ..document("/project/src/a.rs") };
+    assert!(plugin.code_actions(&edited, at_line(3)).is_empty());
+}
+
+#[test]
+fn the_viewed_history_is_read_with_unquoted_paths() {
+    let host = setup();
+    host.on_process("git", file_changed_at_c1);
+    let mut plugin = selected(&host);
+
+    changes_html(&mut plugin, &host);
+
+    assert!(git_runs(&host)[0].starts_with("-c core.quotepath=off log "), "{:?}", git_runs(&host));
+}
+
+#[test]
+fn suggestion_guard_checks_the_whole_range() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion:-1+0\nX\n```");
+    plugin.diffs = Some((7, vec![FileDiff {
+        old_path: "src/a.rs".into(),
+        new_path: "src/a.rs".into(),
+        diff: "@@ -3,2 +3,2 @@\n c\n+d\n".into(),
+        ..FileDiff::default()
+    }]));
+
+    assert_eq!(plugin.code_actions(&document("/project/src/a.rs"), at_line(3)).len(), 1);
+
+    let edited = Document { text: "a\nb\nchanged\nd\ne\nf\n".into(), ..document("/project/src/a.rs") };
+    assert!(plugin.code_actions(&edited, at_line(3)).is_empty(), "the line above the comment changed");
+}
+
+#[test]
+fn crlf_suggestion_on_a_last_line_without_newline_keeps_no_carriage_return() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\r\nX\r\n```");
+    let doc = Document { text: "a\r\nb\r\nc\r\nd".into(), ..document("/project/src/a.rs") };
+
+    assert_eq!(plugin.code_actions(&doc, at_line(3))[0].edits[0].1[0].text, "X");
+}
+
+#[test]
+fn second_list_in_the_same_task_respects_the_shared_deadline() {
+    let host = setup();
+    host.on_fetch(|_| ok(&format!("[{}]", vec![r#"{"id": "d"}"#; 100].join(","))));
+    let now = || if host.requests().is_empty() { 0 } else { 36 };
+    api::begin_budget_at(0);
+
+    let first: Vec<Discussion> = api::paged_until("/a", 100, now, 35).unwrap();
+    let second: Vec<Discussion> = api::paged_until("/b", 100, now, 35).unwrap();
+
+    assert_eq!((first.len(), second.len()), (100, 0));
+    assert_eq!(host.requests().len(), 1);
 }

@@ -8,9 +8,8 @@ use openidea_plugin::text::offset;
 use openidea_plugin::{
     Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin,
 };
-use spring_text::index::{Indexes, PROVIDER_BUDGET};
-use spring_text::java;
-use spring_text::range;
+use spring_text::index::{Indexes, PROVIDER_BUDGET, project_of};
+use spring_text::{parse_source, range, source_calls};
 use std::collections::BTreeSet;
 
 const DEFAULT_USER_PREFIX: &str = "/user/";
@@ -29,6 +28,108 @@ pub enum Kind {
     Send,
     /// `@SendToUser`, `convertAndSendToUser`: a user destination.
     SendToUser,
+    /// `client.subscribe('/topic/x', …)` in a JavaScript STOMP client.
+    ClientSubscribe,
+    /// `client.publish({ destination })` or `client.send('/app/x')` in a JavaScript STOMP client.
+    ClientSend,
+}
+
+impl Kind {
+    fn is_client(self) -> bool {
+        matches!(self, Kind::ClientSubscribe | Kind::ClientSend)
+    }
+
+    /// Whether a client use of this kind talks to `other`.
+    fn faces(self, other: Kind) -> bool {
+        match self {
+            Kind::ClientSubscribe => matches!(other, Kind::Send | Kind::SendToUser | Kind::Subscribe),
+            Kind::ClientSend => other == Kind::Message,
+            Kind::Send | Kind::SendToUser | Kind::Subscribe => other == Kind::ClientSubscribe || !other.is_client(),
+            Kind::Message => other == Kind::ClientSend || !other.is_client(),
+        }
+    }
+}
+
+const SCRIPT_EXTENSIONS: [&str; 5] = [".js", ".jsx", ".ts", ".tsx", ".vue"];
+const SKIPPED_DIRECTORIES: [&str; 3] = ["/node_modules/", "/dist/", "/build/"];
+const CLIENT_FACTORIES: [&str; 6] = ["new Client(", "new Client<", "new StompJs.Client(", "new StompJs.Client<", "Stomp.over(", "Stomp.client("];
+
+fn ident_before(text: &str, end: usize) -> &str {
+    let head = &text[..end];
+    let start = head
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .map_or(0, |i| i + head[i..].chars().next().map_or(1, char::len_utf8));
+    &head[start..]
+}
+
+/// Names assigned a STOMP client (`const c = new Client(`, `this.c = Stomp.over(`).
+fn client_names(text: &str) -> BTreeSet<&str> {
+    let mut names = BTreeSet::new();
+    for factory in CLIENT_FACTORIES {
+        for (at, _) in text.match_indices(factory) {
+            let before = text[..at].trim_end();
+            if let Some(before) = before.strip_suffix('=') {
+                let before = before.trim_end();
+                let statement = before.rsplit(['\n', ';', '{', '}']).next().unwrap_or(before);
+                let declared = statement.split(':').next().unwrap_or(statement).trim_end();
+                names.insert(ident_before(declared, declared.len()));
+            }
+        }
+    }
+    names
+}
+
+/// The contents of a plain quoted literal starting at `i`, when it ends the argument.
+fn literal_at(text: &str, i: usize) -> Option<(usize, usize)> {
+    let quote = *text.as_bytes().get(i)?;
+    if !matches!(quote, b'\'' | b'"' | b'`') {
+        return None;
+    }
+    let len = text[i + 1..].find(quote as char)?;
+    let (at, end) = (i + 1, i + 1 + len);
+    let body = &text[at..end];
+    if body.contains(['\n', '\\']) || (quote == b'`' && body.contains("${")) {
+        return None;
+    }
+    let next = text[end + 1..].trim_start().chars().next()?;
+    (body.starts_with('/') && matches!(next, ',' | ')' | '}')).then_some((at, end))
+}
+
+fn parse_script(text: &str) -> Option<WsFile> {
+    if !["subscribe(", "publish(", "send("].iter().any(|h| text.contains(h)) {
+        return None;
+    }
+    let declared = client_names(text);
+    let mut out = WsFile::default();
+    for (name, kind) in [("subscribe", Kind::ClientSubscribe), ("publish", Kind::ClientSend), ("send", Kind::ClientSend)] {
+        let pattern = format!(".{name}(");
+        for (dot, _) in text.match_indices(&pattern) {
+            let receiver = ident_before(text, dot);
+            let lower = receiver.to_lowercase();
+            if !(lower.contains("stomp") || declared.contains(receiver)) {
+                continue;
+            }
+            let arg = dot + pattern.len();
+            let arg = arg + (text[arg..].len() - text[arg..].trim_start().len());
+            let literal = if name == "publish" {
+                let object = text[arg..].strip_prefix('{').and_then(|_| text[arg..].find('}'));
+                object
+                    .and_then(|close| text[arg..arg + close].find("destination").map(|k| arg + k + "destination".len()))
+                    .and_then(|k| {
+                        let rest = text[k..].trim_start().strip_prefix(':')?;
+                        let value = text.len() - rest.trim_start().len();
+                        literal_at(text, value)
+                    })
+            } else {
+                literal_at(text, arg)
+            };
+            let Some((at, end)) = literal else { continue };
+            let via = format!("{receiver}.{name}");
+            out.uses.push(Use { kind, dest: text[at..end].to_owned(), via, at, end, range: range(text, at, end) });
+        }
+    }
+    out.uses.sort_by_key(|u| u.at);
+    (!out.uses.is_empty()).then_some(out)
 }
 
 /// A destination as written in a file.
@@ -66,14 +167,21 @@ fn is_placeholder(s: &str) -> bool {
     s.contains("${") || s.contains("#{")
 }
 
-pub fn parse(_path: &str, text: &str) -> Option<WsFile> {
+pub fn parse(path: &str, text: &str) -> Option<WsFile> {
+    if SCRIPT_EXTENSIONS.iter().any(|e| path.ends_with(e)) {
+        let normalized = path.replace('\\', "/");
+        if SKIPPED_DIRECTORIES.iter().any(|d| normalized.contains(d)) {
+            return None;
+        }
+        return parse_script(text);
+    }
     const HINTS: [&str; 6] = ["Mapping", "SendTo", "convertAndSend", ".send", "Broker", "addEndpoint"];
     if !HINTS.iter().any(|h| text.contains(h)) {
         return None;
     }
-    let file = java::parse(text);
+    let file = parse_source(path, text);
     let mut out = WsFile::default();
-    let push = |out: &mut WsFile, kind, dest: String, via: &str, s: &java::Str| {
+    let push = |out: &mut WsFile, kind, dest: String, via: &str, s: &spring_text::java::Str| {
         if !is_placeholder(&dest) {
             let range = range(text, s.at, s.end);
             out.uses.push(Use { kind, dest, via: via.to_owned(), at: s.at, end: s.end, range });
@@ -106,7 +214,7 @@ pub fn parse(_path: &str, text: &str) -> Option<WsFile> {
         t.supers().any(|s| s.name.contains("WebSocketMessageBrokerConfigurer"))
             || t.methods().any(|m| m.name == "configureMessageBroker" || m.name == "registerStompEndpoints")
     });
-    for c in java::calls(text) {
+    for c in source_calls(path, text) {
         let strings = || c.args.iter().filter_map(|a| a.string.as_ref().map(|s| s.value.clone()));
         let receiver = c.receiver.as_deref().unwrap_or("").to_lowercase();
         let literal = |i: usize| c.args.get(i).and_then(|a| a.string.as_ref());
@@ -147,7 +255,7 @@ impl Config {
     /// user prefix + user destination.
     fn keys(&self, u: &Use) -> Vec<String> {
         match u.kind {
-            Kind::Send => vec![u.dest.clone()],
+            Kind::Send | Kind::ClientSubscribe | Kind::ClientSend => vec![u.dest.clone()],
             Kind::SendToUser => vec![join(&self.user, &u.dest)],
             Kind::Message | Kind::Subscribe => {
                 let mut keys: Vec<String> = self.apps.iter().map(|p| join(p, &u.dest)).collect();
@@ -181,7 +289,7 @@ impl Snapshot {
         let keys = self.config.keys(u);
         self.uses
             .iter()
-            .filter(|(p, o)| !(p == path && o.at == u.at) && self.config.keys(o).iter().any(|k| keys.contains(k)))
+            .filter(|(p, o)| !(p == path && o.at == u.at) && u.kind.faces(o.kind) && self.config.keys(o).iter().any(|k| keys.contains(k)))
             .collect()
     }
 }
@@ -195,21 +303,71 @@ fn describe((path, u): &(String, Use)) -> String {
     format!("{file}:{} ({})", u.range.start.line + 1, u.via)
 }
 
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const STOMP_DEPENDENCIES: [&str; 3] = ["spring-boot-starter-websocket", "spring-messaging", "spring-websocket"];
+
+fn is_script(path: &str) -> bool {
+    SCRIPT_EXTENSIONS.iter().any(|e| path.ends_with(e))
+}
+
 pub struct WebSocketTools {
     index: Indexes<WsFile>,
+    /// Project roots known to serve STOMP: a build file names the dependency, or a Java/Kotlin file was opened.
+    stomp_roots: BTreeSet<String>,
 }
 
 impl Default for WebSocketTools {
     fn default() -> Self {
-        Self { index: Indexes::new(&["**/*.java"], parse) }
+        Self {
+            index: Indexes::new(
+                &["**/*.java", "**/*.kt", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.vue"],
+                parse,
+            ),
+            stomp_roots: BTreeSet::new(),
+        }
     }
 }
 
 impl WebSocketTools {
+    /// Script documents are only indexed in projects whose root build file names a Spring messaging dependency,
+    /// or after a Java/Kotlin document of the project was opened (multi-module layouts).
+    fn serves_stomp(&mut self, doc: &Document) -> bool {
+        let Some(project) = project_of(&doc.path) else { return false };
+        let Ok(root) = project.root() else { return false };
+
+        if self.stomp_roots.contains(&root) {
+            return true;
+        }
+
+        let names_dependency = BUILD_FILES.iter().any(|file| {
+            project
+                .read_file(file)
+                .is_ok_and(|text| STOMP_DEPENDENCIES.iter().any(|dependency| text.contains(dependency)))
+        });
+
+        if names_dependency {
+            self.stomp_roots.insert(root);
+        }
+
+        names_dependency
+    }
+
     fn snapshot(&mut self, doc: &Document) -> Snapshot {
         let mut config = Config::default();
         let mut uses = Vec::new();
         let mut user = None;
+
+        if is_script(&doc.path) && !self.serves_stomp(doc) {
+            config.user = DEFAULT_USER_PREFIX.to_owned();
+            return Snapshot { config, uses };
+        }
+
+        if !is_script(&doc.path)
+            && let Some(root) = project_of(&doc.path).and_then(|p| p.root().ok())
+        {
+            self.stomp_roots.insert(root);
+        }
+
         if let Some(index) = self.index.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
             for (path, file) in index.iter() {
                 config.brokers.extend(file.brokers.iter().cloned());
@@ -234,10 +392,15 @@ impl Providers for WebSocketTools {
                 Kind::Message | Kind::Subscribe => {
                     let verb = if u.kind == Kind::Message { "SEND" } else { "SUBSCRIBE" };
                     let keys: Vec<String> = snap.config.keys(u).iter().map(|k| format!("{verb} {k}")).collect();
+                    let mut tooltip = keys.join(", ");
+                    if !related.is_empty() {
+                        let list: Vec<String> = related.iter().map(|r| describe(r)).collect();
+                        tooltip = format!("{tooltip}; also used at {}", list.join(", "));
+                    }
                     let target = related.first().map(|r| location(r));
-                    markers.push(LineMarker { line: u.range.start.line, icon: None, tooltip: keys.join(", "), target });
+                    markers.push(LineMarker { line: u.range.start.line, icon: None, tooltip, target });
                 }
-                Kind::Send | Kind::SendToUser => {
+                Kind::Send | Kind::SendToUser | Kind::ClientSubscribe | Kind::ClientSend => {
                     if u.kind == Kind::Send && !snap.config.brokers.is_empty() && !snap.config.routed(&u.dest) {
                         let message = format!(
                             "`{}` is not under a broker prefix ({}), so subscribers won't receive it.",
@@ -367,6 +530,7 @@ public class ChatController {
 
     fn setup() -> MockHost {
         let host = MockHost::install();
+        host.add_file("pom.xml", "<artifactId>spring-boot-starter-websocket</artifactId>");
         host.add_file("src/main/java/com/acme/chat/WebSocketConfig.java", CONFIG);
         host.add_file("src/main/java/com/acme/chat/ChatController.java", CHAT);
         host
@@ -379,6 +543,56 @@ public class ChatController {
             version: 1,
             text: text.into(),
         }
+    }
+
+    const KOTLIN_CHAT: &str = r#"package com.acme.chat
+
+@Controller
+@MessageMapping("/kchat")
+class KtChatController(private val messagingTemplate: SimpMessagingTemplate) {
+    @MessageMapping("/send")
+    @SendTo("/topic/ktmessages")
+    suspend fun send(m: Message): Message = m
+
+    @SubscribeMapping(value = ["/krooms"])
+    fun rooms(): List<Room> = emptyList()
+
+    fun broadcast(m: Message) {
+        messagingTemplate.convertAndSend("/topic/ktmessages", m)
+        messagingTemplate.convertAndSendToUser("bob", "/queue/replies", m)
+        kafkaTemplate.send("orders", m)
+    }
+}
+"#;
+
+    #[test]
+    fn kotlin_message_mapping_is_indexed() {
+        let chat = parse("KtChat.kt", KOTLIN_CHAT).unwrap();
+        let uses: Vec<_> = chat.uses.iter().map(|u| (u.kind, u.dest.as_str(), u.via.as_str())).collect();
+        assert_eq!(uses, [
+            (Kind::Message, "/kchat/send", "@MessageMapping"),
+            (Kind::Send, "/topic/ktmessages", "@SendTo"),
+            (Kind::Subscribe, "/kchat/krooms", "@SubscribeMapping"),
+            (Kind::Send, "/topic/ktmessages", "convertAndSend"),
+            (Kind::SendToUser, "/queue/replies", "convertAndSendToUser"),
+        ]);
+        assert_eq!(parse("", CHAT).unwrap().uses.len(), 8);
+
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/chat/KtChatController.kt", KOTLIN_CHAT);
+        let mut tools = WebSocketTools::default();
+        let path = "/project/src/main/kotlin/com/acme/chat/KtChatController.kt";
+        let kt = Document { path: path.into(), language: "kotlin".into(), version: 1, text: KOTLIN_CHAT.into() };
+        let tips: Vec<_> = tools.line_markers(&kt).into_iter().map(|m| (m.line, m.tooltip)).collect();
+        assert!(tips.iter().any(|(l, t)| *l == 5 && t.starts_with("SEND /app/kchat/send")), "{tips:?}");
+        assert!(tips.iter().any(|(l, t)| *l == 13 && t.contains("KtChatController.kt:7 (@SendTo)")), "{tips:?}");
+    }
+
+    #[test]
+    fn kotlin_template_destinations_are_not_indexed() {
+        let src = "class C(val messagingTemplate: SimpMessagingTemplate) {\n    fun f(room: String) {\n        messagingTemplate.convertAndSend(\"/topic/$room\", 1)\n        messagingTemplate.convertAndSend(\"/topic/all\", 1)\n    }\n}\n";
+        let dests: Vec<_> = parse("C.kt", src).unwrap().uses.into_iter().map(|u| u.dest).collect();
+        assert_eq!(dests, ["/topic/all"]);
     }
 
     #[test]
@@ -454,5 +668,132 @@ public class ChatController {
         let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["/topic/", "/queue/", "/topic/messages"]);
         assert_eq!(items[0].replace, Some(Range::new(Position::new(20, 42), Position::new(20, 44))));
+    }
+
+    const CLIENT: &str = r#"import { Client } from '@stomp/stompjs';
+const client = new Client({ brokerURL: 'ws://localhost/ws' });
+const emitter = makeEmitter();
+client.onConnect = () => {
+  client.subscribe('/topic/messages', (m) => show(m));
+  client.publish({ destination: '/app/chat/send', body: 'hi' });
+  stompClient.send('/app/chat/private', {}, 'x');
+  emitter.subscribe('/topic/messages', cb);
+  client.subscribe(`/topic/${room}`, cb);
+  client.subscribe('/topic/' + room, cb);
+  client.publish({ destination: dest, body: '' });
+};
+"#;
+
+    fn script_doc() -> Document {
+        Document {
+            path: "/project/web/src/chat.ts".into(),
+            language: "typescript".into(),
+            version: 1,
+            text: CLIENT.into(),
+        }
+    }
+
+    #[test]
+    fn script_indexes_only_literal_stomp_calls() {
+        let uses: Vec<_> =
+            parse("chat.ts", CLIENT).unwrap().uses.iter().map(|u| (u.kind, u.dest.clone())).collect();
+        assert_eq!(
+            uses,
+            [
+                (Kind::ClientSubscribe, "/topic/messages".to_owned()),
+                (Kind::ClientSend, "/app/chat/send".to_owned()),
+                (Kind::ClientSend, "/app/chat/private".to_owned()),
+            ]
+        );
+        assert!(parse("/p/node_modules/x/chat.js", CLIENT).is_none());
+    }
+
+    #[test]
+    fn js_documents_skip_indexing_without_a_spring_project() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/chat/ChatController.java", CHAT);
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+        let d = script_doc();
+
+        assert!(tools.line_markers(&d).is_empty());
+        assert!(tools.definition(&d, Position::new(5, 40)).is_empty());
+        assert!(tools.completion(&d, Position::new(5, 40), None).is_empty());
+    }
+
+    #[test]
+    fn js_documents_are_indexed_in_a_spring_project() {
+        let host = setup();
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+
+        assert!(!tools.line_markers(&script_doc()).is_empty());
+    }
+
+    #[test]
+    fn js_subscribe_links_to_send_to_destination() {
+        let host = setup();
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+        let d = script_doc();
+        let targets = tools.definition(&d, Position::new(4, 24));
+        let paths: Vec<_> = targets.iter().map(|t| (t.path.rsplit('/').next().unwrap(), t.range.start.line)).collect();
+        assert_eq!(paths, [("ChatController.java", 8), ("ChatController.java", 19)]);
+
+        let java = doc("ChatController.java", CHAT);
+        let markers = tools.line_markers(&java);
+        assert!(markers[1].tooltip.contains("chat.ts:5 (client.subscribe)"), "{}", markers[1].tooltip);
+        let marker = tools.line_markers(&d);
+        assert_eq!(marker[0].line, 4);
+        assert_eq!(marker[0].target.as_ref().unwrap().range.start.line, 8);
+    }
+
+    #[test]
+    fn js_send_links_to_message_mapping() {
+        let host = setup();
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+        let d = script_doc();
+        let targets = tools.definition(&d, Position::new(5, 40));
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].range.start.line, 7);
+        assert_eq!(tools.definition(&d, Position::new(6, 25)).len(), 1);
+
+        let markers = tools.line_markers(&doc("ChatController.java", CHAT));
+        assert!(markers[0].tooltip.starts_with("SEND /app/chat/send; also used at chat.ts:6"), "{}", markers[0].tooltip);
+        assert!(markers[0].target.as_ref().unwrap().path.ends_with("chat.ts"));
+    }
+
+    #[test]
+    fn js_quiet_for_emitters_and_runtime_destinations() {
+        let host = setup();
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+        let d = script_doc();
+        assert!(tools.definition(&d, Position::new(7, 24)).is_empty());
+        assert!(tools.definition(&d, Position::new(8, 24)).is_empty());
+        assert!(tools.line_markers(&d).iter().all(|m| m.line < 7));
+    }
+
+    #[test]
+    fn non_stomp_client_receiver_is_not_linked() {
+        let host = setup();
+        let text = "const api = makeApi();\napiClient.publish({ destination: '/chat/send' });\nhttpClient.send('/chat/send', body);\n";
+        host.add_file("web/src/api.ts", text);
+        assert!(parse("api.ts", text).is_none());
+        let declared = format!("const client = new StompJs.Client({{}});\n{text}client.send('/chat/send', {{}});\n");
+        assert_eq!(parse("api.ts", &declared).unwrap().uses.len(), 1);
+        let mut tools = WebSocketTools::default();
+        let d = Document { path: "/project/web/src/api.ts".into(), language: "typescript".into(), version: 1, text: text.into() };
+        assert!(tools.line_markers(&d).is_empty());
+        assert!(tools.definition(&d, Position::new(2, 20)).is_empty());
+    }
+
+    #[test]
+    fn typed_declaration_receiver_is_linked() {
+        let _host = setup();
+        let text = "class Chat {\n  private stomp2: StompJs.Client = new StompJs.Client({});\n  connect() {\n    this.link = new Client<Opts>({});\n    const client: Client = new Client({});\n    client.subscribe('/topic/messages', cb);\n    this.stomp2.send('/app/chat/send', {}, '');\n    this.link.subscribe('/topic/messages', cb);\n  }\n}\n";
+        let kinds: Vec<_> = parse("chat.ts", text).unwrap().uses.iter().map(|u| u.kind).collect();
+        assert_eq!(kinds, [Kind::ClientSubscribe, Kind::ClientSend, Kind::ClientSubscribe]);
     }
 }

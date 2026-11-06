@@ -31,6 +31,9 @@ static JAVA: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"at\s+([\w$.]+)\.[\w$<>]+\(([\w$-]+\.\w+):(\d+)\)").unwrap());
 static PYTHON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"File "([^"]+)", line (\d+)"#).unwrap());
 static DOTNET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" in (\S.*?):line (\d+)").unwrap());
+static URI: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:file://|package:)([^\s():]+\.\w+):(\d+)").unwrap());
+static SWIFT_FATAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfile (\S+\.\w+), line (\d+)").unwrap());
 static GENERIC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"((?:[A-Za-z]:)?[\w.\\/@~-]*?[\w-]+\.[A-Za-z]\w*)(?::|\()(\d+)").unwrap());
 
@@ -53,7 +56,7 @@ pub fn frames(line: &str) -> Vec<Frame> {
             span: captures.get(0).unwrap().range(),
         });
     }
-    for pattern in [&*PYTHON, &*DOTNET, &*GENERIC] {
+    for pattern in [&*PYTHON, &*DOTNET, &*URI, &*SWIFT_FATAL, &*GENERIC] {
         for captures in pattern.captures_iter(line).map_while(Result::ok) {
             add(Frame {
                 path: captures[1].replace('\\', "/"),
@@ -194,6 +197,10 @@ mod tests {
         let python = frames(r#"  File "/srv/app/views.py", line 17, in index"#);
         assert_eq!((python[0].path.as_str(), python[0].line), ("/srv/app/views.py", 17));
 
+        let bare_php = frames("Foo.php(12)");
+        assert_eq!((bare_php[0].path.as_str(), bare_php[0].line), ("Foo.php", 12));
+        assert!(frames("profile x.txt, line 3").is_empty());
+
         let php = frames("#0 /var/www/html/app/Http/Kernel.php(128): Foo->bar()");
         assert_eq!((php[0].path.as_str(), php[0].line), ("/var/www/html/app/Http/Kernel.php", 128));
 
@@ -204,6 +211,26 @@ mod tests {
         assert_eq!((dotnet[0].path.as_str(), dotnet[0].line), ("C:/src/App/Program.cs", 12));
 
         assert!(frames("2024-05-01 10:00:00,123 [   1234]   INFO - #c.i.Startup - IDE started").is_empty());
+    }
+
+    #[test]
+    fn finds_ruby_csharp_go_dart_and_swift_frames() {
+        let samples = [
+            ("\tfrom app/models/user.rb:12:in 'save'", "app/models/user.rb", 12),
+            ("\tfrom /srv/app/models/user.rb:12:in `block in save'", "/srv/app/models/user.rb", 12),
+            ("   at X.Y() in /src/App/Program.cs:line 12", "/src/App/Program.cs", 12),
+            ("   at X.Y(Int32 a) in /src/App/Program.cs:line 12", "/src/App/Program.cs", 12),
+            ("\t/usr/local/go/src/main.go:12 +0x1d", "/usr/local/go/src/main.go", 12),
+            ("#0      main (file:///home/me/app/bin/main.dart:12:3)", "/home/me/app/bin/main.dart", 12),
+            ("#1      main (package:app/main.dart:12:3)", "app/main.dart", 12),
+            ("0   App   0x0000000104a1 main + 12 in main.swift:12", "main.swift", 12),
+            ("Fatal error: boom: file /Users/me/App/Sources/main.swift, line 12", "/Users/me/App/Sources/main.swift", 12),
+        ];
+        for (line, path, number) in samples {
+            let found = frames(line);
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!((found[0].path.as_str(), found[0].line), (path, number), "{line}");
+        }
     }
 
     #[test]

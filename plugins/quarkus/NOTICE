@@ -1,19 +1,9 @@
 data/quarkus-properties.tsv is derived from the quarkus-config-model.json and
 quarkus-config-javadoc.json files (META-INF/quarkus-config-doc/) of the
-io.quarkus artifacts quarkus-core, quarkus-arc, quarkus-vertx,
-quarkus-vertx-http, quarkus-rest, quarkus-rest-jackson, quarkus-rest-client,
-quarkus-jackson, quarkus-hibernate-orm, quarkus-hibernate-orm-panache,
-quarkus-hibernate-validator, quarkus-datasource, quarkus-agroal,
-quarkus-jdbc-postgresql, quarkus-jdbc-mysql, quarkus-jdbc-h2,
-quarkus-reactive-pg-client, quarkus-flyway, quarkus-liquibase,
-quarkus-smallrye-health, quarkus-smallrye-openapi,
-quarkus-smallrye-fault-tolerance, quarkus-smallrye-jwt, quarkus-micrometer,
-quarkus-opentelemetry, quarkus-oidc, quarkus-oidc-client, quarkus-security,
-quarkus-messaging-kafka, quarkus-kafka-client, quarkus-scheduler,
-quarkus-cache, quarkus-redis-client, quarkus-mongodb-client, quarkus-qute,
-quarkus-mailer, quarkus-grpc, quarkus-websockets-next,
-quarkus-container-image-jib, quarkus-kubernetes, quarkus-logging-json and
-quarkus-config-yaml, and of their -deployment jars, at version 3.40.1:
+io.quarkus artifacts (about 170 quarkus-* extensions with configuration
+metadata; the artifact list is the EXTENSIONS table of scripts/gen-metadata.py
+in this plugin's source repository, plugins/quarkus/, which the package does
+not ship), and of their -deployment jars, at version 3.40.1:
 property names, types, defaults, deprecations, value hints and the first
 sentence of each description.
 
@@ -28,7 +18,7 @@ directory of Quarkus Tools for IntelliJ 2.6.1
 Copyright Red Hat, Inc. Licensed under the Eclipse Public License 2.0; a copy
 of the License is in LICENSE.
 
-Regenerate the file with scripts/gen-metadata.py.
+Regenerate the file with scripts/gen-metadata.py from the source repository.
 
 Source code: this plugin's source repository, directory `plugins/quarkus`.
 

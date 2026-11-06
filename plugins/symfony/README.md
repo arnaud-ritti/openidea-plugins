@@ -10,7 +10,7 @@ the free code of the public repository.
 | Names        | Indexed from                                                                                                       | Referenced in                                                                                                                                                  |
 | ------------ | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Routes       | `#[Route]` / `@Route` in `src/**/*Controller.php`, `config/routes*` YAML/XML, compiled `var/cache/dev/url_generating_routes.php` | PHP `generateUrl`, `redirectToRoute`, `->generate`; Twig `path()`, `url()`                                                                                     |
-| Templates    | `templates/**/*.twig` (`templates/bundles/XBundle/` as `@X/`)                                                       | PHP `render*`, `stream`, `htmlTemplate`, `textTemplate`, `#[Template]`; Twig `extends`, `include`, `embed`, `import`, `from`, `use`, `include()`, `source()` |
+| Templates    | `templates/**/*.twig` (`templates/bundles/XBundle/` as `@X/`; `twig: paths:` of `config/packages/twig.yaml` as `@namespace/`)                                                       | PHP `render*`, `stream`, `htmlTemplate`, `textTemplate`, `#[Template]`; Twig `extends`, `include`, `embed`, `import`, `from`, `use`, `include()`, `source()` |
 | Blocks       | the parent templates (`extends` chain)                                                                              | Twig `{% block name %}`, `block('name')`                                                                                                                       |
 | Variables    | keys of the array passed to `render()` by controllers                                                              | Twig expressions (completion only)                                                                                                                             |
 | Services     | `services:` in `config/**` YAML, `<service>` in XML, compiled `var/cache/dev/App_KernelDevDebugContainer.xml`      | PHP `$container->get/has`, `service()`, `ref()`; YAML `'@id'`, `'@?id'`; XML `type="service" id=`, `alias=`, `parent=`                                          |
@@ -20,15 +20,25 @@ the free code of the public repository.
 | Entries      | `webpack.config.js` `addEntry`/`addStyleEntry`, `importmap.php`                                                    | Twig `encore_entry_link_tags()`, `encore_entry_script_tags()`, `importmap()`                                                                                    |
 | Roles        | `ROLE_*` in security config and controllers, plus built-in attributes (`IS_AUTHENTICATED_*`, `PUBLIC_ACCESS`, …)  | PHP `isGranted`, `denyAccessUnlessGranted`, `#[IsGranted]`; Twig `is_granted()`                                                                                |
 
+## Twig names and structure
+
+In `.twig` files of a Symfony project: completion of tag names (`if`, `for`,
+`block`, `extends`, … and their `end…` forms) after `{%`, filters after `|`,
+functions in expressions and tests after `is` / `is not`, from static lists
+taken from Twig's public documentation (not read from the project's Twig
+extensions). Template paths after `extends`, `include`, `embed`, `import`,
+`from` and `use` come from the cached `templates/` index.
+
 ## Problems, quick fixes and gutter
 
 - Problems: missing template, missing translation key (in a domain that has
   keys), missing route (once the compiled routes exist), missing service (once
-  the compiled container exists), route defined twice in a file. Files are
+  the compiled container exists), route defined twice in a file, service id defined twice in an XML file, unquoted YAML values starting with `@` or `%` in `config/` and `translations/` (Symfony's parser rejects them), Twig block tags (`block`, `if`, `for`, `macro`,
+  `embed`, `apply`, `autoescape`, `with`, `verbatim`, `cache`, `sandbox`) never closed. Files are
   checked when opened or saved. _Settings › Plugins › Symfony_ turns the
   checks off.
-- Quick fix (⌥⏎) on a missing translation key: add it to one of the domain's
-  YAML files.
+- Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
+  YAML files; on an unquoted `@` / `%` YAML value, quote it.
 - Gutter: controller `render()` → template; template → controllers rendering
   it; `{% block %}` → the parent block it overrides; PHP class → its service
   definition; YAML service → its class file.
@@ -44,6 +54,11 @@ _Symfony: Reindex Project_ rebuilds the index. Saving a file under `config/`,
 `templates/` or `translations/`, a PHP file under `src/`, `composer.json`,
 `webpack.config.js` or `importmap.php` also rebuilds it.
 
+The _Symfony Profiler_ tool window (command _Symfony: Show Profiler_) lists the
+latest 100 requests, newest first, from `var/cache/dev/profiler/index.csv`
+(time in UTC, method, status, URL, IP, token); sub-requests are left out, rows
+cannot be opened.
+
 A project counts as Symfony when it has `symfony.lock` or requires
 `symfony/framework-bundle` or `symfony/symfony` in `composer.json`. Twig files
 need the `aritti.twig` plugin (the IDE has no Twig language). Settings: the
@@ -57,12 +72,11 @@ which the OpenIDEA plugin API has no equivalent for:
 - container `get()` return types, Twig variable types (`{{ post.| }}`),
   form types and options, Doctrine (QueryBuilder, repositories, DQL),
   serializer, event dispatcher, constraint validators;
-- the remaining inspections (service arguments, deprecated Twig, YAML
-  quoting, …) and intentions (they need resolved PHP types);
-- refactorings, find usages, Symfony profiler, MCP tools;
+- the remaining inspections (service arguments, deprecated Twig, …) and intentions (they need resolved PHP types);
+- refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing
   files.
 
 Matching is textual: a call is recognised by its method name, not its class,
-and templates are only looked up in `templates/` (Twig `paths:` namespaces are
-not read, so names starting with `@` are never reported missing).
+and templates are looked up in `templates/` and the `twig: paths:` directories of
+`config/packages/twig.yaml` (names starting with `@` are never reported missing).

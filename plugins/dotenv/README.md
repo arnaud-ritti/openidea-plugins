@@ -71,8 +71,11 @@ Declarations:
 - Dockerfiles (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`): `ENV KEY=value
   OTHER="x y"` and `ENV KEY value`, continued with `\`.
 - Compose files (`docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
-  `compose.yaml`): `environment:` as a list (`- KEY=value`) or a mapping
-  (`KEY: value`).
+  `compose.yaml`): `environment:` as a list (`- KEY=value`), a mapping
+  (`KEY: value`) or a one-line flow collection (`[A=1, B]`, `{A: 1, B: ~}`);
+  and the keys of the files named by `env_file:` (a scalar, a list or the
+  `- path: x` long form, paths relative to the compose file), read when the
+  compose file is indexed. A missing file is ignored.
 
 Usages in code are matched on the text right before the key, compared
 lowercased. The key follows a `"`, `'` or `` ` `` (blanks before the quote
@@ -122,8 +125,9 @@ Settings › Plugins › .env files:
   marker (`package.json`, `composer.json`, `go.mod`, `Cargo.toml`,
   `Dockerfile`, …). Any other env file is known only once it has been opened
   or saved.
-- Compose files are read line by line: no flow style (`environment: [A=1]`),
-  no anchors, no `env_file:`. Keys in Dockerfiles and compose files are
+- Compose files are read line by line: a flow collection must fit on one line,
+  and anchors aren't resolved (`environment: *env`, `<<: *common` and the
+  anchored block they point to are skipped, never turned into keys). Keys in Dockerfiles and compose files are
   declarations only: `$KEY` there isn't a usage, and Go to Declaration doesn't
   work from those files.
 - Rename isn't a refactoring. The quick fix above covers it after the edit,

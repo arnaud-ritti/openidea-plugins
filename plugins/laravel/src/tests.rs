@@ -313,7 +313,7 @@ fn adds_missing_translation_keys() {
     let blade = doc("/project/resources/views/a.blade.php", "blade", "{{ __('messages.goodbye') }}{{ __('messages.nested.x') }}");
 
     let actions = plugin.code_actions(&blade, Range::new(Position::new(0, 16), Position::new(0, 16)));
-    assert_eq!(actions.len(), 1);
+    assert_eq!(actions.len(), 2);
     assert_eq!(actions[0].title, "Add translation key \"messages.goodbye\" to en/messages.php");
 
     let resolved = plugin.resolve_code_action(&blade, actions[0].clone()).unwrap();
@@ -322,7 +322,8 @@ fn adds_missing_translation_keys() {
     assert_eq!(edits[0].text, "    'goodbye' => 'goodbye',\n");
     assert_eq!(edits[0].range.start, Position::new(7, 0));
 
-    assert!(plugin.code_actions(&blade, Range::new(Position::new(0, 45), Position::new(0, 45))).is_empty());
+    let nested = plugin.code_actions(&blade, Range::new(Position::new(0, 45), Position::new(0, 45)));
+    assert!(nested.iter().all(|a| !a.title.starts_with("Add translation key")));
 }
 
 #[test]
@@ -363,4 +364,484 @@ fn ignores_projects_without_laravel() {
     plugin.activate(&host.context("aritti.laravel")).unwrap();
     assert_eq!(plugin.run_command("reindex", &host.invocation(), None).unwrap(), None);
     assert_eq!(host.notifications()[0].body, "No Laravel project is open.");
+}
+
+fn activated_with(host: &MockHost, files: &[(&str, &str)]) -> Main {
+    laravel_project(host);
+    for (path, text) in files {
+        host.add_file(path, text);
+    }
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+    plugin
+}
+
+fn codes(plugin: &Main, language: &str, text: &str) -> Vec<String> {
+    let index = plugin.index_for("/project/x").unwrap();
+    problems(index, language, text, false).into_iter().map(|d| d.code.unwrap()).collect()
+}
+
+#[test]
+fn unknown_blade_component_warns() {
+    let host = MockHost::install();
+    let plugin = activated(&host);
+
+    assert_eq!(codes(&plugin, "blade", "<x-nope />\n<x-card>a</x-card>\n<x-forms.input-field />\n<x-panel />"), ["laravel.unknown-component"]);
+    assert!(codes(&plugin, "blade", "{{-- <x-nope /> --}}\n<x-slot name=\"a\"></x-slot>\n<x-slot:title>t</x-slot:title>\n<x-dynamic-component :component=\"$c\" />\n<x-{{ $name }} />").is_empty());
+}
+
+#[test]
+fn registered_blade_components_are_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(
+        &host,
+        &[("app/Providers/AppServiceProvider.php", "<?php\nBlade::component('package-alert', Alert::class);\n"), ("resources/views/components/card/card.blade.php", "")],
+    );
+
+    assert!(codes(&plugin, "blade", "<x-package-alert /><x-card />").is_empty());
+
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("app/Providers/AppServiceProvider.php", "<?php\nBlade::anonymousComponentPath(__DIR__.'/x');\n")]);
+    assert!(codes(&plugin, "blade", "<x-nope />").is_empty());
+}
+
+#[test]
+fn package_component_namespace_is_skipped() {
+    let host = MockHost::install();
+    let plugin = activated(&host);
+
+    assert!(codes(&plugin, "blade", "<x-package::alert />").is_empty());
+    assert!(codes(&plugin, "blade", "<livewire:package::alert />").is_empty());
+}
+
+#[test]
+fn unknown_livewire_component_warns() {
+    let host = MockHost::install();
+    let plugin = activated(&host);
+
+    assert_eq!(codes(&plugin, "blade", "<livewire:nope />"), ["laravel.unknown-livewire"]);
+    assert_eq!(codes(&plugin, "blade", "@livewire('nope')"), ["laravel.unknown-livewire-directive"]);
+    assert!(codes(&plugin, "blade", "<livewire:styles /><livewire:scripts /><livewire:is :component=\"$c\" />@livewire($name)").is_empty());
+}
+
+#[test]
+fn known_livewire_component_is_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("resources/views/livewire/volt-counter.blade.php", "")]);
+
+    assert!(codes(&plugin, "blade", "<livewire:counter />\n@livewire('counter')\n<livewire:volt-counter />").is_empty());
+}
+
+#[test]
+fn unknown_inertia_page_warns() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("resources/js/Pages/Posts/Index.vue", ""), ("resources/js/pages/Home.tsx", "")]);
+
+    let php = "<?php\nInertia::render('Missing/Page');\nInertia::render('Posts/Index');\ninertia('Home');\nRoute::inertia('/x', 'Nope');\nInertia::render('Posts/' . $x);\n";
+    assert_eq!(codes(&plugin, "php", php), ["laravel.unknown-inertia-page", "laravel.unknown-inertia-page"]);
+
+    let bare = MockHost::install();
+    let plugin = activated(&bare);
+    assert!(codes(&plugin, "php", "<?php\nInertia::render('Missing/Page');").is_empty());
+}
+
+#[test]
+fn unknown_factory_for_model_warns() {
+    let host = MockHost::install();
+    let plugin = activated_with(
+        &host,
+        &[
+            ("database/factories/ArticleFactory.php", "<?php\nclass ArticleFactory {}\n"),
+            ("app/Models/Tag.php", "<?php\nclass Tag extends Model\n{\n    protected static function newFactory() {}\n}\n"),
+        ],
+    );
+
+    let php = "<?php\nPost::factory()->create();\nArticle::factory();\nTag::factory();\nUnknown::factory();\nstatic::factory();\n";
+    let found = problems(plugin.index_for("/project/x").unwrap(), "php", php, false);
+    assert_eq!(found.iter().map(|d| d.code.clone().unwrap()).collect::<Vec<_>>(), ["laravel.unknown-factory"]);
+    assert_eq!((found[0].range.start.line, found[0].range.start.character, found[0].range.end.character), (1, 0, 4));
+}
+
+#[test]
+fn switched_off_checks_are_quiet() {
+    let host = MockHost::install();
+    let plugin = activated(&host);
+    for key in ["reportUnknownComponents", "reportUnknownLivewire", "reportUnknownLivewireDirectives", "reportUnknownInertiaPages", "reportUnknownFactories"] {
+        host.set_setting(key, "false");
+    }
+
+    assert!(codes(&plugin, "blade", "<x-nope /><livewire:nope />@livewire('nope')").is_empty());
+    assert!(codes(&plugin, "php", "<?php\nPost::factory();").is_empty());
+}
+
+#[test]
+fn vendor_component_packages_keep_components_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("composer.json", r#"{"require": {"laravel/framework": "^11.0", "blade-ui-kit/blade-heroicons": "^2"}}"#)]);
+    assert!(codes(&plugin, "blade", "<x-heroicon-o-user />").is_empty());
+
+    let host = MockHost::install();
+    let plugin = activated(&host);
+    assert_eq!(codes(&plugin, "blade", "<x-heroicon-o-user />"), ["laravel.unknown-component"]);
+}
+
+#[test]
+fn registered_livewire_components_keep_livewire_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("app/Providers/AppServiceProvider.php", "<?php\nLivewire::component('shop-cart', Cart::class);\n")]);
+    assert!(codes(&plugin, "blade", "<livewire:shop-cart />@livewire('shop-cart')").is_empty());
+}
+
+#[test]
+fn blade_component_without_alias_is_derived_or_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("app/Providers/AppServiceProvider.php", "<?php\nBlade::component(\\Pkg\\FancyAlert::class);\n")]);
+    assert_eq!(codes(&plugin, "blade", "<x-fancy-alert /><x-nope />"), ["laravel.unknown-component"]);
+
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("app/Providers/AppServiceProvider.php", "<?php\nBlade::component($class);\n")]);
+    assert!(codes(&plugin, "blade", "<x-nope />").is_empty());
+}
+
+#[test]
+fn partial_index_stays_quiet() {
+    let host = MockHost::install();
+    let mut plugin = activated_with(&host, &[("resources/js/Pages/Home.vue", ""), ("database/factories/ArticleFactory.php", "<?php\n")]);
+    let root = plugin.indexes.keys().next().unwrap().clone();
+    plugin.indexes.get_mut(&root).unwrap().partial = true;
+
+    let blade = "<x-nope /><livewire:nope />@livewire('nope')";
+    let php = "<?php\nInertia::render('Nope');\nPost::factory();\n";
+    assert!(codes(&plugin, "blade", blade).is_empty());
+    assert!(codes(&plugin, "php", php).is_empty());
+
+    plugin.indexes.get_mut(&root).unwrap().partial = false;
+    assert_eq!(codes(&plugin, "blade", blade).len(), 3);
+    assert_eq!(codes(&plugin, "php", php).len(), 2);
+}
+
+fn rewrite_titles(plugin: &mut Main, path: &str, language: &str, text: &str, marker: &str) -> Vec<String> {
+    let at = text.find(marker).unwrap() + 1;
+    let position = text::position(text, at);
+    plugin.code_actions(&doc(path, language, text), Range::new(position, position)).into_iter().map(|a| a.title).collect()
+}
+
+fn apply_rewrite(plugin: &mut Main, path: &str, language: &str, text: &str, marker: &str) -> String {
+    let at = text.find(marker).unwrap() + 1;
+    let position = text::position(text, at);
+    let document = doc(path, language, text);
+    let action = plugin.code_actions(&document, Range::new(position, position)).remove(0);
+    let mut edits: Vec<_> = action.edits[0].1.iter().map(|e| (text::offset(text, e.range.start).unwrap(), text::offset(text, e.range.end).unwrap(), e.text.clone())).collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut result = text.to_owned();
+    for (start, end, replacement) in edits {
+        result.replace_range(start..end, &replacement);
+    }
+    result
+}
+
+#[test]
+fn validation_string_to_array() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/PostController.php";
+    let text = "<?php\n$request->validate(['email' => 'required|email|max:255', 'slug' => 'regex:/a|b/|required', 'one' => 'required', 'name' => [\"a\"]]);\n";
+
+    let result = apply_rewrite(&mut plugin, path, "php", text, "required|email");
+    assert!(result.contains("'email' => ['required', 'email', 'max:255'],"));
+    assert!(result.contains("'regex:/a|b/|required'"));
+
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "regex:").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "php", "<?php\n$x = ['a' => 'b|c'];\n", "b|c").is_empty());
+}
+
+#[test]
+fn validation_one_rule_is_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['one' => 'required']);\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/A.php", "php", text, "required").is_empty());
+}
+
+#[test]
+fn controller_string_to_class_array() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/routes/web.php";
+
+    let imported = "<?php\nuse App\\Http\\Controllers\\UserController;\nRoute::get('/u', 'UserController@index');\n";
+    let result = apply_rewrite(&mut plugin, path, "php", imported, "UserController@");
+    assert_eq!(result, "<?php\nuse App\\Http\\Controllers\\UserController;\nRoute::get('/u', [UserController::class, 'index']);\n");
+
+    let same_namespace = "<?php\nnamespace App\\Http\\Controllers;\nRoute::get('/u', 'UserController@index');\n";
+    assert!(apply_rewrite(&mut plugin, path, "php", same_namespace, "UserController@").contains("[UserController::class, 'index']"));
+
+    let not_imported = "<?php\nRoute::get('/u', 'UserController@index');\n";
+    assert!(rewrite_titles(&mut plugin, path, "php", not_imported, "UserController@").is_empty());
+
+    let other_import = "<?php\nuse App\\Other\\PostController;\nRoute::get('/u', 'UserController@index');\n";
+    assert!(rewrite_titles(&mut plugin, path, "php", other_import, "UserController@").is_empty());
+}
+
+#[test]
+fn blade_braces_escape_toggle() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/resources/views/a.blade.php";
+
+    let escaped = "<p>{{ $x }}</p>\n";
+    assert_eq!(apply_rewrite(&mut plugin, path, "blade", escaped, "$x"), "<p>{!! $x !!}</p>\n");
+
+    let raw = "<p>{!! $x !!}</p>\n";
+    assert_eq!(apply_rewrite(&mut plugin, path, "blade", raw, "$x"), "<p>{{ $x }}</p>\n");
+
+    assert!(rewrite_titles(&mut plugin, path, "blade", "{{-- $x --}}", "$x").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "blade", "@{{ $x }}", "$x").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "blade", "<p>text</p>", "text").is_empty());
+    assert!(rewrite_titles(&mut plugin, "/project/app/a.php", "php", "<?php echo '{{ $x }}';", "$x").is_empty());
+}
+
+#[test]
+fn validation_string_inside_existing_array_is_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['a' => ['required', 'string|max:5']]);\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/A.php", "php", text, "string|max").is_empty());
+}
+
+#[test]
+fn validation_custom_messages_are_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let text = "<?php\n$request->validate(['email' => 'required|email'], ['email.required' => 'Required|please']);\nValidator::make($d, ['n' => 'a|b'], ['n.a' => 'x|y']);\n";
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "Required|please").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "x|y").is_empty());
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", text, "a|b").len(), 1);
+}
+
+#[test]
+fn rewrites_survive_multibyte_text_and_crlf() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let text = "<?php\r\n// é日本\r\n$request->validate(['é' => 'required|email']);\r\n";
+    let result = apply_rewrite(&mut plugin, path, "php", text, "required|email");
+    assert_eq!(result, "<?php\r\n// é日本\r\n$request->validate(['é' => ['required', 'email']]);\r\n");
+
+    let blade = "<p>é</p>\r\n<p>{{ $x }}</p>\r\n";
+    let result = apply_rewrite(&mut plugin, "/project/resources/views/a.blade.php", "blade", blade, "$x");
+    assert_eq!(result, "<p>é</p>\r\n<p>{!! $x !!}</p>\r\n");
+}
+
+#[test]
+fn controller_this_validate_rules_are_offered() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$this->validate($request, ['email' => 'required|email'], ['email.required' => 'a|b']);\n";
+    let result = apply_rewrite(&mut plugin, "/project/app/A.php", "php", text, "required|email");
+    assert!(result.contains("['email' => ['required', 'email']]"));
+}
+
+#[test]
+fn controller_this_validate_messages_are_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$this->validate($request, ['email' => 'required|email'], ['email.required' => 'a|b']);\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/A.php", "php", text, "a|b").is_empty());
+}
+
+#[test]
+fn bag_and_form_request_rules_are_offered() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let bag = "<?php\n$request->validateWithBag('post', ['t' => 'required|max:5']);\n$this->validateWithBag('post', $request, ['u' => 'required|max:6']);\n";
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", bag, "required|max:5").len(), 1);
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", bag, "required|max:6").len(), 1);
+
+    let form = "<?php\nclass R {\n    public function rules(): array\n    {\n        return ['n' => 'required|string'];\n    }\n}\n";
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", form, "required|string").len(), 1);
+}
+
+#[test]
+fn chained_and_livewire_validate_rules_are_offered() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let text = "<?php\n$this->request->validate(['a' => 'required|email']);\n$this->request->validateWithBag('b', ['c' => 'required|max:9']);\n$this->validate(['x' => 'required|url']);\n$this->validate($request, ['y' => 'required|ip'], ['y.ip' => 'p|q']);\n$this->validateWithBag('b', ['z' => 'required|uuid'], ['z.uuid' => 'm|n']);\n";
+    for marker in ["required|email", "required|max:9", "required|url", "required|ip", "required|uuid"] {
+        assert_eq!(rewrite_titles(&mut plugin, path, "php", text, marker).len(), 1, "{marker}");
+    }
+    for marker in ["p|q", "m|n"] {
+        assert!(rewrite_titles(&mut plugin, path, "php", text, marker).is_empty(), "{marker}");
+    }
+}
+
+#[test]
+fn every_template_is_registered_and_parses() {
+    let manifest = include_str!("../plugin.toml");
+    let paths: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.strip_prefix("path = \""))
+        .filter(|rest| rest.starts_with("templates/"))
+        .filter_map(|rest| rest.strip_suffix('"'))
+        .collect();
+    assert_eq!(paths.len(), 16, "{paths:?}");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in paths {
+        let body = std::fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("missing {path}"));
+        assert!(body.starts_with("<?php") || body.starts_with("<?php\n"), "{path}");
+        assert!(!body.contains("{{"), "{path}");
+        let mut rest = body.as_str();
+        while let Some(start) = rest.find('$') {
+            let after = &rest[start + 1..];
+            let is_var = after.find('$').map(|end| &after[..end]).filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_uppercase() || c == '_'));
+            if let Some(var) = is_var {
+                assert!(["NAME", "END"].contains(&var), "{path}: ${var}$");
+                rest = &after[var.len() + 1..];
+            } else {
+                rest = after;
+            }
+        }
+    }
+}
+
+fn manifest_values(header: &str, key: &str) -> Vec<String> {
+    let manifest = include_str!("../plugin.toml");
+    let prefix = format!("{key} = ");
+    let mut inside = false;
+    let mut values = Vec::new();
+    for line in manifest.lines() {
+        if line.starts_with('[') {
+            inside = line == header;
+        }
+        if inside && let Some(value) = line.strip_prefix(&prefix) {
+            values.push(value.to_owned());
+        }
+    }
+    values
+}
+
+#[test]
+fn commands_declared_in_manifest_have_handlers() {
+    let ids = manifest_values("[[contributes.commands]]", "id");
+    assert!(ids.len() >= 10, "{ids:?}");
+    for quoted in ids {
+        let id = quoted.trim_matches('"');
+        let host = MockHost::install();
+        let result = Main::default().run_command(id, &host.invocation(), None);
+        assert!(!matches!(result, Err(Error::NotFound(_))), "no handler for {id}");
+    }
+}
+
+#[test]
+fn run_detectors_run_artisan_through_php() {
+    let header = "[[contributes.runDetectors]]";
+    assert_eq!(manifest_values(header, "files"), ["[\"artisan\"]"; 4]);
+    assert_eq!(manifest_values(header, "command"), ["\"php\""; 4]);
+    assert_eq!(
+        manifest_values(header, "args"),
+        [
+            "[\"artisan\", \"serve\"]",
+            "[\"artisan\", \"test\"]",
+            "[\"artisan\", \"queue:work\"]",
+            "[\"artisan\", \"schedule:work\"]",
+        ]
+    );
+}
+
+#[test]
+fn migrate_fresh_runs_only_when_confirmed() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php"]);
+    let mut plugin = activated(&host);
+    host.on_process("php", |args, _| {
+        assert_eq!(args, ["artisan", "migrate:fresh", "--no-interaction"]);
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "ok".into(), stderr: String::new() })
+    });
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    assert!(host.notifications()[0].body.contains("again within 30 seconds"));
+    assert_eq!(host.notifications().len(), 1);
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    assert_eq!(host.notifications().len(), 2);
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    assert_eq!(host.notifications().len(), 3);
+    assert!(host.notifications()[2].body.contains("again within"));
+}
+
+#[test]
+fn migrate_fresh_confirmation_is_per_project() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php"]);
+    let mut plugin = activated(&host);
+    let ran = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = ran.clone();
+    host.on_process("php", move |_, _| {
+        counter.set(counter.get() + 1);
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "ok".into(), stderr: String::new() })
+    });
+
+    host.set_project_root(Some("/project-a"));
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    host.set_project_root(Some("/project-b"));
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+
+    assert_eq!(ran.get(), 0);
+    assert_eq!(host.notifications().len(), 2);
+
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    assert_eq!(ran.get(), 1);
+}
+
+fn complete_directives(plugin: &mut Main, marked: &str) -> Vec<String> {
+    let (text, at) = cursor(marked);
+    labels(plugin.completion(&doc("/project/resources/views/posts/show.blade.php", "blade", &text), at, None))
+}
+
+#[test]
+fn completes_core_and_livewire_directives_after_at() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let all = complete_directives(&mut plugin, "<div>\n@|\n</div>");
+    for name in ["if", "foreach", "forelse", "section", "livewire", "vite", "endif"] {
+        assert!(all.contains(&name.to_owned()), "missing {name}");
+    }
+    assert!(complete_directives(&mut plugin, "@fo|").contains(&"foreach".to_owned()));
+    assert!(complete_directives(&mut plugin, "@forel|rest").contains(&"forelse".to_owned()));
+}
+
+#[test]
+fn completes_custom_directive_from_project() {
+    let host = MockHost::install();
+    let mut plugin = activated_with(
+        &host,
+        &[
+            ("app/Providers/AppServiceProvider.php", "<?php\nBlade::directive('datetime', fn ($e) => $e);\n"),
+            ("app/Support/Directives.php", "<?php\nBlade::directive(\"money\", fn ($e) => $e);\n// Blade::directive('commented', fn () => 1);\n"),
+        ],
+    );
+
+    let names = complete_directives(&mut plugin, "@dat|");
+    assert_eq!(&names[..2], ["datetime", "money"]);
+    assert!(names.contains(&"if".to_owned()) && !names.contains(&"commented".to_owned()));
+}
+
+#[test]
+fn escaped_at_is_not_completed() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    assert!(complete_directives(&mut plugin, "@@i|").is_empty());
+    assert!(complete_directives(&mut plugin, "mail user@exa|").is_empty());
+    assert!(complete_directives(&mut plugin, "user@|").is_empty());
+    assert!(complete_directives(&mut plugin, "{{ $a @fo| }}").is_empty());
+}
+
+#[test]
+fn directive_list_matches_the_blade_plugin() {
+    let source = include_str!("../../blade/src/lib.rs");
+    let region = &source[source.find("const BLOCKS").unwrap()..source.find("fn is_directive").unwrap()];
+    let in_blade: std::collections::BTreeSet<&str> = region.split('"').skip(1).step_by(2).collect();
+    let here: std::collections::BTreeSet<&str> = crate::directives::CORE.iter().copied().collect();
+    assert_eq!(here, in_blade);
 }

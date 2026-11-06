@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "Rust",
+  "image": "mcr.microsoft.com/devcontainers/rust:1",
+  "features": {},
+  "forwardPorts": [],
+  "postCreateCommand": ""
+}

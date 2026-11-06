@@ -17,7 +17,7 @@ use spring_text::range;
 use spring_text::tree::Expansion;
 
 use manifest::{Dep, GLOBS, Kind, bumped, kind, lockfile, parse};
-use osv::{Finding, audit, cached_advisory, compare, level};
+use osv::{Finding, audit, cached_advisory, compare, ignored_advisories, is_ignored, level};
 
 type Display = HashMap<String, Option<(String, Option<String>)>>;
 
@@ -87,7 +87,18 @@ fn rows_key(project: &Project) -> Result<String, Error> {
 fn stored_rows(project: &Project) -> Result<Option<Vec<Row>>, Error> {
     let stored = host::storage::get(&rows_key(project)?)?;
 
-    Ok(stored.and_then(|json| serde_json::from_str(&json).ok()))
+    let rows: Option<Vec<Row>> = stored.and_then(|json| serde_json::from_str(&json).ok());
+    let ignored = ignored_advisories();
+
+    Ok(rows.map(|rows| {
+        rows.into_iter()
+            .map(|mut row| {
+                row.advisories.retain(|id| !is_ignored(&ignored, id, &cached_advisory(id).map(|a| a.aliases).unwrap_or_default()));
+                row
+            })
+            .filter(|row| !row.advisories.is_empty())
+            .collect()
+    }))
 }
 
 fn scan(project: &Project) -> Result<String, Error> {

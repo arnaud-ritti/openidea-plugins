@@ -1,7 +1,7 @@
 //! Spring Web Services Tools for OpenIDEA: links `@PayloadRoot` endpoint
 //! methods to the top-level elements of the project's XML schemas (`.xsd`
 //! files and schemas embedded in `.wsdl`) and checks the classpath resources
-//! given to `ClassPathResource`. Text-based, Java only.
+//! given to `ClassPathResource`. Text-based, Java and Kotlin.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::{
@@ -9,7 +9,7 @@ use openidea_plugin::{
 };
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Arg, JavaFile, Str};
-use spring_text::{contains, range, xml};
+use spring_text::{SOURCE_GLOBS, contains, parse_source, range, source_calls, xml};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
@@ -87,8 +87,8 @@ pub fn schemas(text: &str) -> Vec<Schema> {
         .collect()
 }
 
-fn scan_java(_path: &str, text: &str) -> Option<Vec<Endpoint>> {
-    let found = endpoints(&java::parse(text), text);
+fn scan_java(path: &str, text: &str) -> Option<Vec<Endpoint>> {
+    let found = endpoints(&parse_source(path, text), text);
     (!found.is_empty()).then_some(found)
 }
 
@@ -98,8 +98,8 @@ fn scan_schemas(_path: &str, text: &str) -> Option<Vec<Schema>> {
 }
 
 /// The `ClassPathResource` paths of a file, `classpath:` and leading `/` removed.
-fn resources(text: &str) -> Vec<(String, Str)> {
-    java::calls(text)
+fn resources(path: &str, text: &str) -> Vec<(String, Str)> {
+    source_calls(path, text)
         .into_iter()
         .filter(|c| c.is_new && c.name == "ClassPathResource")
         .filter_map(|c| c.args.into_iter().next()?.string)
@@ -130,14 +130,14 @@ pub struct WsTools {
 
 impl Default for WsTools {
     fn default() -> Self {
-        Self { java: Indexes::new(&["**/*.java"], scan_java), schemas: Indexes::new(&["**/*.xsd", "**/*.wsdl"], scan_schemas) }
+        Self { java: Indexes::new(SOURCE_GLOBS, scan_java), schemas: Indexes::new(&["**/*.xsd", "**/*.wsdl"], scan_schemas) }
     }
 }
 
 impl WsTools {
     fn java_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let text = &doc.text;
-        let f = java::parse(text);
+        let f = parse_source(&doc.path, text);
         let Some(schemas) = self.schemas.for_document(&doc.path, text, PROVIDER_BUDGET) else { return Vec::new() };
         let mut markers = Vec::new();
         let mut problems = Vec::new();
@@ -161,7 +161,7 @@ impl WsTools {
             }
         }
         if schemas.complete() {
-            for (path, s) in resources(text) {
+            for (path, s) in resources(&doc.path, text) {
                 let schema_file = path.ends_with(".xsd") || path.ends_with(".wsdl");
                 let exists = schemas.files().keys().any(|p| RESOURCE_DIRS.iter().any(|d| p.ends_with(&format!("{d}/{path}"))));
                 if schema_file && !exists {
@@ -209,12 +209,12 @@ impl WsTools {
 
 impl Providers for WsTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        if doc.language == "java" { self.java_markers(doc) } else { self.xml_markers(doc) }
+        if matches!(doc.language.as_str(), "java" | "kotlin") { self.java_markers(doc) } else { self.xml_markers(doc) }
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
         let text = &doc.text;
-        let endpoint = endpoints(&java::parse(text), text).into_iter().find(|e| contains(e.local_range, at));
+        let endpoint = endpoints(&parse_source(&doc.path, text), text).into_iter().find(|e| contains(e.local_range, at));
         if let Some(e) = endpoint {
             let Some(schemas) = self.schemas.for_document(&doc.path, text, PROVIDER_BUDGET) else { return Vec::new() };
             return elements_for(schemas, e.namespace.as_deref())
@@ -223,7 +223,7 @@ impl Providers for WsTools {
                 .map(|(p, _, r)| Location { path: p.into(), range: r })
                 .collect();
         }
-        let Some((path, _)) = resources(text).into_iter().find(|(_, s)| contains(range(text, s.at, s.end), at)) else {
+        let Some((path, _)) = resources(&doc.path, text).into_iter().find(|(_, s)| contains(range(text, s.at, s.end), at)) else {
             return Vec::new();
         };
         let Some(project) = project_of(&doc.path) else { return Vec::new() };
@@ -236,7 +236,7 @@ impl Providers for WsTools {
 
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let text = &doc.text;
-        let Some(e) = endpoints(&java::parse(text), text).into_iter().find(|e| contains(e.local_range, at)) else {
+        let Some(e) = endpoints(&parse_source(&doc.path, text), text).into_iter().find(|e| contains(e.local_range, at)) else {
             return Vec::new();
         };
         let Some(schemas) = self.schemas.for_document(&doc.path, text, PROVIDER_BUDGET) else { return Vec::new() };
@@ -333,6 +333,50 @@ class WsConfig {
 
     fn pos(text: &str, needle: &str) -> Position {
         position(text, text.find(needle).unwrap())
+    }
+
+    const KOTLIN_ENDPOINT: &str = r#"package com.acme.ws
+
+@Endpoint
+class KtCountryEndpoint {
+    @PayloadRoot(namespace = NAMESPACE_URI, localPart = "getCountryRequest")
+    @ResponsePayload
+    suspend fun getCountry(@RequestPayload request: GetCountryRequest): GetCountryResponse = TODO()
+
+    @PayloadRoot(namespace = NAMESPACE_URI, localPart = "ghostRequest")
+    fun ghost(@RequestPayload request: Any) {}
+
+    companion object {
+        const val NAMESPACE_URI = "http://acme.com/countries"
+    }
+}
+"#;
+
+    #[test]
+    fn kotlin_payload_root_is_indexed() {
+        let kt = parse_source("K.kt", KOTLIN_ENDPOINT);
+        let found = endpoints(&kt, KOTLIN_ENDPOINT);
+        let names: Vec<_> = found.iter().map(|e| (e.namespace.as_deref().unwrap(), e.local.as_str())).collect();
+        assert_eq!(names, [("http://acme.com/countries", "getCountryRequest"), ("http://acme.com/countries", "ghostRequest")]);
+        assert_eq!(scan_java("K.kt", KOTLIN_ENDPOINT).unwrap().len(), 2);
+        assert_eq!(endpoints(&java::parse(ENDPOINT), ENDPOINT).len(), 3);
+
+        let host = setup();
+        let path = "/project/src/main/kotlin/com/acme/ws/KtCountryEndpoint.kt";
+        host.add_file("src/main/kotlin/com/acme/ws/KtCountryEndpoint.kt", KOTLIN_ENDPOINT);
+        let mut ws = WsTools::default();
+        let doc = Document { path: path.into(), language: "kotlin".into(), version: 1, text: KOTLIN_ENDPOINT.into() };
+        let tips: Vec<_> = ws.line_markers(&doc).into_iter().map(|m| m.tooltip).collect();
+        assert_eq!(tips, ["Payload element <getCountryRequest> in countries.xsd"]);
+        let problems = &host.diagnostics()[path];
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].code.as_deref(), Some("unknown-payload-element"));
+        let xsd_tips: Vec<_> = ws
+            .line_markers(&Document { path: XSD_PATH.into(), language: "xml".into(), version: 1, text: XSD.into() })
+            .into_iter()
+            .map(|m| m.tooltip)
+            .collect();
+        assert!(xsd_tips[0].contains("KtCountryEndpoint.getCountry"), "{xsd_tips:?}");
     }
 
     #[test]

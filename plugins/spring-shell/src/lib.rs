@@ -1,14 +1,14 @@
 //! Spring Shell Tools for OpenIDEA: indexes the shell commands of a project
 //! (`@ShellMethod` and `@Command` methods), checks availability methods and
 //! providers, and completes and links the names they refer to. Text-based,
-//! Java only.
+//! Java and Kotlin.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET};
 use spring_text::java::{self, Annotation, Arg, JavaFile, Member, Str};
-use spring_text::range;
+use spring_text::{SOURCE_GLOBS, parse_source, range};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
@@ -122,8 +122,8 @@ fn beans(f: &JavaFile, text: &str) -> Vec<(String, Range, bool)> {
         .collect()
 }
 
-fn scan(_path: &str, text: &str) -> Option<Shell> {
-    let f = java::parse(text);
+fn scan(path: &str, text: &str) -> Option<Shell> {
+    let f = parse_source(path, text);
     let shell = Shell { commands: commands(&f, text), groups: groups(&f), beans: beans(&f, text) };
     (shell != Shell::default()).then_some(shell)
 }
@@ -245,13 +245,13 @@ pub struct ShellTools {
 
 impl Default for ShellTools {
     fn default() -> Self {
-        Self { indexes: Indexes::new(&["**/*.java"], scan) }
+        Self { indexes: Indexes::new(SOURCE_GLOBS, scan) }
     }
 }
 
 impl Providers for ShellTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        let f = java::parse(&doc.text);
+        let f = parse_source(&doc.path, &doc.text);
         let Some(index) = self.indexes.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
         let (problems, markers) = analyze(doc, &f, index);
         let _ = host::publish_diagnostics(&doc.path, &problems);
@@ -259,7 +259,7 @@ impl Providers for ShellTools {
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
-        let f = java::parse(&doc.text);
+        let f = parse_source(&doc.path, &doc.text);
         let Some(offset) = offset(&doc.text, at) else { return Vec::new() };
         let Some((a, arg, s)) = literal_at(&f, offset) else { return Vec::new() };
         let Some(index) = self.indexes.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
@@ -277,7 +277,7 @@ impl Providers for ShellTools {
     }
 
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
-        let f = java::parse(&doc.text);
+        let f = parse_source(&doc.path, &doc.text);
         let Some(offset) = offset(&doc.text, at) else { return Vec::new() };
         let Some((a, arg, s)) = literal_at(&f, offset) else { return Vec::new() };
         let replace = Some(range(&doc.text, s.at, s.end));
@@ -399,6 +399,61 @@ class ShellConfig {
 
     fn pos(text: &str, needle: &str, delta: usize) -> Position {
         position(text, text.find(needle).unwrap() + delta)
+    }
+
+    const KOTLIN: &str = r#"package com.acme.cli
+
+import org.springframework.shell.command.annotation.Command
+import org.springframework.shell.command.annotation.CommandAvailability
+
+@ShellComponent
+class KtCommands {
+    @ShellMethod(key = ["greet", "hi"], value = "Say hello")
+    suspend fun greet(name: String): String = "hi $name"
+
+    @Command(command = ["kt", "dump"], group = "Kt")
+    @CommandAvailability(provider = "ktMissing")
+    fun dump() {}
+
+    @ShellMethodAvailability(["greet", "nope"])
+    fun canGreet(): Availability = Availability.available()
+}
+
+@Configuration
+class KtConfig {
+    @Bean
+    fun ktConnected(): AvailabilityProvider = AvailabilityProvider { Availability.available() }
+}
+"#;
+
+    #[test]
+    fn kotlin_shell_command_is_indexed() {
+        let kt = |text: &str| commands(&parse_source("K.kt", text), text).into_iter().map(|c| c.key).collect::<Vec<_>>();
+        assert_eq!(kt(KOTLIN), ["greet", "hi", "kt dump"]);
+        let beans = scan("K.kt", KOTLIN).unwrap().beans;
+        assert!(beans.iter().any(|b| b.0 == "ktConnected" && b.2), "{beans:?}");
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/cli/KtCommands.kt", KOTLIN);
+        let mut tools = ShellTools::default();
+        let d = Document {
+            path: "/project/src/main/kotlin/com/acme/cli/KtCommands.kt".into(),
+            language: "kotlin".into(),
+            version: 1,
+            text: KOTLIN.into(),
+        };
+        tools.line_markers(&d);
+        let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/cli/KtCommands.kt"];
+        let messages: Vec<_> = problems.iter().map(|p| p.message.as_str()).collect();
+        assert!(messages.iter().any(|m| m.contains("nope")), "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("ktMissing")), "{messages:?}");
+        assert_eq!(messages.len(), 2, "{messages:?}");
+    }
+
+    #[test]
+    fn kotlin_template_keys_are_not_commands() {
+        let src = "@ShellComponent\nclass K {\n    @ShellMethod(key = [\"$p-run\", \"ok\"])\n    fun a() {}\n}\n";
+        let keys: Vec<_> = commands(&parse_source("K.kt", src), src).into_iter().map(|c| c.key).collect();
+        assert_eq!(keys, ["ok"]);
     }
 
     #[test]
