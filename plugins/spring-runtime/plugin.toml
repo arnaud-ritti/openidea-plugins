@@ -1,7 +1,7 @@
 id = "aritti.spring-runtime"
 name = "Spring Runtime Insight"
 version = "0.1.0"
-description = "Reads the Actuator endpoints (beans, environment, conditions, health, mappings, configuration properties, scheduled tasks) of a Spring Boot application running on localhost and shows them in a Spring Runtime tool window. Editor markers show which beans are loaded, and the runtime value and property source of @Value and configuration keys. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "Reads the Actuator endpoints (beans, environment, conditions, health, mappings, configuration properties, scheduled tasks, loggers, caches) of a Spring Boot application running on localhost and shows them in a Spring Runtime tool window. Editor markers show which beans are loaded, and the runtime value and property source of @Value and configuration keys. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0: first release, with the Actuator snapshot (refresh, clear and optional auto-refresh), the Spring Runtime tool window, runtime markers for beans, @Value and configuration keys, and hints for beans that aren't loaded."
@@ -22,7 +22,7 @@ activation = [
 
 [capabilities]
 required = ["project.read", "storage", "net:localhost"]
-optional = ["net:127.0.0.1"]
+optional = ["net:127.0.0.1", "secrets"]
 
 [[contributes.commands]]
 id = "refresh"
@@ -37,6 +37,11 @@ category = "Spring Runtime"
 [[contributes.providers]]
 kinds = ["line-markers"]
 languages = ["java", "properties", "yaml"]
+
+[[contributes.secrets]]
+name = "actuator-token"
+label = "Actuator token"
+description = "A bearer token or API key for protected Actuator endpoints (with Basic authentication: user:password encoded in Base64). Used when the actuatorAuth setting is bearer or basic."
 
 [[contributes.views]]
 id = "runtime"

@@ -7,7 +7,8 @@ use serde_json::Value;
 use spring_text::config::canonical;
 
 /// The endpoints read, in order; the first one tells whether the application is up.
-pub const ENDPOINTS: [&str; 7] = ["beans", "env", "conditions", "health", "mappings", "configprops", "scheduledtasks"];
+pub const ENDPOINTS: [&str; 9] =
+    ["beans", "env", "conditions", "health", "mappings", "configprops", "scheduledtasks", "loggers", "caches"];
 /// What Actuator shows for a value it hides.
 pub const MASK: &str = "******";
 
@@ -30,6 +31,9 @@ pub struct Snapshot {
     pub mappings: Vec<Mapping>,
     pub configprops: Vec<PropsBean>,
     pub scheduled: Vec<Scheduled>,
+    /// Only `ROOT` and the loggers with a configured level.
+    pub loggers: Vec<Logger>,
+    pub caches: Vec<Cache>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -80,6 +84,20 @@ pub struct Scheduled {
     /// `com.acme.Jobs.cleanup`.
     pub target: String,
     pub detail: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Logger {
+    pub name: String,
+    pub configured: String,
+    pub effective: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Cache {
+    pub manager: String,
+    pub name: String,
+    pub target: String,
 }
 
 fn entries(v: &Value) -> impl Iterator<Item = (&String, &Value)> {
@@ -203,6 +221,21 @@ impl Snapshot {
                             _ => String::new(),
                         };
                         self.scheduled.push(Scheduled { kind: kind.clone(), target: text(&t["runnable"]["target"]), detail });
+                    }
+                }
+            }
+            "loggers" => {
+                for (name, l) in entries(&json["loggers"]) {
+                    let configured = text(&l["configuredLevel"]);
+                    if name == "ROOT" || !configured.is_empty() {
+                        self.loggers.push(Logger { name: name.clone(), configured, effective: text(&l["effectiveLevel"]) });
+                    }
+                }
+            }
+            "caches" => {
+                for (manager, m) in entries(&json["cacheManagers"]) {
+                    for (name, c) in entries(&m["caches"]) {
+                        self.caches.push(Cache { manager: manager.clone(), name: name.clone(), target: text(&c["target"]) });
                     }
                 }
             }

@@ -5,6 +5,12 @@
       "title": "Actuator base URL (localhost or 127.0.0.1 only)",
       "default": "http://localhost:8080/actuator"
     },
+    "actuatorAuth": {
+      "type": "string",
+      "title": "Actuator authentication (the token is the actuator-token secret)",
+      "enum": ["none", "bearer", "basic"],
+      "default": "none"
+    },
     "timeoutMs": {
       "type": "integer",
       "title": "Timeout per Actuator request (ms)",
