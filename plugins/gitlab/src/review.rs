@@ -101,7 +101,7 @@ fn last_commits(ctx: &openidea_plugin::Invocation, refs: Option<&DiffRefs>) -> B
     };
 
     let range = format!("{}..{}", refs.base_sha, refs.head_sha);
-    let args = ["log", "--name-only", "--no-renames", "--format=%x01%H", "-n", "1000", &range];
+    let args = ["-c", "core.quotepath=off", "log", "--name-only", "--no-renames", "--format=%x01%H", "-n", "1000", &range];
 
     git_ok(&project, &args).map(|log| parse_last_commits(&log)).unwrap_or_default()
 }

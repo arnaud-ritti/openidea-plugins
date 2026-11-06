@@ -37,7 +37,7 @@ Optional permissions:
 
 ## Tool windows
 
-- **Merge Requests** (left): the project's merge requests (50 per page, up to 10 pages) as
+- **Merge Requests** (left): the project's merge requests (50 per page, up to 10 pages or 45 s) as
   `!iid title`, with author, branches and draft state. *Filter* cycles through
   the original's quick filters: Open, Include my changes, Need my review,
   Assigned to me (the default) and Closed. Expanding a merge request loads its
@@ -101,8 +101,9 @@ open file, *GitLab: Apply suggestion* appears in the quick fixes there. It
 replaces the N lines above, the commented line and the M lines below with the
 suggestion (a plain ` ```suggestion ` replaces the commented line; an empty one
 deletes it). It's offered for the unresolved threads shown in the editor and
-doesn't check that the lines still match the comment, so look at the lines
-before applying. It only edits the open file; nothing is posted to GitLab.
+isn't offered when the Changes view's cached diff shows a different text on the
+commented line; without that diff it doesn't check, so look at the lines before
+applying. It only edits the open file; nothing is posted to GitLab.
 
 ## Commands
 

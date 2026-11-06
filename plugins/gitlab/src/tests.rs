@@ -710,9 +710,9 @@ fn paging_stops_at_the_page_cap() {
 }
 
 fn file_changed_at_c1(args: &[String], _: Option<&str>) -> Result<ProcessOutput, Error> {
-    let stdout = match args[0].as_str() {
-        "log" => "\u{1}c2\n\nsrc/b.rs\n\u{1}c1\n\nsrc/a.rs\nsrc/b.rs\n".to_owned(),
-        _ => String::new(),
+    let stdout = match args.iter().any(|a| a == "log") {
+        true => "\u{1}c2\n\nsrc/b.rs\n\u{1}c1\n\nsrc/a.rs\nsrc/b.rs\n".to_owned(),
+        false => String::new(),
     };
 
     Ok(ProcessOutput { status: Some(0), stdout, stderr: String::new() })
@@ -811,4 +811,69 @@ fn a_suggestion_reaching_past_the_file_is_not_offered() {
     let (_host, mut plugin) = branch_with_suggestion("```suggestion:-0+9\nX\n```");
 
     assert!(plugin.code_actions(&document("/project/src/a.rs"), at_line(3)).is_empty());
+}
+
+#[test]
+fn paging_stops_at_the_deadline() {
+    let host = setup();
+    host.on_fetch(|_| ok(&format!("[{}]", vec![r#"{"id": "d"}"#; 100].join(","))));
+    let clock = std::cell::Cell::new(0);
+    let now = || {
+        clock.set(clock.get() + 20);
+        clock.get()
+    };
+
+    let threads: Vec<Discussion> = api::paged_until("/projects/g%2Fp/merge_requests/7/discussions", 100, now, 45).unwrap();
+
+    assert_eq!(threads.len(), 300, "checks read 20 s (start), 40 s, 60 s, 80 s: the fourth page is 60 s past the start");
+    assert_eq!(host.requests().len(), 3);
+}
+
+#[test]
+fn suggestion_edit_keeps_crlf() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\nX\nY\n```");
+    let doc = Document { text: "a\r\nb\r\nc\r\nd\r\ne\r\n".into(), ..document("/project/src/a.rs") };
+
+    let actions = plugin.code_actions(&doc, at_line(3));
+
+    assert_eq!(actions[0].edits[0].1[0].text, "X\r\nY\r\n");
+}
+
+#[test]
+fn suggestion_on_a_last_line_without_newline_adds_none() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\nX\n```");
+    let doc = Document { text: "a\nb\nc\nd".into(), ..document("/project/src/a.rs") };
+
+    let edit = &plugin.code_actions(&doc, at_line(3))[0].edits[0].1[0];
+
+    assert_eq!(edit.text, "X");
+    assert_eq!((edit.range.end.line, edit.range.end.character), (3, 1));
+}
+
+#[test]
+fn suggestion_is_not_offered_when_the_line_differs_from_the_cached_diff() {
+    let (host, mut plugin) = branch_with_suggestion("```suggestion\nX\n```");
+    plugin.diffs = Some((7, vec![FileDiff {
+        old_path: "src/a.rs".into(),
+        new_path: "src/a.rs".into(),
+        diff: "@@ -3,2 +3,2 @@\n c\n+d\n".into(),
+        ..FileDiff::default()
+    }]));
+    let _ = host;
+
+    assert_eq!(plugin.code_actions(&document("/project/src/a.rs"), at_line(3)).len(), 1, "line 4 is `d` in the diff and in the file");
+
+    let edited = Document { text: "a\nb\nc\nchanged\ne\nf\n".into(), ..document("/project/src/a.rs") };
+    assert!(plugin.code_actions(&edited, at_line(3)).is_empty());
+}
+
+#[test]
+fn the_viewed_history_is_read_with_unquoted_paths() {
+    let host = setup();
+    host.on_process("git", file_changed_at_c1);
+    let mut plugin = selected(&host);
+
+    changes_html(&mut plugin, &host);
+
+    assert!(git_runs(&host)[0].starts_with("-c core.quotepath=off log "), "{:?}", git_runs(&host));
 }

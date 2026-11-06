@@ -8,6 +8,7 @@ use openidea_plugin::providers::{CodeAction, Document, LineMarker};
 use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem, TextEdit};
 
 use crate::api::{self, Discussion, MergeRequest};
+use crate::review;
 use crate::{GitLab, SELECTED_KEY, first_line, relative_path};
 
 pub const STATUS_ITEM: &str = "merge-request";
@@ -114,6 +115,11 @@ fn suggestion_edit(text: &str, line: u32, suggestion: &Suggestion) -> Option<Tex
     let (end, replacement) = match last_line.ends_with('\n') {
         true => (Position::new(last + 1, 0), suggestion.text.clone()),
         false => (Position::new(last, last_line.chars().count() as u32), suggestion.text.trim_end_matches('\n').to_owned()),
+    };
+
+    let replacement = match text.contains("\r\n") {
+        true => replacement.replace("\r\n", "\n").replace('\n', "\r\n"),
+        false => replacement,
     };
 
     Some(TextEdit { range: Range::new(Position::new(first, 0), end), text: replacement })
@@ -305,6 +311,29 @@ impl GitLab {
             .collect()
     }
 
+    /// False when the Changes view's cached diff has the commented line (0-based) and the open file's text differs.
+    /// Without the cached diff, or when the diff doesn't reach that line, there is nothing to compare with.
+    fn matches_cached_diff(&self, doc: &Document, line: u32) -> bool {
+        let Some(branch) = &self.branch else {
+            return true;
+        };
+        let (Some(mr), Some((iid, diffs))) = (&branch.mr, &self.diffs) else {
+            return true;
+        };
+        let Some(relative) = relative_path(&branch.root, &doc.path) else {
+            return true;
+        };
+        let relative = relative.replace('\\', "/");
+        let Some(file) = diffs.iter().find(|d| d.new_path == relative).filter(|_| *iid == mr.iid) else {
+            return true;
+        };
+        let Some(committed) = review::parse_diff(&file.diff).into_iter().find(|l| l.kind != '-' && l.new == Some(line + 1)) else {
+            return true;
+        };
+
+        doc.text.lines().nth(line as usize).is_none_or(|current| current == committed.text.trim_end_matches('\r'))
+    }
+
     /// "Apply suggestion" for the suggestion blocks of the threads on the selected lines of the open file.
     /// The file may have changed since the comment: the lines are replaced as they are now.
     pub(crate) fn suggestion_actions(&self, doc: &Document, selection: Range) -> Vec<CodeAction> {
@@ -317,6 +346,7 @@ impl GitLab {
             .into_iter()
             .filter(|(line, _)| (selection.start.line..=selection.end.line).contains(line))
             .flat_map(|(line, d)| d.notes.iter().flat_map(|n| suggestions(&n.body)).map(move |s| (line, s)))
+            .filter(|(line, _)| self.matches_cached_diff(doc, *line))
             .filter_map(|(line, suggestion)| {
                 let edit = suggestion_edit(&doc.text, line, &suggestion)?;
 

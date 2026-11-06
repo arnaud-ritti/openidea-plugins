@@ -2,7 +2,7 @@
 //! plugin that OpenIDEA can host. The token never reaches the plugin: the IDE
 //! fills `{{secret:token}}` in the `Authorization` header.
 
-use openidea_plugin::{Error, HttpRequest, host};
+use openidea_plugin::{Error, HttpRequest, LogLevel, host};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -304,13 +304,29 @@ fn rest(method: &str, path: &str, body: Option<Value>) -> Result<Value, Error> {
 }
 
 const MAX_PAGES: usize = 10;
+/// Under the task's 60 s limit, leaving one request (up to 20 s) to finish.
+const PAGING_BUDGET_SECS: u64 = 45;
 
-/// Every page of a list (a short page is the last one), up to [`MAX_PAGES`] to stay within the task's time budget.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Every page of a list (a short page is the last one), up to [`MAX_PAGES`] and [`PAGING_BUDGET_SECS`].
 fn paged<T: DeserializeOwned>(path: &str, per_page: usize) -> Result<Vec<T>, Error> {
+    paged_until(path, per_page, now_secs, PAGING_BUDGET_SECS)
+}
+
+pub(crate) fn paged_until<T: DeserializeOwned>(path: &str, per_page: usize, now: impl Fn() -> u64, budget_secs: u64) -> Result<Vec<T>, Error> {
     let separator = if path.contains('?') { '&' } else { '?' };
+    let started = now();
     let mut all = Vec::new();
 
     for page in 1..=MAX_PAGES {
+        if page > 1 && now().saturating_sub(started) >= budget_secs {
+            host::log(LogLevel::Warn, &format!("{path}: stopped after {} results, out of time; showing the first {}.", all.len(), all.len()));
+            break;
+        }
+
         let items: Vec<T> = parse(rest("GET", &format!("{path}{separator}per_page={per_page}&page={page}"), None)?)?;
         let last = items.len() < per_page;
         all.extend(items);
