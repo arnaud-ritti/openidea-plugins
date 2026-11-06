@@ -3,7 +3,7 @@
 Merged from the four per-area backlogs. Detail, row ids and designs are in each file:
 [spring](backlog-spring.md) · [infra and data](backlog-infra-data.md) · [php](backlog-php.md) · [tooling](backlog-tooling.md).
 
-88 work packages, about 210 open rows. Nothing here is verified in the IDE; every package carries that risk.
+88 work packages. Open rows per the area files: spring 63, infra and data about 60, tooling 21; the PHP file doesn't count its rows (27 packages). Earlier passes (feasible-parity, gap F, the 1.2 work) are already subtracted: each file lists what it found done. Nothing here is verified in the IDE; every package carries that risk.
 
 | Area | Packages | S | M | L | Wave 1 | Wave 2 | Wave 3 |
 |---|---|---|---|---|---|---|---|
