@@ -392,7 +392,12 @@ impl Plugin for OpenApi {
             if id == "copy-route-curl" {
                 routes::copy_as_curl(&route, DEFAULT_BASE)?;
             } else {
-                routes::create_http_file(&route, DEFAULT_BASE)?;
+                let directory = route
+                    .location
+                    .as_ref()
+                    .and_then(|location| location.path.rsplit_once('/'))
+                    .map(|(directory, _)| directory);
+                routes::create_http_file(&route, DEFAULT_BASE, directory)?;
             }
             return Ok(None);
         }
@@ -734,7 +739,14 @@ fn routes(path: &str, text: &str, spec: &spec::Spec) -> Vec<Route> {
     spec::operations(text, &spec.keys)
         .into_iter()
         .map(|operation| {
-            let tag = by_key.get(format!("{}.tags[0]", operation.key).as_str()).map(|k| k.value.clone());
+            let tag = by_key
+                .get(format!("{}.tags[0]", operation.key).as_str())
+                .map(|k| k.value.clone())
+                .or_else(|| {
+                    let flow = &by_key.get(format!("{}.tags", operation.key).as_str())?.value;
+                    let first = flow.trim().strip_prefix('[')?.split([',', ']']).next()?;
+                    Some(first.trim().trim_matches(['"', '\'']).to_owned())
+                });
             let at = position(text, operation.at);
             Route {
                 method: operation.method,
@@ -1035,6 +1047,52 @@ mod tests {
         assert_eq!(items[0].detail.as_deref(), Some("[GET] Pets"));
         assert_eq!(items[0].icon.as_deref(), Some("ext:fileIcon/aritti.openapi/route-get"));
         assert_eq!(items[2].icon.as_deref(), Some("ext:fileIcon/aritti.openapi/route-delete"));
+    }
+
+    #[test]
+    fn create_route_http_writes_beside_the_spec() {
+        let host = MockHost::install().with_capabilities(&["project.read", "process:tee", "clipboard"]);
+        host.on_process("tee", |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() }));
+        host.add_file("/project/api/openapi.yaml", PETSTORE);
+        let mut openapi = OpenApi::default();
+        let view = openapi.render(ENDPOINTS, None, &host.invocation()).unwrap();
+        let Body::List(items) = view.body else { panic!("expected a list") };
+        host.answer_next_prompt(Some(&["http://localhost:8080"]));
+        openapi.run_command("create-route-http", &host.invocation(), Some(&items[0].key)).unwrap();
+        let run = host.process_runs().into_iter().find(|r| r.program == "tee").unwrap();
+        assert_eq!(run.args, ["/project/api/get-pets.http"]);
+    }
+
+    #[test]
+    fn copy_route_curl_copies_with_the_prompted_base() {
+        let host = MockHost::install().with_capabilities(&["project.read", "clipboard"]);
+        host.add_file("/project/api/openapi.yaml", PETSTORE);
+        let mut openapi = OpenApi::default();
+        let view = openapi.render(ENDPOINTS, None, &host.invocation()).unwrap();
+        let Body::List(items) = view.body else { panic!("expected a list") };
+        host.answer_next_prompt(Some(&["http://localhost:9000"]));
+        openapi.run_command("copy-route-curl", &host.invocation(), Some(&items[0].key)).unwrap();
+        assert_eq!(host.clipboard().as_deref(), Some("curl -X GET 'http://localhost:9000/pets'"));
+    }
+
+    #[test]
+    fn route_commands_reject_an_unknown_row() {
+        let host = MockHost::install();
+        let result = OpenApi::default().run_command("copy-route-curl", &host.invocation(), Some("nope"));
+        assert!(matches!(result, Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn first_tag_is_read_from_json_and_flow_style_specs() {
+        let host = MockHost::install();
+        let flow = PETSTORE.replace("      operationId: listPets\n", "      operationId: listPets\n      tags: [Pets]\n");
+        host.add_file("/project/a/openapi.yaml", &flow);
+        let json = r#"{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{"/pets":{"get":{"operationId":"listPets","tags":["Pets"],"responses":{"200":{"description":"ok"}}}}}}"#;
+        host.add_file("/project/b/openapi.json", json);
+        let view = OpenApi::default().render(ENDPOINTS, None, &host.invocation()).unwrap();
+        let Body::List(items) = view.body else { panic!("expected a list") };
+        let tagged: Vec<_> = items.iter().filter(|i| i.detail.as_deref() == Some("[GET] Pets")).collect();
+        assert_eq!(tagged.len(), 2, "{:?}", items.iter().map(|i| &i.detail).collect::<Vec<_>>());
     }
 
     #[test]

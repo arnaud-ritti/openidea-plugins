@@ -250,13 +250,20 @@ fn http_file_name(route: &Route) -> String {
     format!("{}-{slug}.http", route.method.to_ascii_lowercase())
 }
 
-pub fn create_http_file(route: &Route, default_base: &str) -> Result<(), Error> {
+/// `directory` is where the file goes; `None` means `<project root>/http`.
+pub fn create_http_file(route: &Route, default_base: &str, directory: Option<&str>) -> Result<(), Error> {
     let Some(base) = ask_base(default_base)? else {
         return Ok(());
     };
     let project = host::projects()?.into_iter().next().ok_or_else(|| Error::NotFound("project".into()))?;
-    let relative = format!("http/{}", http_file_name(route));
-    let path = format!("{}/{relative}", project.root()?.trim_end_matches('/'));
+    let name = http_file_name(route);
+    let (relative, path) = match directory {
+        Some(directory) => {
+            let path = format!("{}/{name}", directory.trim_end_matches('/'));
+            (path.clone(), path)
+        }
+        None => (format!("http/{name}"), format!("{}/http/{name}", project.root()?.trim_end_matches('/'))),
+    };
     if project.read_file(&relative).is_ok() {
         return host::open_location(&path, 0, 0);
     }
@@ -460,7 +467,7 @@ mod tests {
         host.answer_next_prompt(None);
         copy_as_curl(&r, "http://localhost:8080").unwrap();
         host.answer_next_prompt(None);
-        create_http_file(&r, "http://localhost:8080").unwrap();
+        create_http_file(&r, "http://localhost:8080", None).unwrap();
         assert_eq!(host.clipboard(), None);
         assert!(host.process_runs().is_empty());
         assert!(host.opened_locations().is_empty());
@@ -478,7 +485,7 @@ mod tests {
     fn http_file_is_written_with_tee_and_opened() {
         let host = tee_host(Some(0));
         host.answer_next_prompt(Some(&["http://localhost:8080"]));
-        create_http_file(&route("GET", "/users/{id}", "C"), "http://localhost:8080").unwrap();
+        create_http_file(&route("GET", "/users/{id}", "C"), "http://localhost:8080", None).unwrap();
         let run = host.process_runs().into_iter().find(|r| r.program == "tee").unwrap();
         assert_eq!(run.args, ["/project/http/get-users-id.http"]);
         assert_eq!(host.opened_locations(), [("/project/http/get-users-id.http".to_owned(), 0, 0)]);
@@ -488,7 +495,7 @@ mod tests {
     fn denied_tee_falls_back_to_the_clipboard() {
         let host = MockHost::install().with_capabilities(&["project.read", "clipboard"]);
         host.answer_next_prompt(Some(&["http://localhost:8080"]));
-        create_http_file(&route("GET", "/users", "C"), "http://localhost:8080").unwrap();
+        create_http_file(&route("GET", "/users", "C"), "http://localhost:8080", None).unwrap();
         assert_eq!(
             host.clipboard().as_deref(),
             Some("### GET /users\nGET http://localhost:8080/users\n")
@@ -501,7 +508,7 @@ mod tests {
         let host = tee_host(Some(0));
         host.add_file("http/get-users.http", "old");
         host.answer_next_prompt(Some(&["http://localhost:8080"]));
-        create_http_file(&route("GET", "/users", "C"), "http://localhost:8080").unwrap();
+        create_http_file(&route("GET", "/users", "C"), "http://localhost:8080", None).unwrap();
         assert!(host.process_runs().is_empty());
         assert_eq!(host.opened_locations(), [("/project/http/get-users.http".to_owned(), 0, 0)]);
     }
