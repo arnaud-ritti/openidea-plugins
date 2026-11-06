@@ -6,6 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "Unreleased: gutter link on each include to its changelog file; Liquibase icon on db.changelog-* files. JSON changelogs (checks, changesets view, Go to Definition on include, project index). completion of include file paths (XML, YAML), changeSet author names (setting or git user.name) and, in XML changesets without a declared schema, change type elements and attributes. Project-wide Go to Declaration from the document index: include to the changelog file, rollback changeSetId to its changeSet, table names to createTable. Liquibase: Update (Asks First)… and Liquibase: Rollback Count… commands, with confirmation and a changeset count. 0.1.0: first release. Live checks (duplicate and incomplete changesets, unknown change types in YAML, unresolved include and includeAll, formatted SQL header), YAML and formatted SQL completion, Go to Definition on include, changelog templates and Liquibase CLI run configurations. Change type and attribute names from the Liquibase 4.29 XSD (Apache-2.0)."
 categories = ["tools", "linters"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:xml", "on-language:yaml", "on-language:json", "on-language:sql", "on-view:changesets"]

@@ -21,6 +21,7 @@ and sharing projects with git. \
 gitlab.com with a personal access token: merge request list, threads and review actions, Open on GitLab and Copy Link \
 for files, Create Snippet."""
 categories = ["vcs"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [

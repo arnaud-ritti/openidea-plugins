@@ -21,6 +21,7 @@ Local tasks, task switching and time tracking. Issues from GitHub, gitlab.com, c
 Closing a task can update the issue state; work time can be posted to YouTrack and Jira. Each task reopens its files. \
 The active task's commit message goes to the clipboard or to commit.template."""
 categories = ["tools", "vcs"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-view:tasks", "on-startup-finished", "on-schedule:1200", "on-event:file-opened"]

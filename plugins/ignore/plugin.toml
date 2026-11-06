@@ -7,6 +7,7 @@ homepage = "https://github.com/JetBrains/idea-gitignore"
 license = "Apache-2.0"
 change-notes = "Unreleased: path completion of entries in glob-syntax ignore files (visible files and folders only). Add Selected Paths asks which ignore file (the open one or a root .gitignore, .dockerignore…) to add to; a file that is not open is opened first and the command run again. 0.2.0: Add Selected Paths to the Open Ignore File in the Project view menu. Needs OpenIDEA API 1.2. 0.1.0: first release, ported from .ignore 4.5.7 (JetBrains/idea-gitignore commit 860a6855) with github/gitignore templates at 53cf2971. Not ported because the plugin API has no equivalent: directory gutter markers, path completion, Close Ignored Editors, hiding ignored files in the Project view."
 categories = ["vcs", "linters"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved", "on-event:editor-focused"]

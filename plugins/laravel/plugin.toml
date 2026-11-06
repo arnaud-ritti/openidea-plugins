@@ -17,6 +17,7 @@ assets and the Blade layout markers. Env keys, middleware, route groups, JSON tr
 validation rules, abilities, columns, problems, the tool window and artisan commands follow Laravel's documentation. This port works from a text index of the project, so the features that \
 need PhpStorm's PSI are missing (container types, Eloquent, facades)."""
 categories = ["frameworks"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:php", "on-language:blade", "on-file:resources/js/**"]

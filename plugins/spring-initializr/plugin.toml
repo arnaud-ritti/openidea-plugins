@@ -6,6 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "Pick Spring Boot Version and Pick Dependencies buttons (lists from start.spring.io), and an Add Spring Boot Starters command that inserts dependencies into the open pom.xml or build.gradle(.kts). 0.1.0: first release, with the Spring Initializr tool window (Generate Project and Explore in Browser) and the Open start.spring.io command."
 categories = ["frameworks"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-view:initializr"]

@@ -6,6 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "Unreleased: required attributes and boolean values of batch XML elements (job, step, split, decision, next, end, fail, stop, tasklet, chunk); jobParameters key completion in XML and Java. 0.1.0 (first release): XML job navigation, completion and transition/bean checks, spring.batch.job.name navigation, Spring Batch 5 builder factory and @EnableBatchProcessing hints."
 categories = ["frameworks"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [

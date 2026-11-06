@@ -6,6 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT AND Apache-2.0"
 change-notes = "Unreleased: keyword and enum completion in OpenAPI 3 YAML; Extract inline schema to components/schemas; Copy Self-Contained Spec (bundles external $refs into components); Copy Reference to the Key at the Caret; Compare With Last Revision (git, optional); operation gutter markers that open the operation's first local schema; the specGlobs setting; an OpenAPI file icon; a Redoc view in the preview (bundles Redoc 2.5.4, MIT). OpenAPI: Compare With Another Spec… lists added, removed and changed operations, schemas and sections against a spec you pick, in the OpenAPI Changes view. 0.1.0: first release, with $ref completion and go to definition, problems on open and save, the OpenAPI schema modeline, the endpoints tool window, the Swagger UI preview (bundles Swagger UI 5.34.1, Apache-2.0) and Copy Requests for the HTTP Client."
 categories = ["languages", "tools"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 

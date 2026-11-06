@@ -6,6 +6,7 @@ authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "Unreleased: completion of Twig tags, filters, functions and tests, and thirteen snippets (blk, mcr, esc, emb, ext, for, from, if, imp, inc, sbx, spl, verb) in HTML text; inspections for unclosed tags, end tags without an opening tag and unterminated {{, {% and {# (setting 'diagnostics'). In a Symfony project (symfony.lock or symfony/framework-bundle in composer.json) name completion is left to aritti.symfony so nothing is listed twice; unclosed-tag is reported here in every project. No formatter: OpenIDEA only drives Prettier and Ruff from a language definition, and neither parses Twig. 0.1.0: 0.1.0: first release, with .twig file detection, highlighting, structure view and folding."
 categories = ["languages"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 # Highlighting, structure and folding come from this component; it is loaded
 # when the first Twig file is opened.

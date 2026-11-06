@@ -6,6 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "Unreleased: checks of <websocket:...> XML configuration (required attributes, Info for unknown handler beans). 0.1.0 (first release): STOMP destination index, gutter arrows on handlers and destinations, Go to Definition, completion, warning for destinations outside the broker prefixes, WebSocket Destinations view."
 categories = ["frameworks"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:java", "on-language:kotlin", "on-language:javascript", "on-language:javascriptreact", "on-language:typescript", "on-language:typescriptreact", "on-language:vue", "on-language:xml", "on-view:destinations"]

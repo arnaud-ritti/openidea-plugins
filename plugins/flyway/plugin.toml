@@ -6,6 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "Unreleased: New › Flyway SQL Migration, Java Migration, Kotlin Migration, Java Callback and SQL Callback templates; Flyway icon on V*__*.sql, U*__*.sql and R__*.sql files. Project-wide Go to Declaration and gutter markers from the document index: entity and migration tables (@Entity, @Table(name), CREATE TABLE in V/U/R migrations) and ${placeholder} to its flyway.conf or flyway.toml entry. Flyway: Clean asks for confirmation in a dialog (older hosts: run it twice within 30 seconds). 0.1.0: first release. Migration name and duplicate version checks on open and save and with Flyway: Check Migrations; Copy Next Migration Version; info, validate, migrate, repair and clean in a terminal (flyway or mvn); completion of placeholders in SQL and of keys in flyway.conf and flyway.toml."
 categories = ["frameworks", "linters"]
+icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved", "on-view:migrations"]
