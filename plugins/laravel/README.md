@@ -15,8 +15,10 @@ everything below still works in them.
 Typing `@` (or `@fo`) in a Blade file completes Laravel's and Livewire's own
 directives (`@if`, `@foreach`, `@section`, `@livewire`, `@vite`, the `@end…`
 closers) and the custom ones the project registers with `Blade::directive('name'`
-in `app/**`, as snippets with their arguments and closing directive for the common ones (`@if(…)…@endif`, `@foreach`, `@section`, `@include`, `@vite`); the others and the custom ones insert their name only. `@@if`, `user@example.com` and `@` inside
-`{{ }}` are left alone. Directives registered by vendor packages aren't known.
+in `app/**`. The common ones insert a snippet with their arguments and closing
+directive (`@if(…)…@endif`, `@foreach`, `@section`, `@include`, `@vite`); the
+others and the custom ones insert their name only. `@@if`, `user@example.com`
+and `@` inside `{{ }}` are left alone. Directives registered by vendor packages aren't known.
 
 | Names           | Indexed from                                                                                    | Referenced in                                                                                                                                 |
 | --------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |

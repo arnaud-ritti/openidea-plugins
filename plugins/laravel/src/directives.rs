@@ -19,7 +19,7 @@ pub const CORE: &[&str] = &[
     "livewireScriptConfig", "bool", "unlessenv",
 ];
 
-/// `(directive, insert text)` in snippet syntax, the `@` excluded, a literal `$` written `\\$`.
+/// `(directive, insert text)` in snippet syntax, the `@` excluded, a literal `$` written `\$` in snippet syntax.
 pub const SNIPPETS: &[(&str, &str)] = &[
     ("if", "if(${1:condition})\n    $0\n@endif"),
     ("unless", "unless(${1:condition})\n    $0\n@endunless"),
@@ -35,7 +35,7 @@ pub const SNIPPETS: &[(&str, &str)] = &[
     ("prepend", "prepend('${1:stack}')\n    $0\n@endprepend"),
     ("for", "for(${1:\\$i = 0}; ${2:\\$i < 10}; ${3:\\$i++})\n    $0\n@endfor"),
     ("foreach", "foreach(${1:\\$items} as ${2:\\$item})\n    $0\n@endforeach"),
-    ("forelse", "forelse(${1:\\$items} as ${2:\\$item})\n    $0\n@endforelse"),
+    ("forelse", "forelse(${1:\\$items} as ${2:\\$item})\n    $0\n@empty\n    ${3:empty}\n@endforelse"),
     ("while", "while(${1:condition})\n    $0\n@endwhile"),
     ("switch", "switch(${1:\\$value})\n    $0\n@endswitch"),
     ("can", "can('${1:ability}')\n    $0\n@endcan"),

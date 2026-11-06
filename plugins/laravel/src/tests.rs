@@ -1833,7 +1833,7 @@ fn directives_without_a_snippet_and_custom_directives_stay_name_only() {
     for (marked, label) in [("@end|", "endif"), ("@dat|", "datetime"), ("@els|", "else")] {
         let item = directive_item(&mut plugin, marked, label);
         assert!(!item.snippet, "{label}");
-        assert!(item.insert_text.is_empty() || item.insert_text == label, "{label}");
+        assert_eq!(item.insert_text, label, "{label}");
     }
 }
 
@@ -1857,5 +1857,35 @@ fn snippet_placeholders_are_balanced() {
         assert!(body.matches("$0").count() <= 1, "{name}");
         assert_eq!(body.matches("${").count(), body.matches('}').count(), "{name}");
         assert!(!body.starts_with('@'), "{name}");
+
+        let mut numbers: Vec<u32> = body
+            .match_indices("${")
+            .map(|(i, _)| body[i + 2..].split(':').next().unwrap().parse().unwrap())
+            .collect();
+        numbers.sort();
+        assert_eq!(numbers, (1..=numbers.len() as u32).collect::<Vec<_>>(), "{name}");
     }
+}
+
+#[test]
+fn block_snippets_contain_their_closing_directive() {
+    let closers = [
+        ("if", "endif"), ("unless", "endunless"), ("isset", "endisset"), ("empty", "endempty"), ("auth", "endauth"),
+        ("guest", "endguest"), ("env", "endenv"), ("production", "endproduction"), ("section", "endsection"),
+        ("push", "endpush"), ("pushOnce", "endPushOnce"), ("prepend", "endprepend"), ("for", "endfor"),
+        ("foreach", "endforeach"), ("forelse", "endforelse"), ("while", "endwhile"), ("switch", "endswitch"),
+        ("php", "endphp"), ("verbatim", "endverbatim"), ("can", "endcan"), ("cannot", "endcannot"),
+        ("canany", "endcanany"), ("error", "enderror"), ("component", "endcomponent"), ("slot", "endslot"),
+    ];
+    for (name, closer) in closers {
+        let (_, body) = crate::directives::SNIPPETS.iter().find(|(n, _)| *n == name).unwrap();
+        assert!(body.ends_with(&format!("@{closer}")), "{name}");
+    }
+}
+
+#[test]
+fn forelse_snippet_has_an_empty_branch_before_its_closing_directive() {
+    let (_, body) = crate::directives::SNIPPETS.iter().find(|(n, _)| *n == "forelse").unwrap();
+
+    assert!(body.find("@empty").unwrap() < body.find("@endforelse").unwrap());
 }
