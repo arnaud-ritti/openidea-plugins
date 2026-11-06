@@ -91,6 +91,7 @@ pub fn check_java(file: &JavaFile, autowire_mode_set: Option<bool>, groups: Grou
     for ty in &file.types {
         if groups.configuration_properties {
             configuration_properties_prefix(file, ty, &mut out);
+            constructor_binding(file, ty, &mut out);
         }
         if groups.application_setup {
             application_setup(file, ty, &mut out);
@@ -220,6 +221,35 @@ fn configuration_properties_prefix(file: &JavaFile, ty: &TypeDecl, out: &mut Vec
             "config-properties-prefix",
             format!("`{}` is not a valid @ConfigurationProperties prefix: use lower-case words separated by `-`, joined by single dots (for example `app.mail-server`).", literal.value),
         ));
+    }
+}
+
+const COMPONENT_STEREOTYPES: [&str; 6] = ["Component", "Service", "Repository", "Configuration", "Controller", "RestController"];
+
+/// Rules of binding `@ConfigurationProperties` through a constructor that Spring Boot enforces when it creates the object.
+fn constructor_binding(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
+    if !file.from_spring("ConfigurationProperties") || ty.annotation("ConfigurationProperties").is_none() || ty.kind == "interface" {
+        return;
+    }
+    let registered_by_scan = ty.has(&COMPONENT_STEREOTYPES);
+    let constructors: Vec<&Member> = ty.members.iter().filter(|m| m.kind == MemberKind::Constructor).collect();
+    let binding: Vec<&Member> = constructors.iter().copied().filter(|c| c.annotation("ConstructorBinding").is_some()).collect();
+    let class_level = ty.annotation("ConstructorBinding");
+    let on_constructor = binding.first().and_then(|c| c.annotation("ConstructorBinding"));
+    if registered_by_scan && let Some(a) = on_constructor.or(class_level) {
+        out.push(Finding::new(a.at, a.end, "constructor-binding-component", "`@ConstructorBinding` does not work on a bean that component scanning registers (`@Component`, `@Service`…); Spring then autowires the constructor instead of binding properties."));
+    }
+    for extra in binding.iter().skip(1) {
+        out.push(Finding::new(extra.at, extra.at + extra.name.len(), "constructor-binding-ambiguous", "Only one constructor can be annotated `@ConstructorBinding`."));
+    }
+    let has_default = constructors.iter().any(|c| c.params.is_empty());
+    let parameterized = constructors.iter().any(|c| !c.params.is_empty());
+    if constructors.len() > 1 && binding.is_empty() && class_level.is_none() && !has_default && parameterized && !registered_by_scan && ty.kind != "record" {
+        let first = constructors[0];
+        out.push(
+            Finding::new(first.at, first.at + first.name.len(), "constructor-binding-missing", "This class has several constructors and none is annotated `@ConstructorBinding`, so Spring Boot cannot choose one to bind the properties.")
+                .with_severity(Severity::Info),
+        );
     }
 }
 
@@ -437,6 +467,22 @@ mod tests {
         assert!(codes(PROPS).is_empty());
         assert!(codes(&PROPS.replace("app.mail", "app.mail-server.v2")).is_empty());
         assert!(codes(&PROPS.replace("prefix = \"app.mail\"", "\"mail\"")).is_empty());
+    }
+
+    const BINDING: &str = "import org.springframework.boot.context.properties.ConfigurationProperties;\n@ConfigurationProperties(\"app.mail\")\nclass MailProperties {\n    MailProperties(String host) {}\n    MailProperties(String host, int port) {}\n}\n";
+
+    #[test]
+    fn constructor_binding_rules_are_enforced() {
+        let found = run(BINDING, None);
+        assert_eq!(found, [("constructor-binding-missing", "MailProperties".to_owned())]);
+        let two = BINDING.replace("    MailProperties(String host) {}", "    @ConstructorBinding MailProperties(String host) {}").replace("    MailProperties(String host, int port)", "    @ConstructorBinding MailProperties(String host, int port)");
+        assert_eq!(run(&two, None), [("constructor-binding-ambiguous", "MailProperties".to_owned())]);
+        let scanned = two.replace("@ConfigurationProperties(\"app.mail\")", "@ConfigurationProperties(\"app.mail\") @Component");
+        assert!(run(&scanned, None).iter().any(|f| f.0 == "constructor-binding-component"));
+        let single = BINDING.replace("    MailProperties(String host, int port) {}\n", "");
+        assert!(run(&single, None).is_empty());
+        let defaulted = BINDING.replace("    MailProperties(String host) {}", "    MailProperties() {}");
+        assert!(run(&defaulted, None).is_empty());
     }
 
     #[test]

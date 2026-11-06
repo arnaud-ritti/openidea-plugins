@@ -12,7 +12,7 @@
     },
     "springBoot.checkConfigurationProperties": {
       "type": "boolean",
-      "title": "Check @ConfigurationProperties prefixes",
+      "title": "Check @ConfigurationProperties prefixes and constructor binding",
       "default": true
     },
     "springBoot.checkEarlyEvents": {
@@ -32,12 +32,12 @@
     },
     "springBoot.checkPropertyValues": {
       "type": "boolean",
-      "title": "Warn when a configuration value cannot convert to its key's type (number, boolean, duration, data size)",
+      "title": "Warn when a configuration value cannot convert to its key's type (number, boolean, duration, data size, enum, project class, list items)",
       "default": true
     },
     "springBoot.checkMetadataFiles": {
       "type": "boolean",
-      "title": "Check (additional-)spring-configuration-metadata.json files",
+      "title": "Check (additional-)spring-configuration-metadata.json files (shape, defaults, deprecation, hints, project classes)",
       "default": true
     },
     "springBoot.checkDriverDependency": {

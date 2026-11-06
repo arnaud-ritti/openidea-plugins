@@ -1,9 +1,11 @@
-//! Navigation and extra completion in configuration files: class-valued keys
-//! and `spring.config.import` to their files, logger packages, profile names
-//! and `${}` placeholders.
+//! Navigation and extra completion in configuration files: class-valued keys,
+//! `spring.config.import` and resource-valued keys to their files; logger packages,
+//! profile names, `${}` placeholders, classes, enum constants and resources in values.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind};
 use openidea_plugin::{Position, Range};
+use crate::facts::Summary;
+use crate::values::element_type;
 use spring_text::config::{self, Key, canonical, yaml_parent};
 use spring_text::metadata::Lookup;
 use spring_text::range;
@@ -87,6 +89,58 @@ pub struct Context<'a> {
     pub lookup: &'a Lookup<'a>,
     pub packages: &'a [String],
     pub profiles: &'a [String],
+    pub facts: &'a Summary,
+    /// The project's resources as `classpath:` locations, read when a value wants them.
+    pub resources: &'a dyn Fn() -> Vec<String>,
+}
+
+pub const LOCATION_KEYS: &[&str] = &["spring.config.import", "spring.config.additional-location", "spring.config.location"];
+
+fn base_key(key: &str) -> &str {
+    key.strip_suffix(']').and_then(|k| k.rsplit_once('[')).map_or(key, |(base, _)| base)
+}
+
+fn wants_resources(cx: &Context, key: &str) -> bool {
+    let base = base_key(key);
+    let ty = cx.lookup.prop(base).map_or("", |p| p.ty.as_str());
+    LOCATION_KEYS.iter().any(|k| canonical(k) == canonical(base)) || element_type(ty).unwrap_or(ty) == "Resource"
+}
+
+/// Classes, enum constants and resources for the value being typed, from the key's type.
+fn typed_values(cx: &Context, key: &str, value_at: usize, typed: &str) -> Vec<CompletionItem> {
+    let base = base_key(key);
+    let ty = cx.lookup.prop(base).map_or("", |p| p.ty.as_str());
+    let element = element_type(ty).unwrap_or(ty);
+    let segment_at = typed.rfind(',').map_or(0, |c| c + 1);
+    let blanks = typed[segment_at..].len() - typed[segment_at..].trim_start().len();
+    let start = value_at + segment_at + blanks;
+    if element == "Class" || element.starts_with("Class<") {
+        let replace = range(cx.text, start, cx.at);
+        return cx.facts.types.iter().map(|t| item(t, t, CompletionKind::Class, replace)).collect();
+    }
+    if cx.lookup.values(base).is_empty()
+        && let Some(values) = cx.facts.enum_values(element)
+    {
+        let replace = range(cx.text, start, cx.at);
+        return values.iter().map(|v| item(v, v, CompletionKind::EnumMember, replace)).collect();
+    }
+    if !wants_resources(cx, key) {
+        return Vec::new();
+    }
+    let mut written = &cx.text[start..cx.at];
+    let mut skipped = 0;
+    for prefix in ["optional:", "classpath:"] {
+        if let Some(rest) = written.strip_prefix(prefix) {
+            skipped += prefix.len();
+            written = rest;
+        }
+    }
+    let with_scheme = !cx.text[start..cx.at].contains("classpath:");
+    let replace = range(cx.text, start + skipped, cx.at);
+    (cx.resources)()
+        .iter()
+        .map(|r| item(r, &if with_scheme { format!("classpath:{r}") } else { r.clone() }, CompletionKind::File, replace))
+        .collect()
 }
 
 /// Placeholder keys, logger packages and profile names where the caret is.
@@ -116,7 +170,7 @@ pub fn completion(cx: &Context) -> Vec<CompletionItem> {
                 return names.into_iter().map(|n| item(n, n, CompletionKind::Property, replace)).collect();
             }
             if !PROFILE_KEYS.iter().any(|k| canonical(k) == canonical(&key)) {
-                return Vec::new();
+                return typed_values(cx, &key, value_at, typed);
             }
             let from = typed.rfind(',').map_or(0, |c| c + 1);
             let blanks = typed[from..].len() - typed[from..].trim_start().len();
@@ -151,7 +205,10 @@ pub fn target(path: &str, text: &str, at: usize, lookup: &Lookup) -> Option<Targ
     if value.contains("${") || value.contains('*') {
         return None;
     }
-    if canonical(base) == canonical("spring.config.import") {
+    let ty = lookup.prop(base).map_or("", |p| p.ty.as_str());
+    let resource = element_type(ty).unwrap_or(ty) == "Resource";
+    let sourced = LOCATION_KEYS.iter().any(|k| canonical(k) == canonical(base));
+    if sourced || resource {
         let offset = at - key.value_at;
         let from = value[..offset].rfind(',').map_or(0, |c| c + 1);
         let to = value[offset..].find(',').map_or(value.len(), |c| offset + c);
@@ -160,6 +217,7 @@ pub fn target(path: &str, text: &str, at: usize, lookup: &Lookup) -> Option<Targ
         let location = match one.split_once(':') {
             Some(("classpath" | "file", rest)) => rest,
             Some(_) => return None,
+            None if resource => return None,
             None => one,
         };
         let location = location.trim_start_matches("./").trim_start_matches('/');
@@ -187,7 +245,8 @@ mod tests {
 
     fn catalog() -> Catalog {
         let mut c = Catalog::default();
-        c.add(&Meta { props: vec![Prop { name: "acme.handler".into(), ty: "Class<?>".into(), ..Prop::default() }], hints: vec![] });
+        let prop = |name: &str, ty: &str| Prop { name: name.into(), ty: ty.into(), ..Prop::default() };
+        c.add(&Meta { props: vec![prop("acme.handler", "Class<?>"), prop("acme.mode", "Mode"), prop("acme.template", "Resource"), prop("acme.handlers", "List<Class<?>>")], hints: vec![] });
         c
     }
 
@@ -196,7 +255,12 @@ mod tests {
         let lookup = Lookup(vec![&c]);
         let packages = vec!["com.acme.web".to_owned()];
         let profiles = vec!["dev".to_owned(), "prod".to_owned()];
-        let cx = Context { path, text, at: text.len(), lookup: &lookup, packages: &packages, profiles: &profiles };
+        let facts = Summary::merge(
+            [&crate::facts::Facts { package: "com.acme".into(), types: vec!["com.acme.Handler".into()], enums: vec![("Mode".into(), vec!["FAST".into(), "SAFE_MODE".into()])] }].into_iter(),
+            true,
+        );
+        let resources = || vec!["extra.yml".to_owned(), "static/a.txt".to_owned()];
+        let cx = Context { path, text, at: text.len(), lookup: &lookup, packages: &packages, profiles: &profiles, facts: &facts, resources: &resources };
         completion(&cx).into_iter().map(|i| i.insert_text).collect()
     }
 
@@ -212,6 +276,16 @@ mod tests {
     }
 
     #[test]
+    fn completes_classes_enums_and_resources_in_values() {
+        assert_eq!(complete("application.properties", "acme.handler=com.a"), ["com.acme.Handler"]);
+        assert_eq!(complete("application.yml", "acme:\n  mode: "), ["fast", "safe-mode"]);
+        assert_eq!(complete("application.properties", "acme.template="), ["classpath:extra.yml", "classpath:static/a.txt"]);
+        assert_eq!(complete("application.properties", "acme.template=classpath:st"), ["extra.yml", "static/a.txt"]);
+        assert_eq!(complete("application.properties", "spring.config.import=optional:"), ["classpath:extra.yml", "classpath:static/a.txt"]);
+        assert!(complete("application.properties", "acme.other=").is_empty());
+    }
+
+    #[test]
     fn resolves_imports_and_classes() {
         let c = catalog();
         let lookup = Lookup(vec![&c]);
@@ -221,6 +295,10 @@ mod tests {
         assert_eq!(target("application.properties", text, at("x/y"), &lookup), Some(Target::File("**/x/y.properties".into())));
         assert_eq!(target("application.properties", text, at("com.acme.H"), &lookup), Some(Target::Class("com.acme.Handler".into())));
         assert_eq!(target("application.properties", text, at("${X"), &lookup), None);
+        let template = "acme.template=classpath:tpl/mail.html\nacme.handler=com.acme.Handler\n";
+        assert_eq!(target("application.properties", template, 25, &lookup), Some(Target::File("**/tpl/mail.html".into())));
+        let bare = "acme.template=mail.html\n";
+        assert_eq!(target("application.properties", bare, 16, &lookup), None);
         let vault = "spring.config.import=vault://secret\n";
         assert_eq!(target("application.properties", vault, 25, &lookup), None);
     }

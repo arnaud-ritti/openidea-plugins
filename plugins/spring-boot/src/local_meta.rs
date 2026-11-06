@@ -2,6 +2,8 @@
 //! the edit that defines a missing key in it. Types are judged by their shape
 //! only: classes of libraries are invisible.
 
+use crate::facts::Summary;
+use crate::values;
 use openidea_plugin::Severity;
 use spring_text::finding::Finding;
 use std::collections::BTreeSet;
@@ -22,7 +24,8 @@ enum Node {
     Str { at: usize, end: usize, value: String },
     Obj(Vec<Member>),
     Arr(Vec<Node>),
-    Other,
+    /// A number, boolean or null, by its bytes.
+    Other(usize, usize),
 }
 
 #[derive(Debug)]
@@ -109,10 +112,11 @@ impl Scanner<'_> {
                 Some(Node::Arr(items))
             }
             _ => {
+                let start = self.at;
                 while self.text[self.at..].starts_with(|c: char| !matches!(c, ',' | '}' | ']') && !c.is_whitespace()) {
-                    self.at += 1;
+                    self.at += self.text[self.at..].chars().next().map_or(1, char::len_utf8);
                 }
-                Some(Node::Other)
+                Some(Node::Other(start, self.at))
             }
         }
     }
@@ -159,14 +163,70 @@ fn unknown_fields(members: &[Member], allowed: &[&str], what: &str, out: &mut Ve
     }
 }
 
-pub fn check(text: &str) -> Vec<Finding> {
+const DEPRECATION_FIELDS: &[&str] = &["reason", "replacement", "level", "since"];
+
+/// What the checks may ask about beyond the file itself.
+pub struct Context<'a> {
+    /// Whether another source (the bundled metadata, the project's classes) defines the property.
+    pub defined: &'a dyn Fn(&str) -> bool,
+    pub facts: &'a Summary,
+}
+
+fn simple(ty: &str) -> &str {
+    ty.rsplit('.').next().unwrap_or(ty)
+}
+
+fn literal_of<'n>(text: &'n str, members: &'n [Member], key: &str) -> Option<(usize, usize, &'n str)> {
+    members.iter().find(|m| m.key == key).and_then(|m| match &m.value {
+        Node::Str { at, end, value } => Some((*at, *end, value.as_str())),
+        Node::Other(at, end) => Some((*at, *end, &text[*at..*end])),
+        _ => None,
+    })
+}
+
+fn unresolved_class(ty: &str, facts: &Summary) -> bool {
+    let plain = ty.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'$'));
+    let Some((package, _)) = ty.rsplit_once('.').filter(|_| plain) else { return false };
+    facts.complete && facts.packages.contains(package) && !facts.types.contains(&ty.replace('$', "."))
+}
+
+fn deprecation(text: &str, property: &[Member], cx: &Context, own: &BTreeSet<String>, out: &mut Vec<Finding>) {
+    let Some(member) = property.iter().find(|m| m.key == "deprecation") else { return };
+    let Node::Obj(fields) = &member.value else {
+        out.push(Finding::new(member.at, member.end, "invalid-metadata-deprecation", "`deprecation` is an object with `reason`, `replacement`, `level` and `since`."));
+        return;
+    };
+    unknown_fields(fields, DEPRECATION_FIELDS, "deprecation", out);
+    if let Some((at, end, level)) = literal_of(text, fields, "level")
+        && !matches!(level, "warning" | "error")
+    {
+        out.push(Finding::new(at, end, "invalid-metadata-deprecation", format!("`{level}` is not a deprecation level; use `warning` or `error`.")));
+    }
+    if let Some((at, end, replacement)) = literal_of(text, fields, "replacement")
+        && !replacement.is_empty()
+        && !own.contains(replacement)
+        && !(cx.defined)(replacement)
+    {
+        out.push(Finding::new(at, end, "unknown-metadata-replacement", format!("The replacement `{replacement}` is defined nowhere in the project or Spring Boot.")).with_severity(Severity::Info));
+    }
+}
+
+pub fn check(text: &str, cx: &Context) -> Vec<Finding> {
     let Some(top) = parse(text) else { return Vec::new() };
     let mut out = Vec::new();
     for m in top.iter().filter(|m| !TOP_LEVEL.contains(&m.key.as_str())) {
         out.push(Finding::new(m.at, m.end, "unknown-metadata-field", format!("`{}` is not a section of a metadata file.", m.key)));
     }
+    let own: BTreeSet<String> = entries(&top, "properties").filter_map(|p| string_of(p, "name")).map(|(_, n)| n.to_owned()).collect();
     let mut seen = BTreeSet::new();
     for property in entries(&top, "properties") {
+        deprecation(text, property, cx, &own, &mut out);
+        if let (Some((_, ty)), Some((at, end, default))) = (string_of(property, "type"), literal_of(text, property, "defaultValue"))
+            && valid_type(ty)
+            && let Some(error) = values::problem(simple(ty), default, cx.facts)
+        {
+            out.push(Finding::new(at, end, "invalid-metadata-default", error));
+        }
         unknown_fields(property, PROPERTY_FIELDS, "property", &mut out);
         if let Some((name, value)) = string_of(property, "name")
             && !seen.insert(value.to_owned())
@@ -178,6 +238,11 @@ pub fn check(text: &str) -> Vec<Finding> {
         {
             let (at, end) = value_span(member);
             out.push(Finding::new(at, end, "invalid-metadata-type", format!("`{ty}` is not a Java type name.")));
+        } else if let Some((member, ty)) = string_of(property, "type")
+            && unresolved_class(ty, cx.facts)
+        {
+            let (at, end) = value_span(member);
+            out.push(Finding::new(at, end, "unresolved-metadata-type", format!("No class `{ty}` in the project.")));
         }
         if let Some((name, _)) = string_of(property, "name")
             && !property.iter().any(|m| m.key == "description")
@@ -192,6 +257,15 @@ pub fn check(text: &str) -> Vec<Finding> {
     }
     for hint in entries(&top, "hints") {
         unknown_fields(hint, HINT_FIELDS, "hint", &mut out);
+        if let Some((name, value)) = string_of(hint, "name")
+            && !own.contains(value)
+            && !(cx.defined)(value)
+            && !value.ends_with(".keys")
+            && !value.ends_with(".values")
+        {
+            let (at, end) = value_span(name);
+            out.push(Finding::new(at, end, "unknown-hint-property", format!("The hint names `{value}`, which no property defines.")).with_severity(Severity::Info));
+        }
     }
     out
 }
@@ -232,7 +306,8 @@ mod tests {
     use super::*;
 
     fn codes(text: &str) -> Vec<&'static str> {
-        check(text).iter().map(|f| f.code).collect()
+        let facts = Summary::merge([].iter(), false);
+        check(text, &Context { defined: &|_| true, facts: &facts }).iter().map(|f| f.code).collect()
     }
 
     #[test]
@@ -252,8 +327,31 @@ mod tests {
             "invalid-metadata-type",
             "unknown-metadata-field",
         ]);
-        assert!(check(r#"{"properties": [{"name": "x.y", "type": "String", "description": "d"}]}"#).is_empty());
-        assert!(check("{ broken").is_empty());
+        assert!(codes(r#"{"properties": [{"name": "x.y", "type": "String", "description": "d"}]}"#).is_empty());
+        assert!(codes("{ broken").is_empty());
+    }
+
+    #[test]
+    fn checks_deprecation_defaults_hints_and_project_classes() {
+        let text = r#"{"properties": [
+            {"name": "a.port", "type": "java.lang.Integer", "description": "d", "defaultValue": "80x"},
+            {"name": "a.ok", "type": "java.lang.Integer", "description": "d", "defaultValue": 80},
+            {"name": "a.old", "type": "String", "deprecation": {"level": "fatal", "replacement": "a.nowhere", "colour": 1}},
+            {"name": "a.flag", "type": "boolean", "description": "d", "deprecation": true},
+            {"name": "a.cls", "type": "com.acme.Gone", "description": "d"}
+        ], "hints": [{"name": "a.missing", "values": []}, {"name": "a.port.values", "values": []}]}"#;
+        let facts = Summary::merge([&crate::facts::Facts { package: "com.acme".into(), types: vec!["com.acme.Here".into()], enums: vec![] }].into_iter(), true);
+        let known = |name: &str| name == "a.known";
+        let found: Vec<&str> = check(text, &Context { defined: &known, facts: &facts }).iter().map(|f| f.code).collect();
+        assert_eq!(found, [
+            "invalid-metadata-default",
+            "unknown-metadata-field",
+            "invalid-metadata-deprecation",
+            "unknown-metadata-replacement",
+            "invalid-metadata-deprecation",
+            "unresolved-metadata-type",
+            "unknown-hint-property",
+        ]);
     }
 
     #[test]
@@ -261,7 +359,7 @@ mod tests {
         let text = "{\n  \"properties\": [\n    {\"name\": \"a\", \"description\": \"d\"}\n  ]\n}\n";
         let (from, to, add) = define_key(text, "x.y").unwrap();
         let out = format!("{}{add}{}", &text[..from], &text[to..]);
-        assert!(check(&out).iter().all(|f| f.code == "missing-metadata-description"));
+        assert!(codes(&out).iter().all(|c| *c == "missing-metadata-description"));
         assert!(out.contains("\"x.y\"") && out.contains("\"a\""));
         assert!(parse(&out).is_some());
 

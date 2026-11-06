@@ -1,5 +1,8 @@
 //! Whether a configuration value converts to the type its key's metadata names.
-//! Only types whose conversion is simple and fixed are checked.
+//! Only types whose conversion is simple and fixed are checked: numbers, booleans,
+//! durations, data sizes, enums the project or Spring Boot declares and project classes.
+
+use crate::facts::Summary;
 
 fn integer(value: &str, range: (i128, i128)) -> Option<String> {
     let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
@@ -41,8 +44,25 @@ fn data_size(value: &str) -> Option<String> {
     Some(format!("`{value}` is not a data size; use a number with B, KB, MB, GB or TB (`10MB`)."))
 }
 
+/// The type of a collection's elements: `List<Integer>` and `Integer[]` give `Integer`.
+pub fn element_type(ty: &str) -> Option<&str> {
+    if let Some(element) = ty.strip_suffix("[]") {
+        return Some(element);
+    }
+    ["List<", "Set<", "Collection<"].iter().find_map(|open| ty.strip_prefix(open)?.strip_suffix('>')).filter(|e| !e.contains(','))
+}
+
+fn class_problem(value: &str, facts: &Summary) -> Option<String> {
+    let (package, _) = value.rsplit_once('.')?;
+    let valid = value.split('.').all(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$'));
+    if !valid || !facts.complete || !facts.packages.contains(package) || facts.types.contains(&value.replace('$', ".")) {
+        return None;
+    }
+    Some(format!("No class `{value}` in the project's package `{package}`."))
+}
+
 /// The problem with `value` for a key of metadata type `ty`, or `None` when it converts or the type is not checked.
-pub fn problem(ty: &str, value: &str) -> Option<String> {
+pub fn problem(ty: &str, value: &str, facts: &Summary) -> Option<String> {
     let value = value.trim();
     if value.is_empty() || value.contains("${") || value.contains("#{") {
         return None;
@@ -55,7 +75,13 @@ pub fn problem(ty: &str, value: &str) -> Option<String> {
         "Double" | "double" => value.parse::<f64>().is_err().then(|| format!("`{value}` is not a decimal number.")),
         "Duration" => duration(value),
         "DataSize" => data_size(value),
-        _ => None,
+        "Class" => class_problem(value, facts),
+        _ if ty.starts_with("Class<") => class_problem(value, facts),
+        _ => {
+            let accepted = facts.accepts(ty, value)?;
+            let values = facts.enum_values(ty)?;
+            (!accepted).then(|| format!("`{value}` is not a value of `{ty}`; use {}.", values.join(", ")))
+        }
     }
 }
 
@@ -65,6 +91,8 @@ mod tests {
 
     #[test]
     fn converts_or_reports() {
+        let none = Summary::merge([].iter(), false);
+        let problem = |ty: &str, value: &str| problem(ty, value, &none);
         assert!(problem("Integer", "8080").is_none());
         assert!(problem("Integer", "80x").is_some());
         assert!(problem("Integer", "99999999999").is_some());
@@ -80,5 +108,21 @@ mod tests {
         assert!(problem("Integer", "${PORT:80}").is_none());
         assert!(problem("Charset", "nonsense").is_none());
         assert!(problem("List<String>", "a,b").is_none());
+        assert!(problem("Show", "always").is_none());
+        assert!(problem("Show", "sometimes").unwrap().contains("when-authorized"));
+        assert_eq!(element_type("List<Integer>"), Some("Integer"));
+        assert_eq!(element_type("String[]"), Some("String"));
+        assert_eq!(element_type("Map<String,String>"), None);
+    }
+
+    #[test]
+    fn classes_are_judged_only_in_project_packages() {
+        let facts = crate::facts::Facts { package: "com.acme".into(), types: vec!["com.acme.Handler".into()], enums: vec![] };
+        let summary = Summary::merge([&facts].into_iter(), true);
+        assert!(problem("Class<?>", "com.acme.Handler", &summary).is_none());
+        assert!(problem("Class<?>", "com.acme.Handlr", &summary).is_some());
+        assert!(problem("Class<?>", "org.lib.Handler", &summary).is_none());
+        let partial = Summary::merge([&facts].into_iter(), false);
+        assert!(problem("Class<?>", "com.acme.Handlr", &partial).is_none());
     }
 }
