@@ -623,21 +623,27 @@ fn missing_assets(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
 
         let Some(range) = literal(text, arguments[0]) else { continue };
         let name = &text[range.clone()];
-        let external = name.contains("://") || name.starts_with(['/', '#']) || name.starts_with("data:");
-        if external || is_dynamic(name) {
-            continue;
-        }
-
-        let file = name.split(['?', '#']).next().unwrap_or(name);
-        let generated = matches!(file.split('/').next(), Some("build" | "bundles" | "assets" | "_assets"));
-        let directory_indexed = file.rsplit_once('/').is_none_or(|(directory, _)| {
-            let prefix = format!("{directory}/");
-            ctx.index.assets.keys().any(|known| known.starts_with(&prefix))
-        });
-        if !generated && directory_indexed && !ctx.index.assets.contains_key(file) {
+        if asset_is_missing(ctx, name) {
             out.push(Finding::warn(range, "missing-asset", format!("Asset \"{name}\" does not exist in the public directory.")));
         }
     }
+}
+
+/// An `asset()` path that no indexed public file matches; false for URLs,
+/// dynamic names, generated output and directories the index never saw.
+fn asset_is_missing(ctx: &Context, name: &str) -> bool {
+    let external = name.contains("://") || name.starts_with(['/', '#']) || name.starts_with("data:");
+    if external || is_dynamic(name) {
+        return false;
+    }
+
+    let file = name.split(['?', '#']).next().unwrap_or(name);
+    let generated = matches!(file.split('/').next(), Some("build" | "bundles" | "assets" | "_assets"));
+    let directory_indexed = file.rsplit_once('/').is_none_or(|(directory, _)| {
+        let prefix = format!("{directory}/");
+        ctx.index.assets.keys().any(|known| known.starts_with(&prefix))
+    });
+    !generated && directory_indexed && !ctx.index.assets.contains_key(file)
 }
 
 fn missing_translation_domains(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
@@ -672,6 +678,37 @@ pub fn check_php(ctx: &Context, language: &str, text: &str) -> Vec<Finding> {
     missing_assets(ctx, text, &mut out);
     missing_translation_domains(ctx, text, &mut out);
     out.sort_by_key(|finding| finding.start);
+    out
+}
+
+/// `twig-missing-route` and `twig-missing-asset`: `path()`, `url()` and
+/// `asset()` calls with a literal name. Routes are only checked once the
+/// compiled routes are known; `_`-prefixed routes belong to the framework.
+pub fn check_twig(ctx: &Context, language: &str, text: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if language != "twig" {
+        return out;
+    }
+
+    for reference in refs::references("twig", text) {
+        let name = &text[reference.start..reference.end];
+        let rest = text[reference.end..].strip_prefix(['\'', '"']).unwrap_or(" ").trim_start();
+        if is_dynamic(name) || !rest.starts_with([')', ',']) {
+            continue;
+        }
+
+        let range = reference.start..reference.end;
+        match reference.kind {
+            refs::Kind::Route if ctx.index.compiled_routes && !name.starts_with('_') && !ctx.index.routes.contains_key(name) => {
+                out.push(Finding::warn(range, "twig-missing-route", format!("Route \"{name}\" is not defined.")));
+            }
+            refs::Kind::Asset if !ctx.index.assets.is_empty() && asset_is_missing(ctx, name) => {
+                out.push(Finding::warn(range, "twig-missing-asset", format!("Asset \"{name}\" does not exist in the public directory.")));
+            }
+            _ => {}
+        }
+    }
+
     out
 }
 
@@ -728,7 +765,7 @@ mod tests {
     fn run_with(index: &Index, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
         let files = sources();
         let read = |file: &str| files.get(file).cloned();
-        let groups = Groups { controllers: true, services: true, php_calls: true };
+        let groups = Groups { controllers: true, services: true, php_calls: true, twig: true };
         crate::extra_problems(index, groups, &read, path, language, text)
     }
 
@@ -1126,7 +1163,7 @@ mod tests {
     fn run_custom(index: &Index, files: &[(&str, &str)], path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
         let files: BTreeMap<String, String> = files.iter().map(|(p, t)| ((*p).to_owned(), (*t).to_owned())).collect();
         let read = |file: &str| files.get(file).cloned();
-        let groups = Groups { controllers: true, services: true, php_calls: true };
+        let groups = Groups { controllers: true, services: true, php_calls: true, twig: true };
         crate::extra_problems(index, groups, &read, path, language, text)
     }
 
@@ -1217,5 +1254,114 @@ mod tests {
         let big = |_: &str| Some(format!("{MAILER}{}", " ".repeat(MAX_CLASS_BYTES)));
         let ctx = Context::new(&index, &big);
         assert!(check_services(&ctx, SERVICES, "yaml", yaml).is_empty());
+    }
+
+    fn twig_index() -> Index {
+        let mut index = php_index();
+        index.compiled_routes = true;
+        index.routes.insert("blog_show".into(), Entry { detail: None, path: "/project/src/B.php".into(), at: Position::new(0, 0) });
+        index
+    }
+
+    const TEMPLATE: &str = "/project/templates/a.html.twig";
+
+    fn run_twig(text: &str) -> Vec<Diagnostic> {
+        run_with(&twig_index(), TEMPLATE, "twig", text)
+    }
+
+    #[test]
+    fn twig_missing_route_warns() {
+        let found = run_twig("<a href=\"{{ path('nope') }}\">{{ url(\"gone\", {id: 1}) }}</a>");
+        assert_eq!(codes(&found), ["twig-missing-route", "twig-missing-route"]);
+        assert_eq!(found[0].message, "Route \"nope\" is not defined.");
+    }
+
+    #[test]
+    fn twig_missing_route_is_quiet_for_library_or_dynamic_name() {
+        for call in ["path('blog_show')", "path('_wdt')", "url('_profiler_home')", "path('a_' ~ kind)", "path(name)", "path(\"x#{y}\")"] {
+            assert!(run_twig(&format!("{{{{ {call} }}}}")).is_empty(), "{call}");
+        }
+
+        let mut index = twig_index();
+        index.compiled_routes = false;
+        assert!(run_with(&index, TEMPLATE, "twig", "{{ path('nope') }}").is_empty());
+        assert!(run_with(&twig_index(), "/project/src/A.php", "php", "<?php // {{ path('nope') }}").is_empty());
+    }
+
+    #[test]
+    fn twig_missing_asset_warns() {
+        let found = run_twig("<img src=\"{{ asset('img/missing.png') }}\"><link href=\"{{ asset('css/app.css?v=1') }}\">{{ asset('css/none.css', 'cdn') }}");
+        assert_eq!(codes(&found), ["twig-missing-asset", "twig-missing-asset"]);
+        assert_eq!(found[0].message, "Asset \"img/missing.png\" does not exist in the public directory.");
+    }
+
+    #[test]
+    fn twig_missing_asset_is_quiet_for_library_or_dynamic_name() {
+        for call in [
+            "asset('img/logo.png')",
+            "asset('build/app.js')",
+            "asset('bundles/foo/x.css')",
+            "asset('assets/app.js')",
+            "asset('_assets/a.js')",
+            "asset('unindexed/dir/file.png')",
+            "asset('https://cdn.example.com/x.js')",
+            "asset('//cdn.example.com/x.js')",
+            "asset('/already/absolute.png')",
+            "asset('data:image/png;base64,AAAA')",
+            "asset('img/' ~ name)",
+            "asset(path)",
+        ] {
+            assert!(run_twig(&format!("{{{{ {call} }}}}")).is_empty(), "{call}");
+        }
+
+        let mut index = twig_index();
+        index.assets.clear();
+        assert!(run_with(&index, TEMPLATE, "twig", "{{ asset('img/none.png') }}").is_empty());
+    }
+
+    #[test]
+    fn twig_group_ranges_use_utf16_columns_with_multibyte_text() {
+        let found = run_twig("{# é😀 #}{{ path('nope') }}");
+        assert_eq!(found[0].range.start, Position::new(0, 9 + 9));
+        assert_eq!(found[0].range.end.character, 9 + 9 + 4);
+    }
+
+    #[test]
+    fn twig_group_crlf_files_report_correct_lines() {
+        let found = run_twig("<p>\r\n{{ path('nope') }}\r\n</p>");
+        assert_eq!(found[0].range, TextRange::new(Position::new(1, 9), Position::new(1, 13)));
+    }
+
+    #[test]
+    fn twig_checks_run_without_the_twig_language_provider() {
+        let host = MockHost::install();
+        host.add_file("var/cache/dev/url_generating_routes.php", "<?php\n\nreturn [\n    'app_home' => [[], ['_controller' => 'x'], [], []],\n];\n");
+        let mut plugin = project(&host);
+
+        let template = "/project/templates/a.html.twig";
+        host.add_file("templates/a.html.twig", "{{ path('nope') }}{{ asset('img/missing.png') }}{{ path('app_home') }}");
+        assert_eq!(codes(&opened(&host, &mut plugin, template)), ["twig-missing-route", "twig-missing-asset"]);
+    }
+
+    #[test]
+    fn twig_group_fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        host.add_file("var/cache/dev/url_generating_routes.php", "<?php\n\nreturn [\n    'app_home' => [[], ['_controller' => 'x'], [], []],\n];\n");
+        let mut plugin = project(&host);
+
+        let template = "/project/templates/a.html.twig";
+        host.add_file("templates/a.html.twig", "{% block a %}{{ path('nope') }}{{ include('gone.html.twig') }}");
+        assert_eq!(codes(&opened(&host, &mut plugin, template)), ["missing-template", "unclosed-tag", "twig-missing-route"]);
+
+        host.add_file("templates/a.html.twig", "{% block a %}{{ path('app_home') }}{% endblock %}");
+        plugin.handle_events(&[Event::FileSaved(template.into())], &host.invocation());
+        assert!(host.diagnostics().get(template).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn twig_group_missing_file_is_treated_as_absent() {
+        let host = MockHost::install();
+        let mut plugin = project(&host);
+        assert!(opened(&host, &mut plugin, "/project/templates/gone.html.twig").is_empty());
     }
 }

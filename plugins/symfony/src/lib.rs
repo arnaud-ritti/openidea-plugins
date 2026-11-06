@@ -221,7 +221,7 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
         }
 
         match reference.kind {
-            Kind::Route if index.compiled_routes && !index.routes.contains_key(name) => {
+            Kind::Route if language != "twig" && index.compiled_routes && !index.routes.contains_key(name) => {
                 problem(reference.start, reference.end, "missing-route", format!("Route \"{name}\" is not defined."));
             }
             Kind::Template if !name.starts_with('@') && !index.templates.contains_key(name) => {
@@ -288,12 +288,13 @@ struct Groups {
     controllers: bool,
     services: bool,
     php_calls: bool,
+    twig: bool,
 }
 
 impl Groups {
     fn from_settings() -> Groups {
         let on = |key: &str| host::setting_bool(key).unwrap_or(true);
-        Groups { controllers: on("controllerChecks"), services: on("serviceChecks"), php_calls: on("phpCallChecks") }
+        Groups { controllers: on("controllerChecks"), services: on("serviceChecks"), php_calls: on("phpCallChecks"), twig: on("twigChecks") }
     }
 }
 
@@ -312,6 +313,10 @@ fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &st
 
     if groups.php_calls {
         findings.extend(checks::check_php(&ctx, language, text));
+    }
+
+    if groups.twig {
+        findings.extend(checks::check_twig(&ctx, language, text));
     }
 
     findings

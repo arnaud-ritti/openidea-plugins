@@ -20,6 +20,11 @@
       "title": "Report removed form type names, missing assets and unknown translation domains in PHP",
       "default": true
     },
+    "twigChecks": {
+      "type": "boolean",
+      "title": "Report missing routes and assets in Twig templates",
+      "default": true
+    },
     "publicDirectory": {
       "type": "string",
       "title": "Public directory that asset() paths start from (project-relative)",
