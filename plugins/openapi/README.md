@@ -65,6 +65,8 @@ The OpenAPI Endpoints view (right side) lists `METHOD /path` for every OpenAPI
 YAML or JSON file (up to 1 MiB) of the current window's project, with the operationId and file name as
 detail. Activating an entry opens the operation. Refresh re-scans the project.
 
+It is the shared route list: a flat list: a method icon (GET, POST, PUT, DELETE, PATCH, other), the path, and grey text with the operationId after it. *Filter* narrows the list to one tag (the status line says which), *Clear* restores it, and *Flat/Tree* groups the rows by tag. Row actions: *Copy as curl* and *Create HTTP Request File* (writes `http/<verb>-<path>.http`, needs `process:tee`; without it the request is copied). Limits: the grey text follows the path rather than sitting in a column, there is no request panel beside the list, and no gutter icon on the handler; these wait on upstream OpenIDEA requests. The HTTP file is written beside the spec.
+
 ## Preview
 
 Swagger UI 5.34.1 beside the text. It opens automatically for `openapi.*`,

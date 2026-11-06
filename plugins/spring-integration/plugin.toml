@@ -29,7 +29,7 @@ languages = ["java", "xml", "properties", "yaml"]
 [[contributes.views]]
 id = "structure"
 title = "Spring Structure"
-icon = "icons/spring.svg"
+icon = "icons/structure.svg"
 location = "right"
 
 [[contributes.commands]]

@@ -87,7 +87,7 @@ title = "Spring Endpoints"
 [[contributes.views]]
 id = "endpoints"
 title = "Spring Endpoints"
-icon = "icons/spring.svg"
+icon = "icons/endpoints.svg"
 location = "right"
 
 [[contributes.fileIcons]]

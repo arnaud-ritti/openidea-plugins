@@ -7,3 +7,9 @@ Plugin icons (`plugins/<name>/icon.svg`) show the official full-colour logo of t
 - **Drawn here:** the tiles, the badges, and the pictograms of `jpa-assist` (database + JPA badge), `ideolog` (log file), `properties` (key/value rows) and `dependency-audit` (shield), and `tasks` (checklist), which have no official logo.
 - **Blade:** no standalone Blade logo exists in these sets, so the icon is the Laravel logo with a `{ }` badge, drawn here.
 - Icons are not taken from the JetBrains plugins that some plugins were ported or inspired from.
+
+## Tool window icons after the window consolidation
+
+- **GitLab:** `projects.svg`, `merge-requests.svg` and `merge-request.svg` are the GitLab fox at 75% with a small bottom-right glyph (list, two arrows, info), so the three windows differ in the stripe.
+- **Spring:** `spring-web/icons/endpoints.svg` (globe), `spring-integration/icons/structure.svg` (branching boxes) and `spring-beans/icons/beans.svg` (bean) are the Spring leaf at 75% with a corner glyph, drawn here. Runtime and Initializr keep the plain leaf and the Spring Boot icon. Not yet looked at in the IDE.
+- **Route methods:** `crates/ui-kit/icons/route-{get,post,put,delete,patch,other}.svg` (green, orange, blue, red, purple, grey rounded squares, under 1 KiB) are copied into `spring-web/icons/` and `laravel/icons/` and registered as `fileIcons` for the route list rows.

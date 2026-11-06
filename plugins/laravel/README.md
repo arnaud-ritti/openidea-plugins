@@ -95,9 +95,11 @@ and `@` inside `{{ }}` are left alone. Directives registered by vendor packages 
 
 ## Tool window and commands
 
-The _Laravel_ tool window lists routes (method, URI, name and action), views,
-config keys, translations, middleware and env keys; double-click opens the
-definition. Commands, all under the _Laravel_ category: Reindex Project, Clear
+The _Laravel_ tool window has two sections, switched by buttons. _Routes_ (the default) is the route list described below; _Index_ lists views, config keys, translations, middleware and env keys; double-click opens the definition.
+
+The route list is a flat list: a method icon (GET, POST, PUT, DELETE, PATCH, other), the path, and grey text with `[METHOD] Controller` after it. *Filter* narrows the list to one controller (the status line says which), *Clear* restores it, and *Flat/Tree* groups the rows by controller. Row actions: *Copy as curl* and *Create HTTP Request File* (writes `http/<verb>-<path>.http`, needs `process:tee`; without it the request is copied). Limits: the grey text follows the path rather than sitting in a column, there is no request panel beside the list, and no gutter icon on the handler; these wait on upstream OpenIDEA requests.
+
+ Commands, all under the _Laravel_ category: Reindex Project, Clear
 All Caches (`optimize:clear`), Clear Application / Config / Route Cache,
 Clear Compiled Views, Run Migrations, Link Storage, Seed Database, Fresh
 Migration and Show Route List. Fresh Migration drops all tables, so it asks

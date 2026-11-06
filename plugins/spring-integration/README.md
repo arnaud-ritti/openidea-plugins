@@ -22,7 +22,7 @@ Spring Integration message channels in OpenIDEA, for Java and XML configuration:
 
 Matching is text-based, by channel name as written in string literals and attributes; constants (`outputChannel = Channels.OUT`) aren't followed. Beans and channels from libraries, auto-configuration or other modules aren't seen. Kotlin sources count for bean names and annotations; the Kotlin DSL doesn't.
 
-- **Integration Channels** tool window (bottom): message channels as nodes (declared ones accented) and each endpoint (service activator, transformer, filter, router, gateway, adapter…) as a small node, drawn input channel -> endpoint -> output channel from the project index; click a node to open its source. It refreshes on open and with its Refresh button, which rescans.
+- **Channels** section of the Spring Structure window: message channels as nodes (declared ones accented) and each endpoint (service activator, transformer, filter, router, gateway, adapter…) as a small node, drawn input channel -> endpoint -> output channel from the project index; click a node to open its source. It refreshes on open and with its Refresh button, which rescans.
 
 Not ported: the DSL flow chain edges in the diagram (`.from("a").channel("b")` shows both channels but no endpoint node), adapter-specific attribute checks (JMS, AMQP, HTTP…), the Kotlin DSL, SpEL.
 

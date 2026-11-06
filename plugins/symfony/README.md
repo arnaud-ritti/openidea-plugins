@@ -340,8 +340,11 @@ not a Symfony project.
 
 ## Tool window and commands
 
-The _Symfony_ tool window lists routes, templates, services and translations
-by domain; double-click opens the definition. _Symfony: Warm Up Cache_ and
+The _Symfony_ tool window has _Routes_ and _Index_ sections (the index lists templates, services and translations by domain); double-click opens the definition.
+
+The route list is a flat list: a method icon (GET, POST, PUT, DELETE, PATCH, other), the path, and grey text with `[METHOD] Controller` after it. *Filter* narrows the list to one controller (the status line says which), *Clear* restores it, and *Flat/Tree* groups the rows by controller. Row actions: *Copy as curl* and *Create HTTP Request File* (writes `http/<verb>-<path>.http`, needs `process:tee`; without it the request is copied). Limits: the grey text follows the path rather than sitting in a column, there is no request panel beside the list, and no gutter icon on the handler; these wait on upstream OpenIDEA requests.
+
+ _Symfony: Warm Up Cache_ and
 _Symfony: Clear Cache_ run `php bin/console cache:warmup` or `cache:clear`
 (optional `process:php` capability, trusted projects only), then reindex,
 because the compiled files hold the routes and services of bundles.

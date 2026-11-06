@@ -192,7 +192,7 @@ extensions = ["java", "kt", "xml", "properties", "yml", "yaml", "sql"]
 [[contributes.views]]
 id = "beans"
 title = "Spring Beans"
-icon = "spring-config"
+icon = "icons/beans.svg"
 location = "left"
 
 [contributes.settings]
