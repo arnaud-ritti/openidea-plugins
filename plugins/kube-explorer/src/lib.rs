@@ -96,13 +96,13 @@ pub struct KubeExplorer {
     /// Children of the tree's expandable keys (`ctx`, `ns`, `kind:<kind>`).
     children: BTreeMap<String, Result<Vec<String>, String>>,
     expanded: BTreeSet<String>,
-    /// Kind and name of the selected resource.
+    /// Kind and row of the selected resource: its name, or `ns/name` in all namespaces.
     selected: Option<(String, String)>,
     confirm_delete: bool,
     /// Shown instead of the tree.
     details: Option<Details>,
-    /// Port forward being set up (shown instead of the tree): target and ports.
-    forward: Option<(String, String)>,
+    /// Port forward being set up (shown instead of the tree): namespace, target and ports.
+    forward: Option<(Option<String>, String, String)>,
     /// The manifest whose resources the shown dry run would delete.
     pending_delete: Option<String>,
     /// A revealed Secret: name and decoded values. Dropped by Back.
@@ -125,14 +125,23 @@ pub struct Details {
     text: String,
     /// `yaml`, `diff` or `text` (highlighting).
     lang: &'static str,
-    /// Kind and name of the object an editable YAML is of.
+    /// Kind and row (as in `selected`) of the object an editable YAML is of.
     editing: Option<(String, String)>,
     /// What the last apply printed.
     note: Option<String>,
 }
 
 impl KubeExplorer {
+    fn all_namespaces(&self) -> bool {
+        self.namespace.as_deref() == Some(ALL_NAMESPACES)
+    }
+
+    /// Arguments of a list or manifest call: no namespace for all namespaces.
     fn args(&self, rest: &[&str]) -> Vec<String> {
+        self.args_in(self.namespace.as_deref().filter(|ns| *ns != ALL_NAMESPACES), rest)
+    }
+
+    fn args_in(&self, namespace: Option<&str>, rest: &[&str]) -> Vec<String> {
         let mut args = Vec::new();
         if let Some(path) = host::setting_string("kubeconfig").filter(|p| !p.is_empty()) {
             args.push(format!("--kubeconfig={path}"));
@@ -140,16 +149,41 @@ impl KubeExplorer {
         if let Some(context) = &self.context {
             args.push(format!("--context={context}"));
         }
-        if let Some(namespace) = &self.namespace {
+        if let Some(namespace) = namespace {
             args.push(format!("--namespace={namespace}"));
         }
         args.extend(rest.iter().map(|s| (*s).to_owned()));
         args
     }
 
+    /// The namespace and bare name a row's calls run with. In all namespaces a row is `ns/name`, or a
+    /// bare name for a cluster-scoped kind; both parts must be Kubernetes names, so neither reaches
+    /// kubectl as an option or a path, and no row falls back to the kubeconfig's namespace.
+    fn split_scope(&self, kind: &str, row: &str) -> Result<(Option<String>, String), Error> {
+        if !self.all_namespaces() {
+            if row.is_empty() || row.starts_with('-') {
+                return Err(format!("Refusing the name \"{row}\": it is empty or starts with '-'.").into());
+            }
+            return Ok((self.namespace.clone(), row.to_owned()));
+        }
+        let cluster_scoped = CLUSTER_SCOPED.contains(&kind);
+        match row.split_once('/') {
+            None if cluster_scoped && is_dns_subdomain(row) => Ok((None, row.to_owned())),
+            Some((namespace, name)) if !cluster_scoped && is_dns_label(namespace) && is_dns_subdomain(name) => {
+                Ok((Some(namespace.to_owned()), name.to_owned()))
+            }
+            _ => Err(format!(
+                "Refusing {kind} \"{row}\": in All namespaces a row needs a valid namespace and name. Pick its namespace to act on it."
+            )
+            .into()),
+        }
+    }
+
     /// `kubectl debug` for a pod; names reach kubectl as arguments only, so one that
     /// looks like an option is refused.
-    fn debug_args(&self, pod: &str, image: &str, target: Option<&str>) -> Result<Vec<String>, String> {
+    fn debug_args(&self, row: &str, image: &str, target: Option<&str>) -> Result<Vec<String>, String> {
+        let (namespace, pod) = self.split_scope("pods", row).map_err(|e| e.to_string())?;
+        let pod = pod.as_str();
         let named = [("pod", pod), ("image", image)].into_iter().chain(target.map(|t| ("container", t)));
         for (what, value) in named {
             if value.is_empty() || value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -162,16 +196,18 @@ impl KubeExplorer {
         let target = target.map(|t| format!("--target={t}"));
         let mut rest = vec!["debug", "-it", pod, image.as_str()];
         rest.extend(target.as_deref());
-        Ok(self.args(&rest))
+        Ok(self.args_in(namespace.as_deref(), &rest))
     }
 
-    fn debug_pod(&self, pod: &str) -> Result<(), Error> {
+    fn debug_pod(&self, row: &str) -> Result<(), Error> {
         let image = host::setting_string("debugImage").filter(|i| !i.trim().is_empty());
         let image = image.as_deref().map_or(DEFAULT_DEBUG_IMAGE, str::trim);
-        self.debug_args(pod, image, None)?;
-        let first = self.kubectl(&["get", "pod", pod, "-o", "jsonpath={.spec.containers[0].name}", REQUEST_TIMEOUT], None);
+        self.debug_args(row, image, None)?;
+        let (namespace, pod) = self.split_scope("pods", row)?;
+        let jsonpath = ["get", "pod", &pod, "-o", "jsonpath={.spec.containers[0].name}", REQUEST_TIMEOUT];
+        let first = self.kubectl_in(namespace.as_deref(), &jsonpath, None);
         let target = first.as_deref().map(str::trim).ok().filter(|t| !t.is_empty());
-        let args = self.debug_args(pod, image, target)?;
+        let args = self.debug_args(row, image, target)?;
         host::open_terminal(&format!("Debug: {pod}"), KUBECTL, &args)
     }
 
@@ -192,22 +228,30 @@ impl KubeExplorer {
         false
     }
 
-    fn show_secret(&mut self, name: &str) -> Result<(), Error> {
+    fn show_secret(&mut self, row: &str) -> Result<(), Error> {
         if !Self::secret_gate("secrets") {
             return Ok(());
         }
-        if name.starts_with('-') {
-            return Err("Refusing a secret name that starts with '-'.".into());
-        }
-        let entries = secrets::data_entries(&self.kubectl(&["get", "secret", name, "-o", "json", REQUEST_TIMEOUT], None)?)?;
+        let (namespace, name) = self.split_scope("secrets", row)?;
+        let json = self.kubectl_in(namespace.as_deref(), &["get", "secret", &name, "-o", "json", REQUEST_TIMEOUT], None)?;
+        let entries = secrets::data_entries(&json)?;
         let values = entries.iter().map(|(key, bytes)| (key.clone(), secrets::display(bytes))).collect();
-        self.revealed = Some((name.to_owned(), values));
+        self.revealed = Some((row.to_owned(), values));
         self.details = None;
         host::refresh_view(TREE);
         Ok(())
     }
 
+    /// A Secret needs one namespace: all namespaces would create it in the kubeconfig's.
+    fn secret_namespace_gate(&self) -> Result<(), Error> {
+        if self.all_namespaces() {
+            return Err("Create Secret works in one namespace: pick a namespace first.".into());
+        }
+        Ok(())
+    }
+
     fn create_secret(&mut self) -> Result<(), Error> {
+        self.secret_namespace_gate()?;
         let Some(draft) = &self.draft else {
             return Ok(());
         };
@@ -259,7 +303,15 @@ impl KubeExplorer {
     }
 
     fn kubectl(&self, rest: &[&str], stdin: Option<&str>) -> Result<String, Error> {
-        let out = host::run_process(KUBECTL, &self.args(rest), stdin)?;
+        self.run_kubectl(self.args(rest), stdin)
+    }
+
+    fn kubectl_in(&self, namespace: Option<&str>, rest: &[&str], stdin: Option<&str>) -> Result<String, Error> {
+        self.run_kubectl(self.args_in(namespace, rest), stdin)
+    }
+
+    fn run_kubectl(&self, args: Vec<String>, stdin: Option<&str>) -> Result<String, Error> {
+        let out = host::run_process(KUBECTL, &args, stdin)?;
         if out.status == Some(0) {
             return Ok(out.stdout);
         }
@@ -280,6 +332,10 @@ impl KubeExplorer {
         let kind = if parent == "ns" { "namespaces" } else { parent.trim_start_matches("kind:") };
         let label = KINDS.iter().find(|(k, ..)| *k == kind).map_or(kind.to_owned(), |(_, label, _)| label.to_lowercase());
         let _task = host::begin_task(&format!("Loading {label}"), false);
+        if self.all_namespaces() && !CLUSTER_SCOPED.contains(&kind) {
+            let out = self.kubectl(&["get", kind, "--all-namespaces", "-o", ALL_ROWS, REQUEST_TIMEOUT], None)?;
+            return Ok(out.lines().filter(|line| !line.is_empty()).map(str::to_owned).collect());
+        }
         let out = self.kubectl(&["get", kind, "-o", "name", REQUEST_TIMEOUT], None)?;
         Ok(out.lines().map(|line| line.split_once('/').map_or(line, |(_, name)| name).to_owned()).collect())
     }
@@ -308,7 +364,12 @@ impl KubeExplorer {
         let current = || self.kubectl(&["config", "current-context"], None).ok().map(|out| out.trim().to_owned());
         let context = self.context.clone().or_else(|| self.current_context.clone()).or_else(current);
         let context = context.unwrap_or_else(|| "(kubectl unavailable)".into());
-        format!("{context}/{}", self.namespace.as_deref().unwrap_or("(default)"))
+        let namespace = match self.namespace.as_deref() {
+            Some(ALL_NAMESPACES) => "(all namespaces)",
+            Some(namespace) => namespace,
+            None => "(default)",
+        };
+        format!("{context}/{namespace}")
     }
 
     fn save(&self) {
@@ -328,22 +389,23 @@ impl KubeExplorer {
     }
 
     /// The YAML in an editor on a temp file (saving applies it), else in the panel.
-    fn edit_yaml(&mut self, kind: &str, name: &str) -> Result<(), Error> {
+    fn edit_yaml(&mut self, kind: &str, row: &str) -> Result<(), Error> {
         if !Self::secret_gate(kind) {
             return Ok(());
         }
-        let _task = host::begin_task(&format!("Loading {kind}/{name}"), false);
-        let text = self.kubectl(&["get", kind, name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
+        let (namespace, name) = self.split_scope(kind, row)?;
+        let _task = host::begin_task(&format!("Loading {kind}/{row}"), false);
+        let text = self.kubectl_in(namespace.as_deref(), &["get", kind, &name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
         let yaml = without_resource_version(&text);
         let yaml = format!("{}{yaml}", schema::modeline(&yaml).unwrap_or_default());
-        if let Err(e) = self.open_temp_file(kind, name, &yaml) {
-            host::log(LogLevel::Info, &format!("editing {kind}/{name} in the panel: {e}"));
-            self.show_yaml(kind, name, text, None);
+        if let Err(e) = self.open_temp_file(namespace.as_deref(), kind, &name, &yaml) {
+            host::log(LogLevel::Info, &format!("editing {kind}/{row} in the panel: {e}"));
+            self.show_yaml(kind, row, text, None);
         }
         Ok(())
     }
 
-    fn open_temp_file(&self, kind: &str, name: &str, yaml: &str) -> Result<(), Error> {
+    fn open_temp_file(&self, namespace: Option<&str>, kind: &str, name: &str, yaml: &str) -> Result<(), Error> {
         // Unguessable, so another local user can't plant a symlink at it in /tmp.
         let nonce = RandomState::new().hash_one(0u8) as u32;
         let path = format!("/tmp/kube-explorer-{}-{}-{nonce:08x}.yaml", file_safe(kind), file_safe(name));
@@ -352,7 +414,7 @@ impl KubeExplorer {
             return Err(failure(TEE, &out.stderr, out.status));
         }
         // ponytail: one storage entry per opened file, never pruned; prune by age if 1 MiB gets near.
-        let origin = [self.context.as_deref().unwrap_or(""), self.namespace.as_deref().unwrap_or(""), kind, name];
+        let origin = [self.context.as_deref().unwrap_or(""), namespace.unwrap_or(""), kind, name];
         host::storage::set(&format!("edit:{path}"), &origin.join("\n"))?;
         host::subscribe(EventKind::FileSaved)?;
         host::open_location(&path, 0, 0)
@@ -376,20 +438,22 @@ impl KubeExplorer {
         }
     }
 
-    fn open_yaml(&mut self, kind: &str, name: &str, note: Option<String>) -> Result<(), Error> {
+    fn open_yaml(&mut self, kind: &str, row: &str, note: Option<String>) -> Result<(), Error> {
         if !Self::secret_gate(kind) {
             return Ok(());
         }
-        let _task = host::begin_task(&format!("Loading {kind}/{name}"), false);
-        let text = self.kubectl(&["get", kind, name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
-        self.show_yaml(kind, name, text, note);
+        let (namespace, name) = self.split_scope(kind, row)?;
+        let _task = host::begin_task(&format!("Loading {kind}/{row}"), false);
+        let text = self.kubectl_in(namespace.as_deref(), &["get", kind, &name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
+        self.show_yaml(kind, row, text, note);
         Ok(())
     }
 
-    fn describe(&mut self, kind: &str, name: &str) -> Result<(), Error> {
-        let _task = host::begin_task(&format!("Describing {kind}/{name}"), false);
-        let text = self.kubectl(&["describe", kind, name, REQUEST_TIMEOUT], None)?;
-        self.show(format!("{kind}/{name}"), text, "yaml");
+    fn describe(&mut self, kind: &str, row: &str) -> Result<(), Error> {
+        let (namespace, name) = self.split_scope(kind, row)?;
+        let _task = host::begin_task(&format!("Describing {kind}/{row}"), false);
+        let text = self.kubectl_in(namespace.as_deref(), &["describe", kind, &name, REQUEST_TIMEOUT], None)?;
+        self.show(format!("{kind}/{row}"), text, "yaml");
         Ok(())
     }
 
@@ -401,12 +465,13 @@ impl KubeExplorer {
 
     /// Replaces the edited object; on failure the page keeps the edits and shows why.
     fn apply_yaml(&mut self, yaml: &str) -> Result<(), Error> {
-        let Some((kind, name)) = self.details.as_ref().and_then(|d| d.editing.clone()) else {
+        let Some((kind, row)) = self.details.as_ref().and_then(|d| d.editing.clone()) else {
             return Ok(());
         };
-        let _task = host::begin_task(&format!("Applying {kind}/{name}"), false);
-        match self.kubectl(&["replace", "-f", "-"], Some(yaml)) {
-            Ok(out) => self.open_yaml(&kind, &name, Some(out.trim().to_owned())),
+        let (namespace, _) = self.split_scope(&kind, &row)?;
+        let _task = host::begin_task(&format!("Applying {kind}/{row}"), false);
+        match self.kubectl_in(namespace.as_deref(), &["replace", "-f", "-"], Some(yaml)) {
+            Ok(out) => self.open_yaml(&kind, &row, Some(out.trim().to_owned())),
             Err(e) => host::post_view_message(TREE, &format!("error:{e}")),
         }
     }
@@ -436,11 +501,13 @@ impl KubeExplorer {
         self.actions(view)
     }
 
-    fn start_port_forward(&mut self, kind: &str, name: &str) -> Result<(), Error> {
+    fn start_port_forward(&mut self, kind: &str, row: &str) -> Result<(), Error> {
         let Some((_, ports_path)) = FORWARDABLE.iter().find(|(k, _)| *k == kind) else {
             return Ok(());
         };
-        let found = self.kubectl(&["get", kind, name, "-o", &format!("jsonpath={ports_path}"), REQUEST_TIMEOUT], None)?;
+        let (namespace, name) = self.split_scope(kind, row)?;
+        let jsonpath = format!("jsonpath={ports_path}");
+        let found = self.kubectl_in(namespace.as_deref(), &["get", kind, &name, "-o", &jsonpath, REQUEST_TIMEOUT], None)?;
         // A port served over TCP and UDP is listed twice; forwarding it twice fails.
         let mut ports: Vec<&str> = Vec::new();
         for port in found.split_whitespace() {
@@ -449,7 +516,7 @@ impl KubeExplorer {
             }
         }
         let ports = ports.iter().map(|p| format!("{p}:{p}")).collect::<Vec<_>>().join(" ");
-        self.forward = Some((format!("{kind}/{name}"), ports));
+        self.forward = Some((namespace, format!("{kind}/{name}"), ports));
         self.details = None;
         host::refresh_view(TREE);
         Ok(())
@@ -464,7 +531,7 @@ impl KubeExplorer {
     }
 
     fn render_tree(&mut self) -> Result<View, Error> {
-        if let Some((target, ports)) = &self.forward {
+        if let Some((_, target, ports)) = &self.forward {
             return Ok(self.render_forward(target, ports));
         }
         if let Some(draft) = &self.draft {
@@ -495,11 +562,20 @@ impl KubeExplorer {
             };
         }
         let context = self.context.as_ref().or(self.current_context.as_ref()).cloned().unwrap_or_default();
-        let namespace = self.namespace.clone().unwrap_or_else(|| "(default)".into());
+        let namespace = match self.namespace.as_deref() {
+            Some(ALL_NAMESPACES) => "All namespaces",
+            Some(namespace) => namespace,
+            None => "(default)",
+        };
 
         let mut items = Vec::new();
         self.push_node(&mut items, "ctx", &format!("Context: {context}"), k8s!("cluster"), Some(&context));
+        let at = items.len();
         self.push_node(&mut items, "ns", &format!("Namespace: {namespace}"), k8s!("ns"), self.namespace.as_ref());
+        if self.expanded.contains("ns") {
+            let all = TreeItem::new(&format!("ns/{ALL_NAMESPACES}"), "All namespaces").parent("ns").icon(k8s!("ns"));
+            items.insert(at + 1, if self.all_namespaces() { all.detail("active") } else { all });
+        }
         for (kind, label, icon) in KINDS {
             self.push_node(&mut items, &format!("kind:{kind}"), label, icon, None);
         }
@@ -569,7 +645,7 @@ impl KubeExplorer {
             .button(Button::new("shell", "Shell").icon("terminal").enabled(pod_selected))
             .button(Button::new("attach", "Attach").icon("attach-to-process").enabled(pod_selected))
             .button(Button::new("show-secret", "Show Secret").icon("eye").enabled(kind == "secrets"))
-            .button(Button::new("create-secret", "Create Secret").icon("add"))
+            .button(Button::new("create-secret", "Create Secret").icon("add").enabled(!self.all_namespaces()))
             .button(Button::new("debug", "Debug").icon("debug").enabled(pod_selected))
             .button(Button::new("port-forward", "Port Forward").icon("external-link").enabled(forwardable))
             .button(Button::new("delete", &delete).icon("trash").enabled(self.selected.is_some()))
@@ -650,7 +726,7 @@ impl KubeExplorer {
                 }
             }
             ViewEvent::Field(key, value) if key == "ports" => {
-                if let Some((_, ports)) = &mut self.forward {
+                if let Some((_, _, ports)) = &mut self.forward {
                     *ports = value;
                 }
             }
@@ -687,6 +763,7 @@ impl KubeExplorer {
                 return Ok(());
             }
             "create-secret" => {
+                self.secret_namespace_gate()?;
                 self.draft = Some(Draft::default());
                 host::refresh_view(TREE);
                 return Ok(());
@@ -706,12 +783,12 @@ impl KubeExplorer {
             }
             "submit-secret" => return self.create_secret(),
             "start-forward" => {
-                let Some((target, ports)) = &self.forward else {
+                let Some((namespace, target, ports)) = &self.forward else {
                     return Ok(());
                 };
                 let mut args = vec!["port-forward", target.as_str()];
                 args.extend(ports.split_whitespace());
-                return host::open_terminal(&format!("Port Forward: {target}"), KUBECTL, &self.args(&args));
+                return host::open_terminal(&format!("Port Forward: {target}"), KUBECTL, &self.args_in(namespace.as_deref(), &args));
             }
             "confirm-delete-manifest" => {
                 let Some(manifest) = self.pending_delete.take() else {
@@ -733,37 +810,39 @@ impl KubeExplorer {
             }
             _ => {}
         }
-        let Some((kind, name)) = self.selected.clone() else {
+        let Some((kind, row)) = self.selected.clone() else {
             return Ok(());
         };
+        let (namespace, name) = self.split_scope(&kind, &row)?;
+        let args = |rest: &[&str]| self.args_in(namespace.as_deref(), rest);
         let target = format!("{kind}/{name}");
         match button {
-            "describe" => self.describe(&kind, &name)?,
-            "yaml" => self.edit_yaml(&kind, &name)?,
+            "describe" => self.describe(&kind, &row)?,
+            "yaml" => self.edit_yaml(&kind, &row)?,
             "logs" if kind == "pods" => {
-                host::open_terminal(&format!("Logs: {name}"), KUBECTL, &self.args(&["logs", "-f", "--tail=500", &name]))?
+                host::open_terminal(&format!("Logs: {row}"), KUBECTL, &args(&["logs", "-f", "--tail=500", &name]))?
             }
             "logs" => host::open_terminal(
-                &format!("Logs: {target}"),
+                &format!("Logs: {kind}/{row}"),
                 KUBECTL,
-                &self.args(&["logs", "-f", &target, "--all-pods=true", "--all-containers", "--max-log-requests=20", "--tail=200"]),
+                &args(&["logs", "-f", &target, "--all-pods=true", "--all-containers", "--max-log-requests=20", "--tail=200"]),
             )?,
-            "attach" => host::open_terminal(&format!("Attach: {name}"), KUBECTL, &self.args(&["attach", "-it", &name]))?,
-            "debug" => self.debug_pod(&name)?,
-            "show-secret" if kind == "secrets" => self.show_secret(&name)?,
-            "port-forward" => self.start_port_forward(&kind, &name)?,
+            "attach" => host::open_terminal(&format!("Attach: {row}"), KUBECTL, &args(&["attach", "-it", &name]))?,
+            "debug" => self.debug_pod(&row)?,
+            "show-secret" if kind == "secrets" => self.show_secret(&row)?,
+            "port-forward" => self.start_port_forward(&kind, &row)?,
             "shell" => host::open_terminal(
-                &format!("Shell: {name}"),
+                &format!("Shell: {row}"),
                 KUBECTL,
-                &self.args(&["exec", "-it", &name, "--", "sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"]),
+                &args(&["exec", "-it", &name, "--", "sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"]),
             )?,
             "delete" if !self.confirm_delete => {
                 self.confirm_delete = true;
                 host::refresh_view(TREE);
             }
             "delete" => {
-                let _task = host::begin_task(&format!("Deleting {target}"), false);
-                self.kubectl(&["delete", &kind, &name, "--wait=false"], None)?;
+                let _task = host::begin_task(&format!("Deleting {kind}/{row}"), false);
+                self.kubectl_in(namespace.as_deref(), &["delete", &kind, &name, "--wait=false"], None)?;
                 self.selected = None;
                 self.confirm_delete = false;
                 self.details = None;
@@ -791,6 +870,29 @@ fn resource(key: &str) -> Option<(String, String)> {
     let (parent, name) = key.split_once('/')?;
     let kind = parent.strip_prefix("kind:")?;
     Some((kind.to_owned(), name.to_owned()))
+}
+
+/// The `namespace` storage value of the all-namespaces view.
+pub const ALL_NAMESPACES: &str = "*";
+/// Kinds without a namespace; their rows are bare names in every view.
+const CLUSTER_SCOPED: &[&str] = &["nodes", "persistentvolumes", "namespaces"];
+/// `ns/name` rows of a namespaced kind across all namespaces.
+const ALL_ROWS: &str = "jsonpath={range .items[*]}{.metadata.namespace}{\"/\"}{.metadata.name}{\"\\n\"}{end}";
+
+/// One part of a Kubernetes name: lowercase letters, digits and '-', starting and ending alphanumeric.
+fn is_name_part(s: &str) -> bool {
+    let alnum = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    s.starts_with(alnum) && s.ends_with(alnum) && s.chars().all(|c| alnum(c) || c == '-')
+}
+
+/// A DNS label (RFC 1123), the rule for namespace names.
+fn is_dns_label(s: &str) -> bool {
+    s.len() <= 63 && is_name_part(s)
+}
+
+/// A DNS subdomain (RFC 1123), the rule for most object names.
+fn is_dns_subdomain(s: &str) -> bool {
+    s.len() <= 253 && s.split('.').all(is_name_part)
 }
 
 const KUBECTL_INSTALL_HINT: &str = "Kube Explorer could not run kubectl: it is not installed, or not on the PATH the IDE was started with. \
@@ -2117,5 +2219,289 @@ mod tests {
         let body = kube.render_tree().unwrap().body;
         assert!(!format!("{body:?}").contains("hunter2"));
         assert!(kube.revealed.is_none());
+    }
+
+    const CAPS: &[&str] = &["process:kubectl", "process:tee", "editor.read", "storage", "events", "project.read"];
+
+    fn all_host() -> MockHost {
+        let host = MockHost::install().with_capabilities(CAPS);
+        host.set_setting("allowRevealSecrets", "true");
+        host.on_process("tee", |_, _| ok(""));
+        host.on_process(KUBECTL, |args, _| {
+            let has = |a: &str| args.iter().any(|x| x == a);
+            match args.iter().find(|a| !a.starts_with("--")).map(String::as_str) {
+                Some("config") => ok("minikube\n"),
+                Some("get") if has("--all-namespaces") => ok("team-a/web\nteam-b/api\n"),
+                Some("get") if has("nodes") => ok("node/node-1\n"),
+                Some("get") if has("namespaces") => ok("namespace/team-a\nnamespace/team-b\n"),
+                Some("get") if has("yaml") => ok("apiVersion: v1\nkind: Pod\nmetadata:\n  name: web\n  namespace: team-a\n"),
+                Some("get") if has("json") => ok("{\"data\":{}}"),
+                Some("get") if args.iter().any(|a| a.starts_with("jsonpath=")) => ok("80"),
+                Some("describe") => ok("Name: web\n"),
+                _ => ok(""),
+            }
+        });
+        host
+    }
+
+    fn all_mode() -> KubeExplorer {
+        KubeExplorer { namespace: Some(ALL_NAMESPACES.into()), current_context: Some("minikube".into()), ..Default::default() }
+    }
+
+    fn press(kube: &mut KubeExplorer, kind: &str, row: &str, button: &str) -> Result<(), Error> {
+        kube.selected = Some((kind.into(), row.into()));
+        kube.confirm_delete = false;
+        kube.forward = None;
+        kube.button(button)?;
+        match button {
+            "delete" => kube.button("delete"),
+            "port-forward" => kube.button("start-forward"),
+            _ => Ok(()),
+        }
+    }
+
+    /// Every argument list the actions passed to kubectl, in runs and terminals.
+    fn kubectl_calls(host: &MockHost) -> Vec<Vec<String>> {
+        let runs = host.process_runs().into_iter().filter(|r| r.program == KUBECTL).map(|r| r.args);
+        runs.chain(host.terminals().into_iter().map(|t| t.args)).collect()
+    }
+
+    const ROW_ACTIONS: &[(&str, &str)] = &[
+        ("pods", "describe"),
+        ("pods", "yaml"),
+        ("pods", "logs"),
+        ("deployments", "logs"),
+        ("pods", "shell"),
+        ("pods", "attach"),
+        ("pods", "debug"),
+        ("secrets", "show-secret"),
+        ("services", "port-forward"),
+        ("pods", "delete"),
+    ];
+
+    fn assert_refused(rows: &[&str]) {
+        for row in rows {
+            for (kind, button) in ROW_ACTIONS {
+                let host = all_host();
+                let mut kube = all_mode();
+                assert!(press(&mut kube, kind, row, button).is_err(), "{kind} {row:?} {button}");
+                assert!(kubectl_calls(&host).is_empty(), "{kind} {row:?} {button}: {:?}", kubectl_calls(&host));
+            }
+        }
+    }
+
+    #[test]
+    fn all_namespaces_node_is_the_first_namespace_child() {
+        let host = all_host();
+        let mut kube = KubeExplorer::default();
+
+        kube.handle(TREE, ViewEvent::Expand("ns".into()), &host.invocation()).unwrap();
+        let Body::Tree(items) = kube.render(TREE, None, &host.invocation()).unwrap().body else { panic!("not a tree") };
+
+        let at = items.iter().position(|i| i.key == "ns").unwrap();
+        assert_eq!(items[at + 1].key, "ns/*");
+        assert_eq!(items[at + 1].label, "All namespaces");
+        assert_eq!(items[at + 1].parent.as_deref(), Some("ns"));
+        assert_eq!(items[at + 2].key, "ns/team-a");
+    }
+
+    #[test]
+    fn choosing_all_namespaces_persists_star_and_lists_with_all_namespaces_flag() {
+        let host = all_host();
+        let mut kube = KubeExplorer { namespace: Some("shop".into()), ..Default::default() };
+
+        kube.handle(TREE, ViewEvent::Activate("ns/*".into()), &host.invocation()).unwrap();
+        kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
+
+        assert_eq!(host.storage()["namespace"], "*");
+        let runs = host.process_runs();
+        let list = runs.iter().find(|r| r.args.contains(&"pods".to_owned())).unwrap();
+        assert!(list.args.windows(3).any(|w| w == ["get", "pods", "--all-namespaces"]), "{:?}", list.args);
+        assert!(list.args.contains(&"jsonpath={range .items[*]}{.metadata.namespace}{\"/\"}{.metadata.name}{\"\\n\"}{end}".to_owned()));
+        assert!(runs.iter().all(|r| !r.args.iter().any(|a| a.starts_with("--namespace"))), "{runs:?}");
+        assert!(kube.target().ends_with("/(all namespaces)"), "{}", kube.target());
+    }
+
+    #[test]
+    fn rows_show_their_namespace_and_name() {
+        let host = all_host();
+        let mut kube = all_mode();
+
+        kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
+        let Body::Tree(items) = kube.render(TREE, None, &host.invocation()).unwrap().body else { panic!("not a tree") };
+
+        let row = items.iter().find(|i| i.key == "kind:pods/team-a/web").unwrap();
+        assert_eq!(row.label, "team-a/web");
+        assert!(items.iter().any(|i| i.key == "kind:pods/team-b/api"));
+    }
+
+    #[test]
+    fn cluster_scoped_kinds_have_no_namespace_prefix() {
+        let host = all_host();
+        let mut kube = all_mode();
+
+        kube.handle(TREE, ViewEvent::Expand("kind:nodes".into()), &host.invocation()).unwrap();
+        let tree = keys(kube.render(TREE, None, &host.invocation()).unwrap());
+        kube.handle(TREE, ViewEvent::Select("kind:nodes/node-1".into()), &host.invocation()).unwrap();
+        kube.button("describe").unwrap();
+
+        assert!(tree.contains(&"kind:nodes/node-1".to_owned()), "{tree:?}");
+        let calls = kubectl_calls(&host);
+        assert!(!calls[0].contains(&"--all-namespaces".to_owned()));
+        assert!(calls.iter().all(|args| !args.iter().any(|a| a.starts_with("--namespace"))), "{calls:?}");
+        assert!(calls[1].ends_with(&["describe".into(), "nodes".into(), "node-1".into(), REQUEST_TIMEOUT.into()]));
+    }
+
+    #[test]
+    fn describe_and_yaml_in_all_mode_pass_the_rows_namespace() {
+        let host = all_host();
+        let mut kube = all_mode();
+
+        kube.handle(TREE, ViewEvent::Activate("kind:pods/team-a/web".into()), &host.invocation()).unwrap();
+        press(&mut kube, "pods", "team-a/web", "yaml").unwrap();
+        let path = host.opened_locations()[0].0.clone();
+        KubeExplorer::default().handle_events(&[openidea_plugin::Event::FileSaved(path.clone())], &host.invocation());
+
+        let calls = kubectl_calls(&host);
+        assert!(calls[0].ends_with(&["describe".into(), "pods".into(), "web".into(), REQUEST_TIMEOUT.into()]), "{:?}", calls[0]);
+        assert!(calls[1].ends_with(&["get".into(), "pods".into(), "web".into(), "-o".into(), "yaml".into(), REQUEST_TIMEOUT.into()]));
+        assert!(calls[2].ends_with(&["replace".into(), "-f".into(), path]));
+        for args in &calls {
+            assert!(args.contains(&"--namespace=team-a".to_owned()), "{args:?}");
+        }
+        assert!(host.opened_locations()[0].0.starts_with("/tmp/kube-explorer-pods-web-"));
+    }
+
+    #[test]
+    fn yaml_applied_in_the_panel_keeps_the_rows_namespace() {
+        let host = all_host().with_capabilities(&["process:kubectl", "editor.read", "storage"]);
+        let mut kube = all_mode();
+        press(&mut kube, "pods", "team-a/web", "yaml").unwrap();
+
+        kube.handle(TREE, ViewEvent::Message("apply\nkind: Pod".into()), &host.invocation()).unwrap();
+        kube.button("reload-yaml").unwrap();
+
+        let calls = kubectl_calls(&host);
+        assert!(calls.iter().any(|args| args.ends_with(&["replace".into(), "-f".into(), "-".into()])));
+        assert!(calls.iter().all(|args| args.contains(&"--namespace=team-a".to_owned())), "{calls:?}");
+    }
+
+    #[test]
+    fn delete_in_all_namespaces_targets_the_rows_namespace() {
+        let host = all_host();
+        let mut kube = all_mode();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/team-a/web".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Button("delete".into()), &host.invocation()).unwrap();
+        assert!(kubectl_calls(&host).iter().all(|args| !args.contains(&"delete".to_owned())));
+        kube.handle(TREE, ViewEvent::Button("delete".into()), &host.invocation()).unwrap();
+
+        let calls = kubectl_calls(&host);
+        let delete = calls.iter().find(|args| args.contains(&"delete".to_owned())).unwrap();
+        assert!(delete.contains(&"--namespace=team-a".to_owned()), "{delete:?}");
+        assert!(delete.ends_with(&["delete".into(), "pods".into(), "web".into(), "--wait=false".into()]), "{delete:?}");
+        assert!(calls.iter().flatten().all(|a| !a.contains("team-a/web")));
+    }
+
+    #[test]
+    fn no_resource_action_runs_without_a_namespace_in_all_mode() {
+        assert_refused(&["web", "/web"]);
+    }
+
+    #[test]
+    fn row_with_option_like_namespace_is_refused() {
+        assert_refused(&["--all/x", "-n/x"]);
+    }
+
+    #[test]
+    fn row_with_option_like_name_is_refused() {
+        assert_refused(&["team-a/--force", "team-a/-x"]);
+    }
+
+    #[test]
+    fn row_with_dotdot_or_extra_slash_is_refused() {
+        assert_refused(&["../x", "a/b/c", "a//b", "team-a/..", "Team-A/web", "team-a/we b"]);
+        for valid in ["team-a", "a", "0x"] {
+            assert!(is_dns_label(valid), "{valid}");
+        }
+        for invalid in ["", "-a", "a-", "A", "a.b", "a_b", "..", &"a".repeat(64)] {
+            assert!(!is_dns_label(invalid), "{invalid}");
+        }
+        for valid in ["web", "web-1.v2", &"a".repeat(253)] {
+            assert!(is_dns_subdomain(valid), "{valid}");
+        }
+        for invalid in ["", ".", "..", "a..b", ".a", "a.", "a/b", "-a", "a.-b", &"a".repeat(254)] {
+            assert!(!is_dns_subdomain(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn namespace_reaches_kubectl_as_one_equals_argument() {
+        let host = all_host();
+        let mut kube = all_mode();
+
+        for (kind, button) in ROW_ACTIONS {
+            press(&mut kube, kind, "team-a/web", button).unwrap();
+        }
+
+        let calls = kubectl_calls(&host);
+        assert!(calls.len() >= ROW_ACTIONS.len(), "{calls:?}");
+        for args in &calls {
+            assert_eq!(args.iter().filter(|a| a.starts_with("--namespace")).collect::<Vec<_>>(), ["--namespace=team-a"], "{args:?}");
+            assert!(!args.iter().any(|a| a == "-n" || a == "team-a" || a.contains("team-a/")), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn create_secret_is_refused_in_all_namespaces_mode() {
+        let host = all_host();
+        let mut kube = all_mode();
+
+        let error = kube.button("create-secret").unwrap_err().to_string();
+        assert!(error.contains("pick a namespace first"), "{error}");
+        assert!(kube.draft.is_none());
+
+        kube.draft = Some(Draft { name: "db".into(), key: "k".into(), value: "v".into(), entries: Vec::new() });
+        assert!(kube.button("submit-secret").is_err());
+        assert!(kubectl_calls(&host).is_empty());
+        let view = kube.actions(View::new(Body::Message(String::new())));
+        assert!(!view.toolbar.iter().find(|b| b.id == "create-secret").unwrap().enabled);
+    }
+
+    #[test]
+    fn refresh_button_reloads_expanded_nodes() {
+        for namespace in [None, Some(ALL_NAMESPACES)] {
+            let host = MockHost::install().with_capabilities(CAPS);
+            let listing = std::rc::Rc::new(std::cell::RefCell::new("pod/old\n"));
+            let shown = listing.clone();
+            host.on_process(KUBECTL, move |args, _| match args.contains(&"--all-namespaces".to_owned()) {
+                true => ok(&shown.borrow().replace("pod/", "team-a/")),
+                false => ok(&shown.borrow()),
+            });
+            let mut kube = KubeExplorer { namespace: namespace.map(str::to_owned), current_context: Some("minikube".into()), ..Default::default() };
+            kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
+
+            *listing.borrow_mut() = "pod/new\n";
+            kube.handle(TREE, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+            let tree = keys(kube.render(TREE, None, &host.invocation()).unwrap());
+
+            let new = if namespace.is_some() { "kind:pods/team-a/new" } else { "kind:pods/new" };
+            assert!(tree.contains(&new.to_owned()), "{namespace:?}: {tree:?}");
+            assert!(!tree.iter().any(|k| k.ends_with("/old")), "{namespace:?}: {tree:?}");
+        }
+    }
+
+    #[test]
+    fn existing_single_namespace_behaviour_is_unchanged() {
+        let host = all_host();
+        let mut kube = KubeExplorer { namespace: Some("shop".into()), current_context: Some("minikube".into()), ..Default::default() };
+
+        kube.handle(TREE, ViewEvent::Expand("kind:pods".into()), &host.invocation()).unwrap();
+        press(&mut kube, "pods", "web-1", "delete").unwrap();
+
+        let calls = kubectl_calls(&host);
+        assert_eq!(calls[0], ["--namespace=shop", "get", "pods", "-o", "name", REQUEST_TIMEOUT]);
+        assert_eq!(calls[1], ["--namespace=shop", "delete", "pods", "web-1", "--wait=false"]);
+        assert!(kube.target().ends_with("/shop"));
     }
 }
