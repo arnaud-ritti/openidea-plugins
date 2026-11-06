@@ -8,13 +8,29 @@ use openidea_plugin::text::offset;
 use openidea_plugin::{Diagnostic, Error, Invocation, Plugin, Position, Range, Severity, TextEdit, host, register_plugin};
 use spring_text::index::{Indexes, PROVIDER_BUDGET};
 use spring_text::java::{self, Annotation, JavaFile};
-use spring_text::range;
+use spring_text::{range, xml};
 use std::collections::BTreeSet;
 
 const METHOD_SECURITY: [&str; 4] = ["PreAuthorize", "PostAuthorize", "PreFilter", "PostFilter"];
 const GLOBAL_METHOD_SECURITY: &str =
     "org.springframework.security.config.annotation.method.configuration.EnableGlobalMethodSecurity";
 const ROLE_PREFIX: &str = "ROLE_";
+const SECURITY_NAMESPACE: &str = "http://www.springframework.org/schema/security";
+const WEB_EXPRESSION_FUNCTIONS: [&str; 12] = [
+    "hasRole",
+    "hasAnyRole",
+    "hasAuthority",
+    "hasAnyAuthority",
+    "hasIpAddress",
+    "hasPermission",
+    "isAnonymous",
+    "isAuthenticated",
+    "isFullyAuthenticated",
+    "isRememberMe",
+    "permitAll",
+    "denyAll",
+];
+const ARGUMENT_FUNCTIONS: [&str; 5] = ["hasRole", "hasAnyRole", "hasAuthority", "hasAnyAuthority", "hasIpAddress"];
 /// SpEL completions: label, snippet, the annotations it applies to (empty: all).
 const SPEL: [(&str, &str, &[&str]); 15] = [
     ("hasRole", "hasRole('$1')", &[]),
@@ -108,7 +124,148 @@ fn role_prefix(text: &str, at: usize, role: &str) -> Problem {
     }
 }
 
-fn problems(text: &str) -> Vec<Problem> {
+/// Quotes or parentheses left open in a SpEL expression.
+fn is_unbalanced(expr: &str) -> bool {
+    let mut quote = None;
+    let mut depth = 0i32;
+    for c in expr.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    quote.is_some() || depth != 0
+}
+
+/// Problems of a SpEL web security expression: byte span, code, severity, message.
+fn expression_problems(expr: &str) -> Vec<(usize, usize, &'static str, Severity, String)> {
+    if is_unbalanced(expr) {
+        return vec![(0, expr.len(), "unbalanced-expression", Severity::Error, "Unbalanced quotes or parentheses in this expression.".into())];
+    }
+    let mut out = Vec::new();
+    let bytes = expr.as_bytes();
+    let mut quote = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            quote = Some(c);
+        }
+        let starts_word = c.is_ascii_alphabetic() && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || b"_.@#$".contains(&bytes[i - 1])));
+        if !starts_word {
+            i += 1;
+            continue;
+        }
+        let end = expr[i..].find(|ch: char| !(ch.is_alphanumeric() || ch == '_')).map_or(expr.len(), |n| i + n);
+        let name = &expr[i..end];
+        let after = expr[end..].trim_start();
+        if after.starts_with('(') {
+            let open = expr.len() - after.len();
+            let known = WEB_EXPRESSION_FUNCTIONS.contains(&name);
+            let close = expr[open..].find(')').map_or(expr.len(), |n| open + n);
+            if known && ARGUMENT_FUNCTIONS.contains(&name) && expr[open + 1..close].trim().is_empty() {
+                out.push((i, close + 1, "empty-security-function", Severity::Error, format!("`{name}` needs an argument.")));
+            }
+            let looks_like_check = ["has", "is"].iter().any(|p| name.strip_prefix(p).is_some_and(|rest| rest.starts_with(|ch: char| ch.is_uppercase())));
+            if !known && looks_like_check {
+                let message = format!("`{name}` is not a Spring Security web expression function.");
+                out.push((i, end, "unknown-security-function", Severity::Warning, message));
+            }
+        }
+        i = end;
+    }
+    for (at, role) in spel_roles(expr) {
+        if let Some(bare) = role.strip_prefix(ROLE_PREFIX) {
+            let message = format!("hasRole and hasAnyRole add the `ROLE_` prefix themselves: write `{bare}`.");
+            out.push((at, at + role.len(), "role-prefix", Severity::Warning, message));
+        }
+    }
+    out.sort_by_key(|p| p.0);
+    out
+}
+
+fn xml_problems(text: &str) -> Vec<Problem> {
+    let mut out = Vec::new();
+    if !text.contains(SECURITY_NAMESPACE) {
+        return out;
+    }
+    let elements = xml::elements(text);
+    let diagnostic = |from: usize, to: usize, severity: Severity, code: &str, message: String| Problem {
+        diagnostic: problem(text, from, to, severity, code, message),
+        fix: None,
+    };
+    for (i, e) in elements.iter().enumerate() {
+        if xml::namespace(&elements, i) != Some(SECURITY_NAMESPACE) {
+            continue;
+        }
+        if e.local() == "global-method-security" {
+            let message = "<global-method-security> is deprecated: use <method-security>.".to_owned();
+            let mut found = diagnostic(e.at, e.at + e.name.len(), Severity::Warning, "global-method-security", message);
+            found.diagnostic.deprecated = true;
+            out.push(found);
+        }
+        if e.local() != "http" {
+            continue;
+        }
+        let expressions = e.value("use-expressions") != Some("false");
+        if let Some(a) = e.attr("use-expressions").filter(|_| !expressions) {
+            let message = "`use-expressions=\"false\"` is deprecated: write access rules as expressions (hasRole('ADMIN')).".to_owned();
+            let mut found = diagnostic(a.at, a.value_end + 1, Severity::Warning, "use-expressions-false", message);
+            found.diagnostic.deprecated = true;
+            out.push(found);
+        }
+        let urls: Vec<&xml::Element> = elements
+            .iter()
+            .enumerate()
+            .filter(|(j, u)| u.parent == Some(i) && u.local() == "intercept-url" && xml::namespace(&elements, *j) == Some(SECURITY_NAMESPACE))
+            .map(|(_, u)| u)
+            .collect();
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        for (n, u) in urls.iter().enumerate() {
+            if let Some(access) = u.attr("access").filter(|_| expressions) {
+                let exact = !access.value.contains('&');
+                for (from, to, code, severity, message) in expression_problems(&access.value) {
+                    let (from, to) = if exact { (access.value_at + from, access.value_at + to) } else { (access.value_at, access.value_end) };
+                    out.push(diagnostic(from, to, severity, code, message));
+                }
+            }
+            let Some(pattern) = u.attr("pattern") else { continue };
+            let key = (pattern.value.as_str(), u.value("method").unwrap_or(""));
+            if seen.contains(&key) {
+                let message = format!("The pattern `{}` is already matched by an earlier <intercept-url>.", pattern.value);
+                out.push(diagnostic(pattern.value_at, pattern.value_end, Severity::Warning, "duplicate-pattern", message));
+            }
+            seen.push(key);
+            let catch_all = matches!(pattern.value.as_str(), "/**" | "**") && u.attr("method").is_none();
+            if catch_all && urls[n + 1..].iter().any(|later| later.value("pattern").is_some_and(|p| p != pattern.value)) {
+                let message = "This catch-all pattern comes before more specific ones, which can never match: move it last.".to_owned();
+                out.push(diagnostic(pattern.value_at, pattern.value_end, Severity::Warning, "unreachable-patterns", message));
+            }
+        }
+    }
+    out
+}
+
+fn problems(path: &str, text: &str) -> Vec<Problem> {
+    if path.ends_with(".xml") {
+        return xml_problems(text);
+    }
     let file = java::parse(text);
     let mut out = Vec::new();
     for e in file.types.iter().flat_map(|t| &t.extends).filter(|e| e.name == "WebSecurityConfigurerAdapter") {
@@ -213,13 +370,13 @@ fn overlaps(a: Range, b: Range) -> bool {
 
 impl Providers for SecurityTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        let found: Vec<Diagnostic> = problems(&doc.text).into_iter().map(|p| p.diagnostic).collect();
+        let found: Vec<Diagnostic> = problems(&doc.path, &doc.text).into_iter().map(|p| p.diagnostic).collect();
         let _ = host::publish_diagnostics(&doc.path, &found);
         Vec::new()
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
-        problems(&doc.text)
+        problems(&doc.path, &doc.text)
             .into_iter()
             .filter(|p| overlaps(p.diagnostic.range, selection))
             .filter_map(|p| p.fix)
@@ -415,5 +572,60 @@ class Orders {
         assert_eq!(labels, ["ADMIN", "AUDITOR", "BILLING", "MANAGER"]);
 
         assert!(tools.completion(&doc("A.java", "class A { String s = \"\"; }"), Position::new(0, 22), None).is_empty());
+    }
+
+    const SECURITY_XML: &str = r#"<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:sec="http://www.springframework.org/schema/security">
+    <sec:http pattern="/api/**">
+        <sec:intercept-url pattern="/api/**" access="hasRole('ROLE_API')"/>
+        <sec:intercept-url pattern="/api/**" access="permitAll"/>
+    </sec:http>
+    <sec:http>
+        <sec:intercept-url pattern="/admin/**" access="hasRole('ADMIN') and hasRoles('X')"/>
+        <sec:intercept-url pattern="/a" access="hasRole()"/>
+        <sec:intercept-url pattern="/b" access="hasAnyRole('A', 'ROLE_B"/>
+        <sec:intercept-url pattern="/c" access="(isAuthenticated()"/>
+        <sec:intercept-url pattern="/ok" access="hasAuthority(&apos;x&apos;) and authentication.name.isEmpty() and hasIpAddress('10.0.0.0/8')"/>
+        <sec:intercept-url pattern="/**" access="permitAll"/>
+        <sec:intercept-url pattern="/late" access="denyAll"/>
+    </sec:http>
+    <sec:http use-expressions="false">
+        <sec:intercept-url pattern="/x" access="ROLE_X,ROLE_Y"/>
+    </sec:http>
+    <sec:global-method-security pre-post-annotations="enabled"/>
+</beans>
+"#;
+
+    #[test]
+    fn intercept_url_pattern_and_access_are_checked() {
+        let host = MockHost::install();
+        let mut tools = SecurityTools::default();
+        let d = Document { path: "/project/src/main/resources/security.xml".into(), language: "xml".into(), version: 1, text: SECURITY_XML.into() };
+        tools.line_markers(&d);
+        let found: Vec<(String, String)> = host.diagnostics()[&d.path]
+            .iter()
+            .map(|x| {
+                let span = &SECURITY_XML[offset(SECURITY_XML, x.range.start).unwrap()..offset(SECURITY_XML, x.range.end).unwrap()];
+                (x.code.clone().unwrap(), span.to_owned())
+            })
+            .collect();
+        let found: Vec<(&str, &str)> = found.iter().map(|(c, s)| (c.as_str(), s.as_str())).collect();
+        assert_eq!(found, [
+            ("role-prefix", "ROLE_API"),
+            ("duplicate-pattern", "/api/**"),
+            ("unknown-security-function", "hasRoles"),
+            ("empty-security-function", "hasRole()"),
+            ("unbalanced-expression", "hasAnyRole('A', 'ROLE_B"),
+            ("unbalanced-expression", "(isAuthenticated()"),
+            ("unreachable-patterns", "/**"),
+            ("use-expressions-false", "use-expressions=\"false\""),
+            ("global-method-security", "sec:global-method-security"),
+        ]);
+        assert!(host.diagnostics()[&d.path][8].deprecated);
+
+        let plain = "<beans xmlns=\"http://www.springframework.org/schema/beans\"><http xmlns=\"http://example.com/other\"><intercept-url pattern=\"/a\" access=\"hasRoles(\"/></http></beans>";
+        let d = Document { path: "/project/other.xml".into(), language: "xml".into(), version: 1, text: plain.into() };
+        tools.line_markers(&d);
+        assert!(host.diagnostics().get(&d.path).is_none_or(Vec::is_empty));
     }
 }
