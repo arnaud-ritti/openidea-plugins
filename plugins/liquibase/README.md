@@ -19,12 +19,15 @@ changelog that no other changelog includes is a root node (an include cycle with
 no root is shown from its first file). A changelog node holds its changesets,
 labelled `id (author)` with its comment or first change type, and the changelogs
 it includes, nested where the `include` sits. `includeAll` expands to the
-changelogs under the directory, in path order. Double-click a node to open the
+changelogs under the directory, in path order (`maxDepth`, `filter` and
+`resourceComparator` are ignored). A changelog reached a second time is a leaf
+flagged `already run`. Double-click a node to open the
 file at the changeset. A missing include is a node flagged `missing`, an include
 with a `${property}` is flagged `unresolved`, and a file that includes one of its
 ancestors is flagged `include cycle` and not expanded again. Nothing is run:
 the view reads the text of XML, YAML and formatted SQL changelogs (up to 2000
-files per extension, 3 seconds).
+changelogs and 3 seconds; when either limit hits, the status line says
+`partial`).
 
 ## Checks
 

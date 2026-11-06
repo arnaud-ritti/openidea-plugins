@@ -17,9 +17,14 @@ use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Project, Ra
 use spring_text::index::project_of;
 use std::cell::OnceCell;
 
+const MAX_FILES: usize = 2000;
+const DISCOVERY_BUDGET: Duration = Duration::from_secs(3);
+
 #[derive(Default)]
 pub struct Liquibase {
     expansion: Expansion,
+    /// Changelog count that cuts discovery short; `None`: the default.
+    max_files: Option<usize>,
     /// File and 0-based line by tree item key, from the last render of the changesets view.
     targets: BTreeMap<String, (String, u32)>,
 }
@@ -81,22 +86,38 @@ struct Walk<'a> {
     items: Vec<TreeItem>,
     targets: BTreeMap<String, (String, u32)>,
     visited: BTreeSet<String>,
+    resolved: BTreeMap<(String, usize), (Vec<String>, Target)>,
+    max_files: usize,
+    partial: bool,
 }
 
 impl<'a> Walk<'a> {
-    fn new(project: &'a Project, root: &'a str) -> Self {
-        Self { project, root, found: BTreeMap::new(), items: Vec::new(), targets: BTreeMap::new(), visited: BTreeSet::new() }
+    fn new(project: &'a Project, root: &'a str, max_files: usize) -> Self {
+        Self {
+            project,
+            root,
+            found: BTreeMap::new(),
+            items: Vec::new(),
+            targets: BTreeMap::new(),
+            visited: BTreeSet::new(),
+            resolved: BTreeMap::new(),
+            max_files,
+            partial: false,
+        }
     }
 
-    // ponytail: reads every xml/yaml/sql file the host lists, up to 3 s, to find the changelogs; index them (spring_text::index) if big projects hit the cap
+    // ponytail: reads every xml/yaml/sql file the host lists, up to MAX_FILES per extension and DISCOVERY_BUDGET (checked between reads), on every render; the plugin has no `events` capability to invalidate a cache on save; index them (spring_text::index) if big projects hit the cap
     fn discover(&mut self) {
         let start = Instant::now();
         let mut paths = BTreeSet::new();
         for glob in ["**/*.xml", "**/*.yaml", "**/*.yml", "**/*.sql"] {
-            paths.extend(self.project.find_files(glob, 2000).unwrap_or_default());
+            let listed = self.project.find_files(glob, self.max_files as u32).unwrap_or_default();
+            self.partial |= listed.len() >= self.max_files;
+            paths.extend(listed);
         }
         for path in paths {
-            if start.elapsed() > Duration::from_secs(3) {
+            if self.found.len() >= self.max_files || start.elapsed() > DISCOVERY_BUDGET {
+                self.partial = true;
                 break;
             }
             self.load(&path);
@@ -120,8 +141,8 @@ impl<'a> Walk<'a> {
         let mut included = BTreeSet::new();
         for path in &paths {
             let log = self.found[path].clone();
-            for include in &log.1.includes {
-                included.extend(self.included_files(path, include).0);
+            for index in 0..log.1.includes.len() {
+                included.extend(self.included_files(path, index).0);
             }
         }
         for path in paths.iter().filter(|path| !included.contains(*path)) {
@@ -135,16 +156,22 @@ impl<'a> Walk<'a> {
     }
 
     /// The changelogs `include` (written in `path`) pulls in, and where it points.
-    fn included_files(&mut self, path: &str, include: &Include) -> (Vec<String>, Target) {
-        let found = target(self.project, self.root, path, include);
-        let Target::Found(at) = &found else {
-            return (Vec::new(), found);
-        };
-        if !include.dir {
-            return (vec![at.clone()], found);
+    fn included_files(&mut self, path: &str, index: usize) -> (Vec<String>, Target) {
+        let key = (path.to_owned(), index);
+        if let Some(known) = self.resolved.get(&key) {
+            return known.clone();
         }
-        let prefix = format!("{}/", at.trim_end_matches('/'));
-        let files = self.found.keys().filter(|file| file.starts_with(&prefix)).cloned().collect();
+        let include = &self.found[path].clone().1.includes[index];
+        let found = target(self.project, self.root, path, include);
+        let files = match &found {
+            Target::Found(at) if include.dir => {
+                let prefix = format!("{}/", at.trim_end_matches('/'));
+                self.found.keys().filter(|file| file.starts_with(&prefix)).cloned().collect()
+            }
+            Target::Found(at) => vec![at.clone()],
+            _ => Vec::new(),
+        };
+        self.resolved.insert(key, (files.clone(), found.clone()));
         (files, found)
     }
 
@@ -158,6 +185,10 @@ impl<'a> Walk<'a> {
         self.targets.insert(key.clone(), (path.to_owned(), 0));
         if stack.iter().any(|open| open == path) {
             self.items.push(item.detail("include cycle").icon("warning"));
+            return;
+        }
+        if self.visited.contains(path) {
+            self.items.push(item.detail("already run"));
             return;
         }
         self.items.push(item);
@@ -187,7 +218,7 @@ impl<'a> Walk<'a> {
                 continue;
             }
             let include = &log.includes[index];
-            let (files, found) = self.included_files(path, include);
+            let (files, found) = self.included_files(path, index);
             for file in &files {
                 self.file(file, Some(&key), stack);
             }
@@ -275,21 +306,26 @@ impl Views for Liquibase {
         let Ok(root) = project.root() else {
             return Ok(View::message("Open a project to see its Liquibase changesets."));
         };
-        let mut walk = Walk::new(&project, &root);
+        let mut walk = Walk::new(&project, &root, self.max_files.unwrap_or(MAX_FILES));
         walk.discover();
         if walk.found.is_empty() {
             return Ok(View::message("No Liquibase changelogs found in this project.").button(refresh));
         }
         walk.walk_all();
 
-        let mut items = walk.items;
+        let partial = walk.partial;
+        let mut items = std::mem::take(&mut walk.items);
         for item in items.iter_mut() {
             item.expanded = true;
         }
         self.expansion.apply(&mut items);
-        self.targets = walk.targets;
+        self.targets = std::mem::take(&mut walk.targets);
         let sets = self.targets.keys().filter(|key| key.contains("/c")).count();
-        Ok(View::new(Body::Tree(items)).button(refresh).status(&format!("{sets} changesets")))
+        let mut status = format!("{sets} changesets");
+        if partial {
+            status = format!("{status}; partial: showing the first {} changelogs (time budget)", walk.found.len());
+        }
+        Ok(View::new(Body::Tree(items)).button(refresh).status(&status))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, _ctx: &Invocation) -> Result<(), Error> {
@@ -448,6 +484,58 @@ mod tests {
                 ("1 (x)".to_owned(), None),
                 ("db/a.xml".to_owned(), Some("include cycle".to_owned())),
                 ("gone.xml".to_owned(), Some("missing".to_owned())),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_view_activates_the_plugin() {
+        let manifest = include_str!("../plugin.toml");
+        let activation = manifest.lines().find(|line| line.starts_with("activation")).unwrap();
+        let mut views = 0;
+        let mut lines = manifest.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != "[[contributes.views]]" {
+                continue;
+            }
+            let id = lines.next().unwrap().trim().strip_prefix("id = ").unwrap().trim_matches('"');
+            assert!(activation.contains(&format!("\"on-view:{id}\"")), "no on-view:{id}");
+            views += 1;
+        }
+        assert!(views > 0);
+    }
+
+    #[test]
+    fn partial_discovery_is_flagged() {
+        let host = fixture();
+        let mut liquibase = Liquibase::default();
+        liquibase.max_files = Some(2);
+        let status = liquibase.render("changesets", None, &host.invocation()).unwrap().status.unwrap();
+        assert!(status.contains("partial: showing the first 2 changelogs"), "{status}");
+
+        liquibase.max_files = None;
+        let status = liquibase.render("changesets", None, &host.invocation()).unwrap().status.unwrap();
+        assert!(!status.contains("partial"), "{status}");
+    }
+
+    #[test]
+    fn a_changelog_reached_twice_is_already_run() {
+        let host = MockHost::install();
+        let inc = |f: &str| format!("<include file=\"{f}\" relativeToChangelogFile=\"true\"/>");
+        host.add_file("db/m.xml", &format!("<databaseChangeLog>{}{}</databaseChangeLog>", inc("a.xml"), inc("b.xml")));
+        host.add_file("db/a.xml", &format!("<databaseChangeLog>{}</databaseChangeLog>", inc("c.xml")));
+        host.add_file("db/b.xml", &format!("<databaseChangeLog>{}</databaseChangeLog>", inc("c.xml")));
+        host.add_file("db/c.xml", "<databaseChangeLog><changeSet id=\"1\" author=\"x\"/></databaseChangeLog>");
+        let rows: Vec<_> = tree_rows(&host, &mut Liquibase::default()).into_iter().map(|(_, label, detail)| (label, detail)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("db/m.xml".to_owned(), None),
+                ("db/a.xml".to_owned(), None),
+                ("db/c.xml".to_owned(), None),
+                ("1 (x)".to_owned(), None),
+                ("db/b.xml".to_owned(), None),
+                ("db/c.xml".to_owned(), Some("already run".to_owned())),
             ]
         );
     }
