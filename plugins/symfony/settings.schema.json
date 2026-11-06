@@ -10,6 +10,11 @@
       "title": "Report route controllers without the named method and deprecated route settings",
       "default": true
     },
+    "serviceChecks": {
+      "type": "boolean",
+      "title": "Report deprecated service classes, duplicate parameters and unknown named arguments",
+      "default": true
+    },
     "publicDirectory": {
       "type": "string",
       "title": "Public directory that asset() paths start from (project-relative)",

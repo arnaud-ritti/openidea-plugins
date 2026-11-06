@@ -38,6 +38,10 @@ fn is_route_file(path: &str) -> bool {
     path.contains("/config/routes") || path.contains("/config/routing") || path.contains("/Resources/config/routing")
 }
 
+fn is_service_file(path: &str) -> bool {
+    path.contains("/config/") && !is_route_file(path) && !path.contains("/var/cache/")
+}
+
 fn offset_in(text: &str, part: &str) -> usize {
     part.as_ptr() as usize - text.as_ptr() as usize
 }
@@ -248,6 +252,240 @@ pub fn check_routes(ctx: &Context, path: &str, language: &str, text: &str) -> Ve
     out
 }
 
+struct ServiceDef {
+    class: Option<(String, Range<usize>)>,
+    named: Vec<(String, Range<usize>)>,
+}
+
+fn clean_class(class: &str) -> String {
+    class.replace("\\\\", "\\").trim_start_matches('\\').to_owned()
+}
+
+/// `$name` keys of a flow mapping on one line: `{ $dsn: x, $port: 25 }`.
+fn flow_named_arguments(text: &str, from: usize) -> Vec<(String, Range<usize>)> {
+    let line_end = text[from..].find('\n').map_or(text.len(), |i| from + i);
+    let line = &text[from..line_end];
+    let Some(open) = line.find('{') else { return Vec::new() };
+
+    line.match_indices('$')
+        .filter(|(at, _)| *at > open)
+        .filter_map(|(at, _)| {
+            let length = 1 + line[at + 1..].bytes().take_while(|b| refs::is_identifier(*b)).count();
+            let follows = line[at + length..].trim_start().starts_with(':');
+            (length > 1 && follows).then(|| (line[at..at + length].to_owned(), from + at..from + at + length))
+        })
+        .collect()
+}
+
+fn yaml_definitions(text: &str) -> Vec<ServiceDef> {
+    let keys = index::yaml_keys(text);
+    let mut definitions = Vec::new();
+
+    for service in keys.iter().filter(|k| k.parents == ["services"] && !k.key.starts_with('_') && !k.key.ends_with('\\')) {
+        let own = |k: &&index::YamlKey| k.parents.len() >= 2 && k.parents[0] == "services" && k.parents[1] == service.key;
+        let child = |name: &str| keys.iter().filter(own).find(|k| k.parents.len() == 2 && k.key == name);
+
+        let class = match child("class") {
+            Some(key) => yaml_scalar(text, key).map(|range| (clean_class(&text[range.clone()]), range)),
+            None if service.key.contains('\\') && !service.value.starts_with('@') && child("alias").is_none() => {
+                Some((clean_class(&service.key), service.offset..service.offset + service.key.len()))
+            }
+            None => None,
+        };
+
+        let mut named = Vec::new();
+        if child("parent").is_none() && child("factory").is_none() {
+            for key in keys.iter().filter(own) {
+                if key.parents.len() == 3 && key.parents[2] == "arguments" && key.key.starts_with('$') {
+                    named.push((key.key.clone(), key.offset..key.offset + key.key.len()));
+                }
+                if key.parents.len() == 2 && key.key == "arguments" && key.value.starts_with('{') {
+                    named.extend(flow_named_arguments(text, key.offset));
+                }
+            }
+        }
+
+        definitions.push(ServiceDef { class, named });
+    }
+
+    definitions
+}
+
+fn xml_definitions(text: &str) -> Vec<ServiceDef> {
+    let mut definitions = Vec::new();
+
+    for (tag, at) in index::xml_tags(text, "service") {
+        let attribute = |name: &str| index::xml_attribute(tag, name).map(|(value, offset)| (value, at + offset));
+        let class = attribute("class")
+            .or_else(|| attribute("id").filter(|(id, _)| id.contains('\\')))
+            .filter(|(class, _)| !class.starts_with('%'))
+            .map(|(class, start)| (clean_class(class), start..start + class.len()));
+
+        let mut named = Vec::new();
+        let body_end = if tag.ends_with('/') { None } else { text[at..].find("</service>").map(|i| at + i) };
+        let body_end = body_end.filter(|end| attribute("parent").is_none() && !text[at..*end].contains("<factory"));
+        if let Some(end) = body_end {
+            let body = &text[at + tag.len()..end];
+            let skipped = ["call", "configurator"].map(|name| xml_spans(text, at + tag.len(), end, name));
+
+            for (argument, argument_at) in index::xml_tags(body, "argument") {
+                let argument_at = at + tag.len() + argument_at;
+                let inside_skipped = skipped.iter().flatten().any(|span| span.contains(&argument_at));
+                let Some((key, offset)) = index::xml_attribute(argument, "key").filter(|(key, _)| key.starts_with('$')) else { continue };
+                if !inside_skipped {
+                    named.push((key.to_owned(), argument_at + offset..argument_at + offset + key.len()));
+                }
+            }
+        }
+
+        definitions.push(ServiceDef { class, named });
+    }
+
+    definitions
+}
+
+/// Byte spans of `<name …>…</name>` (or self-closing) elements within a range.
+fn xml_spans(text: &str, from: usize, to: usize, name: &str) -> Vec<Range<usize>> {
+    index::xml_tags(&text[from..to], name)
+        .into_iter()
+        .map(|(tag, at)| {
+            let start = from + at;
+            let end = if tag.ends_with('/') { start + tag.len() } else { text[start..to].find(&format!("</{name}>")).map_or(to, |i| start + i) };
+            start..end
+        })
+        .collect()
+}
+
+fn is_deprecated(source: &str) -> bool {
+    let Some(declaration) = index::class_declaration(source) else { return false };
+    let header = source[..declaration].rsplit([';', '}']).next().unwrap_or_default();
+    header.contains("@deprecated") || header.contains("#[Deprecated") || header.contains("#[\\Deprecated")
+}
+
+/// Parameter names of a class's constructor; `None` when the class has no
+/// constructor of its own or the constructor is variadic.
+fn constructor_parameters(source: &str) -> Option<Vec<String>> {
+    let at = source.find("function __construct")?;
+    let open = at + source[at..].find('(')?;
+    let close = index::closing_paren(source, open + 1).min(source.len());
+    let parameters = &source[open + 1..close];
+
+    if parameters.contains("...") {
+        return None;
+    }
+
+    let names = parameters.match_indices('$').map(|(at, _)| {
+        let length = 1 + parameters[at + 1..].bytes().take_while(|b| refs::is_identifier(*b)).count();
+        parameters[at..at + length].to_owned()
+    });
+
+    Some(names.collect())
+}
+
+fn duplicate_parameters(language: &str, text: &str, out: &mut Vec<Finding>) {
+    let mut names: Vec<String> = Vec::new();
+    let mut report = |name: &str, range: Range<usize>, names: &mut Vec<String>| {
+        if names.iter().any(|earlier| earlier == name) {
+            let message = format!("Parameter \"{name}\" is already defined in this file.");
+            out.push(Finding::warn(range, "duplicate-parameter-key", message));
+        }
+        names.push(name.to_owned());
+    };
+
+    if language == "xml" {
+        let mut events: Vec<(usize, Option<(&str, usize)>, bool)> = Vec::new();
+        for (tag, at) in index::xml_tags(text, "parameter") {
+            let key = index::xml_attribute(tag, "key").map(|(value, offset)| (value, at + offset));
+            events.push((at, key, !tag.ends_with('/')));
+        }
+        for (at, _) in text.match_indices("</parameter>") {
+            events.push((at, None, false));
+        }
+        events.sort_by_key(|(at, _, _)| *at);
+
+        let mut depth = 0usize;
+        for (_, key, opens) in events {
+            let is_close = key.is_none() && !opens;
+            if is_close {
+                depth = depth.saturating_sub(1);
+                continue;
+            }
+            if depth == 0 {
+                if let Some((name, start)) = key {
+                    report(name, start..start + name.len(), &mut names);
+                }
+            }
+            if opens {
+                depth += 1;
+            }
+        }
+        return;
+    }
+
+    let mut in_parameters = false;
+    let mut child_indent: Option<usize> = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+
+        let content = line.trim_end();
+        let trimmed = content.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let indent = content.len() - trimmed.len();
+        if indent == 0 {
+            in_parameters = trimmed.starts_with("parameters:");
+            child_indent = None;
+            continue;
+        }
+
+        if !in_parameters || *child_indent.get_or_insert(indent) != indent {
+            continue;
+        }
+
+        if let Some((key, _)) = index::split_yaml_key(trimmed) {
+            let quoted = usize::from(trimmed.starts_with(['\'', '"']));
+            let key_start = start + indent + quoted;
+            report(key, key_start..key_start + key.len(), &mut names);
+        }
+    }
+}
+
+/// `deprecated-service-class`, `duplicate-parameter-key` and `named-argument-missing`.
+pub fn check_services(ctx: &Context, path: &str, language: &str, text: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+
+    let definitions = match language {
+        "yaml" if is_service_file(path) => yaml_definitions(text),
+        "xml" if is_service_file(path) && text.contains("<container") => xml_definitions(text),
+        _ => return out,
+    };
+    duplicate_parameters(language, text, &mut out);
+
+    for definition in &definitions {
+        let Some((class, range)) = &definition.class else { continue };
+        let Some(entry) = ctx.index.classes.get(class) else { continue };
+        let Some(source) = (ctx.read)(&entry.path) else { continue };
+
+        if is_deprecated(&source) {
+            out.push(Finding::warn(range.clone(), "deprecated-service-class", format!("Service class \"{class}\" is deprecated.")));
+        }
+
+        let Some(parameters) = constructor_parameters(&source) else { continue };
+        for (name, range) in &definition.named {
+            if !parameters.contains(name) {
+                let message = format!("Constructor of \"{class}\" has no argument \"{name}\".");
+                out.push(Finding::warn(range.clone(), "named-argument-missing", message));
+            }
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -263,20 +501,37 @@ mod tests {
     const INVOKABLE: &str = "<?php\nnamespace App\\Controller;\nclass InvokableController\n{\n    public function __invoke() {}\n}\n";
     const CHILD: &str = "<?php\nnamespace App\\Controller;\nclass ChildController extends BaseController\n{\n}\n";
 
+    const OLD_MAILER: &str = "<?php\nnamespace App\\Legacy;\n\nuse Foo\\Bar;\n\n/**\n * @deprecated since 2.0, use Mailer\n */\nclass OldMailer\n{\n}\n";
+    const ATTRIBUTED: &str = "<?php\nnamespace App\\Legacy;\n\n#[\\Deprecated('use Mailer')]\nfinal class Attributed\n{\n}\n";
+    const METHOD_ONLY: &str = "<?php\nnamespace App\\Legacy;\n\nclass MethodOnly\n{\n    /** @deprecated */\n    public function old() {}\n}\n";
+    const MAILER: &str = "<?php\nnamespace App;\n\nclass Mailer\n{\n    public function __construct(private string $dsn, int $port = 25)\n    {\n    }\n}\n";
+    const VARIADIC: &str = "<?php\nnamespace App;\n\nclass Variadic\n{\n    public function __construct(string ...$parts)\n    {\n    }\n}\n";
+    const NO_CONSTRUCTOR: &str = "<?php\nnamespace App;\n\nclass NoConstructor\n{\n}\n";
+
+    const CLASSES: [(&str, &str); 9] = [
+        ("App\\Controller\\BlogController", BLOG),
+        ("App\\Controller\\InvokableController", INVOKABLE),
+        ("App\\Controller\\ChildController", CHILD),
+        ("App\\Legacy\\OldMailer", OLD_MAILER),
+        ("App\\Legacy\\Attributed", ATTRIBUTED),
+        ("App\\Legacy\\MethodOnly", METHOD_ONLY),
+        ("App\\Mailer", MAILER),
+        ("App\\Variadic", VARIADIC),
+        ("App\\NoConstructor", NO_CONSTRUCTOR),
+    ];
+
+    fn class_path(class: &str) -> String {
+        format!("/project/{}.php", class.replace('\\', "/"))
+    }
+
     fn sources() -> BTreeMap<String, String> {
-        let files = [
-            ("App\\Controller\\BlogController", BLOG),
-            ("App\\Controller\\InvokableController", INVOKABLE),
-            ("App\\Controller\\ChildController", CHILD),
-        ];
-        files.iter().map(|(class, text)| (format!("/project/{}.php", class.replace('\\', "/")), (*text).to_owned())).collect()
+        CLASSES.iter().map(|(class, text)| (class_path(class), (*text).to_owned())).collect()
     }
 
     fn fixture_index() -> Index {
         let mut index = Index::default();
-        for class in ["App\\Controller\\BlogController", "App\\Controller\\InvokableController", "App\\Controller\\ChildController"] {
-            let path = format!("/project/{}.php", class.replace('\\', "/"));
-            index.classes.insert(class.into(), Entry { detail: None, path, at: Position::new(0, 0) });
+        for (class, _) in CLASSES {
+            index.classes.insert(class.into(), Entry { detail: None, path: class_path(class), at: Position::new(0, 0) });
         }
         index
     }
@@ -284,7 +539,7 @@ mod tests {
     fn run_with(index: &Index, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
         let files = sources();
         let read = |file: &str| files.get(file).cloned();
-        let groups = Groups { controllers: true };
+        let groups = Groups { controllers: true, services: true };
         crate::extra_problems(index, groups, &read, path, language, text)
     }
 
@@ -420,5 +675,117 @@ mod tests {
         let host = MockHost::install();
         let mut plugin = project(&host);
         assert!(opened(&host, &mut plugin, "/project/config/gone.yaml").is_empty());
+    }
+
+    const SERVICES: &str = "/project/config/services.yaml";
+
+    #[test]
+    fn deprecated_service_class_warns() {
+        let yaml = "services:\n    app.mailer:\n        class: App\\Legacy\\OldMailer\n    App\\Legacy\\Attributed: ~\n";
+        let found = run(SERVICES, "yaml", yaml);
+        assert_eq!(codes(&found), ["deprecated-service-class"; 2]);
+        assert_eq!(found[0].range, TextRange::new(Position::new(2, 15), Position::new(2, 35)));
+        assert_eq!(found[0].message, "Service class \"App\\Legacy\\OldMailer\" is deprecated.");
+        assert_eq!(found[1].range.start, Position::new(3, 4));
+
+        let xml = "<container><services><service id=\"a\" class=\"App\\Legacy\\OldMailer\"/></services></container>";
+        assert_eq!(codes(&run("/project/config/services.xml", "xml", xml)), ["deprecated-service-class"]);
+    }
+
+    #[test]
+    fn deprecated_service_class_is_quiet_for_library_or_dynamic_name() {
+        let yaml = "services:\n    a:\n        class: Vendor\\Old\\Thing\n    b:\n        class: '%app.mailer.class%'\n    c:\n        class: App\\Legacy\\MethodOnly\n    d:\n        class: App\\Mailer\n    App\\Controller\\:\n        resource: ../src\n    e:\n        alias: App\\Legacy\\OldMailer\n";
+        assert!(run(SERVICES, "yaml", yaml).is_empty());
+
+        let xml = "<container><service id=\"a\" class=\"Vendor\\Old\"/><service id=\"b\" class=\"%x%\"/></container>";
+        assert!(run("/project/config/services.xml", "xml", xml).is_empty());
+        assert!(run_with(&Index::default(), SERVICES, "yaml", "services:\n    a:\n        class: App\\Legacy\\OldMailer\n").is_empty());
+    }
+
+    #[test]
+    fn duplicate_parameter_key_warns() {
+        let xml = "<container>\n  <parameters>\n    <parameter key=\"app.a\">1</parameter>\n    <parameter key=\"app.b\"/>\n    <parameter key=\"app.a\">2</parameter>\n  </parameters>\n</container>\n";
+        let found = run("/project/config/services.xml", "xml", xml);
+        assert_eq!(codes(&found), ["duplicate-parameter-key"]);
+        assert_eq!(found[0].range, TextRange::new(Position::new(4, 20), Position::new(4, 25)));
+        assert_eq!(found[0].message, "Parameter \"app.a\" is already defined in this file.");
+
+        let yaml = "parameters:\n    app.a: 1\n    # app.a: commented\n    app.b: 2\n    'app.a': 3\nservices:\n    app.a: ~\n";
+        let found = run(SERVICES, "yaml", yaml);
+        assert_eq!(codes(&found), ["duplicate-parameter-key"]);
+        assert_eq!(found[0].range, TextRange::new(Position::new(4, 5), Position::new(4, 10)));
+    }
+
+    #[test]
+    fn duplicate_parameter_key_is_quiet_for_library_or_dynamic_name() {
+        let xml = "<container><parameters><parameter key=\"a\" type=\"collection\"><parameter key=\"x\">1</parameter></parameter><parameter key=\"b\" type=\"collection\"><parameter key=\"x\">1</parameter></parameter><parameter key=\"c\"/></parameters></container>";
+        assert!(run("/project/config/services.xml", "xml", xml).is_empty());
+        let compiled = "<container><parameters><parameter key=\"a\"/><parameter key=\"a\"/></parameters></container>";
+        assert!(run("/project/var/cache/dev/Kernel.xml", "xml", compiled).is_empty());
+
+        let yaml = "parameters:\n    app.a: 1\n    app.b:\n        x: 1\n        x: 2\nwhen@dev:\n    parameters:\n        app.a: 2\n";
+        assert!(run(SERVICES, "yaml", yaml).is_empty());
+        assert!(run("/project/docker/compose.yaml", "yaml", "parameters:\n    a: 1\n    a: 2\n").is_empty());
+    }
+
+    #[test]
+    fn named_argument_missing_warns() {
+        let yaml = "services:\n    app.mailer:\n        class: App\\Mailer\n        arguments:\n            $dsn: 'smtp://'\n            $transport: '@t'\n    App\\Mailer:\n        arguments: { $dsn: x, $nope: y }\n";
+        let found = run(SERVICES, "yaml", yaml);
+        assert_eq!(codes(&found), ["named-argument-missing"; 2]);
+        assert_eq!(found[0].range, TextRange::new(Position::new(5, 12), Position::new(5, 22)));
+        assert_eq!(found[0].message, "Constructor of \"App\\Mailer\" has no argument \"$transport\".");
+        assert_eq!(found[1].range, TextRange::new(Position::new(7, 30), Position::new(7, 35)));
+
+        let xml = "<container><services><service id=\"a\" class=\"App\\Mailer\"><argument key=\"$dsn\" type=\"string\">x</argument><argument key=\"$nope\"/></service></services></container>";
+        let found = run("/project/config/services.xml", "xml", xml);
+        assert_eq!(codes(&found), ["named-argument-missing"]);
+        assert_eq!(found[0].range.start.character as usize, xml.find("$nope").unwrap());
+    }
+
+    #[test]
+    fn named_argument_missing_is_quiet_for_library_or_dynamic_name() {
+        let yaml = "services:\n    a:\n        class: Vendor\\Mailer\n        arguments: { $x: 1 }\n    b:\n        class: App\\Variadic\n        arguments: { $x: 1 }\n    c:\n        class: App\\NoConstructor\n        arguments: { $x: 1 }\n    d:\n        class: App\\Mailer\n        arguments:\n            $port: 25\n            $dsn: x\n    e:\n        parent: a\n        class: App\\Mailer\n        arguments: { $x: 1 }\n    f:\n        class: '%mailer.class%'\n        arguments: { $x: 1 }\n    g:\n        class: App\\Mailer\n        bind:\n            $x: 1\n";
+        assert!(run(SERVICES, "yaml", yaml).is_empty());
+
+        let xml = "<container><service id=\"a\" class=\"App\\Mailer\"><call method=\"set\"><argument key=\"$whatever\"/></call><bind key=\"$z\"/></service><service id=\"b\" class=\"App\\Mailer\"><factory service=\"f\"/><argument key=\"$q\"/></service></container>";
+        assert!(run("/project/config/services.xml", "xml", xml).is_empty());
+    }
+
+    #[test]
+    fn service_group_ranges_use_utf16_columns_with_multibyte_text() {
+        let xml = "<!-- é😀 --><container><service id=\"a\" class=\"App\\Legacy\\OldMailer\"/></container>";
+        let found = run("/project/config/services.xml", "xml", xml);
+        assert_eq!(found[0].range.start, Position::new(0, 12 + 11 + 23));
+        assert_eq!(found[0].range.end.character, 12 + 11 + 23 + 20);
+    }
+
+    #[test]
+    fn service_group_crlf_files_report_correct_lines() {
+        let yaml = "parameters:\r\n    app.a: 1\r\n    app.a: 2\r\nservices:\r\n    a:\r\n        class: App\\Legacy\\OldMailer\r\n";
+        let found = run(SERVICES, "yaml", yaml);
+        assert_eq!(found[0].range, TextRange::new(Position::new(2, 4), Position::new(2, 9)));
+        assert_eq!(found[1].range.start, Position::new(5, 15));
+    }
+
+    #[test]
+    fn service_group_fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        let mut plugin = project(&host);
+        let path = "/project/config/services.yaml";
+
+        host.add_file("config/services.yaml", "parameters:\n    a: 1\n    a: 2\n");
+        assert_eq!(codes(&opened(&host, &mut plugin, path)), ["duplicate-parameter-key"]);
+
+        host.add_file("config/services.yaml", "parameters:\n    a: 1\n");
+        plugin.handle_events(&[Event::FileSaved(path.into())], &host.invocation());
+        assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn service_group_missing_file_is_treated_as_absent() {
+        let host = MockHost::install();
+        let mut plugin = project(&host);
+        assert!(opened(&host, &mut plugin, "/project/config/services.xml").is_empty());
     }
 }

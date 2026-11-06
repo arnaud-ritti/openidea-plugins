@@ -286,12 +286,13 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
 #[derive(Clone, Copy)]
 struct Groups {
     controllers: bool,
+    services: bool,
 }
 
 impl Groups {
     fn from_settings() -> Groups {
         let on = |key: &str| host::setting_bool(key).unwrap_or(true);
-        Groups { controllers: on("controllerChecks") }
+        Groups { controllers: on("controllerChecks"), services: on("serviceChecks") }
     }
 }
 
@@ -302,6 +303,10 @@ fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &st
 
     if groups.controllers {
         findings.extend(checks::check_routes(&ctx, path, language, text));
+    }
+
+    if groups.services {
+        findings.extend(checks::check_services(&ctx, path, language, text));
     }
 
     findings
