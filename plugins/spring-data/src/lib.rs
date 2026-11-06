@@ -1,13 +1,13 @@
 //! Spring Data Tools for OpenIDEA: checks derived query method names of
 //! Spring Data repositories against the domain class, completes them, links
 //! repositories to their entities and checks `@Query` parameters.
-//! Text-based: types match by simple name among the project's Java sources.
+//! Text-based: types match by simple name among the project's Java and Kotlin sources.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET};
-use spring_text::java::{self, JavaFile, Member, Str, TypeDecl, TypeRef};
+use spring_text::java::{self, JavaFile, Member, TypeDecl, TypeRef};
 use spring_text::{SOURCE_GLOBS, is_kotlin, parse_source, range};
 use std::collections::BTreeMap;
 
@@ -189,6 +189,31 @@ fn class(text: &str, t: &TypeDecl, kotlin: bool) -> Class {
     Class { name: t.name.clone(), range: range(text, t.at, t.at + t.name.len()), parent, props, entity }
 }
 
+/// Equal ignoring case, or one edit away from names of 5+ characters, two from names of 8+.
+fn is_near_miss(known: &str, name: &str) -> bool {
+    if known.eq_ignore_ascii_case(name) {
+        return true;
+    }
+    let shorter = known.chars().count().min(name.chars().count());
+    let distance = edit_distance(known, name);
+    (distance == 1 && shorter >= 5) || (distance == 2 && shorter >= 8)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ca != *cb)).min(above + 1).min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
 /// The project's classes by simple name.
 struct Model<'a> {
     by_name: BTreeMap<&'a str, Vec<(&'a str, &'a Class)>>,
@@ -211,6 +236,12 @@ impl<'a> Model<'a> {
             }
         }
         Self { by_name, entities, complete: index.complete() }
+    }
+
+    /// The known entity or class name that `name` is probably a typo of.
+    fn near_miss(&self, name: &str) -> Option<&'a str> {
+        let known = self.entities.keys().chain(self.by_name.keys()).copied();
+        known.filter(|k| is_near_miss(k, name)).min_by_key(|k| edit_distance(k, name))
     }
 
     fn class(&self, name: &str) -> Option<(&'a str, &'a Class)> {
@@ -441,6 +472,95 @@ fn named_parameters(q: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// What a path of properties led to.
+enum Walk {
+    Type(String),
+    /// A type on the way isn't a project class.
+    Unknown,
+    /// The segment at this index isn't a property.
+    Missing(usize, String),
+}
+
+fn walk(model: &Model, ty: &str, segments: &[&str]) -> Walk {
+    let mut ty = ty.to_owned();
+    for (i, segment) in segments.iter().enumerate() {
+        let Some(props) = model.props(&ty) else { return Walk::Unknown };
+        let Some((_, prop)) = props.into_iter().find(|(_, p)| p.name == *segment) else {
+            return Walk::Missing(i, ty);
+        };
+        ty = prop.ty.clone();
+    }
+    Walk::Type(ty)
+}
+
+/// The type of each identification variable (lower-cased) of a query's declarations.
+fn alias_types(model: &Model, declarations: &[jpql::Decl]) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    let mut conflicting = Vec::new();
+    for decl in declarations {
+        let Some(alias) = decl.alias else { continue };
+        let ty = if decl.is_path() {
+            let segments: Vec<&str> = decl.target.s.split('.').collect();
+            let Some(root) = out.get(&segments[0].to_ascii_lowercase()) else { continue };
+            match walk(model, root, &segments[1..]) {
+                Walk::Type(ty) => ty,
+                _ => continue,
+            }
+        } else {
+            model.entities.get(decl.target.s).map_or_else(|| decl.target.s.to_owned(), |c| c.name.clone())
+        };
+        let key = alias.to_ascii_lowercase();
+        if out.get(&key).is_some_and(|known| *known != ty) {
+            conflicting.push(key);
+            continue;
+        }
+        out.insert(key, ty);
+    }
+    for key in conflicting {
+        out.remove(&key);
+    }
+    out
+}
+
+/// A problem of a JPQL query: its bytes in the query and the diagnostic code and message.
+struct QueryProblem {
+    from: usize,
+    to: usize,
+    code: &'static str,
+    message: String,
+}
+
+/// Unknown entities and unknown properties on identification variables of a project entity.
+fn query_problems(model: &Model, query: &str, domain_in_project: bool) -> Vec<QueryProblem> {
+    let mut out = Vec::new();
+    if !model.complete {
+        return out;
+    }
+    let words = jpql::words(query);
+    let declarations = jpql::declarations(&words);
+    if domain_in_project {
+        for decl in declarations.iter().filter(|d| !d.is_path()) {
+            if model.entities.contains_key(decl.target.s) || model.class(decl.target.s).is_some() {
+                continue;
+            }
+            let Some(known) = model.near_miss(decl.target.s) else { continue };
+            let message = format!("`{}` is not an entity of this project. Did you mean `{known}`?", decl.target.s);
+            out.push(QueryProblem { from: decl.target.at, to: decl.target.at + decl.target.s.len(), code: "unknown-query-entity", message });
+        }
+    }
+    let aliases = alias_types(model, &declarations);
+    for word in words.iter().filter(|w| w.is_name() && w.s.contains('.')) {
+        let segments: Vec<&str> = word.s.split('.').collect();
+        let Some(root) = aliases.get(&segments[0].to_ascii_lowercase()) else { continue };
+        let rest: Vec<&str> = segments[1..].iter().copied().take_while(|s| *s != "class" && !s.is_empty()).collect();
+        if let Walk::Missing(i, ty) = walk(model, root, &rest) {
+            let from = word.at + segments[..=i].iter().map(|s| s.len() + 1).sum::<usize>();
+            out.push(QueryProblem { from, to: from + rest[i].len(), code: "unknown-query-property", message: format!("`{ty}` has no property `{}`.", rest[i]) });
+        }
+    }
+    out
+}
+
 fn warning(text: &str, from: usize, to: usize, code: &str, message: String) -> Diagnostic {
     Diagnostic::new(range(text, from, to), Severity::Warning, message).code(code)
 }
@@ -464,6 +584,14 @@ fn problems(model: &Model, text: &str, file: &JavaFile) -> Vec<Diagnostic> {
                         continue; // a JSON query (MongoDB, Elasticsearch)
                     }
                     let exact = s.value.len() == s.end - s.at;
+                    let native = query.arg("nativeQuery").is_some_and(|a| a.text.trim() == "true");
+                    let single_literal = query.arg("value").is_none_or(|a| a.strings.len() == 1 && !a.text.contains('+'));
+                    if !native && single_literal {
+                        for p in query_problems(model, &s.value, model.class(&domain).is_some()) {
+                            let (from, to) = if exact { (s.at + p.from, s.at + p.to) } else { (s.at, s.end) };
+                            out.push(warning(text, from, to, p.code, p.message));
+                        }
+                    }
                     for (at, name) in named_parameters(&s.value) {
                         if names.iter().any(|n| n == name) {
                             continue;
@@ -570,6 +698,60 @@ fn tail_start(pred: &str) -> (usize, bool) {
     (start, order)
 }
 
+impl DataTools {
+    /// Entity names after `from`/`join` and properties after `alias.` inside a `@Query` string.
+    fn query_completion(&mut self, doc: &Document, off: usize) -> Vec<CompletionItem> {
+        let file = parse_source(&doc.path, &doc.text);
+        let Some((t, _)) = repository_at(&file, off) else { return Vec::new() };
+        let Some(query) = t.methods().filter_map(|m| m.annotation("Query")).find(|a| a.at <= off && off <= a.end) else {
+            return Vec::new();
+        };
+        if query.arg("nativeQuery").is_some_and(|a| a.text.trim() == "true") {
+            return Vec::new();
+        }
+        let Some(s) = query.strings(&["value"]).into_iter().find(|s| s.holds(off)) else { return Vec::new() };
+        if s.value.len() != s.end - s.at {
+            return Vec::new();
+        }
+        let cursor = off - s.at;
+        let typed_start = s.value[..cursor]
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !(c.is_alphanumeric() || matches!(c, '_' | '$' | '.')))
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let typed = &s.value[typed_start..cursor];
+        let Some(index) = self.index(doc) else { return Vec::new() };
+        let model = Model::new(index);
+        let item = |label: &str, detail: &str, kind, from: usize| CompletionItem {
+            detail: Some(detail.to_owned()),
+            replace: Some(range(&doc.text, from, off)),
+            ..CompletionItem::new(label, kind)
+        };
+        let Some((head, _)) = typed.rsplit_once('.') else {
+            let after_from = jpql::words(&s.value[..typed_start]).last().is_some_and(|w| w.is("from") || w.is("join") || w.is("update"));
+            if !after_from {
+                return Vec::new();
+            }
+            return model.entities.iter().map(|(name, c)| item(name, &c.name, CompletionKind::Class, s.at + typed_start)).collect();
+        };
+        let words = jpql::words(&s.value);
+        let aliases = alias_types(&model, &jpql::declarations(&words));
+        let segments: Vec<&str> = head.split('.').collect();
+        let Some(root) = aliases.get(&segments[0].to_ascii_lowercase()) else { return Vec::new() };
+        let Walk::Type(ty) = walk(&model, root, &segments[1..]) else { return Vec::new() };
+        let from = s.at + typed_start + head.len() + 1;
+        let mut seen = Vec::new();
+        let mut items = Vec::new();
+        for (_, p) in model.props(&ty).unwrap_or_default() {
+            if !p.name.is_empty() && !seen.contains(&&p.name) {
+                seen.push(&p.name);
+                items.push(item(&p.name, &p.ty, CompletionKind::Field, from));
+            }
+        }
+        items
+    }
+}
+
 impl Providers for DataTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let file = parse_source(&doc.path, &doc.text);
@@ -621,6 +803,10 @@ impl Providers for DataTools {
 
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(off) = offset(&doc.text, at) else { return Vec::new() };
+        let queried = self.query_completion(doc, off);
+        if !queried.is_empty() {
+            return queried;
+        }
         let start = doc.text[..off]
             .char_indices()
             .rev()
@@ -682,6 +868,7 @@ public class User extends BaseEntity {
     private int age;
     private boolean active;
     @Embedded private Address address;
+    @ManyToOne private Owner owner;
     @OneToMany private List<Order> orders;
     @Transient private String display;
     private static final long serialVersionUID = 1L;
@@ -714,7 +901,7 @@ public interface UserRepository extends JpaRepository<User, Long>, UserRepositor
     List<User> findByDisplay(String d);
     List<User> findByFullNameAndLastName(String full, String last);
 
-    @Query("select u from User u where u.age > :min and u.firstName = :name and u.x = :#{#user.x} and cast(u.a as text)::text = ':nope'")
+    @Query("select u from User u where u.age > :min and u.firstName = :name and u.id = :#{#user.x} and cast(u.age as text)::text = ':nope'")
     List<User> adults(@Param("min") int min, String name);
 
     @Query("select u from User u where u.lastName = :last")
@@ -735,6 +922,7 @@ interface OtherRepository {
     List<Unknown> findByWhatever(String w);
 }
 "#;
+    const CUSTOMER: &str = "package com.acme;\n@Entity\nclass Customer {\n    private String name;\n}\n";
     const IMPL: &str = "package com.acme;\nclass UserRepositoryImpl implements UserRepositoryCustom {}\n";
 
     fn setup() -> MockHost {
@@ -742,6 +930,7 @@ interface OtherRepository {
         host.add_file("src/main/java/com/acme/BaseEntity.java", BASE);
         host.add_file("src/main/java/com/acme/User.java", USER);
         host.add_file("src/main/java/com/acme/UserRepositoryImpl.java", IMPL);
+        host.add_file("src/main/java/com/acme/Customer.java", CUSTOMER);
         host
     }
 
@@ -840,5 +1029,203 @@ interface OtherRepository {
         let items = tools.completion(&doc(&typing), Position::new(line, 29), None);
         assert!(items.iter().any(|i| i.label == "countByAgeOrderByAgeDesc"));
         assert!(tools.completion(&doc(REPO), Position::new(0, 3), None).is_empty());
+    }
+
+    const QUERY_REPO: &str = r#"package com.acme;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    @Query("select u from Custmer u where u.age > 1")
+    List<User> unknownEntity();
+
+    @Query("select u from User u join u.address a where u.address.citty = 'x' and a.zipCode = '1' and u.nme = 2")
+    List<User> unknownProperties();
+
+    @Query("select u from User u join u.orders o where o.number = '1' and o.total > 1 and u.id = 1 and u.createdAt is null")
+    List<User> fine();
+
+    @Query("select u from User u join u.owner o where o.whatever = 1 and u.owner.name.first = 1")
+    List<User> libraryTypes();
+}
+"#;
+
+    fn query_diagnostics(text: &str) -> Vec<(String, String)> {
+        let host = setup();
+        let mut tools = DataTools::default();
+        tools.line_markers(&doc(text));
+        let problems = host.diagnostics().get("/project/src/main/java/com/acme/UserRepository.java").cloned().unwrap_or_default();
+        problems
+            .iter()
+            .map(|d| (d.code.clone().unwrap(), text[offset(text, d.range.start).unwrap()..offset(text, d.range.end).unwrap()].to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn query_unknown_entity_warns() {
+        let found = query_diagnostics(QUERY_REPO);
+        assert_eq!(found[0], ("unknown-query-entity".to_owned(), "Custmer".to_owned()));
+    }
+
+    #[test]
+    fn query_unknown_property_warns() {
+        let found = query_diagnostics(QUERY_REPO);
+        let codes: Vec<_> = found.iter().map(|(c, t)| (c.as_str(), t.as_str())).collect();
+        assert_eq!(codes, [
+            ("unknown-query-entity", "Custmer"),
+            ("unknown-query-property", "citty"),
+            ("unknown-query-property", "nme"),
+        ]);
+    }
+
+    #[test]
+    fn query_property_of_library_entity_is_quiet() {
+        let text = "package com.acme;\ninterface UserRepository extends JpaRepository<User, Long> {\n    @Query(\"select u from User u join u.owner o where o.whatever = 1 and u.owner.name.first = 1\")\n    List<User> q();\n}\n";
+        let found = query_diagnostics(text);
+        assert!(found.is_empty(), "{found:?}");
+        let library = "package com.acme;\ninterface AccountRepository extends JpaRepository<Account, Long> {\n    @Query(\"select a from Acct a where a.nope = 1\")\n    List<Account> q();\n}\n";
+        assert!(query_diagnostics(library).is_empty());
+    }
+
+    #[test]
+    fn short_names_are_not_near_misses() {
+        assert!(!is_near_miss("Rule", "Role") && !is_near_miss("A", "B") && !is_near_miss("Usr", "User"));
+        assert!(is_near_miss("Customer", "Custmer") && is_near_miss("User", "user"));
+        assert!(!is_near_miss("Customer", "Cstmr") && is_near_miss("CustomerOrder", "CustmerOrdr"));
+    }
+
+    #[test]
+    fn incomplete_index_stays_quiet() {
+        let mut index: Index<Vec<Class>> = Index::new(SOURCE_GLOBS, classes);
+        index.update("/p/Customer.java", CUSTOMER);
+        let model = Model::new(&index);
+        assert!(!model.complete);
+        assert!(query_problems(&model, "select c from Custmer c where c.nme = 1", true).is_empty());
+        let mut complete = Model::new(&index);
+        complete.complete = true;
+        assert_eq!(query_problems(&complete, "select c from Custmer c where c.nme = 1", true).len(), 1);
+    }
+
+    #[test]
+    fn subquery_alias_same_type_still_checked() {
+        let text = "package com.acme;\ninterface UserRepository extends JpaRepository<User, Long> {\n    @Query(\"select u from User u where u.age > 1 and exists (select 1 from User u where u.nme = 2)\")\n    List<User> q();\n}\n";
+        let found: Vec<_> = query_diagnostics(text).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(found, ["nme"]);
+    }
+
+    #[test]
+    fn kotlin_raw_string_query_is_checked() {
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/Person.kt", "package com.acme\n\n@Entity\nclass Person(@Id val id: Long, var name: String)\n");
+        let repo = "package com.acme\n\ninterface PersonRepository : JpaRepository<Person, Long> {\n    @Query(\"\"\"\n        select p from Person p\n        where p.nmae = :name\n    \"\"\")\n    fun byName(name: String): List<Person>\n}\n";
+        let kt = Document { path: "/project/src/main/kotlin/com/acme/PersonRepository.kt".into(), language: "kotlin".into(), version: 1, text: repo.into() };
+        let mut tools = DataTools::default();
+        tools.line_markers(&kt);
+        let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/PersonRepository.kt"];
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].message, "`Person` has no property `nmae`.");
+    }
+
+    const QUIET_REPO: &str = r#"package com.acme;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    @Query(value = "select * from Custmer u where u.nope = 1", nativeQuery = true)
+    List<User> nativeOne();
+
+    @NativeQuery("select * from Custmer u where u.nope = 1")
+    List<User> nativeTwo();
+
+    @Query("select u from User u where u.age = :#{u.nope}")
+    List<User> spel(String a);
+
+    @Query("select u from Custmer u " + "where u.age = 1")
+    List<User> concatenated();
+
+    @Query("select u from User u join AuditEvent e on e.user = u where e.kind = 1")
+    List<User> unrelatedEntity();
+
+    @Query("select u from User u where u.age > 1 and exists (select 1 from Order u where u.number = '1')")
+    List<User> aliasReusedInSubquery();
+}
+"#;
+
+    #[test]
+    fn query_native_spel_and_concatenation_are_quiet() {
+        let found = query_diagnostics(QUIET_REPO);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn query_unrelated_entity_name_is_quiet() {
+        let text = "package com.acme;\ninterface UserRepository extends JpaRepository<User, Long> {\n    @Query(\"select u from User u, AuditEvent e where e.kind = 1\")\n    List<User> q();\n}\n";
+        assert!(query_diagnostics(text).is_empty());
+    }
+
+    #[test]
+    fn function_from_is_not_an_entity() {
+        let words = jpql::words("select extract(year from current_date), trim(both from n), substring(x from 2) from User u where exists (select 1 from Order o)");
+        let targets: Vec<_> = jpql::declarations(&words).into_iter().map(|d| d.target.s).collect();
+        assert_eq!(targets, ["User", "Order"]);
+    }
+
+    #[test]
+    fn query_joins_resolve_fields_of_other_entities() {
+        let text = "package com.acme;\ninterface UserRepository extends JpaRepository<User, Long> {\n    @Query(\"select u from User u join Order o on o.number = u.firstName where o.nmbr = 1\")\n    List<User> a();\n    @Query(\"select u from User u join fetch u.orders o where o.totl = 1 and o.total = 2\")\n    List<User> b();\n}\n";
+        let found: Vec<_> = query_diagnostics(text).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(found, ["nmbr", "totl"]);
+    }
+
+    #[test]
+    fn kotlin_query_is_checked() {
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/Person.kt", "package com.acme\n\n@Entity\nclass Person(@Id val id: Long, var name: String)\n");
+        let repo = "package com.acme\n\ninterface PersonRepository : JpaRepository<Person, Long> {\n    @Query(\"select p from Person p where p.nmae = :name\")\n    fun byName(name: String): List<Person>\n}\n";
+        let kt = Document { path: "/project/src/main/kotlin/com/acme/PersonRepository.kt".into(), language: "kotlin".into(), version: 1, text: repo.into() };
+        let mut tools = DataTools::default();
+        tools.line_markers(&kt);
+        let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/PersonRepository.kt"];
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].message, "`Person` has no property `nmae`.");
+    }
+
+    fn complete_in(text: &str, marker: &str) -> Vec<CompletionItem> {
+        let _host = setup();
+        let mut tools = DataTools::default();
+        let cleaned = text.replace(marker, "");
+        let off = text.find(marker).unwrap();
+        let before = &text[..off];
+        let line = before.matches('\n').count() as u32;
+        let col = (off - before.rfind('\n').map_or(0, |i| i + 1)) as u32;
+        tools.completion(&doc(&cleaned), Position::new(line, col), None)
+    }
+
+    #[test]
+    fn query_alias_property_completes() {
+        let text = "package com.acme;\ninterface UserRepository extends JpaRepository<User, Long> {\n    @Query(\"select u from User u where u.address.CARET\")\n    List<User> q();\n}\n";
+        let labels: Vec<_> = complete_in(text, "CARET").into_iter().map(|i| i.label).collect();
+        assert_eq!(labels, ["city", "zipCode"]);
+        let text = text.replace("u.address.CARET", "u.CARET");
+        let labels: Vec<_> = complete_in(&text, "CARET").into_iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"firstName".to_owned()) && labels.contains(&"createdAt".to_owned()) && labels.contains(&"fullName".to_owned()));
+        assert!(!labels.contains(&"display".to_owned()));
+    }
+
+    #[test]
+    fn query_entity_names_complete_after_from_and_join() {
+        let text = "package com.acme;\ninterface UserRepository extends JpaRepository<User, Long> {\n    @Query(\"select u from CARET\")\n    List<User> q();\n}\n";
+        let labels: Vec<_> = complete_in(text, "CARET").into_iter().map(|i| i.label).collect();
+        assert_eq!(labels, ["Customer", "User"]);
+    }
+
+    #[test]
+    fn kotlin_repository_derives_entity() {
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/Person.kt", "package com.acme\n\n@Entity\nclass Person(@Id val id: Long, var name: String, var age: Int)\n");
+        let repo = "package com.acme\n\ninterface PersonRepository : JpaRepository<Person, Long> {\n    fun findByName(name: String): List<Person>\n    fun findByNmae(name: String): List<Person>\n}\n";
+        let kt = Document { path: "/project/src/main/kotlin/com/acme/PersonRepository.kt".into(), language: "kotlin".into(), version: 1, text: repo.into() };
+        let mut tools = DataTools::default();
+        let markers = tools.line_markers(&kt);
+        assert_eq!(markers[0].tooltip, "Domain type: Person");
+        let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/PersonRepository.kt"];
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].message, "`Person` has no property `nmae`.");
     }
 }

@@ -8,11 +8,11 @@ change-notes = "0.1.0 (first release): Spring Security 6 migration checks with q
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java"]
+activation = ["on-language:java", "on-language:kotlin", "on-language:xml"]
 
 [capabilities]
 required = ["project.read"]
 
 [[contributes.providers]]
 kinds = ["completion", "code-actions", "line-markers"]
-languages = ["java"]
+languages = ["java", "kotlin", "xml"]

@@ -6,6 +6,31 @@ use openidea_plugin::Range;
 use spring_text::java::{self, Annotation, MemberKind, TypeRef};
 use spring_text::{decapitalize, range, xml};
 
+const P_NAMESPACE: &str = "http://www.springframework.org/schema/p";
+const C_NAMESPACE: &str = "http://www.springframework.org/schema/c";
+
+/// Whether the attribute of `els[i]` names a bean: `ref=`-style attributes, and
+/// `p:x-ref` / `c:x-ref` when the prefix is bound to the `p`/`c` namespaces.
+pub fn is_xml_ref(els: &[xml::Element], i: usize, a: &xml::Attr) -> bool {
+    let e = &els[i];
+    if XML_REFS.contains(&a.local()) || a.local() == "bean" && matches!(e.local(), "ref" | "idref") {
+        return true;
+    }
+    let Some((prefix, local)) = a.name.split_once(':') else { return false };
+    if !local.ends_with("-ref") || local.len() == "-ref".len() {
+        return false;
+    }
+    let decl = format!("xmlns:{prefix}");
+    let mut at = Some(i);
+    while let Some(k) = at {
+        if let Some(d) = els[k].attrs.iter().find(|d| d.name == decl) {
+            return d.value == P_NAMESPACE || d.value == C_NAMESPACE;
+        }
+        at = els[k].parent;
+    }
+    false
+}
+
 pub const INJECT: [&str; 3] = ["Autowired", "Inject", "Resource"];
 /// Hold one bean: `Optional<Foo>` is a `Foo`.
 const SINGLE_WRAPPERS: [&str; 4] = ["Optional", "ObjectProvider", "Provider", "Lazy"];
@@ -300,9 +325,7 @@ fn xml_model(text: &str) -> FileModel {
             });
             owners[i] = Some(out.beans.len() - 1);
         }
-        let by_name = e.attrs.iter().filter(|a| {
-            XML_REFS.contains(&a.local()) || a.local() == "bean" && matches!(e.local(), "ref" | "idref")
-        });
+        let by_name = e.attrs.iter().filter(|a| is_xml_ref(&els, i, a));
         for a in by_name {
             for name in a.value.split([',', ';', ' ']).filter(|n| !n.is_empty()) {
                 out.injections.push(Injection {
