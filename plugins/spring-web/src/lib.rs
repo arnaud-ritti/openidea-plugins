@@ -1,17 +1,21 @@
 //! Spring Web Tools for OpenIDEA: checks `@PathVariable` parameters against
 //! the URI templates of their request mappings, and links the view names a
-//! `@Controller` returns to their template files. Text-based, Java only.
+//! `@Controller` returns to their template files, and links functional routes
+//! and test URLs to their handlers. Text-based.
 
+use endpoints::{FileInfo, Handler};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::{
     Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
 };
-use spring_text::index::{Indexes, PROVIDER_BUDGET, project_of};
+use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, JavaFile, Param, Str};
-use spring_text::{config, contains, range};
+use spring_text::{SOURCE_GLOBS, config, contains, is_kotlin, range};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
+
+mod endpoints;
 
 const MAPPINGS: [&str; 6] =
     ["RequestMapping", "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping"];
@@ -136,7 +140,9 @@ fn path_problems(text: &str, file: &JavaFile) -> Vec<Problem> {
                 .filter(|v| !claimed.contains(v) && in_paths.iter().all(|p| p.contains(v)))
                 .collect();
             for (a, name) in bound {
-                let Some(i) = in_paths.iter().position(|p| !p.contains(&name)) else { continue };
+                let Some(i) = in_paths.iter().position(|p| !p.contains(&name)) else {
+                    continue;
+                };
                 let message = format!("`{name}` is not a variable of the mapped path `{}`.", paths[i]);
                 let fix = match unclaimed.as_slice() {
                     [only] => Some((
@@ -273,7 +279,30 @@ impl Template {
     }
 }
 
+/// A span of the document leading to the code it stands for.
+struct Link {
+    at: usize,
+    end: usize,
+    tooltip: String,
+    targets: Vec<Location>,
+}
+
+/// The methods a handler reference names: `this::` in the file, `Type::` anywhere.
+fn handler_targets(index: &Index<FileInfo>, path: &str, handler: &Handler) -> Vec<Location> {
+    index
+        .iter()
+        .filter(|(p, _)| handler.ty.is_some() || *p == path)
+        .flat_map(|(p, info)| {
+            info.methods
+                .iter()
+                .filter(|m| m.name == handler.method && handler.ty.as_ref().is_none_or(|t| *t == m.ty))
+                .map(move |m| Location { path: p.to_owned(), range: m.range })
+        })
+        .collect()
+}
+
 pub struct WebTools {
+    endpoints: Indexes<FileInfo>,
     settings: Indexes<Vec<(String, String)>>,
     /// Glob → when listed and the files.
     listings: BTreeMap<String, (Instant, Vec<String>)>,
@@ -281,14 +310,20 @@ pub struct WebTools {
 
 impl Default for WebTools {
     fn default() -> Self {
-        Self { settings: Indexes::new(CONFIG_GLOBS, view_settings), listings: BTreeMap::new() }
+        Self {
+            endpoints: Indexes::new(SOURCE_GLOBS, endpoints::file_info),
+            settings: Indexes::new(CONFIG_GLOBS, view_settings),
+            listings: BTreeMap::new(),
+        }
     }
 }
 
 impl WebTools {
     /// The project's templates, those of the document's module first.
     fn templates(&mut self, doc: &Document) -> Vec<Template> {
-        let Some(project) = project_of(&doc.path) else { return Vec::new() };
+        let Some(project) = project_of(&doc.path) else {
+            return Vec::new();
+        };
         let mut settings = BTreeMap::new();
         if let Some(index) = self.settings.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
             for (key, value) in index.iter().flat_map(|(_, kv)| kv) {
@@ -306,8 +341,12 @@ impl WebTools {
                     self.listings.insert(key.clone(), (Instant::now(), files));
                 }
                 for path in &self.listings[&key].1 {
-                    let Some(i) = path.find(&format!("/{dir}")) else { continue };
-                    let Some(name) = path[i + 1 + dir.len()..].strip_suffix(&format!(".{ext}")) else { continue };
+                    let Some(i) = path.find(&format!("/{dir}")) else {
+                        continue;
+                    };
+                    let Some(name) = path[i + 1 + dir.len()..].strip_suffix(&format!(".{ext}")) else {
+                        continue;
+                    };
                     if !out.iter().any(|t: &Template| t.path == *path) {
                         out.push(Template { name: name.to_owned(), path: path.clone() });
                     }
@@ -319,8 +358,39 @@ impl WebTools {
         out
     }
 
+    /// The spans of the document that lead to a handler: functional routes' method references.
+    fn links(&mut self, doc: &Document) -> Vec<Link> {
+        let Some(index) = self.endpoints.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else {
+            return Vec::new();
+        };
+        if !index.complete() {
+            return Vec::new();
+        }
+        let index = &*index;
+        let Some(mine) = index.files().get(&doc.path) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for e in &mine.endpoints {
+            let Some(handler) = &e.handler else { continue };
+            let targets = handler_targets(index, &doc.path, handler);
+            if !targets.is_empty() {
+                out.push(Link {
+                    at: handler.at,
+                    end: handler.end,
+                    tooltip: format!("Handler of {} {}", e.verb, e.path),
+                    targets,
+                });
+            }
+        }
+        out
+    }
+
     /// The view literals of the document and the templates each names.
     fn views(&mut self, doc: &Document) -> Vec<(Str, Vec<Template>)> {
+        if is_kotlin(&doc.path) {
+            return Vec::new();
+        }
         let literals = view_literals(&doc.text, &java::parse(&doc.text));
         if literals.is_empty() {
             return Vec::new();
@@ -338,6 +408,9 @@ impl WebTools {
 }
 
 fn problems(doc: &Document) -> Vec<Problem> {
+    if is_kotlin(&doc.path) {
+        return Vec::new();
+    }
     path_problems(&doc.text, &java::parse(&doc.text))
 }
 
@@ -345,7 +418,17 @@ impl Providers for WebTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let diagnostics: Vec<Diagnostic> = problems(doc).into_iter().map(|p| p.diagnostic).collect();
         let _ = host::publish_diagnostics(&doc.path, &diagnostics);
-        self.views(doc)
+        let links = self.links(doc).into_iter().map(|l| {
+            let others = if l.targets.len() > 1 { format!(" (+{} more)", l.targets.len() - 1) } else { String::new() };
+            LineMarker {
+                line: position(&doc.text, l.at).line,
+                icon: None,
+                tooltip: format!("{}{others}", l.tooltip),
+                target: l.targets.first().cloned(),
+            }
+        });
+        let views = self
+            .views(doc)
             .into_iter()
             .filter_map(|(s, found)| {
                 let first = found.first()?;
@@ -357,22 +440,35 @@ impl Providers for WebTools {
                     target: Some(first.location()),
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        views.into_iter().chain(links).collect()
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
-        let Some(at) = offset(&doc.text, at) else { return Vec::new() };
-        self.views(doc)
+        let Some(at) = offset(&doc.text, at) else {
+            return Vec::new();
+        };
+        let mut out: Vec<Location> = self
+            .views(doc)
             .into_iter()
             .filter(|(s, _)| s.holds(at))
             .flat_map(|(_, found)| found.into_iter().map(|t| t.location()))
-            .collect()
+            .collect();
+        out.extend(self.links(doc).into_iter().filter(|l| l.at <= at && at <= l.end).flat_map(|l| l.targets));
+        out
     }
 
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
-        let Some(offset) = offset(&doc.text, at) else { return Vec::new() };
+        let Some(offset) = offset(&doc.text, at) else {
+            return Vec::new();
+        };
+        if is_kotlin(&doc.path) {
+            return Vec::new();
+        }
         let literals = view_literals(&doc.text, &java::parse(&doc.text));
-        let Some(s) = literals.iter().find(|s| s.holds(offset)) else { return Vec::new() };
+        let Some(s) = literals.iter().find(|s| s.holds(offset)) else {
+            return Vec::new();
+        };
         let replace = range(&doc.text, s.at, s.end);
         let mut seen = BTreeSet::new();
         self.templates(doc)
@@ -414,6 +510,21 @@ register_plugin!(WebTools, providers);
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
+
+    const JAVA_ROUTES: &str = r#"package com.acme;
+
+@Configuration
+class Routes {
+    @Bean
+    RouterFunction<ServerResponse> routes() {
+        return RouterFunctions.route().GET("/x", this::list)
+            .path("/api", b -> b.GET("/users", Handler::list))
+            .build();
+    }
+
+    ServerResponse list(ServerRequest r) { return null; }
+}
+"#;
 
     const API: &str = r#"package com.acme.web;
 
@@ -556,6 +667,30 @@ class UserController {
             }]
         );
         assert!(tools.definition(&d, Position::new(22, 28)).is_empty(), "@ResponseBody returns a body");
+    }
+
+    #[test]
+    fn router_handler_reference_goes_to_the_method() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Routes.java", JAVA_ROUTES);
+        host.add_file(
+            "src/main/java/com/acme/Handler.java",
+            "class Handler {\n    ServerResponse list(ServerRequest r) { return null; }\n}\n",
+        );
+        let mut tools = WebTools::default();
+        let d = doc("src/main/java/com/acme/Routes.java", JAVA_ROUTES);
+        let markers = tools.line_markers(&d);
+        let found: Vec<_> =
+            markers.iter().map(|m| (m.line, m.target.as_ref().map(|t| t.path.rsplit('/').next().unwrap()))).collect();
+        assert_eq!(found[0], (6, Some("Routes.java")));
+        assert_eq!(found[1], (7, Some("Handler.java")));
+        assert!(markers.iter().all(|m| m.tooltip.starts_with("Handler of ")));
+        let at = Position::new(7, 50);
+        let targets = tools.definition(&d, at);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].range.start.line, 1);
+        assert!(tools.definition(&d, Position::new(6, 52)).len() == 1, "this::list, on the reference");
+        assert!(tools.definition(&d, Position::new(6, 15)).is_empty());
     }
 
     #[test]
