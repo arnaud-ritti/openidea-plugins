@@ -21,6 +21,26 @@ jobs:
           plugins=$(for f in plugins/*/Cargo.toml; do basename "$(dirname "$f")"; done | jq -R . | jq -sc .)
           echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
 
+  crates:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [spring-text, ui-kit]
+    defaults:
+      run:
+        working-directory: crates/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/${{ matrix.name }}
+
+      - run: cargo test
+
   versions:
     runs-on: ubuntu-latest
     steps:

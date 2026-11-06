@@ -20,7 +20,7 @@ activation = [
 
 [capabilities]
 required = ["project.read"]
-optional = ["clipboard"]
+optional = ["clipboard", "storage"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "code-actions", "line-markers"]

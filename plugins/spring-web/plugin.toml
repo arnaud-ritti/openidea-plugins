@@ -30,7 +30,7 @@ activation = [
 
 [capabilities]
 required = ["project.read"]
-optional = ["clipboard", "process:tee", "editor.read", "events"]
+optional = ["clipboard", "process:tee", "editor.read", "events", "storage"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers", "code-actions"]

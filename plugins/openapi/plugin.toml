@@ -14,7 +14,7 @@ activation = ["on-event:file-opened", "on-event:file-saved", "on-view:endpoints"
 
 [capabilities]
 required = ["project.read", "editor.read", "events"]
-optional = ["clipboard", "process:git", "process:tee"]
+optional = ["clipboard", "process:git", "process:tee", "storage"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "code-actions", "line-markers"]

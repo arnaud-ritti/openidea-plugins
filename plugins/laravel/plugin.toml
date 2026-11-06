@@ -25,7 +25,7 @@ activation = ["on-language:php", "on-language:blade", "on-file:resources/js/**"]
 [capabilities]
 required = ["project.read", "events"]
 # clipboard: Copy as curl, and the fallback of Create HTTP Request File. process:tee: bulk PHPDoc removal and factory/resource generators write files. Artisan commands run `php artisan`; editor.read: Create Missing Target reads the name under the cursor.
-optional = ["process:php", "process:tee", "editor.read", "clipboard"]
+optional = ["process:php", "process:tee", "editor.read", "clipboard", "storage"]
 
 [[contributes.commands]]
 id = "reindex"

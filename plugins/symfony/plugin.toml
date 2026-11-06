@@ -29,7 +29,7 @@ required = ["project.read"]
 # editor.*: Twig: Extend Template inserts the extends tag.
 # events: problems refresh on open and save; without it they are not published.
 # process:tee: Create Template writes the file; without it the path is copied.
-optional = ["process:php", "process:tee", "events", "editor.read", "editor.write", "clipboard"]
+optional = ["process:php", "process:tee", "events", "editor.read", "editor.write", "clipboard", "storage"]
 
 [[contributes.commands]]
 id = "reindex"
