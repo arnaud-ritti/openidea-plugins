@@ -334,6 +334,7 @@ fn shows_and_opens_names_in_the_tool_window() {
     let mut plugin = activated(&host);
     let ctx = host.invocation();
 
+    plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
     plugin.handle(VIEW, ViewEvent::Expand("group:route".into()), &ctx).unwrap();
     let View { body: Body::Tree(items), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a tree") };
     let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).take(6).collect();
@@ -2417,4 +2418,87 @@ fn create_missing_makes_the_class_named_by_new_and_refuses_existing_ones() {
 
     host.open_editor("/project/app/Http/X.php", "php", text, &[(2, 18, 2, 18)]);
     assert!(plugin.run_command("create-missing", &host.invocation(), None).is_err());
+}
+
+fn route_rows(view: &View) -> Vec<(String, String, String)> {
+    let Body::List(items) = &view.body else { panic!("not a list") };
+    items
+        .iter()
+        .map(|item| (item.key.clone(), item.label.clone(), item.detail.clone().unwrap_or_default()))
+        .collect()
+}
+
+#[test]
+fn laravel_window_has_routes_and_index_sections() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let ctx = host.invocation();
+
+    let view = plugin.render(VIEW, None, &ctx).unwrap();
+    assert!(matches!(view.body, Body::List(_)));
+    let labels: Vec<_> = view.toolbar.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(&labels[..2], ["\u{25cf} Routes", "Index"]);
+    assert!(labels.contains(&"Filter\u{2026}"));
+
+    plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
+    let view = plugin.render(VIEW, None, &ctx).unwrap();
+    assert!(matches!(view.body, Body::Tree(_)));
+    let labels: Vec<_> = view.toolbar.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(&labels[..2], ["Routes", "\u{25cf} Index"]);
+    assert!(!labels.contains(&"Filter\u{2026}"));
+    assert!(!labels.contains(&"Tree"));
+}
+
+#[test]
+fn routes_show_names_and_controller_methods() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let view = plugin.render(VIEW, None, &host.invocation()).unwrap();
+    let rows = route_rows(&view);
+    assert_eq!(rows[1], ("route:1".into(), "/posts".into(), "[GET] PostController \u{b7} posts.index".into()));
+    assert_eq!(rows[3], ("route:3".into(), "/admin/dashboard".into(), "[GET] PostController \u{b7} admin.dashboard".into()));
+}
+
+#[test]
+fn closure_routes_list_under_closure() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let view = plugin.render(VIEW, None, &host.invocation()).unwrap();
+    assert_eq!(route_rows(&view)[0], ("route:0".into(), "/".into(), "[GET] Closure \u{b7} home".into()));
+}
+
+#[test]
+fn filter_by_controller() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let ctx = host.invocation();
+
+    plugin.render(VIEW, None, &ctx).unwrap();
+    host.answer_next_prompt(Some(&["Closure"]));
+    plugin.handle(VIEW, ViewEvent::Button("routes:filter".into()), &ctx).unwrap();
+    let view = plugin.render(VIEW, None, &ctx).unwrap();
+    assert_eq!(route_rows(&view).len(), 1);
+    assert_eq!(view.status.as_deref(), Some("1 endpoints \u{b7} controller: Closure"));
+}
+
+#[test]
+fn activating_a_route_row_opens_its_definition() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let ctx = host.invocation();
+
+    plugin.handle(VIEW, ViewEvent::Activate("route:0".into()), &ctx).unwrap();
+    assert_eq!(host.opened_locations().len(), 1);
+}
+
+#[test]
+fn curl_row_action_copies_the_route() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    host.answer_next_prompt(Some(&["http://localhost:8000"]));
+    plugin.run_command("route-copy-curl", &host.invocation(), Some("route:1")).unwrap();
+    assert_eq!(host.clipboard().as_deref(), Some("curl -X GET 'http://localhost:8000/posts'"));
 }

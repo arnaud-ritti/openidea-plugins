@@ -11,7 +11,7 @@ documentation. Blade files need the aritti.blade plugin for highlighting."""
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "Daniel Espendiller (original Laravel Plugin)"]
 homepage = "https://github.com/Haehnchen/idea-php-laravel-plugin"
 license = "MIT"
-change-notes = """Unreleased: Laravel: 20 more file templates (Channel, Console Command, Http Exception, PHPUnit tests, Resource Collection, Class, Model, Dusk, Nova, Livewire Form, Fractal, Volt, Inertia pages, four Blade files); one problem listing the missing Route::resource methods; Use #[Scope] on all scope methods; column completion through `$query = Model::query()` variables; route and controller gutter links from the document indexer; Remove IDE Helper PHPDoc from Models; Generate for Model from the Project view with factory and resource bodies filled from migration columns (optional process:tee); Nova, Filament and Livewire form generators; Create Missing for Job, Mail, Event and similar classes; settings modelDirectories and reportMissingResourceMethods. Laravel: Livewire method, route controller and method problems, Find Unused Views, model/factory/policy/observer/event gutter links from a document indexer, component attribute and slot completion, relation-aware column completion, container name completion (app(), @inject, config providers), scope/constructor/facade/translation/rules intentions and 11 more file templates. Laravel: Run Artisan Command..., Generate with artisan make..., New Eloquent Model..., Generate for Model... and Create Missing View, Component or Controller ask for names and options, then run php artisan make:* in a terminal. 0.1.0: first release. Ported from the Laravel Plugin (de.espend.idea.laravel) 0.15.4, \
+change-notes = """Unreleased: Laravel: the tool window has Routes and Index sections; Routes is a flat list with method icons, a controller filter, a flat/tree toggle, and Copy as curl and Create HTTP Request File row actions. Laravel: 20 more file templates (Channel, Console Command, Http Exception, PHPUnit tests, Resource Collection, Class, Model, Dusk, Nova, Livewire Form, Fractal, Volt, Inertia pages, four Blade files); one problem listing the missing Route::resource methods; Use #[Scope] on all scope methods; column completion through `$query = Model::query()` variables; route and controller gutter links from the document indexer; Remove IDE Helper PHPDoc from Models; Generate for Model from the Project view with factory and resource bodies filled from migration columns (optional process:tee); Nova, Filament and Livewire form generators; Create Missing for Job, Mail, Event and similar classes; settings modelDirectories and reportMissingResourceMethods. Laravel: Livewire method, route controller and method problems, Find Unused Views, model/factory/policy/observer/event gutter links from a document indexer, component attribute and slot completion, relation-aware column completion, container name completion (app(), @inject, config providers), scope/constructor/facade/translation/rules intentions and 11 more file templates. Laravel: Run Artisan Command..., Generate with artisan make..., New Eloquent Model..., Generate for Model... and Create Missing View, Component or Controller ask for names and options, then run php artisan make:* in a terminal. 0.1.0: first release. Ported from the Laravel Plugin (de.espend.idea.laravel) 0.15.4, \
 source revision 3a07f4a5f67dc0aacbcd6fdb11a8b5c9814803b0 (tag 0.15.4): routes, controllers, views, config, translations, \
 assets and the Blade layout markers. Env keys, middleware, route groups, JSON translations, components, Vite entries, \
 validation rules, abilities, columns, problems, the tool window and artisan commands follow Laravel's documentation. This port works from a text index of the project, so the features that \
@@ -24,8 +24,8 @@ activation = ["on-language:php", "on-language:blade", "on-file:resources/js/**"]
 
 [capabilities]
 required = ["project.read", "events"]
-# process:tee: bulk PHPDoc removal and factory/resource generators write files. Artisan commands run `php artisan`; editor.read: Create Missing Target reads the name under the cursor.
-optional = ["process:php", "process:tee", "editor.read"]
+# clipboard: Copy as curl, and the fallback of Create HTTP Request File. process:tee: bulk PHPDoc removal and factory/resource generators write files. Artisan commands run `php artisan`; editor.read: Create Missing Target reads the name under the cursor.
+optional = ["process:php", "process:tee", "editor.read", "clipboard"]
 
 [[contributes.commands]]
 id = "reindex"
@@ -118,6 +118,16 @@ title = "Laravel: Remove IDE Helper PHPDoc from Models"
 category = "Laravel"
 
 [[contributes.commands]]
+id = "route-copy-curl"
+title = "Laravel: Copy as curl"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "route-create-http"
+title = "Laravel: Create HTTP Request File"
+category = "Laravel"
+
+[[contributes.commands]]
 id = "reveal"
 title = "Laravel: Show Laravel Tool Window"
 category = "Laravel"
@@ -141,6 +151,18 @@ menu = "viewItem.context"
 view = "laravel"
 command = "reindex"
 when = "viewItemKind == group"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "laravel"
+command = "route-copy-curl"
+when = "viewItemKind == route"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "laravel"
+command = "route-create-http"
+when = "viewItemKind == route"
 
 [[contributes.runDetectors]]
 id = "serve"
@@ -473,3 +495,33 @@ id = "laravel-fractal-transformer"
 name = "Laravel Fractal Transformer"
 extension = "php"
 path = "templates/FractalTransformer.php"
+
+[[contributes.fileIcons]]
+id = "route-get"
+patterns = ["*.laravel-route-get"]
+icon = "icons/route-get.svg"
+
+[[contributes.fileIcons]]
+id = "route-post"
+patterns = ["*.laravel-route-post"]
+icon = "icons/route-post.svg"
+
+[[contributes.fileIcons]]
+id = "route-put"
+patterns = ["*.laravel-route-put"]
+icon = "icons/route-put.svg"
+
+[[contributes.fileIcons]]
+id = "route-delete"
+patterns = ["*.laravel-route-delete"]
+icon = "icons/route-delete.svg"
+
+[[contributes.fileIcons]]
+id = "route-patch"
+patterns = ["*.laravel-route-patch"]
+icon = "icons/route-patch.svg"
+
+[[contributes.fileIcons]]
+id = "route-other"
+patterns = ["*.laravel-route-other"]
+icon = "icons/route-other.svg"

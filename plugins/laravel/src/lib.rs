@@ -34,12 +34,17 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, Position, Range, Severity, TextEdit};
 use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, host, text};
+use ui_kit::routes::{Handler, Route, RouteEvent, RouteList, copy_as_curl, create_http_file};
+use ui_kit::sections::{SectionDef, Switcher};
 
 pub use index::Index;
 use index::{AddName, Entry, Lines, Names};
 use refs::{Kind, Reference};
 
 const VIEW: &str = "laravel";
+const PLUGIN_ID: &str = "aritti.laravel";
+const DEFAULT_BASE_URL: &str = "http://localhost:8000";
+const SECTIONS: &[SectionDef] = &[SectionDef { id: "routes", label: "Routes" }, SectionDef { id: "index", label: "Index" }];
 const SOURCE: &str = "Laravel";
 const CONTROLLERS_DIRECTORY: &str = "app/Http/Controllers/";
 
@@ -478,6 +483,8 @@ pub struct Main {
     expanded: BTreeSet<String>,
     /// Project root and time `migrate-fresh` was first asked for.
     fresh_asked: Option<(String, Instant)>,
+    sections: Option<Switcher>,
+    route_list: Option<RouteList>,
 }
 
 impl Main {
@@ -650,7 +657,7 @@ impl Plugin for Main {
         Ok(())
     }
 
-    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
         match id {
             "reindex" => {
                 let _task = host::begin_task("Indexing Laravel projects", false);
@@ -666,6 +673,16 @@ impl Plugin for Main {
             "migrate" => self.artisan(ctx, "migrate"),
             "storage-link" => self.artisan(ctx, "storage:link"),
             "db-seed" => self.artisan(ctx, "db:seed"),
+            "route-copy-curl" | "route-create-http" => {
+                let Some(route) = arg.and_then(|key| self.route_at(key, ctx)) else {
+                    return Ok(None);
+                };
+                match id {
+                    "route-copy-curl" => copy_as_curl(&route, DEFAULT_BASE_URL)?,
+                    _ => create_http_file(&route, DEFAULT_BASE_URL)?,
+                }
+                Ok(None)
+            }
             "migrate-fresh" => {
                 let root = ctx.project().and_then(|project| project.root().ok()).unwrap_or_default();
                 let confirmed = self
@@ -1207,6 +1224,28 @@ fn group_names<'a>(index: &'a Index, group: &str) -> Option<&'a Names> {
     }
 }
 
+fn route_list_of(index: &Index) -> Vec<Route> {
+    index
+        .route_defs
+        .iter()
+        .map(|entry| {
+            let def = &entry.def;
+            let handler = match &def.controller {
+                Some((class, method)) => Handler { class: class.clone(), member: Some(method.clone()) },
+                None => Handler { class: def.action.clone(), member: None },
+            };
+            let end = Position::new(entry.at.line, entry.at.character + def.width as u32);
+            Route {
+                method: def.methods.split('|').next().unwrap_or_default().to_owned(),
+                path: def.uri.clone(),
+                handler,
+                name: def.name.clone(),
+                location: Some(Location { path: entry.path.clone(), range: Range::new(entry.at, end) }),
+            }
+        })
+        .collect()
+}
+
 fn entry_for<'a>(index: &'a Index, key: &str) -> Option<(&'a str, Position, u32)> {
     let (group, name) = key.split_once(':')?;
     if group == "route" {
@@ -1263,6 +1302,19 @@ impl Main {
         items
     }
 
+    fn sections(&mut self) -> &mut Switcher {
+        self.sections.get_or_insert_with(|| Switcher::new("laravel.section", SECTIONS))
+    }
+
+    fn route_list(&mut self) -> &mut RouteList {
+        self.route_list.get_or_insert_with(|| RouteList::new("laravel.routes", PLUGIN_ID))
+    }
+
+    fn route_at(&self, key: &str, ctx: &Invocation) -> Option<Route> {
+        let number: usize = key.strip_prefix("route:")?.parse().ok()?;
+        route_list_of(self.view_index(ctx)?).into_iter().nth(number)
+    }
+
     fn view_index(&self, ctx: &Invocation) -> Option<&Index> {
         let root = ctx.project()?.root().ok()?;
         self.indexes.get(&root)
@@ -1272,21 +1324,54 @@ impl Main {
 impl Views for Main {
     fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
         let reindex = Button::new("reindex", "Reindex").icon("refresh");
+        let routes_active = self.sections().active() == "routes";
         let Some(index) = self.view_index(ctx) else {
             return Ok(View::message("This project is not a Laravel application.").button(reindex));
         };
 
-        let mut view = View::new(Body::Tree(self.tree(index)))
-            .button(reindex)
-            .button(Button::new("route-list", "Route List").icon("terminal"))
-            .button(Button::new("optimize-clear", "Clear Caches").icon("build-project"));
-        if index.partial {
+        let partial = index.partial;
+        let toolbar = |body| {
+            View::new(body)
+                .button(reindex)
+                .button(Button::new("route-list", "Route List").icon("terminal"))
+                .button(Button::new("optimize-clear", "Clear Caches").icon("build-project"))
+        };
+        let mut view = if routes_active {
+            let routes = route_list_of(index);
+            let list = self.route_list();
+            list.set_routes(routes);
+            list.render(toolbar(Body::Message(String::new())))
+        } else {
+            toolbar(Body::Tree(self.tree(index)))
+        };
+        if partial && view.status.is_none() {
             view = view.status("Index incomplete (time limit reached)");
         }
-        Ok(view)
+        Ok(self.sections().buttons(view, &[]))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if self.sections().handle(&event) {
+            host::refresh_view(view);
+            return Ok(());
+        }
+
+        if self.sections().active() == "routes" {
+            match self.route_list().handle(&event) {
+                RouteEvent::Changed => {
+                    host::refresh_view(view);
+                    return Ok(());
+                }
+                RouteEvent::Open(route) => {
+                    if let Some(location) = route.location {
+                        host::open_location(&location.path, location.range.start.line, location.range.start.character)?;
+                    }
+                    return Ok(());
+                }
+                RouteEvent::Ignored => {}
+            }
+        }
+
         match event {
             ViewEvent::Expand(key) => {
                 self.expanded.insert(key);
