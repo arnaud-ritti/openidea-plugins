@@ -242,7 +242,7 @@ fn go_to(
     let text = editor.document()?.text;
     let (line, _) = caret(editor, &text)?;
     let (format, events) = parsed_events(config, &text);
-    let entries: Vec<_> = events.iter().map(|(e, p)| (e.lines.clone(), p.severity(format), log::has_exception(e.text))).collect();
+    let entries: Vec<_> = events.iter().map(|(e, p)| (e.lines.clone(), p.severity(format), log::has_exception(e.text, p.severity(format) == Some(Severity::Error)))).collect();
     let at = entries.iter().position(|(lines, ..)| lines.contains(&line)).unwrap_or(entries.len().saturating_sub(1));
 
     let Some((lines, ..)) = pick(&entries, at) else {

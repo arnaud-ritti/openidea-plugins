@@ -384,15 +384,26 @@ static EXCEPTION_NAME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:\b[A-Z][A-Za-z0-9_$]*(?:Exception|Error)|[A-Za-z0-9_$]\.(?:Exception|Error))[:(]").unwrap()
 });
 
-/// Whether the event shows an exception anywhere: a `FooException:` / `Foo.Error(` name, a `Caused by:`
-/// or Python traceback line, or a stack frame.
-pub fn has_exception(event: &str) -> bool {
-    event.lines().any(|line| {
+fn is_continuation_frame_line(line: &str) -> bool {
+    let after_hash = line.strip_prefix('#').and_then(|rest| rest.chars().next());
+    line.starts_with(char::is_whitespace)
+        || after_hash.is_some_and(|c| c.is_ascii_digit())
+        || line.starts_with("at ")
+        || line.starts_with("File \"")
+        || line.starts_with("from ")
+}
+
+/// Whether the event shows an exception: a `FooException:` / `Foo.Error(` name, a `Caused by:` or Python
+/// traceback line anywhere, or a stack frame on a continuation line (on the first line only when the
+/// event is error-level, as plain messages mention `host:port` and `file.ext:N`).
+pub fn has_exception(event: &str, first_line_is_error: bool) -> bool {
+    event.lines().enumerate().any(|(index, line)| {
         let trimmed = line.trim_start();
+        let frame_allowed = if index == 0 { first_line_is_error } else { is_continuation_frame_line(line) };
         trimmed.starts_with("Caused by:")
             || trimmed.starts_with("Traceback (most recent call last)")
             || is_match(&EXCEPTION_NAME, line)
-            || !crate::source::frames(line).is_empty()
+            || frame_allowed && !crate::source::frames(line).is_empty()
     })
 }
 
@@ -630,12 +641,18 @@ mod tests {
             "2026-11-06 10:00:00 ERROR - boom\nCaused by: java.lang.Foo",
             "2026-11-06 10:00:00 ERROR - boom\nTraceback (most recent call last):\n  line",
             "[2026-11-06 10:00:00] local.ERROR: boom\n#0 /var/www/Foo.php(12): fn()",
-            "[2026-11-06 10:00:00] local.ERROR: boom\n#0 /var/www/Foo.php(12): fn()",
             "failed with Foo.Error: nope",
         ];
         for event in positives {
-            assert!(has_exception(event), "{event}");
+            assert!(has_exception(event, false), "{event}");
         }
+    }
+
+    #[test]
+    fn exception_detection_accepts_a_frame_on_an_error_first_line() {
+        let fatal = "Fatal error: boom: file /Users/me/App/Sources/main.swift, line 12";
+        assert!(has_exception(fatal, true));
+        assert!(!has_exception(fatal, false));
     }
 
     #[test]
@@ -647,9 +664,13 @@ mod tests {
             "no errors found",
             "error-free build",
             "profile x.txt, line 3",
+            "see foo.txt:3",
+            "Connecting to redis.internal:6379",
+            "https://example.com:8080/",
+            "Loaded app/Models/User.php:45",
         ];
         for event in negatives {
-            assert!(!has_exception(event), "{event}");
+            assert!(!has_exception(event, false), "{event}");
         }
     }
 
