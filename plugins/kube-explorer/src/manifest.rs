@@ -37,6 +37,8 @@ pub struct Doc {
     /// The keys directly under `spec:` and `metadata:` (as values spanning the key) with their scalar values.
     pub spec_keys: Vec<Value>,
     pub spec_inline: bool,
+    /// Scalar values under `spec`, as `key` or `parent.key` (one level down), with their span.
+    pub spec_values: Vec<(String, Value)>,
     pub metadata_keys: Vec<(String, Value, Option<Value>)>,
     /// The keys under `metadata.annotations`, with their scalar values.
     pub annotation_keys: Vec<(Value, Option<Value>)>,
@@ -240,6 +242,18 @@ fn scan_section(doc: &mut Doc, lines: &[Line], mask: &[bool], at: usize, section
     for j in children(lines, mask, at) {
         let Some((key, key_start, value)) = key_value(lines[j].content(), lines[j].content_start()) else { continue };
         let key_span = Value { text: key.clone(), start: key_start, end: key_start + key.len() };
+        if section == "spec" {
+            match &value {
+                Some(v) => doc.spec_values.push((key.clone(), v.clone())),
+                None => {
+                    for k in children(lines, mask, j) {
+                        if let Some((child, _, Some(v))) = key_value(lines[k].content(), lines[k].content_start()) {
+                            doc.spec_values.push((format!("{key}.{child}"), v));
+                        }
+                    }
+                }
+            }
+        }
         match section {
             "spec" => doc.spec_keys.push(key_span.clone()),
             _ => doc.metadata_keys.push((key.clone(), key_span.clone(), value.clone())),

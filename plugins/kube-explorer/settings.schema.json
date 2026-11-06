@@ -65,6 +65,16 @@
       "title": "Report deprecated or removed keys (spec.serviceAccount, spec.rollbackTo, the ingress.class annotation, ...)",
       "default": true
     },
+    "checkRequiredKeys": {
+      "type": "boolean",
+      "title": "Hint at a key the API requires but a Pod, workload, CronJob, NetworkPolicy, claim or binding manifest lacks (spec.containers, spec.template, roleRef, ...)",
+      "default": true
+    },
+    "checkFieldValues": {
+      "type": "boolean",
+      "title": "Hint at a value of a built-in kind that is not one of the field's values (restartPolicy, Service type, strategy, ...) or not an integer or boolean where one is required",
+      "default": true
+    },
     "checkHelmValues": {
       "type": "boolean",
       "title": "Hint at a .Values path in a chart template that values.yaml does not define",

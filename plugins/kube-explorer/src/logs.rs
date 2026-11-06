@@ -1,13 +1,13 @@
 //! A log snapshot in the panel: one `kubectl logs --tail=N --timestamps` run,
 //! filtered in the plugin by text or regular expression, case and start time,
-//! with soft wrap and a copy of the shown lines. Following a log stays a
-//! terminal command: a view cannot stream and a plugin cannot write a file.
+//! with soft wrap, hideable time and source fields, a copy of the shown lines and a download
+//! of them through `tee`. Following a log stays a terminal command: a view cannot stream.
 
 use openidea_plugin::views::{Body, Button, View};
 use openidea_plugin::{Error, NotificationLevel, host};
 use regex_lite::{Regex, RegexBuilder, escape};
 
-use crate::{KubeExplorer, REQUEST_TIMEOUT, WORKLOADS, escape_html};
+use crate::{KubeExplorer, REQUEST_TIMEOUT, TEE, WORKLOADS, escape_html, failure, file_safe};
 
 const DEFAULT_TAIL: f64 = 1000.0;
 const MAX_LOG_BYTES: usize = 2 << 20;
@@ -23,7 +23,10 @@ pub struct LogView {
     regex: bool,
     match_case: bool,
     since: String,
+    until: String,
     wrap: bool,
+    show_time: bool,
+    show_source: bool,
 }
 
 struct Shown<'a> {
@@ -32,8 +35,15 @@ struct Shown<'a> {
     problem: Option<String>,
 }
 
+fn split_source(line: &str) -> (&str, &str) {
+    match line.strip_prefix('[').and_then(|rest| rest.find("] ")) {
+        Some(close) => (&line[..close + 3], &line[close + 3..]),
+        None => ("", line),
+    }
+}
+
 fn timestamp(line: &str) -> Option<&str> {
-    let token = line.split(' ').next()?;
+    let token = split_source(line).1.split(' ').next()?;
     let digits = token.get(..4)?;
     (digits.bytes().all(|b| b.is_ascii_digit()) && token.as_bytes().get(4) == Some(&b'-') && token.contains('T')).then_some(token)
 }
@@ -67,14 +77,16 @@ impl LogView {
             }
         };
         let since = self.since.trim().replace(' ', "T");
-        let mut after_since = since.is_empty();
+        let until = self.until.trim().replace(' ', "T");
+        let mut in_range = since.is_empty();
         let mut lines = Vec::new();
         for line in &self.lines {
-            if let (Some(stamp), false) = (timestamp(line), since.is_empty()) {
-                let length = since.len().min(stamp.len());
-                after_since = stamp[..length] >= since[..length];
+            if let Some(stamp) = timestamp(line) {
+                let after = since.is_empty() || stamp[..since.len().min(stamp.len())] >= since[..since.len().min(stamp.len())];
+                let before = until.is_empty() || stamp[..until.len().min(stamp.len())] <= until[..until.len().min(stamp.len())];
+                in_range = after && before;
             }
-            if after_since && matcher.as_ref().is_none_or(|m| m.is_match(line)) {
+            if in_range && matcher.as_ref().is_none_or(|m| m.is_match(line)) {
                 lines.push(line.as_str());
             }
         }
@@ -84,11 +96,30 @@ impl LogView {
         Shown { lines, matcher, problem }
     }
 
+    fn display(&self, line: &str) -> String {
+        let (source, rest) = split_source(line);
+        let rest = match (self.show_time, timestamp(line)) {
+            (false, Some(stamp)) => rest[stamp.len()..].trim_start(),
+            _ => rest,
+        };
+        match self.show_source {
+            true => format!("{source}{rest}"),
+            false => rest.to_owned(),
+        }
+    }
+
+    fn displayed(&self, shown: &Shown) -> String {
+        shown.lines.iter().map(|line| self.display(line)).collect::<Vec<_>>().join("\n")
+    }
+
     fn page(&self, shown: &Shown) -> String {
         let body: Vec<String> = shown
             .lines
             .iter()
-            .map(|line| match &shown.matcher {
+            .map(|raw| {
+                let line = self.display(raw);
+                let line = line.as_str();
+                match &shown.matcher {
                 None => escape_html(line),
                 Some(matcher) => {
                     let mut out = String::new();
@@ -101,13 +132,15 @@ impl LogView {
                     out.push_str(&escape_html(&line[at..]));
                     out
                 }
+                }
             })
             .collect();
         let white_space = if self.wrap { "pre-wrap" } else { "pre" };
         format!(
             "<style>:root{{--bg:Canvas;--fg:CanvasText}}body{{margin:0;background:var(--openidea-bg,var(--bg));color:var(--openidea-fg,var(--fg))}}\
              pre{{margin:0;padding:8px 10px;font:12px/1.5 var(--openidea-font-mono,ui-monospace,Menlo,monospace);white-space:{white_space};word-break:break-all}}\
-             mark{{background:color-mix(in srgb,var(--openidea-warning,#d6ae58) 55%,transparent);color:inherit}}</style><pre>{}</pre>",
+             mark{{background:color-mix(in srgb,var(--openidea-warning,#d6ae58) 55%,transparent);color:inherit}}</style><pre>{}</pre>\
+             <script>window.openidea&&openidea.onMessage(function(m){{if(m==='end')window.scrollTo(0,document.documentElement.scrollHeight)}})</script>",
             body.join("\n")
         )
     }
@@ -127,23 +160,58 @@ impl LogView {
             .button(Button::new("back", "Back").icon("arrow-left"))
             .button(Button::new("log-filter", "Filter…").icon("search"))
             .button(Button::new("log-since", "Since…").icon("history"))
+            .button(Button::new("log-until", "Until…"))
             .button(Button::new("log-regex", &toggle("Regex", self.regex)))
             .button(Button::new("log-case", &toggle("Match case", self.match_case)))
             .button(Button::new("log-wrap", &toggle("Wrap", self.wrap)))
+            .button(Button::new("log-time", &toggle("Time", self.show_time)))
+            .button(Button::new("log-source", &toggle("Source", self.show_source)))
+            .button(Button::new("log-end", "Scroll to end").icon("arrow-down"))
+            .button(Button::new("log-clear", "Clear").icon("trash"))
             .button(Button::new("log-refresh", "Refresh").icon("refresh"))
             .button(Button::new("log-copy", "Copy").icon("copy"))
+            .button(Button::new("log-download", "Download…").icon("download"))
     }
 }
 
 impl KubeExplorer {
+    fn download_log(&self) -> Result<(), Error> {
+        let Some(view) = &self.log_view else { return Ok(()) };
+        let shown = view.shown();
+        let root = host::projects().ok().and_then(|projects| projects.first().and_then(|project| project.root().ok()));
+        let file = format!("{}.log", file_safe(&format!("{}-{}", view.kind, view.row)));
+        let suggestion = root.map_or(format!("/tmp/{file}"), |root| format!("{}/{file}", root.trim_end_matches('/')));
+        let Some(path) = host::input("Write the shown lines to (absolute path, overwritten)", Some(&suggestion))? else { return Ok(()) };
+        let path = path.trim();
+        if !path.starts_with('/') {
+            return Err("Enter an absolute path.".into());
+        }
+        let mut text = view.displayed(&shown);
+        text.push('\n');
+        let out = match host::run_process(TEE, &[path.to_owned()], Some(&text)) {
+            Ok(out) => out,
+            Err(Error::Denied(_)) => {
+                host::notify(NotificationLevel::Info, "Download logs", "Allow the optional tee capability for Kube Explorer to write the shown lines to a file.");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if out.status != Some(0) {
+            return Err(failure(TEE, &out.stderr, out.status));
+        }
+        let _ = host::open_location(path, 0, 0);
+        crate::config::notify_success("Logs saved", &format!("{} lines in {path}", shown.lines.len()));
+        Ok(())
+    }
+
     fn fetch_log_lines(&self, kind: &str, row: &str) -> Result<(Vec<String>, bool), Error> {
         let (namespace, name) = self.split_scope(kind, row)?;
         let tail = host::setting_number("logViewerLines").unwrap_or(DEFAULT_TAIL).clamp(10.0, 20000.0) as u32;
         let tail = format!("--tail={tail}");
         let target = format!("{kind}/{name}");
         let args: Vec<&str> = match kind {
-            "pods" => vec!["logs", &name, "--timestamps", "--all-containers", &tail, REQUEST_TIMEOUT],
-            _ => vec!["logs", &target, "--all-pods=true", "--all-containers", "--max-log-requests=20", "--timestamps", &tail, REQUEST_TIMEOUT],
+            "pods" => vec!["logs", &name, "--timestamps", "--prefix", "--all-containers", &tail, REQUEST_TIMEOUT],
+            _ => vec!["logs", &target, "--all-pods=true", "--all-containers", "--max-log-requests=20", "--timestamps", "--prefix", &tail, REQUEST_TIMEOUT],
         };
         let out = self.kubectl_in(namespace.as_deref(), &args, None)?;
         let (text, truncated) = cap(out);
@@ -167,7 +235,10 @@ impl KubeExplorer {
             regex: previous.as_ref().is_some_and(|v| v.regex),
             match_case: previous.as_ref().is_some_and(|v| v.match_case),
             since: String::new(),
+            until: String::new(),
             wrap: previous.as_ref().is_none_or(|v| v.wrap),
+            show_time: previous.as_ref().is_none_or(|v| v.show_time),
+            show_source: previous.as_ref().is_none_or(|v| v.show_source),
         });
         self.details = None;
         host::refresh_view(crate::TREE);
@@ -188,12 +259,23 @@ impl KubeExplorer {
                 };
                 view.since = text.trim().to_owned();
             }
+            "log-until" => {
+                let Some(text) = host::input("Show lines up to this time, e.g. 2025-11-06T12:00 (UTC, empty: all)", Some(&view.until))? else {
+                    return Ok(());
+                };
+                view.until = text.trim().to_owned();
+            }
+            "log-time" => view.show_time = !view.show_time,
+            "log-source" => view.show_source = !view.show_source,
+            "log-end" => return host::post_view_message(crate::TREE, "end"),
+            "log-clear" => view.lines.clear(),
+            "log-download" => return self.download_log(),
             "log-regex" => view.regex = !view.regex,
             "log-case" => view.match_case = !view.match_case,
             "log-wrap" => view.wrap = !view.wrap,
             "log-copy" => {
                 let shown = view.shown();
-                let text = shown.lines.join("\n");
+                let text = view.displayed(&shown);
                 match host::copy_to_clipboard(&text) {
                     Ok(()) => crate::config::notify_success("Logs copied", &format!("{} lines", shown.lines.len())),
                     Err(Error::Denied(_)) => host::notify(
@@ -242,7 +324,10 @@ mod tests {
             regex: false,
             match_case: false,
             since: String::new(),
+            until: String::new(),
             wrap: true,
+            show_time: true,
+            show_source: true,
         }
     }
 
@@ -314,7 +399,7 @@ mod tests {
         host.set_setting("logViewerLines", "50");
         let mut kube = KubeExplorer { namespace: Some("shop".into()), ..Default::default() };
         kube.open_log_view("pods", "web").unwrap();
-        assert_eq!(runs.borrow()[0], ["--namespace=shop", "logs", "web", "--timestamps", "--all-containers", "--tail=50", REQUEST_TIMEOUT]);
+        assert_eq!(runs.borrow()[0], ["--namespace=shop", "logs", "web", "--timestamps", "--prefix", "--all-containers", "--tail=50", REQUEST_TIMEOUT]);
 
         host.answer_next_prompt(Some(&["error"]));
         kube.log_button("log-filter").unwrap();
@@ -351,6 +436,61 @@ mod tests {
         kube.namespace = Some("*".into());
         assert!(kube.open_log_view("pods", "--bad").is_err());
         assert!(runs.borrow().is_empty());
+    }
+
+    const PREFIXED: &str = "[pod/web/app] 2025-11-06T09:00:00Z one\n[pod/web/side] 2025-11-06T10:00:00Z two\n[pod/web/app] 2025-11-06T11:00:00Z three\n";
+
+    fn prefixed() -> LogView {
+        LogView { lines: PREFIXED.lines().map(str::to_owned).collect(), ..view("") }
+    }
+
+    #[test]
+    fn until_bounds_the_range_and_the_fields_can_be_hidden() {
+        let mut v = prefixed();
+        v.since = "2025-11-06T09:30".into();
+        v.until = "2025-11-06T10:30".into();
+        assert_eq!(texts(&v), ["[pod/web/side] 2025-11-06T10:00:00Z two"]);
+        v.show_time = false;
+        assert_eq!(v.display(texts(&v)[0].as_str()), "[pod/web/side] two");
+        v.show_source = false;
+        assert_eq!(v.display(texts(&v)[0].as_str()), "two");
+    }
+
+    #[test]
+    fn clear_scroll_and_field_buttons_change_the_view() {
+        let (host, _) = host(PREFIXED);
+        let mut kube = KubeExplorer::default();
+        kube.open_log_view("pods", "web").unwrap();
+        kube.log_button("log-source").unwrap();
+        assert!(!kube.log_view.as_ref().unwrap().show_source);
+        kube.log_button("log-end").unwrap();
+        assert_eq!(host.view_messages(), [("kube".to_owned(), "end".to_owned())]);
+        kube.log_button("log-clear").unwrap();
+        assert!(kube.log_view.as_ref().unwrap().lines.is_empty());
+    }
+
+    #[test]
+    fn download_writes_the_shown_lines_with_tee_and_without_it_only_notifies() {
+        let (host, _) = host(PREFIXED);
+        let host = host.with_capabilities(&["process:kubectl", "process:tee", "storage"]);
+        let written: std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, String)>>> = Default::default();
+        let seen = written.clone();
+        host.on_process("tee", move |args, stdin| {
+            seen.borrow_mut().push((args.to_vec(), stdin.unwrap_or_default().to_owned()));
+            Ok(ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+        });
+        let mut kube = KubeExplorer::default();
+        kube.open_log_view("pods", "web").unwrap();
+        kube.log_view.as_mut().unwrap().filter = "two".into();
+        host.answer_next_prompt(Some(&["/tmp/web.log"]));
+        kube.log_button("log-download").unwrap();
+        assert_eq!(written.borrow()[0].0, ["/tmp/web.log"]);
+        assert_eq!(written.borrow()[0].1, "[pod/web/side] 2025-11-06T10:00:00Z two\n");
+
+        let denied = MockHost::install().with_capabilities(&["process:kubectl", "storage"]);
+        denied.answer_next_prompt(Some(&["/tmp/web.log"]));
+        kube.log_button("log-download").unwrap();
+        assert!(denied.notifications()[0].body.contains("tee"));
     }
 
     #[test]

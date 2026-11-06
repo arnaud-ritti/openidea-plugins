@@ -46,9 +46,14 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   --timestamps` snapshot (`logViewerLines`, 1000 by default; at most the newest 2 MiB and
   5000 lines shown) in the panel. Filter… (text, or a regular expression with Regex on,
   matches highlighted), Match case, Since… (a UTC date or time, compared with the
-  timestamps), Wrap, Refresh, and Copy, which puts the shown lines on the clipboard
-  (optional `clipboard`; the plugin cannot write a file). Following a log stays in
-  the terminal (Logs, Select Log Sources).
+  timestamps), Until… (the same for the end of the range), Wrap, Time and Source (show
+  or hide the timestamp and the `[pod/container]` prefix of each line), Scroll to end,
+  Clear (empties the view; Refresh reads the log again), Refresh, Copy (the shown lines
+  on the clipboard, optional `clipboard`) and Download… (writes the shown lines, as
+  displayed, to an absolute path you confirm, by default `<project>/<kind>-<name>.log`;
+  optional `process:tee`, overwrites the file). Scroll to end relies on the page's
+  script, which the IDE may block. Following a log stays in the terminal (Logs, Select
+  Log Sources).
 - **Completion in YAML**: in an empty document `kpod`, `kdeploy`, `ksts`, `kds`, `kjob`,
   `kcronjob`, `ksvc`, `king`, `kcm`, `ksecret`, `kns`, `krole`, `krb`, `kcr`, `kcrb`
   expand to the manifests of the New-file templates. In a chart's template, inside
@@ -68,9 +73,10 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   `process:telepresence`).
 - **Gutter markers** (indexer): a reference to a ConfigMap, Secret, Service, claim or
   service account has a marker that goes to its definition, and a definition has one
-  that goes to the manifests using it. Names are matched by kind and name across all
-  open YAML files, not by namespace, so equal names in two namespaces can pick the
-  wrong target.
+  that goes to the manifests using it. The indexer reads every YAML file of the project
+  (up to 4096 anchors per file), and names are matched by kind and name, not by
+  namespace, so equal names in two namespaces can pick the wrong target. The markers
+  need the optional `project.read`: without it, or in an untrusted project, there are none.
 - **New file templates** (File › New): Pod, Deployment, StatefulSet, DaemonSet, Job,
   CronJob, Service, Ingress, ConfigMap, Secret (`stringData` placeholder), Namespace,
   Role, RoleBinding, ClusterRole, ClusterRoleBinding and CertificateSigningRequest, on current stable
@@ -106,9 +112,22 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   bundled table), `unknown-kind` (a kind its core, apps, batch, networking.k8s.io or rbac
   group does not have; custom resources, other groups, `*List`, anchors and Helm files
   are never judged), `read-only-field` (`status`, `metadata.uid`, `resourceVersion`, ...;
-  Info) and `deprecated-key` (`spec.serviceAccount`, `spec.rollbackTo`,
-  `spec.loadBalancerIP`, the `ingress.class` and `storage-class` annotations,
-  `metadata.clusterName`). In a chart template `helm-unknown-value` (an Info: a `.Values`
+  Info; also `ComponentStatus`, `Binding` and `Eviction`, which are not applied) and
+  `deprecated-key` (`spec.serviceAccount`, `spec.rollbackTo`, `spec.loadBalancerIP`, the
+  `ingress.class`, `storage-class`, `storage-provisioner` and pod seccomp annotations,
+  `metadata.clusterName`, `Endpoints`, `ComponentStatus`, the `Recycle` reclaim policy).
+  `missing-key` (an Info: `spec.containers` of a Pod, `spec.template` of a workload that
+  has a selector, `spec.serviceName`, a CronJob's `schedule` or `jobTemplate`,
+  `spec.podSelector`, a claim's `accessModes`, `roleRef`, ...; a document without its
+  companion keys is taken for a patch and left alone; switch `checkRequiredKeys`) and
+  `invalid-value` (an Info: a value outside the known set of `restartPolicy`,
+  `dnsPolicy`, Service `type`, the traffic and affinity policies, update strategies,
+  `concurrencyPolicy`, `completionMode`, `volumeMode`, and a non-number or non-boolean in
+  the numeric and boolean `spec` fields; templated values are skipped; switch
+  `checkFieldValues`). The kind tables cover the core, apps, batch, networking and rbac
+  kinds plus a few of autoscaling, policy, storage, scheduling, coordination, discovery,
+  node, certificates, admissionregistration and apiextensions; the other kinds of those
+  groups are only checked for existing. In a chart template `helm-unknown-value` (an Info: a `.Values`
   path whose first missing segment is not in `values.yaml`; quiet for `global`, `tpl`,
   `with`/`range`/`define` bodies, aliases in `values.yaml`, charts with `dependencies`
   or `charts/`, and a missing last key next to `default`, `if`, `required`) and
@@ -116,7 +135,10 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   chart's `templates/`). Each has a switch in the settings.
 - **Commands** on the open file: Apply, Validate (server dry run), Diff,
   Delete Manifest Resources (lists them with a server dry run, then waits for
-  Confirm Delete), Render / Apply Kustomization (the file's directory), Preview
+  Confirm Delete), Reload Manifest from Cluster (replaces each document of the open
+  file with `kubectl get -o yaml` of the same kind, name and namespace, keeping leading
+  comments; one undo step; needs the optional `editor.write`; a document the cluster
+  does not have is left), Render / Apply Kustomization (the file's directory), Preview
   Helm Template, Lint Helm Chart and Update Helm Dependencies (the chart
   around the file; optional `process:helm`). Update Helm Repositories runs
   `helm repo update` (also optional `process:helm`; if denied, a notification
@@ -129,8 +151,7 @@ Settings › Plugins › Kube Explorer; otherwise kubectl uses its default.
 
 Not ported: cluster-backed checks (unknown resources or fields against the
 live API), CRD-aware validation and `requirements.yaml` (Helm 2). The key tables cover
-the kinds listed above only; Reload from Cluster in a manifest is not built (kubectl
-would not fit a provider's 50 ms).
+the kinds listed above only.
 
 Requires `process:kubectl`. Exec-based auth plugins (`gke-gcloud-auth-plugin`,
 `aws`, …) must be on the PATH the IDE was started with.

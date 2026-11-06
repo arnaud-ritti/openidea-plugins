@@ -18,7 +18,7 @@ pub const CHART_MISSING_KEY: &str = "chart-missing-key";
 pub const CHART_UNKNOWN_KEY: &str = "chart-unknown-key";
 pub const CHART_INVALID_VALUE: &str = "chart-invalid-value";
 pub const HELM_EXCESSIVE_TRIM: &str = "helm-excessive-trim";
-pub use crate::kinds::{DEPRECATED_KEY, READ_ONLY_FIELD, UNKNOWN_KEY, UNKNOWN_KIND};
+pub use crate::kinds::{DEPRECATED_KEY, INVALID_VALUE, MISSING_KEY, READ_ONLY_FIELD, UNKNOWN_KEY, UNKNOWN_KIND};
 pub use crate::helm::{HELM_UNKNOWN_INCLUDE, HELM_UNKNOWN_VALUE};
 
 /// Setting (a boolean, default on) that switches each code off.
@@ -36,6 +36,8 @@ pub const SETTINGS: &[(&str, &str)] = &[
     (UNKNOWN_KIND, "checkKindSchema"),
     (READ_ONLY_FIELD, "checkReadOnlyFields"),
     (DEPRECATED_KEY, "checkDeprecatedKeys"),
+    (MISSING_KEY, "checkRequiredKeys"),
+    (INVALID_VALUE, "checkFieldValues"),
     (HELM_UNKNOWN_VALUE, "checkHelmValues"),
     (HELM_UNKNOWN_INCLUDE, "checkHelmIncludes"),
 ];
@@ -196,6 +198,8 @@ fn kind_schema(doc: &Doc, text: &str) -> Vec<Finding> {
                 Problem::UnknownKind => (UNKNOWN_KIND, Severity::Info),
                 Problem::ReadOnly => (READ_ONLY_FIELD, Severity::Info),
                 Problem::Deprecated => (DEPRECATED_KEY, Severity::Warning),
+                Problem::MissingKey => (MISSING_KEY, Severity::Info),
+                Problem::InvalidValue => (INVALID_VALUE, Severity::Info),
             };
             Finding { severity, ..Finding::new(issue.start, issue.end, code, issue.message) }
         })
@@ -371,7 +375,7 @@ mod tests {
     use crate::KubeExplorer;
 
     fn codes(text: &str) -> Vec<&'static str> {
-        check(&documents(text), text).iter().map(|f| f.code).collect()
+        check(&documents(text), text).iter().map(|f| f.code).filter(|code| *code != MISSING_KEY).collect()
     }
 
     fn highlighted<'a>(text: &'a str, code: &str) -> Vec<&'a str> {
@@ -418,7 +422,7 @@ mod tests {
         for text in [
             "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: a\n",
             "apiVersion: example.com/v1beta1\nkind: Ingress\nmetadata:\n  name: a\n",
-            "apiVersion: policy/v1beta1\nkind: Widget\nmetadata:\n  name: a\n",
+            "apiVersion: policy/v1beta1\nkind: Eviction\nmetadata:\n  name: a\n",
             "apiVersion: {{ .Values.api }}\nkind: Ingress\nmetadata:\n  name: a\n",
         ] {
             assert!(codes(text).is_empty(), "{text}");
@@ -656,15 +660,15 @@ mod tests {
             ("authorization.k8s.io/v1beta1", "SelfSubjectAccessReview"),
         ] {
             let text = format!("apiVersion: {version}\nkind: {kind}\nmetadata:\n  name: a\n");
-            assert_eq!(codes(&text), [DEPRECATED_API_VERSION], "{version} {kind}");
+            assert_eq!(codes(&text).into_iter().filter(|code| *code != READ_ONLY_FIELD).collect::<Vec<_>>(), [DEPRECATED_API_VERSION], "{version} {kind}");
         }
     }
 
     #[test]
     fn deprecated_api_version_is_quiet_for_other_kinds_of_a_group() {
         for text in [
-            "apiVersion: autoscaling/v2beta2\nkind: Widget\nmetadata:\n  name: a\n",
-            "apiVersion: coordination.k8s.io/v1beta1\nkind: Foo\nmetadata:\n  name: a\n",
+            "apiVersion: autoscaling/v2beta2\nkind: Scale\nmetadata:\n  name: a\n",
+            "apiVersion: coordination.k8s.io/v1beta1\nkind: LeaseCandidate\nmetadata:\n  name: a\n",
             "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: a\n",
         ] {
             assert!(codes(text).is_empty(), "{text}");

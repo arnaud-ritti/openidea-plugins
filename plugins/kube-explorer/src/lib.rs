@@ -18,6 +18,7 @@ mod convert;
 mod indexer;
 mod manifest;
 mod prompts;
+mod reload;
 mod schema;
 mod secrets;
 
@@ -1199,6 +1200,7 @@ impl Plugin for KubeExplorer {
     /// The IDE drops a command's result text: it is shown in a notification.
     fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
         match id {
+            "reload-from-cluster" => return self.reload_from_cluster(ctx).map(|()| None),
             "helm-repo-update" => return helm_repo_update().map(|()| None),
             "helm-create" => return self.helm_create(ctx).map(|()| None),
             "helm-parameters" => return self.helm_parameters().map(|()| None),
