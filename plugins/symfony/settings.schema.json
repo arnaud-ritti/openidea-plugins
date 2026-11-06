@@ -37,12 +37,12 @@
     },
     "commandChecks": {
       "type": "boolean",
-      "title": "Report problems in console commands",
+      "title": "Report invokable commands without an int return type and invalid console input modes",
       "default": true
     },
     "deprecationChecks": {
       "type": "boolean",
-      "title": "Report deprecated Symfony APIs in PHP",
+      "title": "Report deprecated Symfony APIs the project's version no longer supports",
       "default": true
     },
     "doctrineChecks": {

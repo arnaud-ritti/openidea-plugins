@@ -100,6 +100,24 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     `deprecated-factory-setting`, `factory_class` / `factory_method` /
     `factory_service` (YAML) or `factory-class` / `factory-method` /
     `factory-service` (XML) on a service, removed in Symfony 3.0; use `factory`.
+  - _Commands_ (`commandChecks`, PHP): `command-invokable-return-type` (hint),
+    the `__invoke()` of a class with `#[AsCommand]` (the attribute must resolve
+    to the Symfony class) has no `int` or `never` return type;
+    `console-input-mode` (warning), two base modes ORed in the mode of
+    `InputArgument` (`REQUIRED`, `OPTIONAL`) or `InputOption` (`VALUE_NONE`,
+    `VALUE_REQUIRED`, `VALUE_OPTIONAL`), through `new` or `addArgument()` /
+    `addOption()`; deprecated in Symfony 8.1. Modifiers, numbers and variables
+    are ignored.
+  - _Deprecations_ (`deprecationChecks`, PHP), only when `composer.json` names
+    `symfony/framework-bundle` 8.1 or newer: `filesystem-mirror-copy-on-windows`,
+    the `copy_on_windows` option of `->mirror()` in a file that mentions
+    `Symfony\Component\Filesystem` (use `follow_symlinks`);
+    `tagged-collection-default-method`, `defaultIndexMethod:` or
+    `defaultPriorityMethod:` with a string value on `TaggedIterator`,
+    `TaggedLocator`, `AutowireIterator` or `AutowireLocator` (use
+    `#[AsTaggedItem]`); `from-callable-option`, `alias`, `parent`,
+    `synthetic`, `file`, `arguments`, `properties`, `configurator` or `calls`
+    next to `from_callable` in one PHP-array service (YAML is not checked).
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
   YAML files; on an unquoted `@` / `%` YAML value, quote it; on an unescaped backslash in a
   double-quoted YAML string, double it. Quick fixes follow the check settings.

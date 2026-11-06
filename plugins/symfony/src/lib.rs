@@ -9,6 +9,7 @@ mod checks;
 mod config_checks;
 mod index;
 mod intentions;
+mod php_checks;
 mod php_text;
 mod profiler;
 mod refs;
@@ -448,6 +449,14 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
 
     if groups.yaml_syntax {
         findings.extend(config_checks::yaml_scalars(path, language, text));
+    }
+
+    if groups.commands && language == "php" {
+        findings.extend(php_checks::commands(text));
+    }
+
+    if groups.deprecations && language == "php" {
+        findings.extend(php_checks::deprecations(&ctx, text));
     }
 
     findings
