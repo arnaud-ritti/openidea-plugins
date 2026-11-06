@@ -11,11 +11,13 @@
 //!   `CREATE TABLE` at the caret.
 //! - The JPA Structure tool window lists the project's entities.
 
+mod build;
 mod checks;
 mod generate;
 mod model;
 mod queries;
 mod wizard;
+mod xml;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -28,10 +30,12 @@ use openidea_plugin::{
     Context, Diagnostic, Error, Event, EventKind, Invocation, NotificationLevel, PickItem, Plugin, Location, Position, Project, Range, TextEdit, register_plugin,
 };
 
-use checks::{CALLBACKS, Finding, inspect_attribute_types, inspect_class_signature, is_empty_listener, listener_references, unused_listener, inspect_callbacks, inspect_entity, inspect_kotlin_entity, inspect_repository, missing_id};
+use checks::{CALLBACKS, Finding, inspect_attribute_signatures, inspect_attribute_types, lacks_default_constructor, listener_without_constructor, inspect_class_signature, is_empty_listener, listener_references, unused_listener, inspect_callbacks, inspect_entity, inspect_kotlin_build, inspect_name_references, inspect_query_parameters, name_references, named_query_references, unknown_named_query, declared_named_queries, inspect_kotlin_entity, inspect_repository, missing_id};
+use build::{BUILD_FILES, Build, analyse, is_build_file};
 use generate::{Dialect, Known, callback_import, callback_method, ddl, dto, dto_fields, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
 use model::{Class, Edit, Kind, Relation, annotations, capitalize, decapitalize, snake_case, has_word, import_edit, language_of, mask, parse_class, words};
-use wizard::{AttributeSpec, EntitySpec, attribute_edits, entity_source};
+use wizard::{AttributeSpec, EntitySpec, attribute_edits, entity_source, inverse_spec};
+use xml::Lookup;
 use queries::{ItemKind, Prop, complete, parse_repository};
 
 /// Time one provider call may spend reading repositories.
@@ -266,6 +270,8 @@ fn new_attribute(ctx: &Invocation) -> Result<Option<String>, Error> {
         unique: has("unique"),
         cascade: has("cascade"),
         fetch: has("fetch"),
+        mapped_by: None,
+        imports: Vec::new(),
     };
     let edits = attribute_edits(&class, &doc.text, &mask(&doc.text), &spec).ok_or("The class has no body to add an attribute to.")?;
     let edits: Vec<TextEdit> = edits.iter().map(|e| e.to_text_edit(&doc.text)).collect();
@@ -303,6 +309,10 @@ pub struct JpaAssist {
     locations: HashMap<String, (String, Position)>,
     /// Expanded entities of the structure tree.
     expanded: HashSet<String>,
+    /// Names of `@NamedQuery` and friends across the project; `None` once computed means an XML mapping or a non-literal name hides some.
+    named_queries: Option<Option<HashSet<String>>>,
+    /// Build files around a Kotlin entity, by the entity's path; cleared when a build file is saved.
+    builds: HashMap<String, Build>,
     /// Repositories per project root, read lazily.
     repositories: HashMap<String, RepositoryIndex>,
 }
@@ -357,6 +367,32 @@ impl JpaAssist {
         let mut found = index.by_entity.get(entity).cloned().unwrap_or_default();
         found.sort_by(|a, b| a.1.path.cmp(&b.1.path));
         found
+    }
+
+    /// The build files from the directory of `path` up to the project root.
+    fn build_of(&mut self, project: &Project, path: &str) -> &Build {
+        self.builds.entry(path.to_owned()).or_insert_with(|| {
+            let root = project.root().unwrap_or_default();
+            let mut files = Vec::new();
+            let mut dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+
+            while dir.starts_with(&root) {
+                for name in BUILD_FILES {
+                    let candidate = format!("{dir}/{name}");
+                    if let Ok(text) = project.read_file(&candidate) {
+                        files.push((candidate, text));
+                    }
+                }
+
+                let Some((parent, _)) = dir.rsplit_once('/') else { break };
+                if dir == root {
+                    break;
+                }
+                dir = parent;
+            }
+
+            analyse(&files)
+        })
     }
 
     fn class(&self, name: &str) -> Option<&Class> {
@@ -512,13 +548,135 @@ impl JpaAssist {
 
             if is_empty_listener(&source, &name, kotlin) {
                 findings.push(unused_listener(start, end, &name));
+            } else if lacks_default_constructor(&source, &name, kotlin) {
+                findings.push(listener_without_constructor(start, end, &name));
             }
         }
 
         findings
     }
 
+    /// The names of every named query of the project, `None` when mapping files or constants may declare others.
+    fn named_queries(&mut self, project: &Project) -> Option<&HashSet<String>> {
+        if self.named_queries.is_none() {
+            let mut names = HashSet::new();
+            let mut complete = ["**/*orm.xml", "**/jpa-named-queries.properties"]
+                .iter()
+                .all(|pattern| project.find_files(pattern, 1).unwrap_or_default().is_empty());
+            complete &= project
+                .find_files("**/persistence.xml", 20)
+                .unwrap_or_default()
+                .iter()
+                .all(|p| project.read_file(p).is_ok_and(|t| !t.contains("mapping-file")));
+
+            for path in self.sources(project) {
+                let Some(kotlin) = language_of(&path) else { continue };
+                let Ok(text) = project.read_file(&path) else { continue };
+                if !text.contains("NamedQuery") && !text.contains("NamedNativeQuery") && !text.contains("NamedStoredProcedureQuery") {
+                    continue;
+                }
+
+                match declared_named_queries(&text, kotlin) {
+                    Some(found) => names.extend(found),
+                    None => complete = false,
+                }
+            }
+
+            self.named_queries = Some(complete.then_some(names));
+        }
+
+        self.named_queries.as_ref()?.as_ref()
+    }
+
+    fn check_xml(&mut self, project: &Project, path: &str, text: &str) {
+        let persistence = text.contains("<persistence") && text.contains("persistence-unit");
+        if !(persistence || text.contains("<entity-mappings")) || !setting("checkPersistenceXml") {
+            return;
+        }
+
+        let files = self.sources(project);
+        let orm_present = !project.find_files("**/*orm.xml", 1).unwrap_or_default().is_empty();
+        let findings = xml::inspect(text, orm_present, &|fqcn| xml_lookup(project, &files, fqcn));
+        let diagnostics: Vec<Diagnostic> = findings.iter().map(|f| f.diagnostic(text)).collect();
+        let _ = host::publish_diagnostics(path, &diagnostics);
+    }
+
+    fn name_findings(&mut self, project: &Project, path: &str, text: &str, kotlin: bool) -> Vec<Finding> {
+        let Some(class) = parse_class(text, path) else { return Vec::new() };
+        let references = name_references(text, kotlin, &class);
+        if references.is_empty() {
+            return Vec::new();
+        }
+
+        let files = self.sources(project);
+        let mut stems: HashMap<&str, usize> = HashMap::new();
+        for file in &files {
+            *stems.entry(file_stem(file)).or_default() += 1;
+        }
+
+        let mut wanted: Vec<String> = references.iter().map(|r| r.owner.clone()).collect();
+        wanted.sort();
+        wanted.dedup();
+        for name in &wanted {
+            let mut current = name.clone();
+            for _ in 0..8 {
+                self.load(project, &current, path, true);
+                let Some(parent) = self.class(&current).and_then(|c| c.superclass.clone()) else { break };
+                current = parent;
+            }
+        }
+
+        let names = |owner: &str| -> Option<Vec<String>> {
+            let mut chain = vec![owner.to_owned()];
+            let mut attributes = Vec::new();
+
+            while let Some(name) = chain.pop() {
+                if stems.get(name.as_str()).copied().unwrap_or(0) > 1 || chain.len() > 8 {
+                    return None;
+                }
+
+                let Some(Some(class)) = self.classes.get(&name) else {
+                    return (stems.contains_key(name.as_str()) && !attributes.is_empty()).then_some(attributes);
+                };
+
+                attributes.extend(class.attributes.iter().map(|a| a.name.clone()));
+                chain.extend(class.superclass.clone());
+            }
+
+            Some(attributes)
+        };
+
+        inspect_name_references(&references, &names)
+    }
+
+    fn query_findings(&mut self, project: &Project, text: &str, kotlin: bool) -> Vec<Finding> {
+        let mut findings = inspect_query_parameters(text, kotlin);
+        let references = named_query_references(text, kotlin);
+        if references.is_empty() {
+            return findings;
+        }
+
+        let Some(known) = self.named_queries(project) else { return findings };
+        findings.extend(references.iter().filter(|(name, ..)| !known.contains(name)).map(|(name, start, end)| unknown_named_query(name, *start, *end)));
+
+        findings
+    }
+
     fn findings(&mut self, project: &Project, path: &str, text: &str, kotlin: bool) -> Vec<Finding> {
+        let mut findings = self.findings_core(project, path, text, kotlin);
+
+        if setting("checkMappingNames") {
+            findings.extend(self.name_findings(project, path, text, kotlin));
+        }
+
+        if setting("checkQueryReferences") {
+            findings.extend(self.query_findings(project, text, kotlin));
+        }
+
+        findings
+    }
+
+    fn findings_core(&mut self, project: &Project, path: &str, text: &str, kotlin: bool) -> Vec<Finding> {
         let signature = if setting("checkClassSignature") { inspect_class_signature(text, kotlin) } else { Vec::new() };
 
         if let Some(class) = parse_class(text, path) {
@@ -530,10 +688,17 @@ impl JpaAssist {
             if kotlin {
                 findings.extend(inspect_kotlin_entity(text));
             }
+            if kotlin && setting("checkKotlinEntities") {
+                let build = self.build_of(project, path);
+                findings.extend(inspect_kotlin_build(text, build));
+            }
             if !setting("checkKotlinEntities") {
-                findings.retain(|f| !matches!(f.code, "jpa-data-class" | "jpa-val-attribute" | "jpa-immutable-collection"));
+                findings.retain(|f| !matches!(f.code, "jpa-data-class" | "jpa-val-attribute" | "jpa-immutable-collection" | "jpa-kotlin-plugin-missing" | "jpa-redundant-constructor" | "jpa-redundant-open"));
             }
             findings.extend(signature);
+            if setting("checkAttributeSignatures") {
+                findings.extend(inspect_attribute_signatures(text, kotlin));
+            }
             findings.extend(self.entity_rule_findings(project, path, text, kotlin));
             if setting("checkListenerUsage") {
                 findings.extend(self.listener_findings(project, text));
@@ -621,6 +786,19 @@ impl JpaAssist {
     }
 }
 
+fn xml_lookup(project: &Project, files: &[String], fqcn: &str) -> Lookup {
+    if fqcn.contains('$') {
+        return Lookup::Found { annotated: true };
+    }
+
+    let relative = fqcn.replace('.', "/");
+    let found = files.iter().find(|p| [".java", ".kt"].iter().any(|e| p.ends_with(&format!("/{relative}{e}"))));
+    let Some(path) = found else { return Lookup::NotInProject };
+
+    let text = project.read_file(path).unwrap_or_default();
+    Lookup::Found { annotated: ["@Entity", "@MappedSuperclass", "@Embeddable", "@Converter"].iter().any(|m| text.contains(m)) }
+}
+
 fn publish_context(path: Option<&str>) {
     let text = path.and_then(|p| project_of(p)?.read_file(p).ok()).unwrap_or_default();
     let is_entity = path.is_some_and(|p| parse_class(&text, p).is_some_and(|c| c.kind == Kind::Entity));
@@ -694,14 +872,32 @@ impl Plugin for JpaAssist {
                     publish_context(path.as_deref());
                     continue;
                 }
-                Event::FileOpened(path) | Event::FileSaved(path) => publish_context(Some(path)),
+                Event::FileOpened(path) | Event::FileSaved(path) => {
+                    if is_build_file(path) {
+                        self.builds.clear();
+                    }
+                    publish_context(Some(path))
+                }
                 _ => continue,
             }
 
             let (Event::FileOpened(path) | Event::FileSaved(path)) = event else { continue };
-            let Some(kotlin) = language_of(path) else { continue };
             let Some(project) = project_of(path) else { continue };
+            if path.ends_with(".xml") {
+                if let Ok(text) = project.read_file(path) {
+                    self.check_xml(&project, path, &text);
+                }
+                continue;
+            }
+
+            let Some(kotlin) = language_of(path) else { continue };
             let Ok(text) = project.read_file(path) else { continue };
+
+            if let Some(Some(known)) = self.named_queries.as_mut()
+                && let Some(declared) = declared_named_queries(&text, kotlin)
+            {
+                known.extend(declared);
+            }
 
             if is_repository_file(path)
                 && let Some(index) = self.repositories.get_mut(&project.root().unwrap_or_default())
@@ -716,8 +912,74 @@ impl Plugin for JpaAssist {
     }
 }
 
+impl JpaAssist {
+    /// "Add inverse attribute" for the owning-side association whose declaration (annotations included) the selection touches.
+    fn inverse_actions(&mut self, doc: &Document, selection: Range, class: &Class) -> Vec<CodeAction> {
+        let Some(project) = project_of(&doc.path) else { return Vec::new() };
+        let lines: Vec<&str> = doc.text.lines().collect();
+        let mut actions = Vec::new();
+
+        for attribute in class.attributes.iter().filter(|a| matches!(a.relation, Relation::ManyToOne | Relation::OneToOne | Relation::ManyToMany) && !a.mapped_by) {
+            let declared = attribute.pos.line;
+            let reaches = selection.start.line <= declared
+                && selection.end.line >= selection.start.line
+                && declared - selection.start.line <= 4
+                && (selection.start.line..declared).all(|l| lines.get(l as usize).is_some_and(|line| line.trim_start().starts_with('@')))
+                && selection.end.line <= declared;
+            if !reaches {
+                continue;
+            }
+
+            self.load(&project, &attribute.target, &doc.path, true);
+            let Some(target_path) = self.class(&attribute.target).map(|c| c.path.clone()).filter(|p| *p != doc.path) else { continue };
+            let Ok(target_text) = project.read_file(&target_path) else { continue };
+            let Some(target) = parse_class(&target_text, &target_path).filter(|c| c.kind == Kind::Entity) else { continue };
+            let Some(spec) = inverse_spec(class, attribute, &target) else { continue };
+            let Some(edits) = attribute_edits(&target, &target_text, &mask(&target_text), &spec) else { continue };
+
+            actions.push(CodeAction {
+                title: format!("Add inverse attribute '{}' to {}", spec.name, target.name),
+                kind: Some("refactor".into()),
+                preferred: false,
+                edits: vec![(target_path, edits.iter().map(|e| e.to_text_edit(&target_text)).collect())],
+                data: None,
+            });
+        }
+
+        actions
+    }
+
+    /// Fully qualified class names of the project's sources for the text typed inside a `<class>` element.
+    fn class_element_completion(&mut self, doc: &Document, at: Position) -> Vec<CompletionItem> {
+        let Some(caret) = offset(&doc.text, at) else { return Vec::new() };
+        let before = &doc.text[..caret];
+        let Some(tag) = before.rfind('<') else { return Vec::new() };
+        let Some(typed) = before[tag..].strip_prefix("<class>") else { return Vec::new() };
+        let Some(project) = project_of(&doc.path) else { return Vec::new() };
+
+        let typed = typed.trim();
+        let mut names: Vec<String> = self
+            .sources(&project)
+            .iter()
+            .filter_map(|path| {
+                let (_, after_root) = path.split_once("/java/").or_else(|| path.split_once("/kotlin/"))?;
+                let name = after_root.rsplit_once('.')?.0.replace('/', ".");
+                name.starts_with(typed).then_some(name)
+            })
+            .collect();
+
+        names.sort();
+        names.truncate(100);
+        names.into_iter().map(|n| CompletionItem::new(&n, CompletionKind::Class)).collect()
+    }
+}
+
 impl Providers for JpaAssist {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        if doc.path.ends_with(".xml") {
+            return self.class_element_completion(doc, at);
+        }
+
         let Some(kotlin) = language_of(&doc.path) else { return Vec::new() };
         let Some(repo) = parse_repository(&doc.text, kotlin) else { return Vec::new() };
         let Some(at) = offset(&doc.text, at) else { return Vec::new() };
@@ -780,7 +1042,29 @@ impl Providers for JpaAssist {
             })
             .collect();
 
+        if kotlin && setting("checkKotlinEntities") && let Some(build) = self.builds.get(&doc.path) {
+            for finding in inspect_kotlin_build(text, build).into_iter().filter(|f| touches(f.start, f.end)) {
+                if let Some((title, edits)) = finding.fix {
+                    actions.push(action(doc, title, "quickfix", true, &edits));
+                    continue;
+                }
+
+                if let Some(fix) = build.fix.as_ref().filter(|_| finding.code == "jpa-kotlin-plugin-missing") {
+                    let file = fix.path.rsplit('/').next().unwrap_or(&fix.path);
+                    actions.push(CodeAction {
+                        title: format!("Add the kotlin-jpa plugin to {file}"),
+                        kind: Some("quickfix".into()),
+                        preferred: false,
+                        edits: vec![(fix.path.clone(), vec![fix.edit.to_text_edit(&fix.text)])],
+                        data: None,
+                    });
+                }
+            }
+        }
+
         let Some(class) = parse_class(text, &doc.path).filter(|c| c.kind == Kind::Entity) else { return actions };
+        actions.extend(self.inverse_actions(doc, selection, &class));
+
         if !(selection.start.line..=selection.end.line).contains(&class.pos.line) {
             return actions;
         }
@@ -1019,7 +1303,8 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
 
     #[test]
     fn val_id_is_quiet() {
-        assert!(kotlin_codes("@Entity\nclass K(@Id val id: Long, @EmbeddedId val key: Key)\n").is_empty());
+        assert!(kotlin_codes("@Entity\nclass K(@Id val id: Long)\n").is_empty());
+        assert!(kotlin_codes("@Entity\nclass K(@EmbeddedId val key: Key)\n").is_empty());
         assert!(kotlin_codes("@Entity\nclass K {\n  @Id\n  val id: Long = 0\n}\n").is_empty());
     }
 
@@ -1180,7 +1465,7 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
 
         let association = Position::new(11, 6);
         let titles: Vec<String> = plugin.code_actions(&doc, Range::new(association, association)).into_iter().map(|a| a.title).collect();
-        assert_eq!(titles, ["Fetch lazily"]);
+        assert_eq!(titles, ["Fetch lazily", "Add inverse attribute 'orders' to Customer"]);
     }
 
     #[test]
@@ -1840,4 +2125,438 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         assert!(problems(&host, "src/shop/E.java", LISTENED).is_empty(), "listener file not in the project");
     }
 
+
+    #[test]
+    fn two_associations_on_one_attribute_warn_on_the_second() {
+        let host = host();
+        let text = "@Entity\nclass E {\n  @Id Long id;\n  @OneToOne(fetch = FetchType.LAZY) @ManyToOne(fetch = FetchType.LAZY) Customer c;\n}\n";
+        assert_eq!(problems(&host, "src/shop/E.java", text), ["jpa-attribute-multiple-relations"]);
+        assert_eq!(first_range(&host, "src/shop/E.java"), (3, 36));
+        let ok = "@Entity\nclass E {\n  @Id Long id;\n  @ManyToOne(fetch = FetchType.LAZY) Customer c;\n  @OneToMany List<Customer> d;\n}\n";
+        assert!(problems(&host, "src/shop/E.java", ok).is_empty());
+    }
+
+    #[test]
+    fn association_on_a_wrong_type_warns_and_other_types_are_quiet() {
+        let host = host();
+        let bad = "@Entity\nclass E {\n  @Id Long id;\n  @OneToOne Map<String, Customer> m;\n  @ManyToOne(fetch = FetchType.LAZY) long n;\n  @OneToMany(mappedBy = \"a\") String s;\n  @ManyToOne(fetch = FetchType.LAZY) List<A> l;\n}\n";
+        assert_eq!(
+            problems(&host, "src/shop/E.java", bad),
+            ["jpa-eager-to-one", "jpa-relationship-type", "jpa-relationship-type", "jpa-relationship-type", "jpa-relationship-type"]
+        );
+        let fine = "@Entity\nclass E {\n  @Id Long id;\n  @OneToMany(mappedBy = \"a\") Map<String, Customer> m;\n  @ManyToOne(fetch = FetchType.LAZY) Vendor.Customer c;\n  @ElementCollection Set<String> tags;\n}\n";
+        assert!(problems(&host, "src/shop/E.java", fine).is_empty());
+        assert_eq!(problems(&host, "src/shop/K.kt", "@Entity\nclass K(@Id var id: Long?, @ManyToOne(fetch = FetchType.LAZY) var o: MutableList<A>)\n"), ["jpa-relationship-type"]);
+    }
+
+    #[test]
+    fn embedded_id_with_id_or_id_class_warns() {
+        let host = host();
+        let both = "@Entity\nclass E {\n  @Id Long a;\n  @EmbeddedId Key k;\n}\n";
+        assert_eq!(problems(&host, "src/shop/E.java", both), ["jpa-multiple-id-kinds"]);
+        let with_class = "@Entity\n@IdClass(Key.class)\nclass E {\n  @EmbeddedId Key k;\n}\n";
+        assert_eq!(problems(&host, "src/shop/E.java", with_class), ["jpa-multiple-id-kinds"]);
+        assert!(problems(&host, "src/shop/E.java", "@Entity\nclass E {\n  @EmbeddedId Key k;\n}\n").is_empty());
+    }
+
+    #[test]
+    fn getter_annotations_with_field_id_are_flagged_unless_access_is_declared() {
+        let host = host();
+        let mixed = "@Entity\nclass E {\n  @Id Long id;\n  String n;\n  @Column(name = \"x\")\n  public String getN() { return n; }\n  @Transient public int getZ() { return 1; }\n}\n";
+        assert_eq!(problems(&host, "src/shop/E.java", mixed), ["jpa-mixed-access"]);
+        assert_eq!(first_range(&host, "src/shop/E.java"), (4, 2));
+        let access = mixed.replace("@Entity", "@Entity\n@Access(AccessType.FIELD)");
+        assert!(problems(&host, "src/shop/E.java", &access).is_empty());
+        let on_getter = "@Entity\nclass E {\n  @Column Long f;\n  @Id public Long getId() { return 1L; }\n}\n";
+        assert_eq!(problems(&host, "src/shop/E.java", on_getter), ["jpa-mixed-access"]);
+        let consistent = "@Entity\nclass E {\n  @Id public Long getId() { return 1L; }\n  @Column public String getN() { return n; }\n}\n";
+        assert!(problems(&host, "src/shop/E.java", consistent).is_empty());
+    }
+
+    #[test]
+    fn attribute_signature_group_can_be_switched_off() {
+        let host = host();
+        host.set_setting("jpaAssist.checkAttributeSignatures", "false");
+        let text = "@Entity\nclass E {\n  @Id Long a;\n  @EmbeddedId Key k;\n}\n";
+        assert!(problems(&host, "src/shop/E.java", text).is_empty());
+    }
+
+    #[test]
+    fn listener_without_a_public_default_constructor_is_info() {
+        let host = with_listener("class AuditListener {\n  AuditListener(Clock c) {}\n  @PrePersist void t(Object o) {}\n}\n");
+        assert_eq!(problems(&host, "src/shop/E.java", LISTENED), ["jpa-listener-constructor"]);
+        assert_eq!(host.diagnostics()["/project/src/shop/E.java"][0].severity, openidea_plugin::Severity::Info);
+
+        let private = "class AuditListener {\n  private AuditListener() {}\n  @PrePersist void t(Object o) {}\n}\n";
+        host.add_file("src/shop/AuditListener.java", private);
+        assert_eq!(problems(&host, "src/shop/E.java", LISTENED), ["jpa-listener-constructor"]);
+
+        for ok in [
+            "class AuditListener {\n  public AuditListener() {}\n  AuditListener(int x) {}\n  @PrePersist void t(Object o) {}\n}\n",
+            "class AuditListener {\n  @PrePersist void t(Object o) { new Other(1); }\n}\n",
+        ] {
+            host.add_file("src/shop/AuditListener.java", ok);
+            assert!(problems(&host, "src/shop/E.java", LISTENED).is_empty());
+        }
+    }
+
+    #[test]
+    fn kotlin_listener_constructor_needs_defaults_or_a_secondary_one() {
+        let host = host();
+        let entity = "@Entity\n@EntityListeners(AuditListener::class)\nclass K(@Id var id: Long?)\n";
+        let listener = |header: &str| format!("class AuditListener{header} {{\n  @PrePersist fun t(o: Any) {{}}\n}}\n");
+
+        host.add_file("src/shop/AuditListener.kt", &listener("(val clock: Clock)"));
+        assert_eq!(problems(&host, "src/shop/K.kt", entity), ["jpa-listener-constructor"]);
+        for header in ["", "()", "(val clock: Clock = Clock())", " private constructor()"] {
+            host.add_file("src/shop/AuditListener.kt", &listener(header));
+            assert!(problems(&host, "src/shop/K.kt", entity).is_empty(), "{header}");
+        }
+    }
+
+    const KOTLIN_PLAIN: &str = "@Entity\nclass K(\n  @Id var id: Long?,\n  var name: String,\n)\n";
+
+    fn kotlin_host(build: &str) -> MockHost {
+        let host = host();
+        host.add_file("build.gradle.kts", build);
+        host
+    }
+
+    const KOTLIN_BUILD: &str = "plugins {\n    kotlin(\"jvm\") version \"2.0.21\"\n}\n";
+
+    #[test]
+    fn kotlin_entity_without_the_jpa_plugin_gets_an_info_and_a_build_file_fix() {
+        let host = kotlin_host(KOTLIN_BUILD);
+        assert_eq!(problems(&host, "src/shop/K.kt", KOTLIN_PLAIN), ["jpa-kotlin-plugin-missing"]);
+        assert_eq!(host.diagnostics()["/project/src/shop/K.kt"][0].severity, openidea_plugin::Severity::Info);
+
+        let mut plugin = JpaAssist::default();
+        plugin.handle_events(&[Event::FileOpened("/project/src/shop/K.kt".into())], &host.invocation());
+        let doc = Document { path: "/project/src/shop/K.kt".into(), language: "kotlin".into(), version: 1, text: KOTLIN_PLAIN.into() };
+        let at = Position::new(0, 1);
+        let fix = plugin.code_actions(&doc, Range::new(at, at)).into_iter().find(|a| a.title.starts_with("Add the kotlin-jpa")).unwrap();
+        assert_eq!(fix.title, "Add the kotlin-jpa plugin to build.gradle.kts");
+        assert_eq!(fix.edits[0].0, "/project/build.gradle.kts");
+        assert_eq!(fix.edits[0].1[0].text, "\n    kotlin(\"plugin.jpa\") version \"2.0.21\"");
+    }
+
+    #[test]
+    fn plugin_missing_is_quiet_with_defaults_a_no_arg_constructor_or_an_unknown_build() {
+        let host = kotlin_host(KOTLIN_BUILD);
+        assert!(problems(&host, "src/shop/K.kt", "@Entity\nclass K(@Id var id: Long? = null, var name: String = \"\")\n").is_empty());
+        assert!(problems(&host, "src/shop/K.kt", "@Entity\nclass K(@Id var id: Long?) {\n  constructor() : this(null)\n}\n").is_empty());
+        host.add_file("build.gradle.kts", "plugins {\n    alias(libs.plugins.kotlin.jvm)\n}\n");
+        assert!(problems(&host, "src/shop/K.kt", KOTLIN_PLAIN).is_empty());
+        let java_only = MockHost::install().with_capabilities(&["events", "project.read", "editor.read", "storage"]);
+        assert!(problems(&java_only, "src/shop/K.kt", KOTLIN_PLAIN).is_empty(), "no build file");
+    }
+
+    #[test]
+    fn module_build_file_wins_over_the_root_one_and_a_root_plugin_counts() {
+        let host = kotlin_host("plugins {\n    kotlin(\"plugin.jpa\") version \"2.0.21\"\n}\n");
+        host.add_file("src/build.gradle.kts", KOTLIN_BUILD);
+        assert!(problems(&host, "src/shop/K.kt", KOTLIN_PLAIN).is_empty());
+    }
+
+    const WITH_JPA: &str = "plugins {\n    kotlin(\"jvm\") version \"2.0.21\"\n    kotlin(\"plugin.jpa\") version \"2.0.21\"\n}\n";
+
+    #[test]
+    fn redundant_no_arg_constructor_is_flagged_only_when_the_plugin_is_named() {
+        let host = kotlin_host(WITH_JPA);
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n    constructor() {}\n\n    var name: String = \"\"\n}\n";
+        assert_eq!(problems(&host, "src/shop/K.kt", text), ["jpa-redundant-constructor"]);
+
+        let delegating = "@Entity\nclass K(@Id var id: Long?) {\n    constructor() : this(null)\n}\n";
+        assert!(problems(&host, "src/shop/K.kt", delegating).is_empty());
+        let plain = kotlin_host(KOTLIN_BUILD);
+        assert!(problems(&plain, "src/shop/K.kt", text).is_empty());
+    }
+
+    #[test]
+    fn redundant_constructor_fix_removes_its_line() {
+        let host = kotlin_host(WITH_JPA);
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n    constructor() {}\n    var name: String = \"\"\n}\n";
+        problems(&host, "src/shop/K.kt", text);
+        let mut plugin = JpaAssist::default();
+        plugin.handle_events(&[Event::FileOpened("/project/src/shop/K.kt".into())], &host.invocation());
+        let doc = Document { path: "/project/src/shop/K.kt".into(), language: "kotlin".into(), version: 1, text: text.into() };
+        let at = Position::new(2, 6);
+        let fix = plugin.code_actions(&doc, Range::new(at, at)).into_iter().find(|a| a.title == "Remove constructor").unwrap();
+        let edit = &fix.edits[0].1[0];
+        assert_eq!((edit.range.start, edit.range.end, edit.text.as_str()), (Position::new(2, 0), Position::new(3, 0), ""));
+    }
+
+    #[test]
+    fn open_entity_is_redundant_only_with_an_allopen_entity_configuration() {
+        let text = "@Entity\nopen class K(@Id var id: Long? = null)\n";
+        let host = kotlin_host("plugins { kotlin(\"plugin.jpa\") }\n");
+        assert!(problems(&host, "src/shop/K.kt", text).is_empty());
+        host.add_file("build.gradle.kts", "allOpen {\n  annotation(\"jakarta.persistence.Entity\")\n}\n");
+        assert_eq!(problems(&host, "src/shop/K.kt", text), ["jpa-redundant-open"]);
+    }
+
+    #[test]
+    fn saving_a_build_file_refreshes_the_detection() {
+        let host = kotlin_host(KOTLIN_BUILD);
+        host.add_file("src/shop/K.kt", KOTLIN_PLAIN);
+        let mut plugin = JpaAssist::default();
+        let kotlin = "/project/src/shop/K.kt";
+        plugin.handle_events(&[Event::FileOpened(kotlin.into())], &host.invocation());
+        assert_eq!(host.diagnostics()[kotlin].len(), 1);
+
+        host.add_file("build.gradle.kts", WITH_JPA);
+        plugin.handle_events(&[Event::FileSaved("/project/build.gradle.kts".into()), Event::FileSaved(kotlin.into())], &host.invocation());
+        assert!(host.diagnostics().get(kotlin).is_none_or(|d| d.is_empty()));
+    }
+
+    const ADDRESS: &str = "package shop;\n@Embeddable\nclass Address {\n  String street;\n  String city;\n}\n";
+
+    fn name_host() -> MockHost {
+        let host = host();
+        host.add_file("src/shop/Address.java", ADDRESS);
+        host.add_file("src/shop/Base.java", "package shop;\n@MappedSuperclass\nclass Base {\n  @Id Long id;\n  String created;\n}\n");
+        host
+    }
+
+    fn message_of(host: &MockHost, path: &str) -> Vec<String> {
+        host.diagnostics().get(&format!("/project/{path}")).map_or(Vec::new(), |d| d.iter().map(|d| d.message.clone()).collect())
+    }
+
+    #[test]
+    fn attribute_override_names_are_checked_against_the_embeddable_and_the_mapped_superclass() {
+        let host = name_host();
+        let text = "package shop;\n@Entity\n@AttributeOverride(name = \"created\", column = @Column(name = \"c\"))\nclass E extends Base {\n  @Embedded\n  @AttributeOverrides({@AttributeOverride(name = \"street\", column = @Column(name = \"s\")), @AttributeOverride(name = \"zip\", column = @Column(name = \"z\"))})\n  Address a;\n}\n";
+        assert_eq!(problems(&host, "src/shop/E.java", text), ["jpa-unknown-attribute-override"]);
+        assert_eq!(message_of(&host, "src/shop/E.java"), ["Address has no attribute 'zip' (named in @AttributeOverride)."]);
+
+        let bad_class_level = text.replace("name = \"created\"", "name = \"made\"");
+        assert_eq!(problems(&host, "src/shop/E.java", &bad_class_level).len(), 2);
+    }
+
+    #[test]
+    fn name_checks_are_quiet_for_unknown_duplicate_or_library_targets() {
+        let host = name_host();
+        let unknown = "@Entity\nclass E {\n  @Id Long id;\n  @Embedded @AttributeOverride(name = \"zip\", column = @Column(name = \"z\")) Vendor v;\n}\n";
+        assert!(problems(&host, "src/shop/E.java", unknown).is_empty());
+
+        let library_parent = "@Entity\n@AttributeOverride(name = \"zip\", column = @Column(name = \"z\"))\nclass E extends AbstractPersistable {}\n";
+        assert!(problems(&host, "src/shop/E.java", library_parent).is_empty());
+
+        host.add_file("src/other/Address.java", "package other;\n@Embeddable\nclass Address {\n  String zip;\n}\n");
+        let text = "@Entity\nclass E {\n  @Id Long id;\n  @Embedded @AttributeOverride(name = \"zip\", column = @Column(name = \"z\")) Address a;\n}\n";
+        assert!(problems(&host, "src/shop/E.java", text).is_empty(), "two Address classes");
+
+        assert!(problems(&host, "src/shop/E.java", &text.replace("\"zip\"", "SOME_CONSTANT")).is_empty(), "not a literal");
+    }
+
+    #[test]
+    fn maps_id_and_map_key_are_read_against_the_embedded_id_and_the_element_type() {
+        let host = name_host();
+        host.add_file("src/shop/Key.java", "package shop;\n@Embeddable\nclass Key {\n  Long orderId;\n}\n");
+        let maps_id = "package shop;\n@Entity\nclass E {\n  @EmbeddedId Key key;\n  @MapsId(\"orderId\") @ManyToOne(fetch = FetchType.LAZY) Order order;\n  @MapsId(\"missing\") @ManyToOne(fetch = FetchType.LAZY) Order other;\n}\n";
+        assert_eq!(message_of_after(&host, "src/shop/E.java", maps_id), ["Key has no attribute 'missing' (named in @MapsId)."]);
+
+        let map_key = "package shop;\n@Entity\nclass F {\n  @Id Long id;\n  @OneToMany(mappedBy = \"f\") @MapKey(name = \"number\") Map<String, Order> ok;\n  @OneToMany(mappedBy = \"g\") @MapKey(name = \"nope\") Map<String, Order> bad;\n}\n";
+        host.add_file("src/shop/Order.java", "package shop;\n@Entity\nclass Order {\n  @Id Long id;\n  String number;\n}\n");
+        assert_eq!(message_of_after(&host, "src/shop/F.java", map_key), ["Order has no attribute 'nope' (named in @MapKey)."]);
+    }
+
+    fn message_of_after(host: &MockHost, path: &str, text: &str) -> Vec<String> {
+        problems(host, path, text);
+        message_of(host, path)
+    }
+
+    #[test]
+    fn entity_graph_nodes_name_attributes_but_subgraph_nodes_are_left_alone() {
+        let host = name_host();
+        let text = "package shop;\n@Entity\n@NamedEntityGraph(name = \"g\", attributeNodes = {@NamedAttributeNode(\"created\"), @NamedAttributeNode(value = \"lines\", subgraph = \"s\"), @NamedAttributeNode(\"ghost\")},\n  subgraphs = @NamedSubgraph(name = \"s\", attributeNodes = @NamedAttributeNode(\"anything\")))\nclass E extends Base {\n  @OneToMany(mappedBy = \"e\") List<Line> lines;\n}\n";
+        assert_eq!(message_of_after(&host, "src/shop/E.java", text), ["E has no attribute 'ghost' (named in @NamedAttributeNode)."]);
+    }
+
+    #[test]
+    fn mapping_name_group_can_be_switched_off() {
+        let host = name_host();
+        host.set_setting("jpaAssist.checkMappingNames", "false");
+        let text = "@Entity\nclass E {\n  @Id Long id;\n  @Embedded @AttributeOverride(name = \"zip\", column = @Column(name = \"z\")) Address a;\n}\n";
+        assert!(problems(&host, "src/shop/E.java", text).is_empty());
+    }
+
+    const QUERIES: &str = "package shop.data;\ninterface R extends JpaRepository<Order, Long> {\n  @Query(\"select o from Order o where o.number = :number and o.x = :other and d = '10:30' and e = a::text\")\n  List<Order> a(@Param(\"number\") String n, String another);\n  @Query(\"select o from Order o where o.number = :n\")\n  List<Order> b(@Param(\"number\") String n);\n  @Query(\"select o from Order o where o.number = :number\")\n  List<Order> c(String number);\n  @Query(\"x = :#{#p.id} and y = :z\" + \" more\")\n  List<Order> d(String p);\n}\n";
+
+    #[test]
+    fn query_parameters_must_be_parameters_of_the_method() {
+        let host = host();
+        let messages = message_of_after(&host, "src/shop/data/R.java", QUERIES);
+        assert_eq!(
+            messages,
+            [
+                "The method has no parameter named 'other'. Name the parameter or annotate it with @Param(\"other\").",
+                "The method has no parameter named 'n'. Name the parameter or annotate it with @Param(\"n\")."
+            ]
+        );
+        assert_eq!(first_range(&host, "src/shop/data/R.java").0, 2);
+    }
+
+    #[test]
+    fn kotlin_query_parameters_and_templates() {
+        let host = host();
+        let text = "interface R : JpaRepository<Order, Long> {\n  @Query(\"select o from Order o where o.number = :number\")\n  fun a(@Param(\"num\") number: String): List<Order>\n  @Query(\"x = :n\")\n  fun b(n: String): List<Order>\n  @Query(\"x = :n and $t\")\n  fun c(): List<Order>\n}\n";
+        assert_eq!(message_of_after(&host, "src/shop/data/R.kt", text), ["The method has no parameter named 'number'. Name the parameter or annotate it with @Param(\"number\")."]);
+    }
+
+    #[test]
+    fn named_queries_are_looked_up_across_the_project() {
+        let host = host();
+        host.add_file("src/shop/Order.java", "package shop;\n@Entity\n@NamedQuery(name = \"Order.open\", query = \"select o from Order o\")\nclass Order {\n  @Id Long id;\n}\n");
+        let text = "package shop.data;\ninterface R extends JpaRepository<Order, Long> {\n  @Query(name = \"Order.open\")\n  List<Order> a();\n  @Query(name = \"Order.gone\")\n  List<Order> b();\n}\n";
+        assert_eq!(message_of_after(&host, "src/shop/data/R.java", text), ["No @NamedQuery or @NamedNativeQuery named 'Order.gone' in the project."]);
+
+        let call = "class S {\n  void f(EntityManager em) { em.createNamedQuery(\"Order.open\"); em.createNamedQuery(\"nope\", Order.class); }\n}\n";
+        assert_eq!(message_of_after(&host, "src/shop/S.java", call), ["No @NamedQuery or @NamedNativeQuery named 'nope' in the project."]);
+    }
+
+    #[test]
+    fn named_queries_are_not_judged_when_xml_mappings_may_declare_them() {
+        let host = host();
+        host.add_file("src/main/resources/META-INF/orm.xml", "<entity-mappings/>");
+        let text = "class S {\n  void f(EntityManager em) { em.createNamedQuery(\"nope\"); }\n}\n";
+        assert!(problems(&host, "src/shop/S.java", text).is_empty());
+    }
+
+    #[test]
+    fn query_reference_group_can_be_switched_off() {
+        let host = host();
+        host.set_setting("jpaAssist.checkQueryReferences", "false");
+        assert!(problems(&host, "src/shop/data/R.java", QUERIES).is_empty());
+    }
+
+    const PERSISTENCE: &str = "<persistence version=\"3.0\">\n  <persistence-unit name=\"main\" transaction-type=\"XA\">\n    <class>shop.Order</class>\n    <class>shop.Gone</class>\n    <class>shop.Plain</class>\n  </persistence-unit>\n</persistence>\n";
+
+    #[test]
+    fn persistence_xml_is_checked_when_it_opens() {
+        let host = host();
+        host.add_file("src/shop/Plain.java", "package shop;\nclass Plain {}\n");
+        let mut codes = problems(&host, "src/main/resources/META-INF/persistence.xml", PERSISTENCE);
+        codes.sort();
+        assert_eq!(codes, ["jpa-xml-class-not-persistent", "jpa-xml-class-unknown", "jpa-xml-value"]);
+    }
+
+    #[test]
+    fn mapping_files_make_unannotated_classes_acceptable() {
+        let host = host();
+        host.add_file("src/shop/Plain.java", "package shop;\nclass Plain {}\n");
+        host.add_file("src/main/resources/META-INF/orm.xml", "<entity-mappings><entity class=\"shop.Plain\"/></entity-mappings>");
+        let codes = problems(&host, "src/main/resources/META-INF/persistence.xml", PERSISTENCE);
+        assert!(!codes.contains(&"jpa-xml-class-not-persistent".to_owned()), "{codes:?}");
+        assert!(problems(&host, "src/main/resources/META-INF/orm.xml", "<entity-mappings><entity class=\"shop.Plain\"/></entity-mappings>").is_empty());
+    }
+
+    #[test]
+    fn other_xml_files_and_the_switch_are_ignored() {
+        let host = host();
+        assert!(problems(&host, "src/pom.xml", "<project><class>nope.Missing</class></project>").is_empty());
+        host.set_setting("jpaAssist.checkPersistenceXml", "false");
+        assert!(problems(&host, "src/main/resources/META-INF/persistence.xml", PERSISTENCE).is_empty());
+    }
+
+    #[test]
+    fn class_element_completes_class_names_from_the_sources() {
+        let host = host();
+        let doc = |text: &str| Document { path: "/project/persistence.xml".into(), language: "xml".into(), version: 1, text: text.into() };
+        host.add_file("src/main/java/shop/Order.java", ORDER);
+        host.add_file("src/main/java/shop/Customer.java", CUSTOMER);
+        let text = "<persistence-unit>\n  <class>shop.O</class>";
+        let at = Position::new(1, "  <class>shop.O".len() as u32);
+        let items = JpaAssist::default().completion(&doc(text), at, None);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["shop.Order"]);
+
+        let outside = JpaAssist::default().completion(&doc("<persistence-unit>\n  <provider>shop.O"), Position::new(1, 17), None);
+        assert!(outside.is_empty());
+    }
+
+    fn apply_edits(text: &str, edits: &[TextEdit]) -> String {
+        let mut out = text.to_owned();
+        let mut sorted: Vec<&TextEdit> = edits.iter().collect();
+        sorted.sort_by_key(|e| std::cmp::Reverse((e.range.start.line, e.range.start.character)));
+        for e in sorted {
+            let start = offset(&out, e.range.start).unwrap();
+            let end = offset(&out, e.range.end).unwrap();
+            out.replace_range(start..end, &e.text);
+        }
+        out
+    }
+
+    fn inverse_at(host: &MockHost, line: u32, selected: &str) -> Vec<CodeAction> {
+        let _ = host;
+        let doc = Document { path: "/project/src/shop/Order.java".into(), language: "java".into(), version: 1, text: selected.into() };
+        let at = Position::new(line, 4);
+        JpaAssist::default().code_actions(&doc, Range::new(at, at)).into_iter().filter(|a| a.title.starts_with("Add inverse")).collect()
+    }
+
+    #[test]
+    fn many_to_one_offers_a_one_to_many_on_the_target_file() {
+        let host = host();
+        for line in [11, 12] {
+            let actions = inverse_at(&host, line, ORDER);
+            assert_eq!(actions.len(), 1, "line {line}");
+            assert_eq!(actions[0].title, "Add inverse attribute 'orders' to Customer");
+            let (path, edits) = &actions[0].edits[0];
+            assert_eq!(path, "/project/src/shop/Customer.java");
+            let result = apply_edits(CUSTOMER, edits);
+            assert!(result.contains("import java.util.List;"), "{result}");
+            assert!(result.contains("    @OneToMany(mappedBy = \"customer\")\n    private List<Order> orders = new ArrayList<>();\n}"), "{result}");
+            assert!(result.contains("import jakarta.persistence.OneToMany;"));
+        }
+    }
+
+    #[test]
+    fn inverse_is_not_offered_off_the_declaration_or_when_one_exists() {
+        let host = host();
+        assert!(inverse_at(&host, 7, ORDER).is_empty());
+        assert!(inverse_at(&host, 13, ORDER).is_empty());
+
+        host.add_file("src/shop/Customer.java", "package shop;\n@Entity\npublic class Customer {\n    @Id Long id;\n    @OneToMany(mappedBy = \"customer\") List<Order> orders;\n}\n");
+        assert!(inverse_at(&host, 12, ORDER).is_empty());
+
+        host.add_file("src/shop/Customer.java", "package shop;\n@Entity\npublic class Customer {\n    @Id Long id;\n    String orders;\n}\n");
+        assert!(inverse_at(&host, 12, ORDER).is_empty(), "name taken");
+
+        host.add_file("src/shop/Customer.java", "package shop;\npublic class Customer {}\n");
+        assert!(inverse_at(&host, 12, ORDER).is_empty(), "not an entity");
+
+        let missing = ORDER.replace("Customer customer", "Stranger customer");
+        assert!(inverse_at(&host, 12, &missing).is_empty(), "target file missing");
+    }
+
+    #[test]
+    fn one_to_one_and_cross_package_targets_get_a_mapped_by_and_an_import() {
+        let host = host();
+        host.add_file("src/billing/Invoice.java", "package billing;\n\nimport jakarta.persistence.*;\n\n@Entity\npublic class Invoice {\n    @Id Long id;\n}\n");
+        let text = "package shop;\n\nimport billing.Invoice;\n\n@Entity\npublic class Order {\n    @Id Long id;\n    @OneToOne\n    private Invoice invoice;\n}\n";
+        let doc = Document { path: "/project/src/shop/Order.java".into(), language: "java".into(), version: 1, text: text.into() };
+        let at = Position::new(8, 4);
+        let found = JpaAssist::default().code_actions(&doc, Range::new(at, at));
+        let action = found.iter().find(|a| a.title.starts_with("Add inverse")).unwrap();
+        assert_eq!(action.title, "Add inverse attribute 'order' to Invoice");
+        let invoice = host.invocation().project().unwrap().read_file("/project/src/billing/Invoice.java").unwrap();
+        let result = apply_edits(&invoice, &action.edits[0].1);
+        assert!(result.contains("import shop.Order;"), "{result}");
+        assert!(result.contains("@OneToOne(mappedBy = \"invoice\")\n    private Order order;"), "{result}");
+    }
+
+    #[test]
+    fn kotlin_targets_get_a_mutable_list() {
+        let host = MockHost::install().with_capabilities(&["events", "project.read", "editor.read", "storage"]);
+        host.add_file("src/shop/Order.java", ORDER);
+        host.add_file("src/shop/Customer.kt", "package shop\n\nimport jakarta.persistence.*\n\n@Entity\nclass Customer {\n    @Id\n    var id: Long? = null\n}\n");
+        let doc = Document { path: "/project/src/shop/Order.java".into(), language: "java".into(), version: 1, text: ORDER.into() };
+        let at = Position::new(12, 4);
+        let found = JpaAssist::default().code_actions(&doc, Range::new(at, at));
+        let action = found.iter().find(|a| a.title.starts_with("Add inverse")).unwrap();
+        assert_eq!(action.edits[0].0, "/project/src/shop/Customer.kt");
+        let customer = host.invocation().project().unwrap().read_file("/project/src/shop/Customer.kt").unwrap();
+        let result = apply_edits(&customer, &action.edits[0].1);
+        assert!(result.contains("@OneToMany(mappedBy = \"customer\")\n    var orders: MutableList<Order> = mutableListOf()"), "{result}");
+    }
 }

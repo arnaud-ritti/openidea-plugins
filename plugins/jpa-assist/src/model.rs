@@ -428,6 +428,47 @@ pub fn arg<'t>(text: &'t str, masked: &str, a: &Annotation, key: &str) -> Option
     })
 }
 
+/// The byte range of argument `key` of `a` (the lone argument counts as `value`), trimmed.
+pub fn value_range(text: &str, masked: &str, a: &Annotation, key: &str) -> Option<(usize, usize)> {
+    let (start, end) = a.args?;
+
+    split_top_level(&masked[start..end]).into_iter().find_map(|(offset, part)| {
+        let at = start + offset;
+        let from = match part.split_once('=') {
+            Some((k, _)) if k.trim() == key => at + part.find('=')? + 1,
+            Some(_) => return None,
+            None if key == "value" && !text[at..at + part.len()].trim().is_empty() => at,
+            None => return None,
+        };
+
+        let raw = &text[from..at + part.len()];
+        let lead = raw.len() - raw.trim_start().len();
+        Some((from + lead, from + lead + raw.trim().len()))
+    })
+}
+
+/// The content of the plain string literal at `range`, and where it starts; `None` for anything else (concatenation, text block, template).
+pub fn plain_literal(text: &str, (start, end): (usize, usize), kotlin: bool) -> Option<(usize, &str)> {
+    let literal = text.get(start..end)?;
+    let inner = literal.strip_prefix('"')?.strip_suffix('"')?;
+    if literal.len() < 2 || literal.starts_with("\"\"\"") || (kotlin && inner.contains('$')) {
+        return None;
+    }
+
+    let mut bytes = inner.bytes();
+    while let Some(c) = bytes.next() {
+        match c {
+            b'\\' => {
+                bytes.next();
+            }
+            b'"' => return None,
+            _ => {}
+        }
+    }
+
+    Some((start + 1, inner))
+}
+
 fn string_arg(text: &str, masked: &str, a: &Annotation, key: &str) -> Option<String> {
     string_value(arg(text, masked, a, key)?)
 }
@@ -445,7 +486,7 @@ fn last_segment(s: &str) -> &str {
 }
 
 /// `List<Order>` → `Order`, `Map<String, Item>` → `Item`, `Customer?` → `Customer`.
-fn element_type(ty: &str) -> String {
+pub fn element_type(ty: &str) -> String {
     let base = match (ty.find('<'), ty.rfind('>')) {
         (Some(open), Some(close)) if open < close => {
             split_top_level(&ty[open + 1..close]).last().map_or("", |(_, last)| last.trim())
@@ -516,7 +557,7 @@ pub fn declared_type(decl: &str, kotlin: bool) -> Option<String> {
 }
 
 /// `(name offset, name, declared type)` of a field or property declaration.
-fn declaration(decl: &str, kotlin: bool) -> Option<(usize, String, String)> {
+pub fn declaration(decl: &str, kotlin: bool) -> Option<(usize, String, String)> {
     let left = decl.split('=').next().unwrap_or(decl).trim_end().trim_end_matches(';');
 
     if kotlin {

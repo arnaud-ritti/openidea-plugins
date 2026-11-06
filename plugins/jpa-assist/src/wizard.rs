@@ -1,7 +1,7 @@
 //! Source for the New Entity and New Attribute wizards.
 
 use crate::generate::callback_import;
-use crate::model::{Class, Edit, Relation, capitalize, import_edit};
+use crate::model::{Attribute, Class, Edit, Relation, capitalize, decapitalize, import_edit};
 
 pub struct EntitySpec {
     pub name: String,
@@ -25,6 +25,59 @@ pub struct AttributeSpec {
     pub unique: bool,
     pub cascade: bool,
     pub fetch: bool,
+    /// The attribute on the owning side that this one mirrors.
+    pub mapped_by: Option<String>,
+    pub imports: Vec<String>,
+}
+
+fn plural(name: &str) -> String {
+    if let Some(stem) = name.strip_suffix('y').filter(|s| s.ends_with(|c: char| !"aeiou".contains(c))) {
+        return format!("{stem}ies");
+    }
+
+    if ["s", "x", "z", "ch", "sh"].iter().any(|e| name.ends_with(e)) {
+        return format!("{name}es");
+    }
+
+    format!("{name}s")
+}
+
+/// The attribute that makes `attribute` of `owner` bidirectional, for `target`; `None` when `target` already mirrors it.
+pub fn inverse_spec(owner: &Class, attribute: &Attribute, target: &Class) -> Option<AttributeSpec> {
+    let relation = match attribute.relation {
+        Relation::ManyToOne => Relation::OneToMany,
+        Relation::OneToOne => Relation::OneToOne,
+        Relation::ManyToMany => Relation::ManyToMany,
+        _ => return None,
+    };
+
+    if attribute.mapped_by || target.attributes.iter().any(|a| a.target == owner.name && a.mapped_by) {
+        return None;
+    }
+
+    let single = decapitalize(&owner.name);
+    let name = if relation.to_many() { plural(&single) } else { single };
+    if target.attributes.iter().any(|a| a.name == name) {
+        return None;
+    }
+
+    let imports = match (&owner.package, &target.package) {
+        (Some(package), other) if Some(package) != other.as_ref() => vec![format!("{package}.{}", owner.name)],
+        _ => Vec::new(),
+    };
+
+    Some(AttributeSpec {
+        name,
+        ty: owner.name.clone(),
+        relation,
+        enumerated: false,
+        not_null: false,
+        unique: false,
+        cascade: false,
+        fetch: false,
+        mapped_by: Some(attribute.name.clone()),
+        imports,
+    })
 }
 
 struct Field {
@@ -182,7 +235,7 @@ pub fn attribute_edits(class: &Class, text: &str, masked: &str, spec: &Attribute
         }
         imports.extend(type_import(&ty).map(str::to_owned));
     } else {
-        let mut args = Vec::new();
+        let mut args: Vec<String> = spec.mapped_by.iter().map(|m| format!("mappedBy = \"{m}\"")).collect();
         if spec.fetch {
             imports.push(callback_import(class, "FetchType"));
             let kind = if spec.relation.to_one() { "LAZY" } else { "EAGER" };
@@ -214,6 +267,7 @@ pub fn attribute_edits(class: &Class, text: &str, masked: &str, spec: &Attribute
     let accessors = class.attributes.iter().any(|a| crate::model::has_word(masked, &format!("get{}", capitalize(&a.name))));
     let field = Field { annotations, ty, name: spec.name.clone(), init };
     let mut edits: Vec<Edit> = {
+        imports.extend(spec.imports.iter().cloned());
         let refs: Vec<&str> = imports.iter().map(String::as_str).collect();
         import_edit(text, &refs, kotlin).into_iter().collect()
     };
@@ -224,4 +278,18 @@ pub fn attribute_edits(class: &Class, text: &str, masked: &str, spec: &Attribute
     }
 
     Some(edits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plural;
+
+    #[test]
+    fn plural_names_follow_english_endings() {
+        assert_eq!(plural("order"), "orders");
+        assert_eq!(plural("category"), "categories");
+        assert_eq!(plural("day"), "days");
+        assert_eq!(plural("address"), "addresses");
+        assert_eq!(plural("box"), "boxes");
+    }
 }
