@@ -1,0 +1,23 @@
+asyncapi: 3.0.0
+info:
+  title: $NAME$
+  version: 1.0.0
+channels:
+  userSignedUp:
+    address: user/signedup
+    messages:
+      userSignedUp:
+        $ref: '#/components/messages/UserSignedUp'
+operations:
+  receiveUserSignedUp:
+    action: receive
+    channel:
+      $ref: '#/channels/userSignedUp'
+components:
+  messages:
+    UserSignedUp:
+      payload:
+        type: object
+        properties:
+          email:
+            type: string

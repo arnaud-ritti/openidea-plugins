@@ -285,4 +285,46 @@ mod tests {
         assert!(elapsed.as_millis() < 1000, "took {elapsed:?}");
         eprintln!("large spec check: {elapsed:?}");
     }
+
+    fn template(name: &str) -> String {
+        std::fs::read_to_string(format!("{}/templates/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    #[test]
+    fn templates_pass_the_openapi_checks() {
+        for name in ["openapi.yaml", "openapi.json"] {
+            let text = template(name);
+            let spec = parse(&text).unwrap_or_else(|| panic!("{name} is not detected as an OpenAPI document"));
+            assert_eq!(spec.version, "3.1.0", "{name}");
+            assert!(found(&text).is_empty(), "{name}");
+            assert_eq!(operations(&text, &spec.keys).len(), 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn asyncapi_template_is_not_checked_as_openapi() {
+        assert!(parse(&template("asyncapi.yaml")).is_none());
+    }
+
+    #[test]
+    fn every_template_is_registered_and_exists() {
+        let manifest = std::fs::read_to_string(format!("{}/plugin.toml", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut registered: Vec<&str> = manifest.lines().filter_map(|l| l.strip_prefix("path = \"templates/")?.strip_suffix('"')).collect();
+        let mut files: Vec<String> = std::fs::read_dir(format!("{}/templates", env!("CARGO_MANIFEST_DIR")))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        registered.sort();
+        files.sort();
+        assert_eq!(registered, ["asyncapi.yaml", "openapi.json", "openapi.yaml"]);
+        assert_eq!(files, registered);
+        for name in registered {
+            let text = template(name);
+            for (at, _) in text.match_indices('$') {
+                let word: String = text[at + 1..].chars().take_while(|c| c.is_ascii_uppercase() || *c == '_').collect();
+                let closed = !word.is_empty() && text[at + 1 + word.len()..].starts_with('$');
+                assert!(!closed || word == "NAME" || word == "END", "{name} has the placeholder ${word}$");
+            }
+        }
+    }
 }
