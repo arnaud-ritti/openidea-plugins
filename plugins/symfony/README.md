@@ -33,12 +33,12 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
 
 - Problems: missing template, missing translation key (in a domain that has
   keys), missing route (once the compiled routes exist), missing service (once
-  the compiled container exists), route defined twice in a file, service id defined twice in an XML file, Twig block tags (`block`, `if`, `for`, `macro`,
+  the compiled container exists), route defined twice in a file, service id defined twice in an XML file, unquoted YAML values starting with `@` or `%` in `config/` and `translations/` (Symfony's parser rejects them), Twig block tags (`block`, `if`, `for`, `macro`,
   `embed`, `apply`, `autoescape`, `with`, `verbatim`, `cache`, `sandbox`) never closed. Files are
   checked when opened or saved. _Settings › Plugins › Symfony_ turns the
   checks off.
-- Quick fix (⌥⏎) on a missing translation key: add it to one of the domain's
-  YAML files.
+- Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
+  YAML files; on an unquoted `@` / `%` YAML value, quote it.
 - Gutter: controller `render()` → template; template → controllers rendering
   it; `{% block %}` → the parent block it overrides; PHP class → its service
   definition; YAML service → its class file.
@@ -72,8 +72,7 @@ which the OpenIDEA plugin API has no equivalent for:
 - container `get()` return types, Twig variable types (`{{ post.| }}`),
   form types and options, Doctrine (QueryBuilder, repositories, DQL),
   serializer, event dispatcher, constraint validators;
-- the remaining inspections (service arguments, deprecated Twig, YAML
-  quoting, …) and intentions (they need resolved PHP types);
+- the remaining inspections (service arguments, deprecated Twig, …) and intentions (they need resolved PHP types);
 - refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing
   files.

@@ -548,7 +548,7 @@ pub fn yaml_keys(text: &str) -> Vec<YamlKey> {
     keys
 }
 
-fn split_yaml_key(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_yaml_key(line: &str) -> Option<(&str, &str)> {
     if let Some(quote) = line.chars().next().filter(|c| *c == '\'' || *c == '"') {
         let close = line[1..].find(quote)? + 1;
         let rest = line[close + 1..].trim_start().strip_prefix(':')?;

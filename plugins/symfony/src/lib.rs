@@ -9,6 +9,7 @@ mod index;
 mod profiler;
 mod refs;
 mod twig;
+mod yaml_quotes;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,6 +187,10 @@ fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '~', '$', '#'])
 }
 
+fn is_quoted_config(path: &str) -> bool {
+    path.contains("/config/") || path.contains("/translations/")
+}
+
 /// Problems of a file: missing routes, templates, services and translation
 /// keys (the plugin's *Missing* inspections), and routes defined twice.
 pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
@@ -238,6 +243,14 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
     if language == "twig" {
         for (range, name) in twig::unclosed_tags(text) {
             problem(range.start, range.end, "unclosed-tag", format!("Tag \"{name}\" is never closed: missing {{% end{name} %}}."));
+        }
+    }
+
+    if language == "yaml" && is_quoted_config(path) {
+        for range in yaml_quotes::unquoted(text) {
+            let first = text[range.start..].chars().next().unwrap_or('@');
+            let message = format!("A YAML value starting with \"{first}\" must be quoted.");
+            problem(range.start, range.end, "unquoted-yaml-scalar", message);
         }
     }
 
@@ -536,6 +549,26 @@ impl Providers for Main {
     /// Adds a missing translation key to one of the domain's YAML files.
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
+        if doc.language == "yaml" && is_quoted_config(&doc.path) {
+            let quote_fixes: Vec<CodeAction> = yaml_quotes::unquoted(&doc.text)
+                .into_iter()
+                .map(|range| (range_of(&doc.text, range.start, range.end), range))
+                .filter(|(range, _)| range.start.line >= selection.start.line && range.start.line <= selection.end.line)
+                .map(|(range, bytes)| {
+                    let quoted = format!("'{}'", doc.text[bytes].replace('\'', "''"));
+                    CodeAction {
+                        title: format!("Quote {quoted}"),
+                        kind: Some("quickfix".into()),
+                        preferred: true,
+                        edits: vec![(doc.path.clone(), vec![TextEdit { range, text: quoted }])],
+                        data: None,
+                    }
+                })
+                .collect();
+            if !quote_fixes.is_empty() {
+                return quote_fixes;
+            }
+        }
         let Some(offset) = text::offset(&doc.text, selection.start) else { return Vec::new() };
         let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return Vec::new() };
 
@@ -1092,5 +1125,29 @@ mod tests {
 
         let defaults = wrap("    <defaults autowire=\"true\"/>\n    <prototype namespace=\"App\\\" resource=\"../src\"/>\n    <service id=\"app.a\"><argument type=\"service\" id=\"app.a\"/></service>\n");
         assert!(found(&defaults).is_empty());
+    }
+
+    #[test]
+    fn quotes_unquoted_yaml_scalar_with_quick_fix() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let text = "services:\n    app.a:\n        arguments: [@logger, '@ok']\n";
+        let yaml = doc("/project/config/services.yaml", "yaml", text);
+
+        let index = plugin.index_for("/project/x").unwrap();
+        let found = problems(index, &yaml.path, "yaml", text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code.as_deref(), Some("unquoted-yaml-scalar"));
+        assert_eq!(found[0].range, Range::new(Position::new(2, 20), Position::new(2, 27)));
+
+        let at = Range::new(Position::new(2, 22), Position::new(2, 22));
+        let actions = plugin.code_actions(&yaml, at);
+        assert_eq!(actions[0].title, "Quote '@logger'");
+        assert_eq!(actions[0].edits[0].1[0].text, "'@logger'");
+        assert_eq!(actions[0].edits[0].1[0].range, found[0].range);
+
+        let other = doc("/project/docker/compose.yaml", "yaml", "a: @x\n");
+        assert!(plugin.code_actions(&other, at).is_empty());
+        assert!(problems(plugin.index_for("/project/x").unwrap(), &other.path, "yaml", &other.text).is_empty());
     }
 }
