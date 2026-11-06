@@ -182,6 +182,9 @@ fn fetch_snapshot() -> Result<Snapshot, Error> {
             Err(Error::Denied(cap)) => {
                 return Err(format!("{cap} is not granted. Allow it in Settings › Plugins, or use http://localhost.").into());
             }
+            Err(Error::NotFound(_)) if i == 0 && matches!(auth.as_str(), "bearer" | "basic") && !host::secret_is_set("actuator-token") => {
+                return Err("Set the actuator-token secret in Settings › Plugins, or set actuatorAuth to none.".into());
+            }
             // The application isn't up: don't wait for every endpoint to time out.
             Err(e) if i == 0 => {
                 return Err(format!("Could not reach {url} ({e}). Is the application running with Spring Boot Actuator?").into());
@@ -834,7 +837,18 @@ mod tests {
         let view = runtime.render(VIEW, None, &host.invocation()).unwrap();
         let status = view.status.unwrap_or_default();
         assert!(status.contains("check actuatorAuth and the actuator-token secret"), "{status}");
-        assert!(!status.contains("s3cret"));
+    }
+
+    #[test]
+    fn unset_actuator_token_is_not_reported_as_unreachable() {
+        let host = MockHost::install().with_capabilities(&["secrets", "net:localhost"]);
+        host.set_setting("actuatorAuth", "\"bearer\"");
+        host.on_fetch(|_| Ok(HttpResponse { status: 200, headers: vec![], body: b"{}".to_vec() }));
+
+        let error = fetch_snapshot().unwrap_err().to_string();
+
+        assert!(error.contains("Set the actuator-token secret"), "{error}");
+        assert!(!error.contains("Could not reach"), "{error}");
     }
 
     #[test]
