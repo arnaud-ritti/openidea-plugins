@@ -81,6 +81,40 @@ Optional permissions:
   terminal, into the clone directory. Open the clone with File › Open when it
   finishes.
 
+## Forms and detail views
+
+Five views open from the IDE's tool window list, not from commands. The
+`forms` setting turns the first three off, `commitsView` and `pipelineView`
+the last two, and `noteActions` the comment actions.
+
+- **Create Merge Request**: title, description, target branch (up to 1000
+  branches), one assignee, reviewers by username, labels as text, and the Draft,
+  Squash and Delete source branch checkboxes. No pickers, no milestone.
+- **Create Snippet**: title, description, visibility and personal or project.
+  It uses the focused file, or its selection. A public snippet needs a second
+  click, which posts only the file and content the warning named.
+- **Share Project on GitLab**: namespace, remote name, visibility, description,
+  an optional `git init` (runs on the first click) and an optional initial
+  commit. The commit waits for a second click bound to the listed files, and
+  files that look secret (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`)
+  are refused. There is no file-selection tree.
+- **Merge Request Commits**: the commits of the selected merge request. A
+  double click shows that commit's diff, read-only, in the Changes view; commit
+  mode has no comments and no viewed marks.
+- **Merge Request Pipelines**: the newest 20 pipelines with their jobs by stage.
+  Retry a job or pipeline, cancel a pipeline (second click) or open it on
+  GitLab. No job log and no manual play.
+- In the Merge Request view, your own comments (not system notes) get Edit,
+  Delete (second click) and an award emoji from a fixed list of eight
+  (`thumbsup`, `thumbsdown`, `heart`, `tada`, `laughing`, `confused`, `rocket`,
+  `eyes`). The edit box starts empty and Save Edit overwrites on one click.
+
+Values that go into a URL or a git command (branch and ref names, remote names,
+usernames, commit SHAs, repository paths, clone URLs) are checked first and
+refused when they fail, so a branch or path outside `[A-Za-z0-9._/@+-]` can't
+be pushed or cloned through the plugin. Project paths longer than 64
+characters can't be cloned.
+
 ## Current branch
 
 When the branch's upstream is on a gitlab.com remote, the status bar shows
@@ -132,6 +166,10 @@ Settings › Plugins › GitLab:
 | Key | Default | Effect |
 |---|---|---|
 | `editorReview` | `true` | show the current branch's unresolved threads in the editor |
+| `forms` | `true` | the Create Merge Request, Create Snippet and Share Project views |
+| `noteActions` | `true` | edit, delete and react on your own comments |
+| `commitsView` | `true` | the merge request's commits and each commit's changes |
+| `pipelineView` | `true` | the merge request's pipelines and jobs, with retry and cancel |
 | `ciJobReferences` | `true` | `.gitlab-ci.yml`: report `needs`, `dependencies` and `extends` naming a job that is not in the file |
 | `ciStages` | `true` | `.gitlab-ci.yml`: report a job `stage` that is not in `stages` (or the default stages) |
 | `ciDuplicateJobUsage` | `true` | `.gitlab-ci.yml`: report a job listed twice in one `needs`, `dependencies` or `extends` |
@@ -160,8 +198,8 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 - Lists are read page by page up to 10 pages, all the lists of one command or
   refresh sharing a 35 s budget (lists after it are partial or empty): 500 merge requests, 1,000 threads
   per merge request, 1,000 projects, 1,000 diff files.
-- No side-by-side diff in the IDE's diff viewer, no per-commit diffs, and no
-  commenting from the editor gutter.
+- No side-by-side diff in the IDE's diff viewer, and no commenting from the
+  editor gutter. Per-commit diffs are read-only.
 - Line comments, replies, resolving and Viewed in the Changes view need
   scripts, which the desktop IDE currently blocks in plugin pages; comment from
   the Merge Request view or on GitLab instead.
@@ -170,9 +208,10 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
   attachments.
 - Filtering is limited to the five quick filters; no search by author, label
   or text.
-- Create Merge Request, Share Project and Create Snippet have no title or
-  description fields.
-- Share Project doesn't run `git init` or commit files.
+- The form views have no pickers (users, labels, milestone), no file chooser
+  and no file-selection tree; a snippet holds one file.
+- No Open on GitLab entry in the Project view menu: commands there get no
+  selection.
 - A file counts as viewed until a later merge request commit touches it; that
   needs the commits in the local checkout, else the head commit is used.
 - Not ported: usage statistics, `.gitlab-ci.yml` schema validation, completion and inspections beyond the four listed under CI files; included files are not followed. Applying a suggestion doesn't mark it as applied on GitLab.
