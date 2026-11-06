@@ -358,6 +358,38 @@ fn xml_problems(text: &str, index: &Index<Vec<Name>>) -> Vec<Diagnostic> {
     out
 }
 
+/// A `<chunk>` needs a `commit-interval` or a `chunk-completion-policy` (Spring Batch reference, "Configuring a Step"). A step that inherits (`parent`) or is `abstract` may get it from the other side of the inheritance, so it is left alone.
+fn chunk_problems(text: &str) -> Vec<Diagnostic> {
+    if !text.contains(NAMESPACE) || !text.contains("chunk") {
+        return Vec::new();
+    }
+    let els = xml::elements(text);
+    let inherits = |i: usize| {
+        let mut at = Some(i);
+        while let Some(e) = at.map(|a| &els[a]) {
+            if e.local() == "step" && (e.attr("parent").is_some() || e.attr("abstract").is_some()) {
+                return true;
+            }
+            at = e.parent;
+        }
+        false
+    };
+    els.iter()
+        .enumerate()
+        .filter(|(i, e)| e.local() == "chunk" && xml::namespace(&els, *i) == Some(NAMESPACE))
+        .filter(|(_, e)| e.attr("commit-interval").is_none() && e.attr("chunk-completion-policy").is_none())
+        .filter(|(i, _)| !inherits(*i))
+        .map(|(_, e)| {
+            Diagnostic::new(
+                range(text, e.at, e.at + e.name.len()),
+                Severity::Warning,
+                "A chunk needs a commit-interval or a chunk-completion-policy; without either the step fails to start.",
+            )
+            .code("chunk-missing-commit-interval")
+        })
+        .collect()
+}
+
 fn config_problems(doc: &Document, index: &Index<Vec<Name>>) -> Vec<Diagnostic> {
     if !index.complete() {
         return Vec::new();
@@ -437,7 +469,13 @@ impl Providers for Batch {
         let kind = file_kind(doc);
         let Some(index) = kind.and_then(|_| self.index(doc)) else { return Vec::new() };
         let problems = match kind {
-            Some("xml") => xml_problems(&doc.text, index),
+            Some("xml") => {
+                let mut found = xml_problems(&doc.text, index);
+                if host::setting_bool("springBatch.checkChunk").unwrap_or(true) {
+                    found.extend(chunk_problems(&doc.text));
+                }
+                found
+            }
             Some("java") => java_problems(&doc.text, all(index).any(|(_, n)| n.kind == Kind::BootApp)),
             _ => config_problems(doc, index),
         };
@@ -653,6 +691,44 @@ public class BatchConfig {
             (11, "unknown-transition-target".into(), Severity::Error),
         ]);
         assert!(host.diagnostics()[XML_PATH][0].message.contains("'missingProcessor'"));
+    }
+
+    fn chunk_codes(text: &str) -> Vec<(u32, u32)> {
+        chunk_problems(text).iter().map(|d| (d.range.start.line, d.range.start.character)).collect()
+    }
+
+    const CHUNKLESS: &str = "<job id=\"j\" xmlns=\"http://www.springframework.org/schema/batch\">\n  <step id=\"é\"><tasklet><chunk reader=\"r\" writer=\"w\"/></tasklet></step>\n</job>";
+
+    #[test]
+    fn chunk_missing_commit_interval_warns() {
+        assert_eq!(chunk_codes(CHUNKLESS), [(1, 25)]);
+    }
+
+    #[test]
+    fn chunk_missing_commit_interval_is_quiet_for_library_or_dynamic_name() {
+        assert!(chunk_codes(&CHUNKLESS.replace("reader=", "commit-interval=\"${size}\" reader=")).is_empty());
+        assert!(chunk_codes(&CHUNKLESS.replace("reader=", "chunk-completion-policy=\"p\" reader=")).is_empty());
+        assert!(chunk_codes(&CHUNKLESS.replace("id=\"é\"", "id=\"é\" parent=\"base\"")).is_empty());
+        assert!(chunk_codes(&CHUNKLESS.replace("id=\"é\"", "id=\"é\" abstract=\"true\"")).is_empty());
+        assert!(chunk_codes(&CHUNKLESS.replace("http://www.springframework.org/schema/batch", "urn:other")).is_empty());
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        host.add_file("a.xml", CHUNKLESS);
+        let mut b = Batch::default();
+        b.line_markers(&doc("/project/a.xml", "xml", CHUNKLESS));
+        let chunks = || {
+            host.diagnostics()["/project/a.xml"]
+                .iter()
+                .filter(|d| d.code.as_deref() == Some("chunk-missing-commit-interval"))
+                .count()
+        };
+        assert_eq!(chunks(), 1);
+        let fixed = CHUNKLESS.replace("reader=", "commit-interval=\"5\" reader=");
+        b.line_markers(&doc("/project/a.xml", "xml", &fixed));
+        assert_eq!(chunks(), 0);
     }
 
     #[test]

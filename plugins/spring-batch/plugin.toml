@@ -33,3 +33,7 @@ id = "diagram"
 title = "Batch Jobs"
 icon = "hierarchy"
 location = "bottom"
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Spring Batch"
