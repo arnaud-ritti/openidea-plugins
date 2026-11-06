@@ -1,7 +1,8 @@
 //! Spring Security Tools for OpenIDEA: flags configuration that Spring
 //! Security 6 removed or deprecated (with quick fixes where the change is
 //! mechanical), redundant `ROLE_` prefixes and plain-text password encoders,
-//! and completes SpEL in method security annotations. Text-based, Java only.
+//! and completes SpEL in method security annotations. Text-based: Java and
+//! Kotlin sources, and the security namespace of Spring XML files.
 
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
@@ -266,7 +267,7 @@ fn problems(path: &str, text: &str) -> Vec<Problem> {
     if path.ends_with(".xml") {
         return xml_problems(text);
     }
-    let file = java::parse(text);
+    let file = spring_text::parse_source(path, text);
     let mut out = Vec::new();
     for e in file.types.iter().flat_map(|t| &t.extends).filter(|e| e.name == "WebSecurityConfigurerAdapter") {
         let message = "WebSecurityConfigurerAdapter was removed in Spring Security 6: declare a SecurityFilterChain @Bean instead.";
@@ -305,7 +306,7 @@ fn problems(path: &str, text: &str) -> Vec<Problem> {
         }
     }
     let security = file.imports.iter().any(|i| i.path.starts_with("org.springframework.security"));
-    for c in java::calls(text) {
+    for c in spring_text::source_calls(path, text) {
         let name_end = c.at + c.name.len();
         let renamed = match c.name.as_str() {
             "antMatchers" | "mvcMatchers" | "regexMatchers" if security => Some("requestMatchers"),
@@ -351,6 +352,20 @@ fn problems(path: &str, text: &str) -> Vec<Problem> {
             out.push(Problem { diagnostic: problem(text, s.at, s.end, Severity::Info, "plain-text-password", message), fix: None });
         }
     }
+    if security && spring_text::is_kotlin(path) {
+        for (at, _) in text.match_indices("authorizeRequests") {
+            let after = at + "authorizeRequests".len();
+            let standalone = !text[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+            if standalone && text[after..].trim_start().starts_with('{') {
+                let message = "`authorizeRequests` is deprecated: use `authorizeHttpRequests`.".to_owned();
+                let mut diagnostic = problem(text, at, after, Severity::Warning, "authorize-requests", message);
+                diagnostic.deprecated = true;
+                let fix = Some(("Rename to authorizeHttpRequests".to_owned(), vec![edit(text, at, after, "authorizeHttpRequests")]));
+                out.push(Problem { diagnostic, fix });
+            }
+        }
+        out.sort_by_key(|p| p.diagnostic.range.start);
+    }
     out
 }
 
@@ -392,6 +407,9 @@ impl Providers for SecurityTools {
 
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(off) = offset(&doc.text, at) else { return Vec::new() };
+        if spring_text::is_kotlin(&doc.path) {
+            return Vec::new();
+        }
         let file = java::parse(&doc.text);
         let Some((annotation, s)) = annotations(&file)
             .filter(|a| METHOD_SECURITY.contains(&a.name.as_str()))
@@ -627,5 +645,49 @@ class Orders {
         let d = Document { path: "/project/other.xml".into(), language: "xml".into(), version: 1, text: plain.into() };
         tools.line_markers(&d);
         assert!(host.diagnostics().get(&d.path).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn kotlin_http_dsl_flags_deprecated_matchers() {
+        let host = MockHost::install();
+        let mut tools = SecurityTools::default();
+        let text = r#"package com.acme
+
+import org.springframework.security.config.annotation.web.invoke
+import org.springframework.security.config.annotation.method.configuration.EnableGlobalMethodSecurity
+
+@EnableGlobalMethodSecurity(prePostEnabled = true)
+class SecurityConfig : WebSecurityConfigurerAdapter() {
+    fun chain(http: HttpSecurity): SecurityFilterChain {
+        http {
+            authorizeRequests {
+                authorize("/x", permitAll)
+                authorize("/y", hasRole("ROLE_ADMIN"))
+            }
+        }
+        http.authorizeRequests().antMatchers("/a").permitAll().mvcMatchers("/b").permitAll().regexMatchers("/c.*").denyAll()
+        return http.build()
+    }
+}
+"#;
+        let d = Document { path: "/project/src/main/kotlin/com/acme/SecurityConfig.kt".into(), language: "kotlin".into(), version: 1, text: text.into() };
+        tools.line_markers(&d);
+        let found: Vec<(String, String)> = host.diagnostics()[&d.path]
+            .iter()
+            .map(|x| (x.code.clone().unwrap(), text[offset(text, x.range.start).unwrap()..offset(text, x.range.end).unwrap()].to_owned()))
+            .collect();
+        let found: Vec<(&str, &str)> = found.iter().map(|(c, s)| (c.as_str(), s.as_str())).collect();
+        assert_eq!(found, [
+            ("enable-global-method-security", "@EnableGlobalMethodSecurity(prePostEnabled = true)"),
+            ("web-security-configurer-adapter", "WebSecurityConfigurerAdapter"),
+            ("authorize-requests", "authorizeRequests"),
+            ("role-prefix", "ROLE_ADMIN"),
+            ("authorize-requests", "authorizeRequests"),
+            ("removed-request-matcher", "antMatchers"),
+            ("removed-request-matcher", "mvcMatchers"),
+            ("removed-request-matcher", "regexMatchers"),
+        ]);
+        let p = openidea_plugin::text::position(text, text.find("antMatchers").unwrap());
+        assert_eq!(tools.code_actions(&d, Range::new(p, p)).len(), 1);
     }
 }
