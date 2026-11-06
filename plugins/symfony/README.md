@@ -127,8 +127,9 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     (deprecated since ORM 3.2, use `#[Index]` / `#[UniqueConstraint]`);
     `orm-lifecycle-callbacks-missing` (warning), a lifecycle attribute
     (`PrePersist`, `PostPersist`, `PreUpdate`, `PostUpdate`, `PreRemove`,
-    `PostRemove`, `PostLoad`, `PreFlush`) in an `#[Entity]` or
-    `#[MappedSuperclass]` class without `#[HasLifecycleCallbacks]`;
+    `PostRemove`, `PostLoad`, `PreFlush`) in an `#[Entity]` class
+    without `#[HasLifecycleCallbacks]` (a `#[MappedSuperclass]` is skipped: a
+    subclass may carry it);
     `orm-one-to-many-mapped-by` (warning), `#[OneToMany]` without `mappedBy`
     and without a `#[JoinTable]` on the property; `orm-inverse-side-join-column`
     (hint), `#[JoinColumn]` next to `#[OneToOne(mappedBy: ...)]`;

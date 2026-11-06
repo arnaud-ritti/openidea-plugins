@@ -453,12 +453,17 @@ fn form_actions(text: &str, at: usize) -> Vec<Action> {
 
 /// Whether `at` is on a `{% extends %}` tag that is not inside a comment or verbatim body.
 pub fn caret_on_extends(text: &str, at: usize) -> bool {
-    let Some(open) = text[..(at + 2).min(text.len())].rfind("{%") else { return false };
+    let mut end = (at + 2).min(text.len());
+    while !text.is_char_boundary(end) {
+        end += 1;
+    }
+
+    let Some(open) = text[..end].rfind("{%") else { return false };
     if !twig::code_regions(text).iter().any(|region| region.contains(&open)) {
         return false;
     }
 
-    let Some(close) = text[open..].find("%}").map(|found| open + found + 2) else { return false };
+    let Some(close) = text[open + 2..].find("%}").map(|found| open + 2 + found + 2) else { return false };
     let inside = text[open + 2..close - 2].trim_start_matches(['-', '~']).trim_start();
     let is_extends = inside.strip_prefix("extends").is_some_and(|rest| !rest.bytes().next().is_some_and(refs::is_identifier));
 
@@ -493,6 +498,23 @@ pub fn twig_actions(text: &str, at: usize, parent_blocks: &[String]) -> Vec<Acti
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn caret_on_extends_survives_multibyte_text_after_the_caret() {
+        let text = "{% extends '\u{e9}' %}\n";
+        assert!(super::caret_on_extends(text, "{% extends '".len()));
+        let text = "{% extends \u{2019}'a' %}\n";
+        assert!(super::caret_on_extends(text, "{% extends ".len()));
+        let text = "{% extends 'a' %}\n\u{1F600}";
+        assert!(super::caret_on_extends(text, "{% extends".len()));
+        let text = "{% extends 'a' %}\u{e9}";
+        assert!(super::caret_on_extends(text, "{% extends 'a' %}".len() - 1));
+        let text = "{% e\u{2019}";
+        assert!(!super::caret_on_extends(text, 3));
+        assert!(!super::caret_on_extends("{%}", 1));
+        let text = "{%\u{2019}";
+        assert!(!super::caret_on_extends(text, 1));
+    }
+
     use super::*;
 
     const V7: Option<(u32, u32)> = Some((7, 0));

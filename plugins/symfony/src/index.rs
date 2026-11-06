@@ -813,9 +813,10 @@ pub fn twig_namespaces(value: &str) -> Vec<(String, String)> {
         .split(',')
         .filter_map(|pair| {
             let (namespace, directory) = pair.split_once('=')?;
+            let namespace = namespace.trim().trim_start_matches('@');
             let directory = directory.trim().replace("%kernel.project_dir%", "");
             let directory = directory.trim_start_matches("./").trim_matches('/').to_owned();
-            (!directory.is_empty() && !directory.contains("..")).then(|| (directory, namespace.trim().to_owned()))
+            (!directory.is_empty() && !directory.contains("..")).then(|| (directory, namespace.to_owned()))
         })
         .collect()
 }
@@ -1282,6 +1283,11 @@ final class BlogController extends AbstractController
             twig_namespaces("emails=templates/mail, =templates/main ,pdf=./pdf/"),
             [("templates/mail".into(), "emails".into()), ("templates/main".into(), String::new()), ("pdf".into(), "pdf".into())]
         );
+    }
+
+    #[test]
+    fn twig_namespaces_setting_strips_a_leading_at_sign() {
+        assert_eq!(twig_namespaces("@emails=templates/mail"), [("templates/mail".into(), "emails".into())]);
     }
 
     #[test]

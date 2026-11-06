@@ -193,7 +193,7 @@ pub fn insert_use(text: &str, fqcn: &str) -> Option<UseEdit> {
         return Some(UseEdit { offset: 0, text: String::new(), short_name: import.alias.clone() });
     }
 
-    if header.imports.iter().any(|(import, _)| import.alias == short) {
+    if header.imports.iter().any(|(import, _)| import.alias.eq_ignore_ascii_case(short)) {
         return None;
     }
 
@@ -485,6 +485,11 @@ mod tests {
         let edit = insert_use(text, "\\Foo\\Bar").unwrap();
         assert_eq!(edit.text, "");
         assert_eq!(edit.short_name, "Baz");
+    }
+
+    #[test]
+    fn insert_use_compares_aliases_case_insensitively() {
+        assert!(insert_use("<?php\nuse Foo\\request;\n", "Symfony\\Component\\HttpFoundation\\Request").is_none());
     }
 
     #[test]

@@ -98,7 +98,7 @@ fn has_named(masked: &str, attribute: &AttributeUse, wanted: &str) -> bool {
     list.into_iter().any(|argument| named(masked, argument).is_some_and(|(name, _)| &masked[name] == wanted))
 }
 
-/// `mappedBy` written by name or as the second positional argument.
+/// `mappedBy` written by name or as any positional argument that is not `X::class`.
 fn has_mapped_by(masked: &str, attribute: &AttributeUse) -> bool {
     if !masked[attribute.range.clone()].contains('(') {
         return false;
@@ -108,7 +108,7 @@ fn has_mapped_by(masked: &str, attribute: &AttributeUse) -> bool {
     }
 
     let list = arguments(masked, attribute.arguments.start - 1);
-    list.into_iter().skip(1).any(|argument| named(masked, argument).is_none())
+    list.into_iter().any(|argument| named(masked, argument.clone()).is_none() && !masked[argument].trim_end().ends_with("::class"))
 }
 
 fn same_property<'a>(masked: &'a str, attributes: &'a [AttributeUse], attribute: &AttributeUse) -> impl Iterator<Item = &'a AttributeUse> {
@@ -161,7 +161,7 @@ fn nullable_attribute(masked: &str, attribute: &AttributeUse, found: &mut Vec<Fi
 }
 
 fn lifecycle_callbacks(masked: &str, attributes: &[AttributeUse], found: &mut Vec<Finding>) {
-    for entity in attributes.iter().filter(|a| matches!(mapping_name(a), Some("Entity" | "MappedSuperclass"))) {
+    for entity in attributes.iter().filter(|a| mapping_name(a) == Some("Entity")) {
         let Target::Class { name } = &entity.target else { continue };
 
         let marked = attributes.iter().any(|a| mapping_name(a) == Some("HasLifecycleCallbacks") && a.target == entity.target);
@@ -308,6 +308,12 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_callbacks_missing_is_quiet_for_mapped_superclasses() {
+        let text = format!("<?php\n{ORM}\n#[ORM\\MappedSuperclass]\nclass Base\n{{\n    #[ORM\\PrePersist]\n    public function a(): void {{}}\n}}\n");
+        assert!(php(&text).is_empty());
+    }
+
+    #[test]
     fn lifecycle_callbacks_missing_is_quiet_outside_entities() {
         let text = format!("<?php\n{ORM}\nclass Listener\n{{\n    #[ORM\\PrePersist]\n    public function a(): void {{}}\n}}\n");
         assert!(php(&text).is_empty());
@@ -327,6 +333,8 @@ mod tests {
     #[test]
     fn one_to_many_with_mapped_by_is_quiet() {
         for body in [
+            "#[ORM\\OneToMany('author', targetEntity: Book::class)]\n    private $books;",
+            "#[ORM\\OneToMany('author', Book::class)]\n    private $books;",
             "#[ORM\\OneToMany(targetEntity: Phone::class, mappedBy: 'user')]\n    private $phones;",
             "#[ORM\\OneToMany(Phone::class, 'user')]\n    private $phones;",
             "#[ORM\\OneToMany(targetEntity: Phone::class)]\n    #[ORM\\JoinTable(name: 'users_phones')]\n    private $phones;",
@@ -464,6 +472,37 @@ mod tests {
     fn doctrine_group_crlf_files_report_correct_lines() {
         let found = run(PATH, "php", &TABLE.replace('\n', "\r\n"));
         assert_eq!(found[0].range, TextRange::new(Position::new(3, 2), Position::new(3, 11)));
+    }
+
+    const XML: &str = "<doctrine-mapping>\n<!-- \u{e9}\u{1F600} --><join-column name=\"a\" nullable=\"true\"/>\n</doctrine-mapping>\n";
+    const XML_PATH: &str = "/project/config/doctrine/User.orm.xml";
+    const YAML: &str = "# \u{e9}\u{1F600}\nApp\\Entity\\User:\n  manyToOne:\n    a:\n      joinColumn:\n        nullable: true\n";
+    const YAML_PATH: &str = "/project/config/doctrine/User.orm.yml";
+
+    #[test]
+    fn doctrine_xml_group_ranges_use_utf16_columns_with_multibyte_text() {
+        let found = run(XML_PATH, "xml", XML);
+        assert_eq!(found[0].range.start, Position::new(1, 34));
+    }
+
+    #[test]
+    fn doctrine_yaml_group_ranges_use_utf16_columns_with_multibyte_text() {
+        let found = run(YAML_PATH, "yaml", YAML);
+        assert_eq!(found[0].range, TextRange::new(Position::new(5, 8), Position::new(5, 16)));
+    }
+
+    #[test]
+    fn doctrine_xml_and_yaml_groups_crlf_files_report_correct_lines() {
+        let found = run(XML_PATH, "xml", &XML.replace('\n', "\r\n"));
+        assert_eq!(found[0].range.start, Position::new(1, 34));
+        let found = run(YAML_PATH, "yaml", &YAML.replace('\n', "\r\n"));
+        assert_eq!(found[0].range, TextRange::new(Position::new(5, 8), Position::new(5, 16)));
+    }
+
+    #[test]
+    fn doctrine_xml_and_yaml_groups_fixed_file_publishes_empty_list() {
+        assert!(run(XML_PATH, "xml", &XML.replace("true", "false")).is_empty());
+        assert!(run(YAML_PATH, "yaml", &YAML.replace("true", "false")).is_empty());
     }
 
     fn published(host: &MockHost, plugin: &mut Main, event: Event) -> Vec<String> {

@@ -214,11 +214,15 @@ fn input_modes(masked: &str) -> Vec<Finding> {
 }
 
 fn base_mode_count(expression: &str, call: &ModeCall) -> usize {
-    expression
+    let mut modes: Vec<&str> = expression
         .split('|')
         .filter_map(|term| term.trim().strip_prefix('\\').unwrap_or(term.trim()).rsplit_once("::"))
         .filter(|(owner, constant)| owner.rsplit('\\').next() == Some(call.owner) && call.base_modes.contains(constant))
-        .count()
+        .map(|(_, constant)| constant)
+        .collect();
+    modes.sort_unstable();
+    modes.dedup();
+    modes.len()
 }
 
 pub fn deprecations(ctx: &Context, text: &str) -> Vec<Finding> {
@@ -561,6 +565,45 @@ mod tests {
         ] {
             let text = format!("<?php\nreturn ['services' => ['a' => [{body}], 'b' => ['parent' => 'p']]];\n");
             assert!(deprecations_in(Some((8, 1)), &text).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn deprecations_ranges_use_utf16_columns_with_multibyte_text() {
+        let text = MIRROR.replace("    $fs->mirror", "    /* \u{e9}\u{1F600} */ $fs->mirror");
+        let found = run(Some((8, 1)), PATH, &text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].range.start.line, 4);
+        assert_eq!(found[0].range.start.character, 4 + 10 + "$fs->mirror('a', 'b', null, ['".len() as u32);
+    }
+
+    #[test]
+    fn deprecations_crlf_files_report_correct_lines() {
+        let found = run(Some((8, 1)), PATH, &MIRROR.replace('\n', "\r\n"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].range.start.line, 4);
+        assert_eq!(found[0].range.start.character, 4 + "$fs->mirror('a', 'b', null, ['".len() as u32);
+    }
+
+    #[test]
+    fn deprecations_fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        let mut plugin = project(&host);
+
+        host.add_file("src/Command/XCommand.php", MIRROR);
+        assert_eq!(published(&host, &mut plugin, Event::FileOpened(PATH.into())), ["filesystem-mirror-copy-on-windows"]);
+
+        host.add_file("src/Command/XCommand.php", &MIRROR.replace(", ['copy_on_windows' => true]", ""));
+        assert!(published(&host, &mut plugin, Event::FileSaved(PATH.into())).is_empty());
+    }
+
+    #[test]
+    fn console_input_mode_counts_distinct_base_modes() {
+        for code in [
+            "$c->addArgument('n', InputArgument::REQUIRED | InputArgument::REQUIRED);",
+            "$c->addOption('o', null, InputOption::VALUE_NONE | InputOption::VALUE_NONE);",
+        ] {
+            assert!(mode_texts(code).is_empty(), "{code}");
         }
     }
 

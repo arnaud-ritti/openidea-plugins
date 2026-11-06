@@ -155,9 +155,7 @@ const CORE_TAGS: &[&str] = &[
     "routing.expression_language_provider",
     "routing.loader",
     "routing.route_loader",
-    "runtime.reset",
     "scheduler.schedule_provider",
-    "security.authenticator.login_linker",
     "security.expression_language_provider",
     "security.remember_me_handler",
     "security.voter",
@@ -192,7 +190,9 @@ fn candidates<'a>(index: &'a Index, path: &str, language: &str, text: &str, refe
                 .iter()
                 .map(|tag| ((*tag).to_owned(), Entry { detail: Some("Symfony core tag".into()), path: String::new(), at: Position::new(0, 0) }))
                 .collect();
-            all.extend(index.tags.iter().map(|(tag, entry)| (tag.clone(), entry.clone())));
+            for (tag, entry) in &index.tags {
+                all.entry(tag.clone()).or_insert_with(|| entry.clone());
+            }
             Cow::Owned(all)
         }
         Kind::Translation => {
@@ -466,12 +466,14 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
     findings
 }
 
-/// Findings of all groups that carry a replacement, for quick fixes.
+/// Findings that carry a replacement, for quick fixes: only the YAML scalar check has one.
 fn fixes(index: &Index, path: &str, language: &str, text: &str) -> Vec<checks::Finding> {
-    let project = project_for(path);
-    let read = |file: &str| project.as_ref().and_then(|project| project.read_file(file).ok());
+    let published = host::setting_bool("diagnostics").unwrap_or(true) && !index.partial;
+    if !published || !Groups::from_settings().yaml_syntax {
+        return Vec::new();
+    }
 
-    findings(index, Groups::from_settings(), &read, path, language, text)
+    config_checks::yaml_scalars(path, language, text)
         .into_iter()
         .filter(|finding| finding.replacement.is_some())
         .collect()
@@ -1519,6 +1521,28 @@ mod tests {
     }
 
     #[test]
+    fn core_tags_are_documented_symfony_tags() {
+        assert!(!CORE_TAGS.contains(&"runtime.reset"));
+        assert!(!CORE_TAGS.contains(&"security.authenticator.login_linker"));
+        assert!(CORE_TAGS.contains(&"kernel.reset"));
+    }
+
+    #[test]
+    fn project_tags_keep_the_core_tag_detail() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let yaml = doc(SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['kernel.reset']\n");
+        let project_entry = Entry { detail: Some("project".into()), path: "x".into(), at: Position::new(0, 0) };
+        plugin.indexes.values_mut().for_each(|index| {
+            index.tags.insert("kernel.reset".into(), project_entry.clone());
+        });
+        let reference = refs::reference_at("yaml", &yaml.text, yaml.text.find("kernel.reset").unwrap() + 2).unwrap();
+        let index = plugin.index_for(SERVICES_FILE).unwrap();
+        let names = candidates(index, SERVICES_FILE, "yaml", &yaml.text, &reference);
+        assert_eq!(names["kernel.reset"].detail.as_deref(), Some("Symfony core tag"));
+    }
+
+    #[test]
     fn twig_namespaces_setting_resolves_templates() {
         let host = MockHost::install();
         host.set_setting("twigNamespaces", r#""emails=templates/mail""#);
@@ -1641,6 +1665,24 @@ mod tests {
         let other = doc("/project/docker/compose.yaml", "yaml", "a: @x\n");
         assert!(plugin.code_actions(&other, at).is_empty());
         assert!(extra_problems(plugin.index_for("/project/x").unwrap(), Groups::all_on(), &read, &other.path, "yaml", &other.text).is_empty());
+    }
+
+    #[test]
+    fn replacement_fixes_follow_diagnostics_setting_and_partial_index() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let yaml = doc("/project/config/services.yaml", "yaml", "b: \"App\\Foo\"\n");
+        let all = Range::new(Position::new(0, 0), Position::new(1, 0));
+        let replaces = |plugin: &mut Main| plugin.code_actions(&yaml, all).iter().any(|a| a.title.starts_with("Replace with"));
+        assert!(replaces(&mut plugin));
+
+        host.set_setting("diagnostics", "false");
+        assert!(!replaces(&mut plugin));
+        host.set_setting("diagnostics", "true");
+        assert!(replaces(&mut plugin));
+
+        plugin.indexes.values_mut().for_each(|index| index.partial = true);
+        assert!(!replaces(&mut plugin));
     }
 
     #[test]
