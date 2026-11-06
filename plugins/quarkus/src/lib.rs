@@ -2,16 +2,20 @@
 //! files, ported from Quarkus Tools for IntelliJ 2.6.1 (Red Hat, EPL-2.0).
 
 pub mod checks;
+mod indexer;
 mod java;
+mod java_checks;
 
-use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
-use openidea_plugin::{Diagnostic, Error, Invocation, Plugin, Position, Severity, host, register_plugin};
+use openidea_plugin::{Diagnostic, Error, Invocation, Plugin, Position, Range, Severity, TextEdit, host, register_plugin};
 use spring_text::config::{self, is_config_file};
 use spring_text::index::{Indexes, PROVIDER_BUDGET, project_of};
-use spring_text::metadata::{Catalog, Lookup, Meta, parse_tsv, properties_completion, strip_profile, yaml_completion};
+use spring_text::metadata::{Catalog, Lookup, parse_tsv, properties_completion, strip_profile, yaml_completion};
 use spring_text::range;
-use std::collections::BTreeMap;
+use java::JavaInfo;
+use java_checks::{Context, Fix};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 /// Quarkus 3.40.1 and MicroProfile properties.
@@ -33,25 +37,83 @@ pub fn is_quarkus_config(path: &str) -> bool {
 }
 
 pub struct QuarkusTools {
-    sources: Indexes<Meta>,
+    sources: Indexes<JavaInfo>,
+    configs: Indexes<Vec<String>>,
+    published_java: BTreeSet<String>,
     /// Whether a directory is inside a Quarkus module, by absolute path.
     modules: BTreeMap<String, bool>,
 }
 
 impl Default for QuarkusTools {
     fn default() -> Self {
-        Self { sources: Indexes::new(&["**/*.java"], java::config_meta), modules: BTreeMap::new() }
+        Self {
+            sources: Indexes::new(&["**/*.java"], java::java_info),
+            configs: Indexes::new(&["**/application*.properties", "**/application*.yaml", "**/application*.yml", "**/microprofile-config.properties"], squashed_keys),
+            published_java: BTreeSet::new(),
+            modules: BTreeMap::new(),
+        }
     }
 }
 
+fn squashed_keys(path: &str, text: &str) -> Option<Vec<String>> {
+    let lookup = Lookup(vec![bundled()]);
+    let keys: Vec<String> = config::keys(path, text).iter().map(|k| checks::squash(&checks::normalize(&lookup, strip_profile(&k.key)))).collect();
+    Some(keys)
+}
+
+fn env_keys(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.lines().filter_map(|line| line.trim_start().split_once('=').map(|(key, _)| checks::squash(key.trim_start_matches("export "))))
+}
+
 impl QuarkusTools {
+    /// Every key the project's other config files and `.env` set, `None` while the project is not fully read.
+    fn java_problems(&mut self, doc: &Document) -> Vec<java_checks::Problem> {
+        let unassigned = host::setting_bool("quarkus.checkUnassigned").unwrap_or(false);
+        let annotations = host::setting_bool("quarkus.checkAnnotations").unwrap_or(true);
+        if !(unassigned || annotations) || !self.uses_quarkus(&doc.path) {
+            return Vec::new();
+        }
+        let rest_clients = self.sources.for_document(&doc.path, &doc.text, PROVIDER_BUDGET).filter(|index| index.complete()).map(|index| {
+            let mut clients: BTreeMap<String, bool> = BTreeMap::new();
+            for (name, registered) in index.iter().flat_map(|(_, info)| info.interfaces.iter()) {
+                *clients.entry(name.clone()).or_default() |= *registered;
+            }
+            clients
+        });
+        let (project, _) = self.project(doc);
+        let configured = self.keys_elsewhere(doc);
+        let lookup = Lookup(vec![&project, bundled()]);
+        let ctx = Context { lookup: &lookup, configured: configured.as_ref(), rest_clients: rest_clients.as_ref(), unassigned, annotations };
+        java_checks::check(&doc.text, &ctx)
+    }
+
+    /// The `application.properties` nearest to `path`.
+    fn properties_file_for(&mut self, doc: &Document) -> Option<String> {
+        let index = self.configs.for_document(&doc.path, &doc.text, PROVIDER_BUDGET)?;
+        let shared = |p: &str| p.bytes().zip(doc.path.bytes()).take_while(|(a, b)| a == b).count();
+        index.iter().map(|(p, _)| p).filter(|p| p.ends_with("/application.properties")).max_by_key(|p| shared(p)).map(str::to_owned)
+    }
+
+    fn keys_elsewhere(&mut self, doc: &Document) -> Option<BTreeSet<String>> {
+        let index = self.configs.for_document(&doc.path, &doc.text, PROVIDER_BUDGET)?;
+        if !index.complete() {
+            return None;
+        }
+        let mut keys: BTreeSet<String> = index.iter().flat_map(|(_, keys)| keys.iter().cloned()).collect();
+        let root = project_of(&doc.path)?.root().ok()?;
+        if let Ok(env) = project_of(&doc.path)?.read_file(&format!("{}/.env", root.trim_end_matches('/'))) {
+            keys.extend(env_keys(&env));
+        }
+        Some(keys)
+    }
+
     /// The project's own properties, and whether a whole pass over the project was read.
     fn project(&mut self, doc: &Document) -> (Catalog, bool) {
         let mut catalog = Catalog::default();
         let Some(index) = self.sources.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else {
             return (catalog, false);
         };
-        for (_, meta) in index.iter() {
+        for meta in index.iter().filter_map(|(_, info)| info.meta.as_ref()) {
             catalog.add(meta);
         }
         (catalog, index.complete())
@@ -60,7 +122,7 @@ impl QuarkusTools {
     /// Looks for `io.quarkus` in the build files of the file's directory and
     /// its parents, up to the project root: in a multi-module build only the
     /// root (or a parent) may name Quarkus.
-    fn uses_quarkus(&mut self, path: &str) -> bool {
+    pub(crate) fn uses_quarkus(&mut self, path: &str) -> bool {
         let Some(project) = project_of(path) else { return false };
         let Ok(root) = project.root() else { return false };
         let root = root.trim_end_matches('/');
@@ -106,25 +168,63 @@ fn profile_items(text: &str, at: usize) -> Vec<CompletionItem> {
         .collect()
 }
 
+/// Completes a line that names an instance (`quarkus.datasource."users".jdbc.`) as the line without
+/// the name, then writes the name back into the items.
+fn named_items(text: &str, at: usize, lookup: &Lookup) -> Option<Vec<CompletionItem>> {
+    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    let line = &text[line_start..line_end];
+    let open = line.find(".\"")?;
+    let close = open + 2 + line[open + 2..].find('"')?;
+    let root = strip_profile(line[..open].trim_start());
+    if !line[close + 1..].starts_with('.') || at <= line_start + close || !lookup.values("!named").iter().any(|r| r == root) {
+        return None;
+    }
+    let (cut, name) = (line_start + open, &line[open..=close]);
+    let stripped = format!("{}{}", &text[..cut], &text[cut + name.len()..]);
+    let shifted = |position: Position| {
+        let o = offset(&stripped, position)?;
+        Some(range_point(text, if o >= cut { o + name.len() } else { o }))
+    };
+    let mut items = properties_completion(&stripped, at - name.len(), lookup);
+    for item in &mut items {
+        if let Some(replace) = item.replace {
+            item.replace = Some(Range { start: shifted(replace.start)?, end: shifted(replace.end)? });
+        }
+        if item.label.starts_with(&format!("{root}.")) {
+            for field in [&mut item.label, &mut item.insert_text] {
+                *field = field.replacen(root, &format!("{root}{name}"), 1);
+            }
+            item.filter_text = item.filter_text.take().map(|f| f.replacen(root, &format!("{root}{name}"), 1));
+        }
+    }
+    Some(items)
+}
+
+fn range_point(text: &str, at: usize) -> Position {
+    openidea_plugin::text::position(text, at)
+}
+
 /// Expressions are checked only in `application.properties|yaml|yml`: profile files and
 /// `microprofile-config.properties` lean on the base file, `.env`, the environment and `-D`.
 fn is_base_file(path: &str) -> bool {
     matches!(path.rsplit(['/', '\\']).next(), Some("application.properties" | "application.yaml" | "application.yml"))
 }
 
-fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool) -> Vec<Diagnostic> {
+fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool, elsewhere: Option<&BTreeSet<String>>) -> Vec<Diagnostic> {
     let keys = config::keys(path, text);
     let mut out = Vec::new();
     for k in &keys {
-        let base = strip_profile(&k.key);
-        if base.is_empty() {
+        let written = strip_profile(&k.key);
+        if written.is_empty() {
             continue;
         }
+        let base = &*checks::normalize(lookup, written);
         let range = range(text, k.at, k.end);
         if let Some(dep) = lookup.prop(base).and_then(|p| p.deprecated.as_ref()) {
             let message = match dep.replacement.as_str() {
-                "" => format!("`{base}` is deprecated."),
-                r => format!("`{base}` is deprecated. Use `{r}` instead."),
+                "" => format!("`{written}` is deprecated."),
+                r => format!("`{written}` is deprecated. Use `{r}` instead."),
             };
             let mut d = Diagnostic::new(range, Severity::Warning, message).code("deprecated-property");
             d.deprecated = true;
@@ -134,7 +234,7 @@ fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool) -> Vec<Diag
             && !keys.iter().any(|o| o.key.len() > k.key.len() && o.key.starts_with(&k.key) && matches!(o.key.as_bytes()[k.key.len()], b'.' | b'['))
             && let Some(group) = lookup.unknown(base)
         {
-            let message = format!("`{base}` is not a known property of `{group}`.");
+            let message = format!("`{written}` is not a known property of `{group}`.");
             out.push(Diagnostic::new(range, Severity::Warning, message).code("unknown-property"));
         }
     }
@@ -145,6 +245,9 @@ fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool) -> Vec<Diag
     };
     let yaml = !path.ends_with(".properties");
     out.extend(checks::check(text, yaml, lookup, groups).iter().map(|f| f.diagnostic(text)));
+    if let Some(elsewhere) = elsewhere {
+        out.extend(checks::missing_required(&keys, elsewhere, lookup).iter().map(|f| f.diagnostic(text)));
+    }
     out
 }
 
@@ -155,6 +258,13 @@ impl Providers for QuarkusTools {
             if self.uses_quarkus(&doc.path) {
                 self.sources.for_document(&doc.path, &doc.text, PROVIDER_BUDGET);
             }
+            let found: Vec<Diagnostic> = self.java_problems(doc).iter().map(|p| p.finding.diagnostic(&doc.text)).collect();
+            if !found.is_empty() || self.published_java.remove(&doc.path) {
+                let _ = host::publish_diagnostics(&doc.path, &found);
+            }
+            if !found.is_empty() {
+                self.published_java.insert(doc.path.clone());
+            }
             return Vec::new();
         }
         if !is_quarkus_config(&doc.path) {
@@ -162,7 +272,8 @@ impl Providers for QuarkusTools {
         }
         let found = if self.uses_quarkus(&doc.path) {
             let (project, complete) = self.project(doc);
-            problems(&doc.path, &doc.text, &Lookup(vec![&project, bundled()]), complete)
+            let elsewhere = if host::setting_bool("quarkus.checkRequired").unwrap_or(false) { self.keys_elsewhere(doc) } else { None };
+            problems(&doc.path, &doc.text, &Lookup(vec![&project, bundled()]), complete, elsewhere.as_ref())
         } else {
             Vec::new()
         };
@@ -170,7 +281,46 @@ impl Providers for QuarkusTools {
         Vec::new()
     }
 
+    fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        if !doc.path.ends_with(".java") {
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        for problem in self.java_problems(doc) {
+            let finding = &problem.finding;
+            let lines = range(&doc.text, finding.start, finding.end);
+            if lines.start.line > selection.end.line || lines.end.line < selection.start.line {
+                continue;
+            }
+            for fix in problem.fixes {
+                let (title, edits) = match fix {
+                    Fix::DefaultValue { at, value } => {
+                        let edit = TextEdit { range: range(&doc.text, at, at), text: format!(", defaultValue = \"{value}\"") };
+                        ("Add defaultValue".to_owned(), vec![(doc.path.clone(), vec![edit])])
+                    }
+                    Fix::AddKey { key } => {
+                        let Some(file) = self.properties_file_for(doc) else { continue };
+                        let Ok(current) = project_of(&doc.path).map_or(Err(Error::NotFound(file.clone())), |p| p.read_file(&file)) else { continue };
+                        let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
+                        let edit = TextEdit { range: range(&current, current.len(), current.len()), text: format!("{separator}{key}=\n") };
+                        (format!("Add `{key}` to application.properties"), vec![(file, vec![edit])])
+                    }
+                };
+                actions.push(CodeAction { title, kind: Some("quickfix".into()), preferred: false, edits, data: None });
+            }
+        }
+        actions
+    }
+
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        if doc.path.ends_with(".java") {
+            let Some(at) = offset(&doc.text, at) else { return Vec::new() };
+            if !self.uses_quarkus(&doc.path) || java::completion_slot(&doc.text, at).is_none() {
+                return Vec::new();
+            }
+            let (project, _) = self.project(doc);
+            return java::key_items(&doc.text, at, &Lookup(vec![&project, bundled()]));
+        }
         if !is_quarkus_config(&doc.path) || !self.uses_quarkus(&doc.path) {
             return Vec::new();
         }
@@ -181,7 +331,7 @@ impl Providers for QuarkusTools {
             return yaml_completion(&doc.text, at, &lookup);
         }
         let mut items = profile_items(&doc.text, at);
-        items.extend(properties_completion(&doc.text, at, &lookup));
+        items.extend(named_items(&doc.text, at, &lookup).unwrap_or_else(|| properties_completion(&doc.text, at, &lookup)));
         items
     }
 }
@@ -198,7 +348,7 @@ impl Plugin for QuarkusTools {
     }
 }
 
-register_plugin!(QuarkusTools, providers);
+register_plugin!(QuarkusTools, providers, indexing);
 
 #[cfg(test)]
 mod tests {
@@ -511,6 +661,156 @@ mod tests {
             .map(|(extension, _)| *extension)
             .collect();
         assert!(missing.is_empty(), "no metadata for {missing:?}");
+    }
+
+    #[test]
+    fn completes_below_a_named_instance_and_writes_the_name_back() {
+        let _host = quarkus_project();
+        let text = "%dev.quarkus.datasource.\"users\".jdbc.ur";
+        let items = complete(PROPS, text);
+        let url = find(&items, "quarkus.datasource.\"users\".jdbc.url");
+        assert_eq!(url.insert_text, "quarkus.datasource.\"users\".jdbc.url=");
+        assert_eq!(url.replace, Some(range(text, 5, text.len())));
+        assert!(!labels(&items).iter().any(|l| l.starts_with("quarkus.http")));
+        let text = "quarkus.datasource.\"users\".jdbc.enable-keep-alive=";
+        let items = complete(PROPS, text);
+        assert_eq!(labels(&items), ["true", "false"]);
+        assert_eq!(items[0].replace, Some(range(text, text.len(), text.len())));
+        assert!(complete(PROPS, "quarkus.log.category.\"io.acme\".le").is_empty());
+    }
+
+    #[test]
+    fn checks_keys_of_a_named_instance_like_the_unnamed_ones() {
+        let host = quarkus_project();
+        let text = "quarkus.datasource.\"users\".jdbc.url=jdbc:h2:mem\nquarkus.datasource.\"users\".jdbc.urll=x\nquarkus.datasource.\"users\".jdbc.max-size=abc\nquarkus.log.category.\"io.acme\".level=DEBUG\nquarkus.datasource.\"a\".jdbc.url=\n";
+        QuarkusTools::default().line_markers(&doc(PROPS, text));
+        assert_eq!(codes(text, &host.diagnostics()[PROPS]), [
+            ("unknown-property", "quarkus.datasource.\"users\".jdbc.urll"),
+            ("invalid-value", "abc"),
+        ]);
+    }
+
+    #[test]
+    fn required_keys_are_reported_only_when_asked_and_when_nothing_else_sets_them() {
+        let host = quarkus_project();
+        let text = "quarkus.tls.key-store.jks.password=secret\n";
+        let mut tools = QuarkusTools::default();
+        tools.line_markers(&doc(PROPS, text));
+        assert!(host.diagnostics().get(PROPS).is_none_or(|d| d.is_empty()));
+        host.set_setting("quarkus.checkRequired", "true");
+        tools.line_markers(&doc(PROPS, text));
+        let found = &host.diagnostics()[PROPS];
+        assert_eq!(codes(text, found), [("missing-required", "quarkus.tls.key-store.jks.password")]);
+        assert_eq!(found[0].severity, Severity::Info);
+        tools.line_markers(&doc(PROPS, "quarkus.http.port=1\n"));
+        assert!(host.diagnostics().get(PROPS).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn required_keys_set_in_another_file_or_the_environment_are_quiet() {
+        let host = quarkus_project();
+        host.set_setting("quarkus.checkRequired", "true");
+        let text = "quarkus.tls.key-store.jks.password=secret\n";
+        host.add_file("src/main/resources/application-prod.properties", "%prod.quarkus.tls.key-store.jks.path=/k.jks\n");
+        QuarkusTools::default().line_markers(&doc(PROPS, text));
+        assert!(host.diagnostics().get(PROPS).is_none_or(|d| d.is_empty()));
+        let host = quarkus_project();
+        host.set_setting("quarkus.checkRequired", "true");
+        host.add_file(".env", "QUARKUS_TLS_KEY_STORE_JKS_PATH=/k.jks\n");
+        QuarkusTools::default().line_markers(&doc(PROPS, text));
+        assert!(host.diagnostics().get(PROPS).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn reads_the_bundled_named_roots_and_required_keys() {
+        let lookup = Lookup(vec![bundled()]);
+        assert!(lookup.values("!named").contains(&"quarkus.datasource".to_owned()));
+        assert!(lookup.values("!required").contains(&"quarkus.tls.key-store.jks.path".to_owned()));
+        assert!(!lookup.values("!required").contains(&"quarkus.http.host".to_owned()));
+    }
+
+    const JAVA: &str = "/project/src/main/java/org/acme/Greeting.java";
+
+    #[test]
+    fn completes_config_property_names_and_mapping_prefixes() {
+        let host = quarkus_project();
+        host.add_file("src/main/java/org/acme/Other.java", "class O { @ConfigProperty(name = \"greeting.message\") String m; }");
+        let text = "class G {\n  @ConfigProperty(name = \"quarkus.http.po";
+        let items = complete(JAVA, text);
+        let port = find(&items, "quarkus.http.port");
+        assert_eq!((port.insert_text.as_str(), port.detail.as_deref()), ("quarkus.http.port", Some("int")));
+        assert_eq!(port.replace, Some(range(text, text.len() - 15, text.len())));
+        assert!(!labels(&items).contains(&"quarkus.http"));
+        let text = "@ConfigMapping(prefix = \"quarkus.http.s";
+        assert!(labels(&complete(JAVA, text)).contains(&"quarkus.http.ssl"));
+        assert!(complete(JAVA, "@ConfigProperty(name = \"quarkus.http.port\", defaultValue = \"qu").is_empty());
+        assert!(complete(JAVA, "String s = \"quarkus.ht").is_empty());
+        assert!(complete(JAVA, "@Named(name = \"quarkus.ht").is_empty());
+        assert!(labels(&complete(JAVA, "class G { @ConfigProperty(name = \"greeting.")).contains(&"greeting.message"));
+    }
+
+    fn java_host() -> MockHost {
+        let host = quarkus_project();
+        host.add_file("src/main/resources/application.properties", "app.d=1\n");
+        host.set_setting("quarkus.checkUnassigned", "true");
+        host
+    }
+
+    #[test]
+    fn publishes_unassigned_keys_and_scheduler_problems_for_java() {
+        let host = java_host();
+        let text = "class G {\n  @ConfigProperty(name = \"app.a\") String a;\n  @ConfigProperty(name = \"app.d\") String d;\n  @Scheduled(cron = \"* * * * *\") void tick() {}\n}\n";
+        let mut tools = QuarkusTools::default();
+        tools.line_markers(&doc(JAVA, text));
+        tools.line_markers(&doc(JAVA, text));
+        assert_eq!(codes(text, &host.diagnostics()[JAVA]), [("unassigned-property", "app.a"), ("invalid-cron", "* * * * *")]);
+        tools.line_markers(&doc(JAVA, "class G {}\n"));
+        assert!(host.diagnostics().get(JAVA).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn unassigned_check_is_off_by_default_and_quiet_without_config_files() {
+        let host = quarkus_project();
+        let text = "class G { @ConfigProperty(name = \"app.a\") String a; }";
+        let mut tools = QuarkusTools::default();
+        tools.line_markers(&doc(JAVA, text));
+        assert!(host.diagnostics().get(JAVA).is_none());
+        host.set_setting("quarkus.checkUnassigned", "true");
+        tools.line_markers(&doc(JAVA, text));
+        assert!(host.diagnostics().get(JAVA).is_none());
+    }
+
+    #[test]
+    fn reports_a_rest_client_interface_without_register_rest_client() {
+        let host = quarkus_project();
+        host.add_file("src/main/java/org/acme/Api.java", "@Path(\"/x\") public interface Api { @GET String get(); }");
+        host.add_file("src/main/java/org/acme/Ok.java", "@RegisterRestClient @Path(\"/y\") public interface Ok { }");
+        let text = "class G { @Inject @RestClient Api api; @Inject @RestClient Ok ok; @Inject @RestClient Unknown u; }";
+        let mut tools = QuarkusTools::default();
+        tools.line_markers(&doc(JAVA, text));
+        tools.line_markers(&doc(JAVA, text));
+        assert_eq!(codes(text, &host.diagnostics()[JAVA]), [("rest-client-not-registered", "api")]);
+        host.set_setting("quarkus.checkAnnotations", "false");
+        tools.line_markers(&doc(JAVA, text));
+        assert!(host.diagnostics().get(JAVA).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn quick_fixes_add_a_default_and_a_key_to_the_existing_properties_file() {
+        let _host = java_host();
+        let text = "class G {\n  @ConfigProperty(name = \"app.a\") int a;\n}\n";
+        let mut tools = QuarkusTools::default();
+        let selection = Range::new(Position::new(1, 5), Position::new(1, 5));
+        tools.code_actions(&doc(JAVA, text), selection);
+        let actions = tools.code_actions(&doc(JAVA, text), selection);
+        assert_eq!(actions.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(), ["Add defaultValue", "Add `app.a` to application.properties"]);
+        let default = &actions[0].edits[0].1[0];
+        assert_eq!(default.text, ", defaultValue = \"0\"");
+        assert_eq!(default.range, range(text, 42, 42));
+        let (file, edits) = &actions[1].edits[0];
+        assert_eq!(file, "/project/src/main/resources/application.properties");
+        assert_eq!((edits[0].text.as_str(), edits[0].range.start), ("app.a=\n", Position::new(1, 0)));
+        assert!(tools.code_actions(&doc(JAVA, text), Range::new(Position::new(0, 0), Position::new(0, 0))).is_empty());
     }
 
     #[test]

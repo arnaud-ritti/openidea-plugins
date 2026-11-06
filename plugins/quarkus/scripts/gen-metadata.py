@@ -10,7 +10,9 @@ The jars are read in memory from Maven Central; nothing is extracted or run.
 Output, one record per line, tab-separated:
     name  type  default  deprecation  description
 deprecation is empty or `w:<replacement>`; hint lines start with `@`:
-`@name  value  value…`.
+`@name  value  value…`. Two hint lines are not about a key: `@!named  root…` lists the roots that take a
+quoted name segment (`quarkus.datasource`, as in `quarkus.datasource."users".jdbc.url`) and `@!required  key…`
+lists the keys that have no default and are not Optional.
 """
 
 import io
@@ -55,6 +57,8 @@ quarkus-kubernetes quarkus-kubernetes-client quarkus-kubernetes-config quarkus-k
 quarkus-openshift quarkus-knative quarkus-minikube quarkus-kind quarkus-helm
 quarkus-logging-json quarkus-logging-gelf quarkus-logging-sentry quarkus-config-yaml quarkus-picocli quarkus-jacoco
 quarkus-cyclonedx""".split()
+# Not Optional and without a default in the model, but Quarkus fills them in at run time.
+COMPUTED_DEFAULT = {"quarkus.http.host", "quarkus.management.host"}
 MODEL = "META-INF/quarkus-config-doc/quarkus-config-model.json"
 JAVADOC = "META-INF/quarkus-config-doc/quarkus-config-javadoc.json"
 MAVEN = "https://repo1.maven.org/maven2/io/quarkus"
@@ -121,14 +125,24 @@ def property_name(item):
     return None
 
 
-def extension_records(artifact, version, props, hints, levels):
+def named_root(item, primary):
+    for extra in item.get("additionalPaths", []):
+        name = extra["property"]
+        head, quoted, rest = name.partition('."')
+        end = rest.find('"') + 1 if quoted else 0
+        if end and head + rest[end:] == primary:
+            return head
+    return None
+
+
+def extension_records(artifact, version, props, hints, levels, required, named):
     before = len(props)
-    read_extension(artifact, version, props, hints, levels)
+    read_extension(artifact, version, props, hints, levels, required, named)
     if len(props) == before:
         print(f"skipped {artifact}: no new configuration properties", file=sys.stderr)
 
 
-def read_extension(artifact, version, props, hints, levels):
+def read_extension(artifact, version, props, hints, levels, required, named):
     for jar_name in (artifact, f"{artifact}-deployment"):
         try:
             jar = zipfile.ZipFile(io.BytesIO(fetch(f"{MAVEN}/{jar_name}/{version}/{jar_name}-{version}.jar")))
@@ -143,10 +157,17 @@ def read_extension(artifact, version, props, hints, levels):
         for root in json.loads(jar.read(MODEL)).get("configRoots", []):
             for item in properties(root.get("items", [])):
                 name = property_name(item)
+                root = named_root(item, item["path"]["property"])
+                if root:
+                    named.add(root)
                 if name is None or name in props:
                     continue
                 doc = elements.get(f"{item.get('sourceType')}.{item.get('sourceElementName')}", {})
                 ty = item.get("typeDescription") or simple_type(item.get("type"))
+                if (not item.get("optional") and "defaultValue" not in item and not item.get("map")
+                        and "deprecation" not in item and name == item["path"]["property"]
+                        and "[" not in name and name not in COMPUTED_DEFAULT):
+                    required.add(name)
                 deprecation = "w:" if "deprecation" in item else ""
                 if "deprecation" in item:
                     deprecation += clean(item["deprecation"].get("replacement", ""))
@@ -175,9 +196,9 @@ def microprofile(props, hints):
 
 
 def main(version, out, extra):
-    props, hints, levels = {}, {}, []
+    props, hints, levels, required, named = {}, {}, [], set(), set()
     for artifact in dict.fromkeys(EXTENSIONS + extra):
-        extension_records(artifact, version, props, hints, levels)
+        extension_records(artifact, version, props, hints, levels, required, named)
     microprofile(props, hints)
     log_levels = json.loads(fetch(f"{STATIC}jboss-logmanager-metadata.json"))
     level_values = [clean(v["value"]) for h in log_levels.get("hints", []) if h["name"] == "java.util.logging.Level"
@@ -185,6 +206,7 @@ def main(version, out, extra):
     for name in levels:
         hints.setdefault(name, level_values)
     lines = ["\t".join(f.replace("\t", " ") for f in props[name]) for name in sorted(props)]
+    lines += ["\t".join(["@!named"] + sorted(named)), "\t".join(["@!required"] + sorted(required))]
     lines += ["\t".join(["@" + name] + [v.replace("\t", " ") for v in hints[name]]) for name in sorted(hints)]
     with open(out, "w", encoding="utf-8") as f:
         f.write(f"# Quarkus {version} configuration metadata (Apache-2.0) and MicroProfile metadata from "
