@@ -1311,6 +1311,23 @@ fn env_outside_config_warns_in_app_code() {
 }
 
 #[test]
+fn env_check_survives_non_ascii_text_and_still_warns_after_it() {
+    let text = "<?php\n$pr\u{e9}nom = 1;\n?>\n<p>caf\u{e9} \u{20ac} \u{1F600}</p>\n<?php\n$a = env('APP_KEY');\n";
+    let found = env_snippets("app/Views/a.php", "php", text);
+    assert_eq!(found, [("env-outside-config", "env('APP_KEY')".to_owned())]);
+}
+
+#[test]
+fn env_quiet_directories_match_the_project_relative_path() {
+    let text = "<?php\n$a = env('APP_KEY');\n";
+    assert_eq!(env_snippets("app/Services/A.php", "php", text).len(), 1);
+
+    for path in ["config/app.php", "bootstrap/app.php", "vendor/a/b.php", "tests/Feature/AExampleTest.php"] {
+        assert!(env_snippets(path, "php", text).is_empty(), "{path}");
+    }
+}
+
+#[test]
 fn env_in_config_bootstrap_and_tests_is_quiet() {
     let text = "<?php\n$a = env('APP_KEY');\n";
     for path in ["/project/config/app.php", "/project/bootstrap/app.php", "/project/vendor/a/b.php", "/project/tests/Feature/AExampleTest.php"] {
@@ -1742,6 +1759,26 @@ fn ide_blade_json_entries_without_a_path_are_ignored() {
         index::ide_blade_namespaces(r#"{"namespaces": [{"namespace": "a"}, {"namespace": "b", "path": "  "}, {"namespace": "c", "path": "ok"}]}"#),
         [(Some("c".to_owned()), "ok".to_owned())]
     );
+}
+
+#[test]
+fn ide_blade_json_strips_a_leading_dot_slash() {
+    assert_eq!(
+        index::ide_blade_namespaces(r#"{"namespaces": [{"namespace": "m", "path": "./modules/views"}]}"#),
+        [(Some("m".to_owned()), "modules/views".to_owned())]
+    );
+}
+
+#[test]
+fn ide_blade_json_nested_values_do_not_drop_the_file() {
+    let text = r#"{"namespaces": [{"namespace": "a", "meta": {"x": [1, {"y": "}"}], "z": "],"}, "path": "one"}, {"namespace": "b", "tags": ["p", "q"], "path": "two"}]}"#;
+    assert_eq!(index::ide_blade_namespaces(text), [(Some("a".to_owned()), "one".to_owned()), (Some("b".to_owned()), "two".to_owned())]);
+}
+
+#[test]
+fn ide_blade_json_handles_escaped_quotes_bom_and_trailing_garbage() {
+    let text = "\u{feff}{\"namespaces\": [{\"namespace\": \"a\\\"b\", \"skip\": \"x\\\"},y\", \"path\": \"p\"}]} trailing garbage";
+    assert_eq!(index::ide_blade_namespaces(text), [(Some("a\"b".to_owned()), "p".to_owned())]);
 }
 
 #[test]

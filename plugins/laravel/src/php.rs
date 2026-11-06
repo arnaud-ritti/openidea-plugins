@@ -331,7 +331,6 @@ fn read_word(masked: &str, at: usize) -> Range<usize> {
     at..end
 }
 
-
 /// Arguments of the call whose `(` is at `open`.
 pub fn arguments(text: &str, open: usize) -> Vec<Range<usize>> {
     match closing(text, open) {

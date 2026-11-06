@@ -239,12 +239,23 @@ fn scan_namespaces(b: &[u8]) -> Option<Vec<(Option<String>, String)>> {
             }
         }
     }
-    // ponytail: a non-string value is skipped to the next `,` or `}`; nested values inside an entry are not understood.
     fn skip_value(b: &[u8], mut i: usize) -> Option<usize> {
-        while !matches!(*b.get(i)?, b',' | b'}') {
-            i += 1;
+        let mut depth = 0usize;
+        loop {
+            match *b.get(i)? {
+                b'"' => i = string(b, i)?.1,
+                b'{' | b'[' => {
+                    depth += 1;
+                    i += 1;
+                }
+                b'}' | b']' if depth > 0 => {
+                    depth -= 1;
+                    i += 1;
+                }
+                b',' | b'}' if depth == 0 => return Some(i),
+                _ => i += 1,
+            }
         }
-        Some(i)
     }
 
     let key = b"\"namespaces\"";
@@ -294,7 +305,7 @@ fn scan_namespaces(b: &[u8]) -> Option<Vec<(Option<String>, String)>> {
             }
         }
 
-        let path = path.trim().trim_matches('/');
+        let path = path.trim().trim_start_matches("./").trim_matches('/');
         if !path.is_empty() {
             let namespace = namespace.trim();
             found.push(((!namespace.is_empty()).then(|| namespace.to_owned()), path.to_owned()));

@@ -8,8 +8,10 @@ use crate::php;
 const QUIET_DIRECTORIES: &[&str] = &["/config/", "/bootstrap/", "/vendor/", "/tests/"];
 
 /// `env()` called outside the configuration files returns null once the configuration is cached.
-pub fn env_outside_config(path: &str, language: &str, text: &str) -> Vec<Finding> {
-    if language != "php" || QUIET_DIRECTORIES.iter().any(|directory| path.contains(directory)) {
+/// `relative_path` is relative to the project root.
+pub fn env_outside_config(relative_path: &str, language: &str, text: &str) -> Vec<Finding> {
+    let rooted = format!("/{relative_path}");
+    if language != "php" || QUIET_DIRECTORIES.iter().any(|directory| rooted.contains(directory)) {
         return Vec::new();
     }
 
@@ -24,12 +26,12 @@ pub fn env_outside_config(path: &str, language: &str, text: &str) -> Vec<Finding
             continue;
         }
 
-        if masked[at..].starts_with("<<<") {
+        if bytes[at..].starts_with(b"<<<") {
             at = heredoc_end(&masked, at);
             continue;
         }
 
-        if !masked[at..].starts_with("env") {
+        if !bytes[at..].starts_with(b"env") {
             at += 1;
             continue;
         }

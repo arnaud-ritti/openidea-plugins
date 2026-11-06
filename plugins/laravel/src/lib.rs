@@ -293,12 +293,15 @@ fn eloquent_problems(project: &Project, path: &str, language: &str, text: &str) 
 }
 
 /// `env()` calls outside the configuration files.
-fn function_problems(path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+fn function_problems(project: &Project, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
     if !enabled("checkFunctions") {
         return Vec::new();
     }
 
-    function_checks::env_outside_config(path, language, text)
+    let Ok(root) = project.root() else { return Vec::new() };
+    let relative = path.strip_prefix(&format!("{root}/")).unwrap_or(path);
+
+    function_checks::env_outside_config(relative, language, text)
         .into_iter()
         .map(|finding| problem(text, finding.start..finding.end, finding.code, finding.severity, finding.message))
         .collect()
@@ -402,7 +405,7 @@ impl Main {
             Ok(text) if enabled && !index.partial => {
                 let mut found = problems(index, language, &text, check_routes);
                 found.extend(eloquent_problems(project, path, language, &text));
-                found.extend(function_problems(path, language, &text));
+                found.extend(function_problems(project, path, language, &text));
                 found.sort_by_key(|d| (d.range.start.line, d.range.start.character));
                 found
             }
