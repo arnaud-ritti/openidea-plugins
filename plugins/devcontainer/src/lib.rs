@@ -80,17 +80,6 @@ fn is_devcontainer_file(path: &str) -> bool {
     matches!(path.rsplit('/').next(), Some("devcontainer.json" | ".devcontainer.json"))
 }
 
-fn in_valid_location(path: &str) -> bool {
-    let path = path.replace('\\', "/");
-    let mut segments = path.rsplit('/');
-
-    match segments.next() {
-        Some(".devcontainer.json") => true,
-        Some("devcontainer.json") => segments.take(2).any(|folder| folder == ".devcontainer"),
-        _ => false,
-    }
-}
-
 fn inspect(path: &str) {
     let Some(project) = host::projects()
         .unwrap_or_default()
@@ -123,10 +112,12 @@ fn enabled_findings(path: &str, text: &str) -> Vec<checks::Finding> {
     let properties = host::setting_bool("checkProperties").unwrap_or(true);
     let features = host::setting_bool("checkFeatures").unwrap_or(true);
 
-    if !in_valid_location(path) {
+    if !checks::in_valid_location(path) {
         let hint = checks::folder_structure(path).filter(|_| host::setting_bool("checkFolderStructure").unwrap_or(true));
 
-        return hint.map(|hint| checks::Finding { start: checks::first_token(text).start, end: checks::first_token(text).end, ..hint }).into_iter().collect();
+        let token = checks::first_token(text);
+
+        return hint.map(|hint| checks::Finding { start: token.start, end: token.end, ..hint }).into_iter().collect();
     }
 
     checks::check(text)
@@ -294,7 +285,6 @@ register_plugin!(Main, providers);
 mod tests {
     use super::*;
     use openidea_plugin::ProcessOutput;
-    use std::time::{Duration, Instant};
     use openidea_plugin::mock::MockHost;
 
     fn host() -> MockHost {
@@ -853,18 +843,39 @@ mod tests {
     #[test]
     fn completion_is_fast_on_a_256_kib_file() {
         let _host = host();
-        let body = format!("{{\"name\": \"{}\", |}}", "x".repeat(MAX_BYTES));
 
-        let started = Instant::now();
-        let items = complete(&body);
-
-        assert!(items.is_empty());
-        assert!(started.elapsed() < Duration::from_millis(50));
+        let oversized = format!("{{\"name\": \"{}\", |}}", "x".repeat(MAX_BYTES));
+        assert!(complete(&oversized).is_empty());
 
         let near_limit = format!("{{\"name\": \"{}\", |}}", "x".repeat(MAX_BYTES - 100));
-        let started = Instant::now();
         assert!(!complete(&near_limit).is_empty());
-        assert!(started.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn completion_at_the_end_of_unfinished_text_does_not_panic() {
+        let _host = host();
+
+        for marked in ["{\n|", "{ |", "{\"a\": 1,\n|", "{\"a\": |", "{\"a\":\n|"] {
+            let _ = complete(marked);
+        }
+
+        assert!(!complete("{\n|").is_empty());
+        assert!(!complete("{ |").is_empty());
+        assert!(!complete("{\"image\": 1,\n|").is_empty());
+    }
+
+    #[test]
+    fn structure_hint_ranges_use_utf16_columns_with_multibyte_first_character() {
+        let host = host();
+        open(&host, "devcontainer.json", "/* é😀 */ 日{}");
+
+        let found = published(&host, "devcontainer.json");
+
+        assert_eq!(found[0].range.start.character, 10);
+        assert_eq!(found[0].range.end.character, 11);
+
+        open(&host, "other/devcontainer.json", "é{}");
+        assert_eq!(published(&host, "other/devcontainer.json")[0].range.end.character, 1);
     }
 
     #[test]

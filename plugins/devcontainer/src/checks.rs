@@ -43,11 +43,19 @@ struct Member {
     value_range: Range<usize>,
 }
 
-pub fn folder_structure(path: &str) -> Option<Finding> {
+pub fn in_valid_location(path: &str) -> bool {
     let path = path.replace('\\', "/");
     let mut segments = path.rsplit('/');
 
-    if segments.next() != Some("devcontainer.json") || segments.take(2).any(|folder| folder == ".devcontainer") {
+    match segments.next() {
+        Some(".devcontainer.json") => true,
+        Some("devcontainer.json") => segments.take(2).any(|folder| folder == ".devcontainer"),
+        _ => false,
+    }
+}
+
+pub fn folder_structure(path: &str) -> Option<Finding> {
+    if !path.replace('\\', "/").ends_with("/devcontainer.json") && path != "devcontainer.json" || in_valid_location(path) {
         return None;
     }
 
@@ -63,8 +71,9 @@ pub fn folder_structure(path: &str) -> Option<Finding> {
 pub fn first_token(text: &str) -> Range<usize> {
     let bytes = text.as_bytes();
     let start = skip_trivia(bytes, if bytes.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 });
+    let width = text[start..].chars().next().map_or(0, char::len_utf8);
 
-    start..(start + 1).min(text.len()).max(start)
+    start..start + width
 }
 
 const SHUTDOWN_ACTIONS: &[&str] = &["none", "stopContainer", "stopCompose"];
@@ -185,10 +194,9 @@ fn trivia_outside_comment(bytes: &[u8], mut at: usize, offset: usize) -> Option<
             return Some(at);
         }
 
-        let is_comment = bytes[at] == b'/';
-        let inside = match (is_comment, bytes[at + 1]) {
-            (true, b'/') => at < offset && offset <= next,
-            (true, _) => at < offset && (offset < next || !bytes[..next].ends_with(b"*/")),
+        let inside = match (bytes[at], bytes.get(at + 1)) {
+            (b'/', Some(b'/')) => at < offset && offset <= next,
+            (b'/', Some(b'*')) => at < offset && (offset < next || !bytes[..next].ends_with(b"*/")),
             _ => false,
         };
         if inside {
