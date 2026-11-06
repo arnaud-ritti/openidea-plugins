@@ -106,8 +106,7 @@ fn invalid_api_version(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     for a in annotations.filter(|a| MAPPINGS.contains(&a.name.as_str())) {
         let Some(version) = a.arg("version").filter(|_| from_spring(file, &a.name)) else { continue };
         let [literal] = version.strings.as_slice() else { continue };
-        let quote = literal.at - version.at;
-        let alone = quote > 0 && version.end - literal.end == quote && version.text.len() == literal.end - literal.at + 2 * quote;
+        let alone = version.text.starts_with('"') && version.text.ends_with('"');
         if !alone || is_semantic_version(&literal.value) {
             continue;
         }
@@ -243,6 +242,9 @@ mod tests {
         assert!(versions("VERSION").is_empty());
         assert!(versions("{\"1.x\", \"2\"}").is_empty());
         assert!(versions("\"1.\" + \"x\"").is_empty());
+        assert!(versions("V + \"x\" + V").is_empty());
+        assert!(versions("A+\"x\"+B").is_empty());
+        assert!(versions("\"x\" + V").is_empty());
         let bad = VERSIONED.replace("\"1.1\"", "\"latest\"");
         assert!(run_with(&bad, Some(true), Some(false), ALL).is_empty());
         assert!(run_with(&bad, Some(true), None, ALL).is_empty());
@@ -275,10 +277,11 @@ mod tests {
 
     #[test]
     fn ranges_use_utf16_columns_with_multibyte_text() {
-        let text = VERSIONED.replace("\"1.1\"", "\"é1\"").replace("String a()", "String é()");
+        let text = VERSIONED.replace("path = \"/a\"", "path = \"/é😀\"").replace("\"1.1\"", "\"é1\"");
         let found = check_java(&parse(&text), Some(true), Some(true), ALL);
         let range = found[0].diagnostic(&text).range;
         assert_eq!(range.start.line, 3);
+        assert_eq!(range.start.character, "    @GetMapping(path = \"/é😀\", version = ".encode_utf16().count() as u32);
         assert_eq!(range.end.character - range.start.character, 4);
     }
 
@@ -288,5 +291,7 @@ mod tests {
         let found = check_java(&parse(&text), Some(true), Some(true), ALL);
         let range = found[0].diagnostic(&text).range;
         assert_eq!(range.start.line, 3);
+        assert_eq!(range.end.line, 3);
+        assert_eq!(range.end.character - range.start.character, "\"latest\"".len() as u32);
     }
 }
