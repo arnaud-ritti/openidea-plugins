@@ -26,7 +26,6 @@ const SPRING_TEST_ANNOTATIONS: [&str; 17] = [
     "JooqTest",
 ];
 const JUNIT_PARAMETERS: [&str; 4] = ["TestInfo", "TestReporter", "RepetitionInfo", "CapturedOutput"];
-const AUTOWIRED_PARAMETER_ANNOTATIONS: [&str; 4] = ["Autowired", "Qualifier", "Value", "Inject"];
 const EVENT_LISTENERS: [&str; 2] = ["EventListener", "TransactionalEventListener"];
 const PAYLOAD_RETURNS: [&str; 17] = [
     "boolean", "byte", "short", "int", "long", "float", "double", "char", "Boolean", "Byte", "Short", "Integer",
@@ -96,13 +95,9 @@ fn test_constructor_autowire(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Findi
         return;
     }
     let needs_injection = constructor.params.iter().any(|p| {
-        !JUNIT_PARAMETERS.contains(&p.ty.name.as_str())
-            && !AUTOWIRED_PARAMETER_ANNOTATIONS.iter().any(|a| p.annotation(a).is_some())
+        !JUNIT_PARAMETERS.contains(&p.ty.name.as_str()) && p.annotations.is_empty()
     });
-    let parameter_annotated = constructor
-        .params
-        .iter()
-        .any(|p| AUTOWIRED_PARAMETER_ANNOTATIONS.iter().any(|a| p.annotation(a).is_some()));
+    let parameter_annotated = constructor.params.iter().any(|p| !p.annotations.is_empty());
     if !needs_injection || parameter_annotated {
         return;
     }
@@ -176,6 +171,14 @@ mod tests {
     }
 
     const LISTENERS: &str = "import org.springframework.context.event.EventListener;\nclass L {\n    @EventListener\n    void two(A a, B b) {}\n    @EventListener\n    String text(A a) { return \"\"; }\n    @EventListener\n    BEvent ok(A a) { return null; }\n    @EventListener\n    List<BEvent> many(A a) { return null; }\n    @EventListener(classes = A.class)\n    void none() {}\n}\n";
+
+    #[test]
+    fn constructor_param_with_foreign_annotation_is_quiet() {
+        let text = TEST.replace("(OwnerService service)", "(@TempDir Path dir, OwnerService service)");
+        assert!(run(&text, Some(false)).is_empty());
+        let mock = TEST.replace("(OwnerService service)", "(@Mock OwnerService service)");
+        assert!(run(&mock, Some(false)).is_empty());
+    }
 
     #[test]
     fn event_listener_signature_warns() {

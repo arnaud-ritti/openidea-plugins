@@ -29,6 +29,7 @@ fn placeholder(s: &str) -> bool {
 
 const AUTOWIRE_MODE_GLOBS: &[&str] = &[
     "**/spring.properties",
+    "**/junit-platform.properties",
     "**/application*.properties",
     "**/application*.yml",
     "**/application*.yaml",
@@ -444,6 +445,15 @@ public class MailProperties {
 
         let fixed = broken.replace("    OwnerTests(", "    @Autowired OwnerTests(").replace("(A a, B b)", "(A a)");
         tools.line_markers(&doc(path, &fixed));
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn junit_platform_properties_sets_autowire_mode() {
+        let host = MockHost::install();
+        host.add_file("src/test/resources/junit-platform.properties", "spring.test.constructor.autowire.mode=all\n");
+        let path = "/project/src/test/java/OwnerTests.java";
+        BootTools::default().line_markers(&doc(path, "@SpringBootTest\nclass OwnerTests {\n    OwnerTests(Service s) {}\n}\n"));
         assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
     }
 
