@@ -575,6 +575,33 @@ mod tests {
         Document { path: path.into(), language: language.into(), version: 1, text: text.into() }
     }
 
+    fn template_section(id: &str) -> String {
+        include_str!("../plugin.toml")
+            .split("[[contributes.fileTemplates]]")
+            .skip(1)
+            .find(|section| section.contains(&format!("id = \"{id}\"")))
+            .unwrap_or_else(|| panic!("no file template {id}"))
+            .to_string()
+    }
+
+    #[test]
+    fn new_menu_declares_a_properties_file_template() {
+        let section = template_section("properties");
+
+        assert!(section.contains("extension = \"properties\""));
+        let path = section
+            .lines()
+            .find_map(|line| line.strip_prefix("path = \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("a path");
+        assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path).is_file());
+    }
+
+    #[test]
+    fn xml_properties_template_is_unchanged() {
+        assert!(template_section("xml-properties").contains("templates/xml-properties.xml"));
+    }
+
     fn caret(line: u32, character: u32) -> Range {
         Range::new(Position::new(line, character), Position::new(line, character))
     }

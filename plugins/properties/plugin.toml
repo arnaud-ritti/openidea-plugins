@@ -67,3 +67,9 @@ id = "xml-properties"
 name = "XML Properties File"
 extension = "xml"
 path = "templates/xml-properties.xml"
+
+[[contributes.fileTemplates]]
+id = "properties"
+name = "Properties File"
+extension = "properties"
+path = "templates/properties.properties"
