@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "Python",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "features": {},
+  "forwardPorts": [8000],
+  "postCreateCommand": ""
+}

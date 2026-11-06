@@ -13,7 +13,8 @@ Runs the project's [Dev Container](https://containers.dev) with the
 The plugin uses `.devcontainer/devcontainer.json`, or else `.devcontainer.json`.
 For a configuration in `.devcontainer/<folder>/`, set Settings › Plugins ›
 Dev Container CLI › Configuration file. New › Dev Container Configuration adds a
-starter `devcontainer.json`.
+starter `devcontainer.json`; New › Dev Container (Node, Python, Java, PHP, Rust, Docker Compose)
+adds one based on the matching containers.dev reference image.
 
 Requires the devcontainer CLI (`npm i -g @devcontainers/cli`) and Docker. The IDE
 keeps running on the host: OpenIDEA's remote development connects over SSH or

@@ -184,4 +184,34 @@ mod tests {
 
         assert!(matches!(error, Error::Denied(cap) if cap == "process:docker"));
     }
+
+    fn strip_line_comments(text: &str) -> String {
+        text.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn all_templates_registered() {
+        let manifest = include_str!("../plugin.toml");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let mut registered = 0;
+
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            let path = format!("path = \"templates/{name}\"");
+            assert!(manifest.contains(&path), "{name} is not registered");
+            registered += 1;
+        }
+
+        assert_eq!(manifest.matches("[[contributes.fileTemplates]]").count(), registered);
+
+        for line in manifest.lines().filter(|l| l.starts_with("path = \"templates/")) {
+            let relative = line.trim_start_matches("path = \"").trim_end_matches('"');
+            let text = std::fs::read_to_string(dir.parent().unwrap().join(relative)).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&strip_line_comments(&text)).unwrap_or_else(|e| panic!("{relative}: {e}"));
+            assert!(json.get("$schema").is_some(), "{relative} lacks $schema");
+            assert!(json.get("image").is_some() || json.get("dockerComposeFile").is_some(), "{relative} lacks image or dockerComposeFile");
+        }
+
+        assert!(registered >= 7);
+    }
 }
