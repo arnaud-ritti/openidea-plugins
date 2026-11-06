@@ -11,6 +11,8 @@ Matching is text-based, on destination literals as written; `${…}` placeholder
 
 - **JavaScript/TypeScript STOMP clients** (`.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, outside `node_modules`, `dist`, `build`): `client.subscribe('/topic/x', …)` links to the matching `@SendTo`/`convertAndSend`/`@SubscribeMapping`, and `client.publish({ destination: '/app/x' })` or `client.send('/app/x', …)` links to the `@MessageMapping` handler (application prefix applied). The Java side lists the client usages in its gutter tooltip. A call counts when its receiver name contains `stomp`, or was assigned `new Client(`, `new StompJs.Client(`, `Stomp.over(` or `Stomp.client(` in the same file (`httpClient.send` and the like are ignored). Only plain string literals starting with `/` count; template strings with `${…}` and concatenations are skipped. One target opens per marker; the tooltip lists the rest.
 
+  JS/TS/Vue documents are only read and linked in a project whose root `pom.xml`, `build.gradle` or `build.gradle.kts` mentions `spring-boot-starter-websocket`, `spring-messaging` or `spring-websocket`, or once a Java or Kotlin file of the project has been opened in the session; elsewhere they are left alone (no scan of the project). A backend in a sub-module with no such root build file is picked up only after one of its Java/Kotlin files is opened.
+
 Not ported: raw `WebSocketHandler` registration checks, SockJS options.
 
 ```sh

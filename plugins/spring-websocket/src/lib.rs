@@ -8,7 +8,7 @@ use openidea_plugin::text::offset;
 use openidea_plugin::{
     Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin,
 };
-use spring_text::index::{Indexes, PROVIDER_BUDGET};
+use spring_text::index::{Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::{parse_source, range, source_calls};
 use std::collections::BTreeSet;
 
@@ -303,24 +303,71 @@ fn describe((path, u): &(String, Use)) -> String {
     format!("{file}:{} ({})", u.range.start.line + 1, u.via)
 }
 
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const STOMP_DEPENDENCIES: [&str; 3] = ["spring-boot-starter-websocket", "spring-messaging", "spring-websocket"];
+
+fn is_script(path: &str) -> bool {
+    SCRIPT_EXTENSIONS.iter().any(|e| path.ends_with(e))
+}
+
 pub struct WebSocketTools {
     index: Indexes<WsFile>,
+    /// Project roots known to serve STOMP: a build file names the dependency, or a Java/Kotlin file was opened.
+    stomp_roots: BTreeSet<String>,
 }
 
 impl Default for WebSocketTools {
     fn default() -> Self {
-        Self { index: Indexes::new(
+        Self {
+            index: Indexes::new(
                 &["**/*.java", "**/*.kt", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.vue"],
                 parse,
-            ) }
+            ),
+            stomp_roots: BTreeSet::new(),
+        }
     }
 }
 
 impl WebSocketTools {
+    /// Script documents are only indexed in projects whose root build file names a Spring messaging dependency,
+    /// or after a Java/Kotlin document of the project was opened (multi-module layouts).
+    fn serves_stomp(&mut self, doc: &Document) -> bool {
+        let Some(project) = project_of(&doc.path) else { return false };
+        let Ok(root) = project.root() else { return false };
+
+        if self.stomp_roots.contains(&root) {
+            return true;
+        }
+
+        let names_dependency = BUILD_FILES.iter().any(|file| {
+            project
+                .read_file(file)
+                .is_ok_and(|text| STOMP_DEPENDENCIES.iter().any(|dependency| text.contains(dependency)))
+        });
+
+        if names_dependency {
+            self.stomp_roots.insert(root);
+        }
+
+        names_dependency
+    }
+
     fn snapshot(&mut self, doc: &Document) -> Snapshot {
         let mut config = Config::default();
         let mut uses = Vec::new();
         let mut user = None;
+
+        if is_script(&doc.path) && !self.serves_stomp(doc) {
+            config.user = DEFAULT_USER_PREFIX.to_owned();
+            return Snapshot { config, uses };
+        }
+
+        if !is_script(&doc.path)
+            && let Some(root) = project_of(&doc.path).and_then(|p| p.root().ok())
+        {
+            self.stomp_roots.insert(root);
+        }
+
         if let Some(index) = self.index.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
             for (path, file) in index.iter() {
                 config.brokers.extend(file.brokers.iter().cloned());
@@ -483,6 +530,7 @@ public class ChatController {
 
     fn setup() -> MockHost {
         let host = MockHost::install();
+        host.add_file("pom.xml", "<artifactId>spring-boot-starter-websocket</artifactId>");
         host.add_file("src/main/java/com/acme/chat/WebSocketConfig.java", CONFIG);
         host.add_file("src/main/java/com/acme/chat/ChatController.java", CHAT);
         host
@@ -658,6 +706,28 @@ client.onConnect = () => {
             ]
         );
         assert!(parse("/p/node_modules/x/chat.js", CLIENT).is_none());
+    }
+
+    #[test]
+    fn js_documents_skip_indexing_without_a_spring_project() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/chat/ChatController.java", CHAT);
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+        let d = script_doc();
+
+        assert!(tools.line_markers(&d).is_empty());
+        assert!(tools.definition(&d, Position::new(5, 40)).is_empty());
+        assert!(tools.completion(&d, Position::new(5, 40), None).is_empty());
+    }
+
+    #[test]
+    fn js_documents_are_indexed_in_a_spring_project() {
+        let host = setup();
+        host.add_file("web/src/chat.ts", CLIENT);
+        let mut tools = WebSocketTools::default();
+
+        assert!(!tools.line_markers(&script_doc()).is_empty());
     }
 
     #[test]
