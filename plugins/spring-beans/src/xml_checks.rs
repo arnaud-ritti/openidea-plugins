@@ -2,7 +2,7 @@
 //! beans file, on other namespaces and on `${...}` placeholders.
 
 use crate::aop;
-use crate::checks::{Groups, capitalised, names_of, profiles_overlap, same_scope, weaving_plugin_in_build};
+use crate::checks::{Groups, capitalised, coexist, names_of, same_scope, weaving_plugin_in_build};
 use crate::model::{is_xml_ref, name_tokens};
 use crate::{Found, World};
 use openidea_plugin::TextEdit;
@@ -209,7 +209,7 @@ fn duplicate_names(path: &str, els: &[xml::Element], by_name: &ByName, out: &mut
                 !other.kind.starts_with('<')
                     && !other.conditional
                     && names_of(other).any(|n| n == name)
-                    && profiles_overlap(&profiles, &other.profiles)
+                    && coexist(&profiles, &other.profiles)
                     && same_scope(path, other_path)
             });
             if let Some(&(other_path, _)) = clash {

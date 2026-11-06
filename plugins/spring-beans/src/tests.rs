@@ -2203,3 +2203,117 @@ fn saved_kotlin_file_publishes_field_injection() {
     Navigator::default().handle_events(&[Event::FileSaved(path.into())], &host.invocation());
     assert!(host.diagnostics()[path].iter().any(|d| d.code.as_deref() == Some("field-injection")));
 }
+
+const MAILER: &str = "package com.acme.mail;\n\n@Service\npublic class Mailer {\n}\n";
+
+fn command_host(text: &str) -> MockHost {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/mail/Mailer.java", MAILER);
+    host.open_editor("/project/src/main/java/com/acme/Orders.java", "java", text, &[(3, 0, 3, 0)]);
+    host
+}
+
+fn run(host: &MockHost, id: &str, answers: &[&[&str]]) -> Result<Option<String>, Error> {
+    answers.iter().for_each(|a| host.answer_next_prompt(Some(a)));
+    Navigator::default().run_command(id, &host.invocation(), None)
+}
+
+const ORDERS: &str = "package com.acme;\n\nimport java.util.List;\npublic class Orders {\n    private int count;\n\n    void place() {}\n}\n";
+
+#[test]
+fn autowire_adds_an_annotated_field_with_imports() {
+    let host = command_host(ORDERS);
+    run(&host, "generate-autowired-dependency", &[&["0"]]).unwrap();
+    let text = host.editor_text();
+    assert!(text.contains("import com.acme.mail.Mailer;"), "{text}");
+    assert!(text.contains("import org.springframework.beans.factory.annotation.Autowired;"));
+    assert!(text.contains("    private int count;\n    @Autowired\n    private Mailer mailer;\n"), "{text}");
+}
+
+#[test]
+fn setter_dependency_adds_field_and_autowired_setter() {
+    let host = command_host(ORDERS);
+    run(&host, "generate-setter", &[&["0"]]).unwrap();
+    let text = host.editor_text();
+    assert!(text.contains("    private Mailer mailer;\n"), "{text}");
+    assert!(text.contains("    @Autowired\n    public void setMailer(Mailer mailer) {\n        this.mailer = mailer;\n    }\n}"), "{text}");
+}
+
+#[test]
+fn constructor_dependency_creates_or_extends_the_constructor() {
+    let host = command_host(ORDERS);
+    run(&host, "generate-constructor-dependency", &[&["0"]]).unwrap();
+    let text = host.editor_text();
+    assert!(text.contains("private final Mailer mailer;"), "{text}");
+    assert!(text.contains("public Orders(Mailer mailer) {\n        this.mailer = mailer;\n    }"), "{text}");
+
+    let with_constructor = ORDERS.replace("    void place() {}", "    Orders(int n) {\n        this.count = n;\n    }");
+    let host = command_host(&with_constructor);
+    run(&host, "generate-constructor-dependency", &[&["0"]]).unwrap();
+    let text = host.editor_text();
+    assert!(text.contains("Orders(int n, Mailer mailer) {\n        this.count = n;\n        this.mailer = mailer;"), "{text}");
+}
+
+#[test]
+fn event_listener_asks_for_the_event_type() {
+    let host = command_host("package com.acme;\n\nclass Orders {}\n");
+    run(&host, "generate-event-listener", &[&["OrderPlaced"]]).unwrap();
+    let text = host.editor_text();
+    assert!(text.contains("@EventListener\n    public void onOrderPlaced(OrderPlaced event) {\n    }\n}"), "{text}");
+    assert!(text.contains("import org.springframework.context.event.EventListener;"));
+    assert!(!text.contains("}}"));
+
+    let host = command_host(ORDERS);
+    assert!(run(&host, "generate-event-listener", &[&["not a type"]]).is_err());
+    assert_eq!(host.editor_text(), ORDERS);
+}
+
+#[test]
+fn generators_edit_nothing_when_dismissed_or_duplicated() {
+    for id in ["generate-autowired-dependency", "generate-setter", "generate-constructor-dependency", "generate-event-listener"] {
+        let host = command_host(ORDERS);
+        host.answer_next_prompt(None);
+        Navigator::default().run_command(id, &host.invocation(), None).unwrap();
+        assert_eq!(host.editor_text(), ORDERS, "{id}");
+    }
+
+    let host = command_host(&ORDERS.replace("int count", "Mailer mailer"));
+    assert!(run(&host, "generate-autowired-dependency", &[&["0"]]).is_err());
+}
+
+#[test]
+fn generators_without_write_access_show_a_notice() {
+    let host = MockHost::install().with_capabilities(&["project.read", "editor.read"]);
+    host.add_file("src/main/java/com/acme/mail/Mailer.java", MAILER);
+    host.open_editor("/project/src/main/java/com/acme/Orders.java", "java", ORDERS, &[(3, 0, 3, 0)]);
+    run(&host, "generate-autowired-dependency", &[&["0"]]).unwrap();
+    assert_eq!(host.editor_text(), ORDERS);
+    assert!(host.notifications()[0].body.contains("Allow editor changes"));
+}
+
+#[test]
+fn active_profiles_are_chosen_stored_and_narrow_duplicate_names() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Dev.java", "@Configuration\nclass Dev {\n    @Bean @Profile(\"dev\") Clock clock() { return null; }\n}\n");
+    host.add_file("src/main/java/com/acme/Any.java", "@Configuration\nclass Any {\n    @Bean Clock clock() { return null; }\n}\n");
+    host.add_file("src/main/resources/application-prod.yml", "a: b\n");
+
+    let profile_choices = |host: &MockHost| {
+        host.answer_next_prompt(Some(&["dev", "prod"]));
+        Navigator::default().run_command("change-active-profiles", &host.invocation(), None).unwrap();
+        host.storage().get("activeProfiles").cloned()
+    };
+    let clash = || checks::coexist(&["dev".to_owned()], &[]);
+    assert!(clash());
+    assert_eq!(profile_choices(&host).as_deref(), Some("dev,prod"));
+    assert!(clash());
+
+    host.answer_next_prompt(Some(&["prod"]));
+    Navigator::default().run_command("change-active-profiles", &host.invocation(), None).unwrap();
+    assert_eq!(commands::active_profiles(), ["prod"]);
+    assert!(!clash());
+
+    host.answer_next_prompt(None);
+    Navigator::default().run_command("change-active-profiles", &host.invocation(), None).unwrap();
+    assert_eq!(commands::active_profiles(), ["prod"]);
+}

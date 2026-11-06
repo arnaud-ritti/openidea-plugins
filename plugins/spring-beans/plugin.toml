@@ -4,19 +4,71 @@ version = "0.1.0" # x-release-please-version
 description = "Spring Framework beans for Java, Kotlin and XML configuration: finds stereotype classes, @Bean methods, Spring Data repositories and <bean> definitions; links injection points to the beans Spring would pick (by type through the project's type hierarchy, @Qualifier, @Primary, parameter name) and beans to where they are injected; navigates and completes bean names in qualifiers, XML references, SpEL @bean references and named pointcuts; completes SpEL #variables and pointcut designators; lists beans in a Spring Beans tool window, draws their dependencies in a Spring Bean Graph, and turns field injection into constructor injection. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.2.0: Kotlin and XML bean configuration; bean names, aliases, @Qualifier, @Primary and @Profile; candidates through the whole type hierarchy; gutter icons from beans to their injection points; SpEL and AspectJ pointcut completion and navigation; Spring Bean Graph; Use constructor injection quick fix. 0.1.0 (first release): bean index, injection navigation, Spring Beans tool window, field injection warning."
+change-notes = "Unreleased: Generate Setter, Constructor, Autowired Dependency and Event Listener editor commands; Change Active Spring Profiles (narrows the duplicate bean name check); gutter markers between event publishers and listeners and between classes and their XML beans, with a chooser for several targets, following the project's type hierarchy across files. Also: project-wide Go to Declaration and gutter markers from the host's document index (bean names, aliases, qualifiers, injection points by type), without the provider time budget. 0.2.0: Kotlin and XML bean configuration; bean names, aliases, @Qualifier, @Primary and @Profile; candidates through the whole type hierarchy; gutter icons from beans to their injection points; SpEL and AspectJ pointcut completion and navigation; Spring Bean Graph; Use constructor injection quick fix. 0.1.0 (first release): bean index, injection navigation, Spring Beans tool window, field injection warning."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:java", "on-language:kotlin", "on-language:xml", "on-event:file-opened", "on-event:file-saved"]
 
 [capabilities]
-required = ["project.read"]
-optional = ["events"]
+required = ["project.read", "editor.read"]
+optional = ["events", "editor.write", "storage"]
 
 [[contributes.providers]]
 kinds = ["definition", "line-markers", "completion", "code-actions"]
 languages = ["java", "kotlin", "xml"]
+
+[[contributes.commands]]
+id = "generate-setter"
+title = "Generate Setter Dependency"
+category = "Spring"
+
+[[contributes.commands]]
+id = "generate-constructor-dependency"
+title = "Generate Constructor Dependency"
+category = "Spring"
+
+[[contributes.commands]]
+id = "generate-autowired-dependency"
+title = "Generate Autowired Dependency"
+category = "Spring"
+
+[[contributes.commands]]
+id = "generate-event-listener"
+title = "Generate Event Listener"
+category = "Spring"
+
+[[contributes.commands]]
+id = "change-active-profiles"
+title = "Change Active Spring Profiles"
+category = "Spring"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "generate-setter"
+when = "editorLangId == java"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "generate-constructor-dependency"
+when = "editorLangId == java"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "generate-autowired-dependency"
+when = "editorLangId == java"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "generate-event-listener"
+when = "editorLangId == java"
+
+[[contributes.menus]]
+menu = "tools"
+command = "change-active-profiles"
+
+[[contributes.documentIndexers]]
+extensions = ["java", "kt", "xml"]
 
 [[contributes.views]]
 id = "beans"
@@ -27,7 +79,7 @@ location = "left"
 [[contributes.views]]
 id = "bean-graph"
 title = "Spring Bean Graph"
-icon = "hierarchy"
+icon = "icons/spring.svg"
 location = "bottom"
 
 [contributes.settings]

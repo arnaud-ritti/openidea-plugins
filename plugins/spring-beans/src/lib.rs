@@ -7,6 +7,8 @@
 mod annotation_checks;
 mod aop;
 mod checks;
+mod commands;
+mod indexer;
 mod injection_checks;
 mod kotlin;
 mod kotlin_build;
@@ -21,7 +23,7 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Context, Diagnostic, Error, Event, EventKind, Invocation, Location, LogLevel, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
+    Context, Diagnostic, Error, Event, EventKind, Invocation, Location, LogLevel, Plugin, Position, Range, Severity, TextEdit, host,
 };
 use sites::{Hit, Site, Word};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
@@ -167,6 +169,14 @@ fn hits(doc: &Document) -> Vec<Hit> {
     match doc.language.as_str() {
         "java" => sites::java(&doc.text),
         "xml" => sites::xml(&doc.text),
+        _ => Vec::new(),
+    }
+}
+
+fn lib_hits(path: &str, text: &str) -> Vec<Hit> {
+    match path.rsplit('.').next() {
+        Some("java") => sites::java(text),
+        Some("xml") => sites::xml(text),
         _ => Vec::new(),
     }
 }
@@ -787,12 +797,30 @@ impl Plugin for Navigator {
         }
     }
 
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        match id {
+            "generate-setter" => commands::generate(self, ctx, commands::Generate::Setter),
+            "generate-constructor-dependency" => commands::generate(self, ctx, commands::Generate::Constructor),
+            "generate-autowired-dependency" => commands::generate(self, ctx, commands::Generate::Autowire),
+            "generate-event-listener" => commands::generate(self, ctx, commands::Generate::Listener),
+            "change-active-profiles" => commands::change_active_profiles(self, ctx),
+            _ => Err(Error::NotFound(format!("command {id}"))),
+        }
     }
 }
 
-register_plugin!(Navigator, providers, views);
+// `register_plugin!` has no arm for providers, views and indexing together.
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn() -> Navigator = <Navigator as Default>::default;
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    struct Component;
+    openidea_plugin::__plugin_exports!(Navigator, Component, openidea_plugin::bindings);
+    openidea_plugin::__providers_exports!(Navigator, Component);
+    openidea_plugin::__views_exports!(Navigator, Component);
+    openidea_plugin::__indexing_exports!(Navigator, Component);
+    openidea_plugin::bindings::__export_plugin_world!(Component with_types_in openidea_plugin::bindings);
+};
 
 #[cfg(test)]
 mod tests;

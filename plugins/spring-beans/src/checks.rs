@@ -251,6 +251,25 @@ pub(crate) fn names_of(bean: &Bean) -> impl Iterator<Item = &str> {
     std::iter::once(bean.name.as_str()).chain(bean.aliases.iter().map(String::as_str))
 }
 
+/// Whether a bean under `profiles` exists when the user picked `active` profiles (none picked: it may).
+fn enabled(profiles: &[String], active: &[String]) -> bool {
+    active.is_empty()
+        || profiles.is_empty()
+        || profiles.iter().any(|p| match p.strip_prefix('!') {
+            Some(negated) => !active.iter().any(|a| a == negated),
+            None => active.contains(p),
+        })
+}
+
+/// [`profiles_overlap`], narrowed to the profiles chosen with Change Active Profiles.
+pub(crate) fn coexist(a: &[String], b: &[String]) -> bool {
+    if !profiles_overlap(a, b) {
+        return false;
+    }
+    let active = crate::commands::active_profiles();
+    enabled(a, &active) && enabled(b, &active)
+}
+
 /// Whether two beans can be active together; a `${...}` or `#{...}` profile is unknown, so never.
 pub(crate) fn profiles_overlap(a: &[String], b: &[String]) -> bool {
     if a.iter().chain(b).any(|p| dynamic(p)) {
@@ -392,7 +411,7 @@ fn duplicate_names(path: &str, file: &JavaFile, ty: &TypeDecl, text: &str, world
                 && !overload
                 && !other.conditional
                 && shares_name
-                && profiles_overlap(&bean.profiles, &other.profiles)
+                && coexist(&bean.profiles, &other.profiles)
                 && same_scope(path, other_path)
         });
         let Some((other_path, other)) = clash else { continue };
