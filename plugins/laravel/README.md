@@ -15,13 +15,15 @@ everything below still works in them.
 Typing `@` (or `@fo`) in a Blade file completes Laravel's and Livewire's own
 directives (`@if`, `@foreach`, `@section`, `@livewire`, `@vite`, the `@end…`
 closers) and the custom ones the project registers with `Blade::directive('name'`
-in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
-`{{ }}` are left alone. Directives registered by vendor packages aren't known.
+in `app/**`. The common ones insert a snippet with their arguments and closing
+directive (`@if(…)…@endif`, `@foreach`, `@section`, `@include`, `@vite`); the
+others and the custom ones insert their name only. `@@if`, `user@example.com`
+and `@` inside `{{ }}` are left alone. Directives registered by vendor packages aren't known.
 
 | Names           | Indexed from                                                                                    | Referenced in                                                                                                                                 |
 | --------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Routes          | `->name()`, `['as' => …]`, `Route::resource` (`only`, `except`, `names`) in `routes/`, with the name prefixes of the groups around them | `route()`, `to_route()`, `redirect()->route()`, `Redirect::route()`, `URL::signedRoute()`, `Route::has()`, `routeIs()`                       |
-| Views           | `resources/views/**` (`.blade.php`, `.php`), `vendor/<package>/` overrides as `package::name`, extra directories from the settings | `view()`, `View::make/exists/first`, `Route::view`, `->view()`, `->markdown()`, `new Content(view:)`; Blade `@extends`, `@include*`, `@each`, `@component` |
+| Views           | `resources/views/**` (`.blade.php`, `.php`), `vendor/<package>/` overrides as `package::name`, extra directories from the settings and from `ide-blade.json` (see below) | `view()`, `View::make/exists/first`, `Route::view`, `->view()`, `->markdown()`, `new Content(view:)`; Blade `@extends`, `@include*`, `@each`, `@component` |
 | Config          | `return [...]` of `config/**/*.php`, nested keys joined with `.`                                | `config()`, `Config::get/has/set/string/…`                                                                                                    |
 | Translations    | `lang/<locale>/<file>.php` (`file.key`), `lang/<locale>.json`, `lang/vendor/<package>/…`, main locale first | `__()`, `trans()`, `trans_choice()`, `Lang::get/has/choice`, Blade `@lang`                                                                  |
 | Env keys        | `.env.example`, `.env` (names only, values are never read)                                      | `env()`, `Env::get()`                                                                                                                         |
@@ -51,9 +53,14 @@ in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
   `Prunable` or `MassPrunable` while none of `routes/console.php`,
   `app/Console/Kernel.php` and `bootstrap/app.php` mentions `model:prune` (quiet
   when none can be read); and `orderBy('created_at', 'desc')` /
-  `orderBy('created_at')`, a hint with a quick fix to `latest()` / `oldest()`.
+  `orderBy('created_at')` (also any literal column ending in `_at` or `_date`,
+  or `date`), a hint with a quick fix to `latest()` / `oldest()` (with the
+  column when it is not `created_at`).
   Models with `getFillable()`, `#[Fillable]` or `unguard` stay quiet, as do
   classes without a file in the project and dynamic class names.
+- Function problems (setting `checkFunctions`, PHP files): `env-outside-config`,
+  a warning on `env()` calls outside `config/`, `bootstrap/`, `vendor/` and
+  `tests/`, because `env()` returns null once the configuration is cached.
 - Quick fix (⌥⏎) on a missing `file.key` translation key: add `'key' => 'key'`
   to the main locale's lang file.
 - Intentions (⌥⏎): `'required|email'` in a validation call or `rules()` becomes
@@ -63,6 +70,25 @@ in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
   `'UserController@index'` becomes `[UserController::class, 'index']` when the
   file is in `App\Http\Controllers` or already imports the class (no import is
   added); in a `.blade.php` file `{{ $x }}` and `{!! $x !!}` toggle.
+- More intentions (⌥⏎), each editing the open file only:
+  - Blade `class="btn btn-primary"` becomes `@class(['btn', 'btn-primary'])`, and
+    `class="btn {{ $size }}"` becomes `@class(['btn', $size])` (not offered with
+    `{!! !!}`, `@if`/`@php`, a single quote, an empty value or an existing `@class`).
+  - "Convert all validation rules in this array to arrays": every `'a|b'` of the
+    array that can be converted (at least two; `regex:` and non-string items stay).
+  - "Convert all controller strings in this file": every `'Name@action'` and
+    `Route::resource('x', 'Name')` string whose class is in the controllers
+    namespace or imported (at least two). A single `Route::resource` string
+    converts to `Name::class`.
+  - `'exists:users,id'`, `'unique:users,email'` (at most two arguments),
+    `'in:a,b'` and `'not_in:a,b'` in a rule list become `Rule::exists(...)`,
+    `Rule::unique(...)`, `Rule::in([...])`, `Rule::notIn([...])` with the
+    `Illuminate\Validation\Rule` import (not offered when another `Rule` is imported).
+  - `Route::`, `Auth::`, `Str::` and the other core facades get their `use` line
+    when the file has a namespace and does not import the name (skipped in rare
+    code where a word pair reads as a class declaration, such as `$class = Auth::user()`).
+- Setting `controllersNamespace` (default `App\Http\Controllers`): the namespace
+  that `'Name@action'` strings resolve in.
 - Gutter: `view()` → view file; controller method → its route; view → views
   extending or including it and the controllers rendering it; `@section` →
   parent section and the views filling it; `@push` ↔ `@stack`.
@@ -151,10 +177,17 @@ API has no equivalent for (see `LIMITATIONS.md`):
 - Eloquent relations and attributes added by accessors, and `where('column')`
   on a query whose model is lost (`$user->posts()->where(...)`); dropped and
   renamed columns aren't tracked; config `providers` class completion;
-- the _Extract partial view_ refactoring, and the `ide-blade.json` view
-  namespaces;
+- the _Extract partial view_ refactoring;
 - artisan `make:*` commands, which need a name and the plugin API has no
   input dialog.
+
+View namespaces and extra view roots come from `ide-blade.json` at the project
+root or `.idea/ide-blade.json` (both are read when present):
+`{"namespaces": [{"namespace": "admin", "path": "modules/admin/views"}]}`
+indexes those views as `admin::users.index`; a blank or missing `namespace`
+adds a plain view root, an entry without `path` is ignored, and malformed JSON
+is ignored. Limit: only these two paths are read, not an `ide-blade.json`
+elsewhere in the project, and saving either file reindexes.
 
 Vite entries, components and Livewire components are indexed when the project
 is, so a new file under `resources/js` or `resources/css` shows up after a

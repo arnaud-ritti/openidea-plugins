@@ -19,6 +19,7 @@ the free code of the public repository.
 | Assets       | files under `public/`                                                                                              | Twig `asset()`; PHP `->getUrl()`                                                                                                                               |
 | Entries      | `webpack.config.js` `addEntry`/`addStyleEntry`, `importmap.php`                                                    | Twig `encore_entry_link_tags()`, `encore_entry_script_tags()`, `importmap()`                                                                                    |
 | Roles        | `ROLE_*` in security config and controllers, plus built-in attributes (`IS_AUTHENTICATED_*`, `PUBLIC_ACCESS`, …)  | PHP `isGranted`, `denyAccessUnlessGranted`, `#[IsGranted]`; Twig `is_granted()`                                                                                |
+| Tags         | Symfony's built-in service tags plus the tags used in `config/**` YAML and XML service files                      | YAML `tags:` of a service (`- { name: x }`, `- name: x`, `['x']`, `- x`); XML `<tag name="">` (completion only)                                              |
 
 ## Twig names and structure
 
@@ -77,19 +78,114 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     route absent from the compiled routes (silent without them, for
     `_`-prefixed routes and dynamic names; replaces `missing-route` in Twig
     files); `twig-missing-asset`, `asset('x')` of a file absent from the public
-    directory, with the same exceptions as in PHP. Both run on `.twig` files
-    from their extension, so they work without the `aritti.twig` plugin.
+    directory, with the same exceptions as in PHP; `twig-route-compare`, a
+    literal compared with `app.current_route` or
+    `app.request.attributes.get('_route')` (`==`, `!=`, `is same as`, `in [...]`)
+    that is not a compiled route; `twig-missing-translation-domain`, the domain
+    of `'k'|trans(args, 'domain')` (or `domain:`) without translation files.
+    They run on `.twig` files from their extension, so they work without the
+    `aritti.twig` plugin. Comments and `{% verbatim %}` bodies are skipped.
+  - _Twig syntax_ (`twigSyntaxChecks`): `twig-for-condition` (warning), the `if`
+    condition of `{% for %}` (deprecated in Twig 2.10, removed in 3.0; use
+    `|filter`); `twig-component-block-syntax` (error), a `{% block %}` inside a
+    `<twig:Name>` element; `twig-component-self-import` (error), `_self` as
+    the source of `{% from %}` / `{% import %}` inside a component. An
+    unbalanced `<twig:...>` file is left alone.
+  - _YAML syntax_ (`yamlSyntaxChecks`, files under `config/` and
+    `translations/`): `unquoted-yaml-scalar` (also a value starting with a
+    backtick, or with `|` or `>` that is no block scalar header),
+    `yaml-unescaped-backslash` (hint), a backslash in a double-quoted string
+    that starts no escape, and `yaml-unquoted-colon` (hint), a `: ` inside an
+    unquoted value. Also in the _service_ group (`serviceChecks`):
+    `deprecated-factory-setting`, `factory_class` / `factory_method` /
+    `factory_service` (YAML) or `factory-class` / `factory-method` /
+    `factory-service` (XML) on a service, removed in Symfony 3.0; use `factory`.
+  - _Commands_ (`commandChecks`, PHP): `command-invokable-return-type` (hint),
+    the `__invoke()` of a class with `#[AsCommand]` (the attribute must resolve
+    to the Symfony class) has no `int` or `never` return type;
+    `console-input-mode` (warning), two base modes ORed in the mode of
+    `InputArgument` (`REQUIRED`, `OPTIONAL`) or `InputOption` (`VALUE_NONE`,
+    `VALUE_REQUIRED`, `VALUE_OPTIONAL`), through `new` or `addArgument()` /
+    `addOption()`; deprecated in Symfony 8.1. Modifiers, numbers and variables
+    are ignored.
+  - _Deprecations_ (`deprecationChecks`, PHP), only when `composer.json` names
+    `symfony/framework-bundle` 8.1 or newer: `filesystem-mirror-copy-on-windows`,
+    the `copy_on_windows` option of `->mirror()` in a file that mentions
+    `Symfony\Component\Filesystem` (use `follow_symlinks`);
+    `tagged-collection-default-method`, `defaultIndexMethod:` or
+    `defaultPriorityMethod:` with a string value on `TaggedIterator`,
+    `TaggedLocator`, `AutowireIterator` or `AutowireLocator` (use
+    `#[AsTaggedItem]`); `from-callable-option`, `alias`, `parent`,
+    `synthetic`, `file`, `arguments`, `properties`, `configurator` or `calls`
+    next to `from_callable` in one PHP-array service (YAML is not checked).
+  - _Doctrine_ (`doctrineChecks`, PHP attributes, `*.orm.xml`, `*.orm.yml|yaml`;
+    written from the Doctrine ORM documentation, not from the Symfony Plugin's
+    source). PHP files count only when they import `Doctrine\ORM\Mapping` (or
+    a member of it, aliases followed): `orm-empty-table` (hint), `#[Table]`
+    with no arguments or `name: ''`; `orm-table-deprecated-property`
+    (warning), `indexes:` or `uniqueConstraints:` in `#[Table(...)]`
+    (deprecated since ORM 3.2, use `#[Index]` / `#[UniqueConstraint]`);
+    `orm-lifecycle-callbacks-missing` (warning), a lifecycle attribute
+    (`PrePersist`, `PostPersist`, `PreUpdate`, `PostUpdate`, `PreRemove`,
+    `PostRemove`, `PostLoad`, `PreFlush`) in an `#[Entity]` class
+    without `#[HasLifecycleCallbacks]` (a `#[MappedSuperclass]` is skipped: a
+    subclass may carry it);
+    `orm-one-to-many-mapped-by` (warning), `#[OneToMany]` without `mappedBy`
+    and without a `#[JoinTable]` on the property; `orm-inverse-side-join-column`
+    (hint), `#[JoinColumn]` next to `#[OneToOne(mappedBy: ...)]`;
+    `orm-join-column-nullable` (hint), an explicit `nullable: true` (the
+    default) on a join column in PHP, XML (`<join-column>`) or YAML
+    (`joinColumn` / `joinColumns`).
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
-  YAML files; on an unquoted `@` / `%` YAML value, quote it.
+  YAML files; on an unquoted `@` / `%` YAML value, quote it; on an unescaped backslash in a
+  double-quoted YAML string, double it. Quick fixes follow the check settings.
 - Gutter: controller `render()` → template; template → controllers rendering
   it; `{% block %}` → the parent block it overrides; PHP class → its service
   definition; YAML service → its class file.
+
+### Code actions
+
+Refactorings in the code actions menu (⌥⏎), from `src/intentions.rs`. Each
+edits the open file only, and is not offered when a needed import would clash
+with another class of the same short name.
+
+- _Add #[Route] attribute_: caret in a public, non-static, non-magic method
+  without `#[Route]` of a class named `*Controller` or extending
+  `AbstractController` / `Controller`, when `composer.json` requires
+  `symfony/framework-bundle` 6.2 or newer. Path and name come from the class
+  and method names (`/blog/show-post`, `app_blog_show_post`); the caret is not
+  moved to the path.
+- _Add parameter: Request $request_ / _UserInterface $user_: in a public route
+  action (`#[Route]`, `@Route`, or `__invoke` of a class with a `#[Route]`).
+  In the `__invoke` of an `#[AsCommand]` class: `InputInterface`,
+  `OutputInterface`, `Cursor`, `SymfonyStyle`, `Application`. One action per
+  type (no chooser); a type already in the signature, by short or full name, is
+  not offered.
+- _Use TextType::class_: on the second argument of `->add('field', 'text')`
+  when it is a pre-3.0 form type alias; _Use class constants for all form types
+  in this file_ when the file has two or more.
+- _Override block "name"_: with the caret on `{% extends %}`, one action per
+  parent block the file does not define; appends a block calling `parent()`
+  at the end of the file.
 
 ## New file templates
 
 New menu entries for a PHP class with a fixed `App\…` namespace: Command,
 Controller, Form Type, Twig Extension, Compiler Pass, Kernel Test, Web Test,
 Event Subscriber and Voter.
+
+Three more create the default `config/services` file of the Symfony recipe
+(`_defaults` with autowire and autoconfigure, the `App\` resource): Service
+Config (YAML), (XML) and (PHP).
+
+## File icons and status item
+
+`services.yaml`, `services.yml`, `routes.yaml`, `routes.yml`, `bundles.php` and
+`symfony.lock` get a small "S" icon (drawn for this plugin, not the Symfony
+logo). The status bar shows `Symfony 7.1` (the `symfony/framework-bundle`
+constraint; just `Symfony` without one) with the route, service and template
+counts as tooltip; clicking it reindexes. It disappears when the project is
+not a Symfony project.
 
 ## Tool window and commands
 
@@ -110,7 +206,9 @@ cannot be opened.
 A project counts as Symfony when it has `symfony.lock` or requires
 `symfony/framework-bundle` or `symfony/symfony` in `composer.json`. Twig files
 need the `aritti.twig` plugin (the IDE has no Twig language). Settings: the
-public directory and extra compiled container and route files.
+public directory, extra compiled container and route files, and extra Twig
+namespaces (`twigNamespaces`, comma-separated `name=directory` pairs, an empty
+name is the main namespace; added to `twig: paths:`).
 
 ## Not ported
 
@@ -120,7 +218,7 @@ which the OpenIDEA plugin API has no equivalent for:
 - container `get()` return types, Twig variable types (`{{ post.| }}`),
   form types and options, Doctrine (QueryBuilder, repositories, DQL),
   serializer, event dispatcher, constraint validators;
-- the remaining inspections (deprecated Twig, …) and intentions (they need resolved PHP types);
+- the remaining inspections and intentions (they need resolved PHP types);
 - refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing
   files.

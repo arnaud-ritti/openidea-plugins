@@ -11,6 +11,7 @@ mod blade;
 mod controllers;
 mod directives;
 mod eloquent_checks;
+mod function_checks;
 mod index;
 mod js;
 mod migrations;
@@ -37,6 +38,10 @@ const CONTROLLERS_DIRECTORY: &str = "app/Http/Controllers/";
 
 /// Whether a saved file (project-relative) feeds the index.
 fn affects_index(relative: &str) -> bool {
+    if matches!(relative, "ide-blade.json" | ".idea/ide-blade.json") {
+        return true;
+    }
+
     let directory = [
         "routes/",
         "config/",
@@ -287,6 +292,21 @@ fn eloquent_problems(project: &Project, path: &str, language: &str, text: &str) 
         .collect()
 }
 
+/// `env()` calls outside the configuration files.
+fn function_problems(project: &Project, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+    if !enabled("checkFunctions") {
+        return Vec::new();
+    }
+
+    let Ok(root) = project.root() else { return Vec::new() };
+    let relative = path.strip_prefix(&format!("{root}/")).unwrap_or(path);
+
+    function_checks::env_outside_config(relative, language, text)
+        .into_iter()
+        .map(|finding| problem(text, finding.start..finding.end, finding.code, finding.severity, finding.message))
+        .collect()
+}
+
 fn enabled(setting: &str) -> bool {
     host::setting_bool(setting).unwrap_or(true)
 }
@@ -385,6 +405,7 @@ impl Main {
             Ok(text) if enabled && !index.partial => {
                 let mut found = problems(index, language, &text, check_routes);
                 found.extend(eloquent_problems(project, path, language, &text));
+                found.extend(function_problems(project, path, language, &text));
                 found.sort_by_key(|d| (d.range.start.line, d.range.start.character));
                 found
             }
@@ -526,17 +547,21 @@ impl Plugin for Main {
 }
 
 fn directive_items(index: &Index, replace: Range) -> Vec<CompletionItem> {
-    let core = directives::CORE.iter().map(|name| (*name, None));
-    let custom = index.directives.iter().map(|(name, entry)| (name.as_str(), entry.detail.clone()));
+    let core = directives::CORE.iter().map(|name| (*name, None, true));
+    let custom = index.directives.iter().map(|(name, entry)| (name.as_str(), entry.detail.clone(), false));
 
     let mut seen = BTreeSet::new();
     custom
         .chain(core)
-        .filter(|(name, _)| seen.insert(*name))
-        .map(|(name, detail)| {
+        .filter(|(name, _, _)| seen.insert(*name))
+        .map(|(name, detail, is_core)| {
             let mut item = CompletionItem::new(name, CompletionKind::Keyword);
             item.detail = detail;
             item.replace = Some(replace);
+            if is_core && let Some((_, body)) = directives::SNIPPETS.iter().find(|(n, _)| *n == name) {
+                item.snippet = true;
+                item.insert_text = (*body).to_owned();
+            }
             item
         })
         .collect()
@@ -655,7 +680,8 @@ impl Providers for Main {
             }));
         }
 
-        found.extend(actions::rewrites(&doc.path, language, &doc.text, offset).into_iter().map(|rewrite| CodeAction {
+        let controllers_namespace = host::setting_string("controllersNamespace").filter(|namespace| !namespace.is_empty()).unwrap_or_else(|| "App\\Http\\Controllers".into());
+        found.extend(actions::rewrites(&doc.path, language, &doc.text, offset, &controllers_namespace).into_iter().map(|rewrite| CodeAction {
             title: rewrite.title,
             kind: Some(rewrite.kind.into()),
             preferred: false,

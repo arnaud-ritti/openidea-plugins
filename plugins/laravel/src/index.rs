@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use openidea_plugin::Position;
+use openidea_plugin::{Error, Position};
 use openidea_plugin::host::{self, Project};
 
 use crate::refs::{self, Kind};
@@ -190,6 +190,129 @@ pub fn view_name(relative: &str) -> Option<String> {
     Some(stem.replace('/', "."))
 }
 
+/// `ide-blade.json` and `.idea/ide-blade.json` are read by path: `find_files`
+/// skips hidden directories on the host. A missing file is `NotFound` in the
+/// mock and `Invalid` on the host; both mean absent.
+pub fn ide_blade_roots(read: impl Fn(&str) -> Result<String, Error>) -> Vec<(Option<String>, String)> {
+    ["ide-blade.json", ".idea/ide-blade.json"]
+        .iter()
+        .filter_map(|path| read(path).ok())
+        .flat_map(|text| ide_blade_namespaces(&text))
+        .collect()
+}
+
+/// `{"namespaces": [{"namespace": "foo", "path": "res"}]}`: entries without a
+/// path are dropped, a blank namespace is an unnamespaced root, malformed JSON
+/// yields nothing.
+pub fn ide_blade_namespaces(text: &str) -> Vec<(Option<String>, String)> {
+    scan_namespaces(text.as_bytes()).unwrap_or_default()
+}
+
+fn scan_namespaces(b: &[u8]) -> Option<Vec<(Option<String>, String)>> {
+    fn skip(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b',') {
+            i += 1;
+        }
+        i
+    }
+    fn string(b: &[u8], mut i: usize) -> Option<(String, usize)> {
+        if b.get(i) != Some(&b'"') {
+            return None;
+        }
+        i += 1;
+        let mut out = Vec::new();
+        loop {
+            match *b.get(i)? {
+                b'"' => return Some((String::from_utf8_lossy(&out).into_owned(), i + 1)),
+                b'\\' => {
+                    out.push(match *b.get(i + 1)? {
+                        b'n' => b'\n',
+                        b't' => b'\t',
+                        c => c,
+                    });
+                    i += 2;
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+    }
+    fn skip_value(b: &[u8], mut i: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        loop {
+            match *b.get(i)? {
+                b'"' => i = string(b, i)?.1,
+                b'{' | b'[' => {
+                    depth += 1;
+                    i += 1;
+                }
+                b'}' | b']' if depth > 0 => {
+                    depth -= 1;
+                    i += 1;
+                }
+                b',' | b'}' if depth == 0 => return Some(i),
+                _ => i += 1,
+            }
+        }
+    }
+
+    let key = b"\"namespaces\"";
+    let mut i = b.windows(key.len()).position(|w| w == key)? + key.len();
+    i = skip(b, i);
+    if b.get(i) != Some(&b':') {
+        return None;
+    }
+    i = skip(b, i + 1);
+    if b.get(i) != Some(&b'[') {
+        return None;
+    }
+    i += 1;
+
+    let mut found = Vec::new();
+    loop {
+        i = skip(b, i);
+        match *b.get(i)? {
+            b']' => return Some(found),
+            b'{' => i += 1,
+            _ => return None,
+        }
+
+        let (mut namespace, mut path) = (String::new(), String::new());
+        loop {
+            i = skip(b, i);
+            if *b.get(i)? == b'}' {
+                i += 1;
+                break;
+            }
+            let (name, next) = string(b, i)?;
+            i = skip(b, next);
+            if *b.get(i)? != b':' {
+                return None;
+            }
+            i = skip(b, i + 1);
+            match string(b, i) {
+                Some((value, next)) => {
+                    i = next;
+                    match name.as_str() {
+                        "namespace" => namespace = value,
+                        "path" => path = value,
+                        _ => {}
+                    }
+                }
+                None => i = skip_value(b, i)?,
+            }
+        }
+
+        let path = path.trim().trim_start_matches("./").trim_matches('/');
+        if !path.is_empty() {
+            let namespace = namespace.trim();
+            found.push(((!namespace.is_empty()).then(|| namespace.to_owned()), path.to_owned()));
+        }
+    }
+}
+
 /// `Forms/InputField.php` is the tag name `forms.input-field`.
 fn tag_name(relative: &str) -> String {
     let stem = relative.strip_suffix(".php").unwrap_or(relative);
@@ -274,11 +397,15 @@ impl Index {
             project.read_file(path).ok()
         };
 
-        let mut view_roots: Vec<String> = VIEW_ROOTS.iter().map(|r| (*r).to_owned()).collect();
-        view_roots.extend(comma_separated("viewPaths"));
-        for view_root in &view_roots {
+        let mut view_roots: Vec<(Option<String>, String)> = VIEW_ROOTS.iter().map(|r| (None, (*r).to_owned())).collect();
+        view_roots.extend(comma_separated("viewPaths").into_iter().map(|r| (None, r)));
+        view_roots.extend(ide_blade_roots(|path| project.read_file(path)));
+        for (namespace, view_root) in &view_roots {
             for path in files(&[format!("{view_root}/**/*.php")]) {
-                let Some(name) = relative(&path).strip_prefix(&format!("{view_root}/")).and_then(view_name) else { continue };
+                let Some(mut name) = relative(&path).strip_prefix(&format!("{view_root}/")).and_then(view_name) else { continue };
+                if let Some(namespace) = namespace {
+                    name = format!("{namespace}::{name}");
+                }
                 index.views.add(&name, None, &path, Position::new(0, 0), 0);
 
                 if !path.ends_with(".blade.php") {

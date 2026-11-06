@@ -22,7 +22,32 @@
     },
     "twigChecks": {
       "type": "boolean",
-      "title": "Report missing routes and assets in Twig templates",
+      "title": "Report missing routes, assets and translation domains and unknown route comparisons in Twig templates",
+      "default": true
+    },
+    "twigSyntaxChecks": {
+      "type": "boolean",
+      "title": "Report deprecated for conditions and component syntax mistakes in Twig",
+      "default": true
+    },
+    "yamlSyntaxChecks": {
+      "type": "boolean",
+      "title": "Report syntax problems in YAML configuration files",
+      "default": true
+    },
+    "commandChecks": {
+      "type": "boolean",
+      "title": "Report invokable commands without an int return type and invalid console input modes",
+      "default": true
+    },
+    "deprecationChecks": {
+      "type": "boolean",
+      "title": "Report deprecated Symfony APIs the project's version no longer supports",
+      "default": true
+    },
+    "doctrineChecks": {
+      "type": "boolean",
+      "title": "Report problems in Doctrine mappings",
       "default": true
     },
     "publicDirectory": {
@@ -38,6 +63,11 @@
     "compiledRoutes": {
       "type": "string",
       "title": "Extra compiled route files, like url_generating_routes.php (project-relative, comma-separated)",
+      "default": ""
+    },
+    "twigNamespaces": {
+      "type": "string",
+      "title": "Extra Twig namespaces as name=directory pairs (project-relative, comma-separated; an empty name is the main namespace)",
       "default": ""
     }
   }

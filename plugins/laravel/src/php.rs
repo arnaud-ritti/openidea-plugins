@@ -129,6 +129,208 @@ pub fn split(text: &str, range: Range<usize>) -> Vec<Range<usize>> {
     parts
 }
 
+struct Import {
+    fqcn: String,
+    alias: String,
+}
+
+pub struct UseEdit {
+    pub offset: usize,
+    pub text: String,
+    pub short_name: String,
+}
+
+fn short_name(fqcn: &str) -> &str {
+    fqcn.rsplit('\\').next().unwrap_or(fqcn)
+}
+
+/// Same length as `text`: comments and string contents become spaces, line breaks stay.
+fn mask_all(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = bytes.to_vec();
+    let blank = |out: &mut Vec<u8>, range: Range<usize>| {
+        for byte in &mut out[range] {
+            if *byte != b'\n' && *byte != b'\r' {
+                *byte = b' ';
+            }
+        }
+    };
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        match byte {
+            b'/' if next == Some(b'*') => {
+                let end = text[i + 2..].find("*/").map_or(bytes.len(), |at| i + 2 + at + 2);
+                blank(&mut out, i..end);
+                i = end;
+            }
+            b'/' if next == Some(b'/') => {
+                let end = text[i..].find('\n').map_or(bytes.len(), |at| i + at);
+                blank(&mut out, i..end);
+                i = end;
+            }
+            b'#' if next != Some(b'[') => {
+                let end = text[i..].find('\n').map_or(bytes.len(), |at| i + at);
+                blank(&mut out, i..end);
+                i = end;
+            }
+            b'\'' | b'"' => {
+                let mut end = i + 1;
+                while end < bytes.len() && bytes[end] != byte {
+                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                }
+                let end = end.min(bytes.len());
+                blank(&mut out, i + 1..end);
+                i = (end + 1).min(bytes.len());
+            }
+            _ => i += 1,
+        }
+    }
+
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\' | b'$' | b'?' | b'|' | b'&') || byte >= 0x80
+}
+
+fn push_import(imports: &mut Vec<Import>, item: &str, prefix: &str) {
+    let item = item.trim();
+    if item.is_empty() {
+        return;
+    }
+
+    let (name, alias) = match item.split_once(" as ") {
+        Some((name, alias)) => (name.trim(), Some(alias.trim())),
+        None => (item, None),
+    };
+    let fqcn = format!("{prefix}{}", name.trim_start_matches('\\'));
+    let alias = alias.unwrap_or_else(|| short_name(&fqcn)).to_owned();
+    imports.push(Import { fqcn, alias });
+}
+
+/// Imports with the byte offset where each statement's line ends, and the
+/// offset after the `namespace` line.
+struct Header {
+    imports: Vec<(Import, usize)>,
+    namespace: Option<(String, usize)>,
+}
+
+fn line_end(masked: &str, from: usize) -> usize {
+    masked[from..].find('\n').map_or(masked.len(), |at| from + at + 1)
+}
+
+fn scan_header(masked: &str) -> Header {
+    let mut header = Header { imports: Vec::new(), namespace: None };
+    let mut depth = 0usize;
+    let mut offset = 0;
+
+    while offset < masked.len() {
+        let next_line = line_end(masked, offset);
+        let line = masked[offset..next_line].trim();
+
+        if depth == 0 && line.starts_with("use ") {
+            let statement_end = masked[offset..].find(';').map_or(masked.len(), |at| offset + at + 1);
+            let end = line_end(masked, statement_end.saturating_sub(1));
+            let statement = masked[offset + 4..statement_end.saturating_sub(1).max(offset + 4)].trim();
+            if !statement.starts_with("function ") && !statement.starts_with("const ") {
+                let mut imports = Vec::new();
+                match statement.split_once('{') {
+                    Some((prefix, rest)) => {
+                        let prefix = prefix.trim().trim_start_matches('\\');
+                        for item in rest.trim_end_matches('}').split(',') {
+                            push_import(&mut imports, item, prefix);
+                        }
+                    }
+                    None => {
+                        for item in statement.split(',') {
+                            push_import(&mut imports, item, "");
+                        }
+                    }
+                }
+                header.imports.extend(imports.into_iter().map(|import| (import, end)));
+            }
+            offset = end;
+            continue;
+        }
+
+        if depth == 0 && header.namespace.is_none() && line.starts_with("namespace ") {
+            let name: String = line["namespace ".len()..].chars().take_while(|c| !matches!(c, ';' | '{' | ' ')).collect();
+            header.namespace = Some((name.trim_start_matches('\\').to_owned(), next_line));
+        }
+
+        depth = (depth + line.matches('{').count()).saturating_sub(line.matches('}').count());
+        if line.starts_with("namespace ") && line.ends_with('{') {
+            depth = 0;
+        }
+        offset = next_line;
+    }
+
+    header
+}
+
+pub fn insert_use(text: &str, fqcn: &str) -> Option<UseEdit> {
+    let masked = mask_all(text);
+    let header = scan_header(&masked);
+    let fqcn = fqcn.trim_start_matches('\\');
+    let short = short_name(fqcn);
+
+    if let Some((import, _)) = header.imports.iter().find(|(import, _)| import.fqcn == fqcn) {
+        return Some(UseEdit { offset: 0, text: String::new(), short_name: import.alias.clone() });
+    }
+
+    if header.imports.iter().any(|(import, _)| import.alias.eq_ignore_ascii_case(short)) {
+        return None;
+    }
+
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let line = format!("use {fqcn};{eol}");
+    let (offset, text) = if let Some((_, end)) = header.imports.last() {
+        (*end, line)
+    } else if let Some((_, end)) = &header.namespace {
+        (*end, format!("{eol}{line}"))
+    } else {
+        let start = line_end(&masked, masked.find("<?php")?);
+        match declare_end(&masked, start) {
+            Some(end) => (end, format!("{eol}{line}")),
+            None => (start, line),
+        }
+    };
+
+    Some(UseEdit { offset, text, short_name: short.to_owned() })
+}
+
+/// Offset after the line of a `declare(...);` statement that opens the file at `from`.
+fn declare_end(masked: &str, from: usize) -> Option<usize> {
+    let start = skip_whitespace(masked, from);
+    let word = read_word(masked, start);
+    if !masked[word.clone()].eq_ignore_ascii_case("declare") {
+        return None;
+    }
+
+    let semicolon = masked[word.end..].find(';')? + word.end;
+    Some(line_end(masked, semicolon))
+}
+
+fn skip_whitespace(masked: &str, mut at: usize) -> usize {
+    let bytes = masked.as_bytes();
+    while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+        at += 1;
+    }
+    at
+}
+
+fn read_word(masked: &str, at: usize) -> Range<usize> {
+    let bytes = masked.as_bytes();
+    let mut end = at;
+    while end < bytes.len() && is_word_byte(bytes[end]) {
+        end += 1;
+    }
+    at..end
+}
+
 /// Arguments of the call whose `(` is at `open`.
 pub fn arguments(text: &str, open: usize) -> Vec<Range<usize>> {
     match closing(text, open) {
@@ -284,6 +486,38 @@ pub fn array_paths(text: &str, open: usize, prefix: &str, out: &mut Vec<Leaf>, d
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_use_goes_after_the_last_import() {
+        let text = "<?php\nnamespace App;\n\nuse A\\B;\nuse A\\C;\n\nclass X {}\n";
+        let edit = insert_use(text, "Foo\\Bar").unwrap();
+        assert_eq!(edit.text, "use Foo\\Bar;\n");
+        assert_eq!(&text[..edit.offset], "<?php\nnamespace App;\n\nuse A\\B;\nuse A\\C;\n");
+        assert_eq!(edit.short_name, "Bar");
+    }
+
+    #[test]
+    fn insert_use_refuses_a_short_name_clash() {
+        assert!(insert_use("<?php\nuse Other\\Bar;\n", "Foo\\Bar").is_none());
+    }
+
+    #[test]
+    fn insert_use_handles_namespace_declare_crlf_and_existing_imports() {
+        let text = "<?php\nnamespace App;\n\nclass X {}\n";
+        let edit = insert_use(text, "Foo\\Bar").unwrap();
+        assert_eq!(edit.text, "\nuse Foo\\Bar;\n");
+        assert_eq!(&text[..edit.offset], "<?php\nnamespace App;\n");
+
+        let text = "<?php\ndeclare(strict_types=1);\n\nclass X {}\n";
+        let edit = insert_use(text, "Foo\\Bar").unwrap();
+        assert_eq!(&text[..edit.offset], "<?php\ndeclare(strict_types=1);\n");
+
+        let text = "<?php\r\nnamespace App;\r\n\r\nuse A\\B;\r\n\r\nclass X {}\r\n";
+        assert_eq!(insert_use(text, "Foo\\Bar").unwrap().text, "use Foo\\Bar;\r\n");
+
+        let edit = insert_use("<?php\nuse Foo\\Bar;\n", "\\Foo\\Bar").unwrap();
+        assert_eq!(edit.text, "");
+    }
 
     #[test]
     fn masks_comments_but_not_strings() {

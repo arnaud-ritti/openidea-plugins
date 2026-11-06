@@ -86,7 +86,7 @@ pub fn unclosed_tags(text: &str) -> Vec<(Range<usize>, &str)> {
         i = at + 1;
 
         if text[at..].starts_with("{#") {
-            i = text[at..].find("#}").map_or(text.len(), |e| at + e + 2);
+            i = text[at + 2..].find("#}").map_or(text.len(), |e| at + 2 + e + 2);
             continue;
         }
 
@@ -127,4 +127,67 @@ pub fn unclosed_tags(text: &str) -> Vec<(Range<usize>, &str)> {
 
     unclosed.extend(open);
     unclosed
+}
+
+/// Byte ranges of the template that are Twig or HTML text: everything but
+/// `{# #}` comments and the bodies of `{% verbatim %}`.
+pub fn code_regions(text: &str) -> Vec<Range<usize>> {
+    let mut regions = Vec::new();
+    let mut region_start = 0;
+    let mut i = 0;
+
+    while let Some(found) = text[i..].find('{') {
+        let at = i + found;
+        i = at + 1;
+
+        if text[at..].starts_with("{#") {
+            regions.push(region_start..at);
+            region_start = text[at + 2..].find("#}").map_or(text.len(), |e| at + 2 + e + 2);
+            i = region_start;
+            continue;
+        }
+
+        if !text[at..].starts_with("{%") {
+            continue;
+        }
+
+        let Some(close) = text[at + 2..].find("%}").map(|e| at + 2 + e + 2) else { break };
+        let inside = text[at + 2..close - 2].trim_matches(['-', '~', ' ', '\t', '\r', '\n']);
+        i = close;
+
+        if inside != "verbatim" {
+            continue;
+        }
+
+        regions.push(region_start..close);
+        let body_end = text[close..].find("endverbatim").and_then(|e| text[..close + e].rfind("{%")).filter(|&at| at >= close);
+        region_start = body_end.unwrap_or(text.len());
+        i = region_start.max(close);
+    }
+
+    regions.push(region_start..text.len());
+    regions.retain(|region| !region.is_empty());
+    regions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::code_regions;
+
+    #[test]
+    fn code_regions_skip_comments_and_verbatim_bodies() {
+        let text = "a{# x #}b{% verbatim %}{{ c }}{% endverbatim %}d";
+        let parts: Vec<_> = code_regions(text).into_iter().map(|r| &text[r]).collect();
+        assert_eq!(parts, ["a", "b{% verbatim %}", "{% endverbatim %}d"]);
+
+        let text = "a{%}b{#}c";
+        assert_eq!(code_regions(text), [0..text.len()]);
+
+        let text = "a{# open";
+        assert_eq!(code_regions(text), [0..1]);
+
+        let text = "{% verbatim %}never closed";
+        let parts: Vec<_> = code_regions(text).into_iter().map(|r| &text[r]).collect();
+        assert_eq!(parts, ["{% verbatim %}"]);
+    }
 }

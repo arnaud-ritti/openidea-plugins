@@ -14,17 +14,31 @@ use crate::index::{self, Index};
 use crate::refs;
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Finding {
+pub(crate) struct Finding {
     pub start: usize,
     pub end: usize,
     pub code: &'static str,
     pub message: String,
     pub severity: Severity,
+    /// Text that replaces `start..end` in a quick fix.
+    pub replacement: Option<String>,
 }
 
 impl Finding {
-    fn warn(range: Range<usize>, code: &'static str, message: String) -> Finding {
-        Finding { start: range.start, end: range.end, code, message, severity: Severity::Warning }
+    fn with_severity(range: Range<usize>, code: &'static str, message: String, severity: Severity) -> Finding {
+        Finding { start: range.start, end: range.end, code, message, severity, replacement: None }
+    }
+
+    pub(crate) fn warn(range: Range<usize>, code: &'static str, message: String) -> Finding {
+        Finding::with_severity(range, code, message, Severity::Warning)
+    }
+
+    pub(crate) fn hint(range: Range<usize>, code: &'static str, message: String) -> Finding {
+        Finding::with_severity(range, code, message, Severity::Hint)
+    }
+
+    pub(crate) fn error(range: Range<usize>, code: &'static str, message: String) -> Finding {
+        Finding::with_severity(range, code, message, Severity::Error)
     }
 }
 
@@ -67,11 +81,11 @@ fn is_route_file(path: &str) -> bool {
     path.contains("/config/routes") || path.contains("/config/routing") || path.contains("/Resources/config/routing")
 }
 
-fn is_service_file(path: &str) -> bool {
+pub(crate) fn is_service_file(path: &str) -> bool {
     path.contains("/config/") && !is_route_file(path) && !path.contains("/var/cache/")
 }
 
-fn offset_in(text: &str, part: &str) -> usize {
+pub(crate) fn offset_in(text: &str, part: &str) -> usize {
     part.as_ptr() as usize - text.as_ptr() as usize
 }
 
@@ -528,7 +542,7 @@ pub fn check_services(ctx: &Context, path: &str, language: &str, text: &str) -> 
     out
 }
 
-const FORM_TYPES: &[(&str, &str)] = &[
+pub(crate) const FORM_TYPES: &[(&str, &str)] = &[
     ("text", "TextType"),
     ("textarea", "TextareaType"),
     ("email", "EmailType"),
@@ -569,7 +583,7 @@ const BUILT_IN_DOMAINS: &[&str] = &["messages", "validators", "security"];
 /// Positions of the `(` of every call that ends with `needle` (which ends in
 /// `(`). A needle that starts with a name is a function call: not a method,
 /// not part of a longer name.
-fn call_opens<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+pub(crate) fn call_opens<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
     let function = needle.as_bytes()[0].is_ascii_alphabetic();
 
     text.match_indices(needle).filter_map(move |(at, _)| {
@@ -580,7 +594,7 @@ fn call_opens<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = usize>
 }
 
 /// Range of the contents of a quoted string argument.
-fn literal(text: &str, argument: &str) -> Option<Range<usize>> {
+pub(crate) fn literal(text: &str, argument: &str) -> Option<Range<usize>> {
     let argument = argument.trim();
     let quote = argument.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
     let inner = argument.strip_prefix(quote)?.strip_suffix(quote)?;
@@ -588,20 +602,31 @@ fn literal(text: &str, argument: &str) -> Option<Range<usize>> {
     Some(start..start + inner.len())
 }
 
-fn is_dynamic(name: &str) -> bool {
+pub(crate) fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '$', '~', '#'])
 }
 
-fn form_type_strings(text: &str, out: &mut Vec<Finding>) {
+/// Literal aliases in the second argument of `->add()` calls of a form type,
+/// with the alias and the class that replaced it.
+pub(crate) fn form_type_literals(text: &str) -> Vec<(Range<usize>, &'static str, &'static str)> {
     if !text.contains("FormBuilderInterface") && !text.contains("AbstractType") && !text.contains("$builder") {
-        return;
+        return Vec::new();
     }
 
+    let mut found = Vec::new();
     for open in call_opens(text, "->add(") {
         let arguments = refs::arguments(text, open);
         let Some(range) = arguments.get(1).and_then(|argument| literal(text, argument)) else { continue };
         let Some((alias, class)) = FORM_TYPES.iter().find(|(alias, _)| *alias == &text[range.clone()]) else { continue };
 
+        found.push((range, *alias, *class));
+    }
+
+    found
+}
+
+fn form_type_strings(text: &str, out: &mut Vec<Finding>) {
+    for (range, alias, class) in form_type_literals(text) {
         let message = format!("Form type \"{alias}\" was removed in Symfony 3; use {class}::class.");
         out.push(Finding::warn(range, "form-type-string", message));
     }
@@ -646,6 +671,15 @@ fn asset_is_missing(ctx: &Context, name: &str) -> bool {
     !generated && directory_indexed && !ctx.index.assets.contains_key(file)
 }
 
+/// A literal domain that looks project-local (lowercase, `+intl-icu` allowed)
+/// yet has no translation files; never true before translations were indexed.
+pub(crate) fn translation_domain_is_unknown(ctx: &Context, domain: &str) -> bool {
+    let name = domain.strip_suffix("+intl-icu").unwrap_or(domain);
+    let project_local = !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'));
+
+    !ctx.index.translations.is_empty() && project_local && !BUILT_IN_DOMAINS.contains(&name) && !ctx.index.translations.contains_key(name)
+}
+
 fn missing_translation_domains(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
     if ctx.index.translations.is_empty() {
         return;
@@ -657,9 +691,7 @@ fn missing_translation_domains(ctx: &Context, text: &str, out: &mut Vec<Finding>
         let Some(range) = named.or_else(|| arguments.get(2).copied()).and_then(|argument| literal(text, argument)) else { continue };
 
         let domain = &text[range.clone()];
-        let name = domain.strip_suffix("+intl-icu").unwrap_or(domain);
-        let project_local = !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'));
-        if !project_local || BUILT_IN_DOMAINS.contains(&name) || ctx.index.translations.contains_key(name) {
+        if !translation_domain_is_unknown(ctx, domain) {
             continue;
         }
 
@@ -721,7 +753,7 @@ mod tests {
 
     use super::*;
     use crate::index::Entry;
-    use crate::{Groups, Main};
+    use crate::Main;
 
     const BLOG: &str = "<?php\nnamespace App\\Controller;\nclass BlogController\n{\n    public function index() {}\n    private function hidden() {}\n}\n";
     const INVOKABLE: &str = "<?php\nnamespace App\\Controller;\nclass InvokableController\n{\n    public function __invoke() {}\n}\n";
@@ -765,7 +797,7 @@ mod tests {
     fn run_with(index: &Index, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
         let files = sources();
         let read = |file: &str| files.get(file).cloned();
-        let groups = Groups { controllers: true, services: true, php_calls: true, twig: true };
+        let groups = crate::Groups::all_on();
         crate::extra_problems(index, groups, &read, path, language, text)
     }
 
@@ -1163,7 +1195,7 @@ mod tests {
     fn run_custom(index: &Index, files: &[(&str, &str)], path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
         let files: BTreeMap<String, String> = files.iter().map(|(p, t)| ((*p).to_owned(), (*t).to_owned())).collect();
         let read = |file: &str| files.get(file).cloned();
-        let groups = Groups { controllers: true, services: true, php_calls: true, twig: true };
+        let groups = crate::Groups::all_on();
         crate::extra_problems(index, groups, &read, path, language, text)
     }
 

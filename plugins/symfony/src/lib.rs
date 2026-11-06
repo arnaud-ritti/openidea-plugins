@@ -6,10 +6,16 @@
 //! Brault; MIT), see README.md for what was and wasn't ported.
 
 mod checks;
+mod config_checks;
+mod doctrine;
 mod index;
+mod intentions;
+mod php_checks;
+mod php_text;
 mod profiler;
 mod refs;
 mod twig;
+mod twig_checks;
 mod yaml_quotes;
 
 use std::borrow::Cow;
@@ -18,13 +24,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Table, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, Position, Range, Severity, TextEdit};
-use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, host, register_plugin, text};
+use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, host, register_plugin, text};
 
 pub use index::Index;
 use index::{Entry, Names, Sink};
 use refs::{Kind, Reference};
 
 const VIEW: &str = "symfony";
+const STATUS_ITEM: &str = "symfony";
 const PROFILER_VIEW: &str = "symfony-profiler";
 const SOURCE: &str = "Symfony";
 const DEFAULT_DOMAIN: &str = "messages";
@@ -92,6 +99,82 @@ fn domain_of(doc_language: &str, text: &str, reference: &Reference) -> String {
     refs::translation_domain(doc_language, text, reference).unwrap_or_else(|| DEFAULT_DOMAIN.into())
 }
 
+/// The tags of Symfony's "Built-in Symfony Service Tags" page.
+const CORE_TAGS: &[&str] = &[
+    "asset_mapper.compiler",
+    "assets.package",
+    "auto_alias",
+    "cache.pool",
+    "cache.pool.clearer",
+    "cache.taggable",
+    "chatter.transport_factory",
+    "config_cache.resource_checker",
+    "console.command",
+    "container.do_not_inline",
+    "container.env_var_loader",
+    "container.env_var_processor",
+    "container.excluded",
+    "container.hot_path",
+    "container.no_preload",
+    "container.preload",
+    "container.service_locator",
+    "container.service_subscriber",
+    "container.stack",
+    "controller.argument_value_resolver",
+    "controller.service_arguments",
+    "data_collector",
+    "doctrine.event_listener",
+    "doctrine.event_subscriber",
+    "doctrine.orm.entity_listener",
+    "doctrine.repository_service",
+    "form.type",
+    "form.type_extension",
+    "form.type_guesser",
+    "http_client.client",
+    "kernel.cache_clearer",
+    "kernel.cache_warmer",
+    "kernel.event_listener",
+    "kernel.event_subscriber",
+    "kernel.fragment_renderer",
+    "kernel.locale_aware",
+    "kernel.reset",
+    "mailer.transport_factory",
+    "messenger.message_handler",
+    "messenger.receiver",
+    "messenger.transport_factory",
+    "mime.mime_type_guesser",
+    "monolog.logger",
+    "monolog.processor",
+    "notifier.channel",
+    "property_info.access_extractor",
+    "property_info.constructor_extractor",
+    "property_info.initializable_extractor",
+    "property_info.list_extractor",
+    "property_info.type_extractor",
+    "proxy",
+    "routing.expression_language_provider",
+    "routing.loader",
+    "routing.route_loader",
+    "scheduler.schedule_provider",
+    "security.expression_language_provider",
+    "security.remember_me_handler",
+    "security.voter",
+    "serializer.encoder",
+    "serializer.normalizer",
+    "texter.transport_factory",
+    "translation.dumper",
+    "translation.extractor",
+    "translation.extractor.visitor",
+    "translation.loader",
+    "twig.extension",
+    "twig.loader",
+    "twig.runtime",
+    "validator.auto_mapper",
+    "validator.constraint_validator",
+    "validator.initializer",
+    "workflow.definition",
+];
+
 /// Names a reference can name, for completion and navigation.
 fn candidates<'a>(index: &'a Index, path: &str, language: &str, text: &str, reference: &Reference) -> Cow<'a, Names> {
     match reference.kind {
@@ -102,6 +185,16 @@ fn candidates<'a>(index: &'a Index, path: &str, language: &str, text: &str, refe
         Kind::Asset => Cow::Borrowed(&index.assets),
         Kind::Entry => Cow::Borrowed(&index.entries),
         Kind::Role => Cow::Borrowed(&index.roles),
+        Kind::Tag => {
+            let mut all: Names = CORE_TAGS
+                .iter()
+                .map(|tag| ((*tag).to_owned(), Entry { detail: Some("Symfony core tag".into()), path: String::new(), at: Position::new(0, 0) }))
+                .collect();
+            for (tag, entry) in &index.tags {
+                all.entry(tag.clone()).or_insert_with(|| entry.clone());
+            }
+            Cow::Owned(all)
+        }
         Kind::Translation => {
             if let Some(names) = index.translations.get(&domain_of(language, text, reference)) {
                 return Cow::Borrowed(names);
@@ -128,6 +221,7 @@ fn completion_kind(kind: Kind) -> CompletionKind {
         Kind::Entry => CompletionKind::Module,
         Kind::Role => CompletionKind::Constant,
         Kind::Block => CompletionKind::Field,
+        Kind::Tag => CompletionKind::Keyword,
     }
 }
 
@@ -188,7 +282,7 @@ fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '~', '$', '#'])
 }
 
-fn is_quoted_config(path: &str) -> bool {
+pub(crate) fn is_quoted_config(path: &str) -> bool {
     path.contains("/config/") || path.contains("/translations/")
 }
 
@@ -247,14 +341,6 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
         }
     }
 
-    if language == "yaml" && is_quoted_config(path) {
-        for range in yaml_quotes::unquoted(text) {
-            let first = text[range.start..].chars().next().unwrap_or('@');
-            let message = format!("A YAML value starting with \"{first}\" must be quoted.");
-            problem(range.start, range.end, "unquoted-yaml-scalar", message);
-        }
-    }
-
     if language == "xml" && !path.contains("/var/cache/") {
         let mut services: Vec<(String, Position)> = Vec::new();
         index::xml_services(path, text, &mut services);
@@ -289,17 +375,47 @@ struct Groups {
     services: bool,
     php_calls: bool,
     twig: bool,
+    twig_syntax: bool,
+    yaml_syntax: bool,
+    commands: bool,
+    deprecations: bool,
+    doctrine: bool,
 }
 
 impl Groups {
+    #[cfg(test)]
+    fn all_on() -> Groups {
+        Groups {
+            controllers: true,
+            services: true,
+            php_calls: true,
+            twig: true,
+            twig_syntax: true,
+            yaml_syntax: true,
+            commands: true,
+            deprecations: true,
+            doctrine: true,
+        }
+    }
+
     fn from_settings() -> Groups {
         let on = |key: &str| host::setting_bool(key).unwrap_or(true);
-        Groups { controllers: on("controllerChecks"), services: on("serviceChecks"), php_calls: on("phpCallChecks"), twig: on("twigChecks") }
+        Groups {
+            controllers: on("controllerChecks"),
+            services: on("serviceChecks"),
+            php_calls: on("phpCallChecks"),
+            twig: on("twigChecks"),
+            twig_syntax: on("twigSyntaxChecks"),
+            yaml_syntax: on("yamlSyntaxChecks"),
+            commands: on("commandChecks"),
+            deprecations: on("deprecationChecks"),
+            doctrine: on("doctrineChecks"),
+        }
     }
 }
 
-/// Problems of the text inspections, converted to diagnostics.
-fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+/// Findings of the switched-on groups.
+fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<checks::Finding> {
     let ctx = checks::Context::new(index, read);
     let mut findings = Vec::new();
 
@@ -317,9 +433,55 @@ fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &st
 
     if groups.twig {
         findings.extend(checks::check_twig(&ctx, language, text));
+
+        if language == "twig" {
+            findings.extend(twig_checks::names(&ctx, text));
+        }
+    }
+
+    if groups.twig_syntax && language == "twig" {
+        findings.extend(twig_checks::syntax(text));
+    }
+
+    if groups.services {
+        findings.extend(config_checks::deprecated_factory_settings(path, language, text));
+    }
+
+    if groups.yaml_syntax {
+        findings.extend(config_checks::yaml_scalars(path, language, text));
+    }
+
+    if groups.commands && language == "php" {
+        findings.extend(php_checks::commands(text));
+    }
+
+    if groups.deprecations && language == "php" {
+        findings.extend(php_checks::deprecations(&ctx, text));
+    }
+
+    if groups.doctrine {
+        findings.extend(doctrine::check(path, language, text));
     }
 
     findings
+}
+
+/// Findings that carry a replacement, for quick fixes: only the YAML scalar check has one.
+fn fixes(index: &Index, path: &str, language: &str, text: &str) -> Vec<checks::Finding> {
+    let published = host::setting_bool("diagnostics").unwrap_or(true) && !index.partial;
+    if !published || !Groups::from_settings().yaml_syntax {
+        return Vec::new();
+    }
+
+    config_checks::yaml_scalars(path, language, text)
+        .into_iter()
+        .filter(|finding| finding.replacement.is_some())
+        .collect()
+}
+
+/// Problems of the text inspections, converted to diagnostics.
+fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+    findings(index, groups, read, path, language, text)
         .into_iter()
         .map(|finding| Diagnostic {
             range: range_of(text, finding.start, finding.end),
@@ -350,6 +512,7 @@ impl Main {
 
         if !index::is_symfony(project) {
             self.indexes.remove(&root);
+            self.update_status_item(&root);
             return;
         }
 
@@ -358,12 +521,28 @@ impl Main {
             host::log(LogLevel::Warn, &format!("index of {root} is partial: out of time"));
         }
         self.indexes.insert(root.clone(), index);
+        self.update_status_item(&root);
 
         let checked: Vec<String> = self.checked.iter().filter(|path| under(path, &root)).cloned().collect();
         for path in checked {
             self.check(project, &path);
         }
         host::refresh_view(VIEW);
+    }
+
+    fn update_status_item(&self, root: &str) {
+        let remaining = self.indexes.iter().next();
+        let Some((root, index)) = self.indexes.get_key_value(root).or(remaining) else {
+            host::remove_status_item(STATUS_ITEM);
+            return;
+        };
+
+        let text = match index.framework_version {
+            Some((major, minor)) => format!("Symfony {major}.{minor}"),
+            None => "Symfony".to_owned(),
+        };
+        let item = StatusItem { text, tooltip: Some(self.summary_of(root, index)), command: Some("reindex".into()) };
+        host::set_status_item(STATUS_ITEM, &item);
     }
 
     fn index_all(&mut self) {
@@ -425,28 +604,28 @@ impl Main {
             return "No Symfony project is open.".into();
         }
 
-        let lines: Vec<String> = self
-            .indexes
-            .iter()
-            .map(|(root, i)| {
-                let partial = if i.partial { " (index incomplete)" } else { "" };
-                let translations: usize = i.translations.values().map(Names::len).sum();
-                format!(
-                    "{root}: {} routes, {} templates, {} services, {translations} translations{partial}",
-                    i.routes.len(),
-                    i.templates.len(),
-                    i.services.len(),
-                )
-            })
-            .collect();
+        let lines: Vec<String> = self.indexes.iter().map(|(root, i)| self.summary_of(root, i)).collect();
         lines.join("\n")
+    }
+
+    fn summary_of(&self, root: &str, i: &Index) -> String {
+        let partial = if i.partial { " (index incomplete)" } else { "" };
+        let translations: usize = i.translations.values().map(Names::len).sum();
+        format!(
+            "{root}: {} routes, {} templates, {} services, {translations} translations{partial}",
+            i.routes.len(),
+            i.templates.len(),
+            i.services.len(),
+        )
     }
 }
 
 impl Plugin for Main {
     fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
         for kind in [EventKind::FileSaved, EventKind::FileOpened] {
-            host::subscribe(kind)?;
+            if let Err(error) = host::subscribe(kind) {
+                host::log(LogLevel::Warn, &format!("Symfony problems need the {} event: {error}", kind.name()));
+            }
         }
         self.index_all();
         Ok(())
@@ -529,6 +708,9 @@ impl Providers for Main {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
         let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return Vec::new() };
+        if reference.kind == Kind::Tag {
+            return Vec::new();
+        }
 
         let name = &doc.text[reference.start..reference.end];
         let names = candidates(index, &doc.path, &doc.language, &doc.text, &reference);
@@ -604,50 +786,82 @@ impl Providers for Main {
         markers
     }
 
-    /// Adds a missing translation key to one of the domain's YAML files.
+    /// Quick fixes (quote YAML scalars, apply check replacements, add a missing translation key) and refactorings (`intentions.rs`).
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
-        if doc.language == "yaml" && is_quoted_config(&doc.path) {
-            let quote_fixes: Vec<CodeAction> = yaml_quotes::unquoted(&doc.text)
-                .into_iter()
-                .map(|range| (range_of(&doc.text, range.start, range.end), range))
-                .filter(|(range, _)| range.start.line >= selection.start.line && range.start.line <= selection.end.line)
-                .map(|(range, bytes)| {
-                    let quoted = format!("'{}'", doc.text[bytes].replace('\'', "''"));
-                    CodeAction {
-                        title: format!("Quote {quoted}"),
-                        kind: Some("quickfix".into()),
-                        preferred: true,
-                        edits: vec![(doc.path.clone(), vec![TextEdit { range, text: quoted }])],
-                        data: None,
-                    }
-                })
-                .collect();
-            if !quote_fixes.is_empty() {
-                return quote_fixes;
-            }
+        let mut actions = Vec::new();
+
+        if doc.language == "yaml" && is_quoted_config(&doc.path) && Groups::from_settings().yaml_syntax {
+            actions.extend(
+                yaml_quotes::unquoted(&doc.text)
+                    .into_iter()
+                    .map(|range| (range_of(&doc.text, range.start, range.end), range))
+                    .filter(|(range, _)| range.start.line >= selection.start.line && range.start.line <= selection.end.line)
+                    .map(|(range, bytes)| {
+                        let quoted = format!("'{}'", doc.text[bytes].replace('\'', "''"));
+                        CodeAction {
+                            title: format!("Quote {quoted}"),
+                            kind: Some("quickfix".into()),
+                            preferred: true,
+                            edits: vec![(doc.path.clone(), vec![TextEdit { range, text: quoted }])],
+                            data: None,
+                        }
+                    }),
+            );
         }
-        let Some(offset) = text::offset(&doc.text, selection.start) else { return Vec::new() };
-        let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return Vec::new() };
+
+        let Some(offset) = text::offset(&doc.text, selection.start) else { return actions };
+        let selection_end = text::offset(&doc.text, selection.end).unwrap_or(offset);
+
+        let intentions = match doc.language.as_str() {
+            "php" => intentions::php_actions(&doc.text, offset, index.framework_version),
+            "twig" if intentions::caret_on_extends(&doc.text, offset) => {
+                let blocks: Vec<String> = project_for(&doc.path).map(|project| parent_blocks(index, &project, &doc.text).into_keys().collect()).unwrap_or_default();
+                intentions::twig_actions(&doc.text, offset, &blocks)
+            }
+            _ => Vec::new(),
+        };
+        actions.extend(intentions.into_iter().map(|action| CodeAction {
+            title: action.title,
+            kind: Some(action.kind.into()),
+            preferred: false,
+            edits: vec![(doc.path.clone(), action.edits.into_iter().map(|(range, text)| TextEdit { range: range_of(&doc.text, range.start, range.end), text }).collect())],
+            data: None,
+        }));
+
+        for finding in fixes(index, &doc.path, &doc.language, &doc.text) {
+            let Some(replacement) = finding.replacement else { continue };
+            if finding.start > selection_end || finding.end < offset {
+                continue;
+            }
+
+            actions.push(CodeAction {
+                title: format!("Replace with {replacement}"),
+                kind: Some("quickfix".into()),
+                preferred: true,
+                edits: vec![(doc.path.clone(), vec![TextEdit { range: range_of(&doc.text, finding.start, finding.end), text: replacement }])],
+                data: None,
+            });
+        }
+
+        let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return actions };
 
         let key = &doc.text[reference.start..reference.end];
         let domain = domain_of(&doc.language, &doc.text, &reference);
         let missing = index.translations.get(&domain).is_some_and(|keys| !keys.contains_key(key));
         if reference.kind != Kind::Translation || is_dynamic(key) || !missing {
-            return Vec::new();
+            return actions;
         }
 
         let files = index.translation_files.get(&domain).map(Vec::as_slice).unwrap_or_default();
-        files
-            .iter()
-            .map(|file| CodeAction {
-                title: format!("Add translation key \"{key}\" to {}", file_name(file)),
-                kind: Some("quickfix".into()),
-                preferred: false,
-                edits: Vec::new(),
-                data: Some(format!("{file}\n{key}")),
-            })
-            .collect()
+        actions.extend(files.iter().map(|file| CodeAction {
+            title: format!("Add translation key \"{key}\" to {}", file_name(file)),
+            kind: Some("quickfix".into()),
+            preferred: false,
+            edits: Vec::new(),
+            data: Some(format!("{file}\n{key}")),
+        }));
+        actions
     }
 
     fn resolve_code_action(&mut self, _doc: &Document, mut action: CodeAction) -> Result<CodeAction, Error> {
@@ -869,6 +1083,54 @@ mod tests {
 
     fn labels(items: Vec<CompletionItem>) -> Vec<String> {
         items.into_iter().map(|item| item.label).collect()
+    }
+
+    #[test]
+    fn code_actions_combine_quote_fix_and_intentions() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+
+        let yaml = doc("/project/config/services.yaml", "yaml", "services:\n    app.mailer:\n        arguments: [@foo]\n        class: App\\Mailer\n        factory: @bar\n");
+        let titles: Vec<String> = plugin.code_actions(&yaml, Range::new(Position::new(4, 17), Position::new(4, 17))).into_iter().map(|action| action.title).collect();
+        assert!(titles.iter().any(|title| title.starts_with("Quote ")), "{titles:?}");
+
+        let php = doc("/project/src/Controller/PostController.php", "php", "<?php\nnamespace App\\Controller;\n\nclass PostController extends AbstractController\n{\n    public function show()\n    {\n    }\n}\n");
+        let actions = plugin.code_actions(&php, Range::new(Position::new(5, 22), Position::new(5, 22)));
+        let route = actions.iter().find(|action| action.title == "Add #[Route] attribute").expect("route action");
+        assert_eq!(route.kind.as_deref(), Some("refactor.rewrite"));
+        assert_eq!(route.edits[0].1.len(), 2);
+
+        let twig = doc("/project/templates/blog/new.html.twig", "twig", "{% extends 'base.html.twig' %}\n");
+        let actions = plugin.code_actions(&twig, Range::new(Position::new(0, 5), Position::new(0, 5)));
+        let titles: Vec<String> = actions.into_iter().map(|action| action.title).collect();
+        assert_eq!(titles, ["Override block \"body\"", "Override block \"title\""]);
+    }
+
+    #[test]
+    fn denied_events_log_a_warning_and_still_activate() {
+        let host = MockHost::install().with_capabilities(&["project.read"]);
+        symfony_project(&host);
+        let mut plugin = Main::default();
+        assert!(plugin.activate(&host.context("aritti.symfony")).is_ok());
+        assert!(host.logs().iter().any(|(level, _)| *level == LogLevel::Warn));
+    }
+
+    #[test]
+    fn settings_groups_default_on_and_switch_off_independently() {
+        let host = MockHost::install();
+        let keys = ["controllerChecks", "serviceChecks", "phpCallChecks", "twigChecks", "twigSyntaxChecks", "yamlSyntaxChecks", "commandChecks", "deprecationChecks", "doctrineChecks"];
+        let states = |groups: Groups| {
+            [groups.controllers, groups.services, groups.php_calls, groups.twig, groups.twig_syntax, groups.yaml_syntax, groups.commands, groups.deprecations, groups.doctrine]
+        };
+        assert_eq!(states(Groups::from_settings()), [true; 9]);
+
+        for (position, key) in keys.iter().enumerate() {
+            host.set_setting(key, "false");
+            let mut expected = [true; 9];
+            expected[position] = false;
+            assert_eq!(states(Groups::from_settings()), expected);
+            host.set_setting(key, "true");
+        }
     }
 
     #[test]
@@ -1137,6 +1399,201 @@ mod tests {
         assert!(offered.contains(&"base.html.twig".to_owned()));
     }
 
+    fn complete_marked(plugin: &mut Main, path: &str, language: &str, marked: &str) -> Vec<String> {
+        let at = marked.find('|').unwrap();
+        let text = marked.replace('|', "");
+        let before = &marked[..at];
+        let line = before.matches('\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
+        labels(plugin.completion(&doc(path, language, &text), Position::new(line, column), None))
+    }
+
+    fn tagged_project(host: &MockHost) {
+        host.add_file(
+            "config/services/tags.yaml",
+            "services:\n    a:\n        tags:\n            - { name: app.flow_tag, priority: 1 }\n            - name: app.block_tag\n            - app.bare_tag\n    b:\n        tags: ['app.list_tag']\n",
+        );
+        host.add_file("config/services/tags.xml", "<services><service id=\"c\"><tag name=\"app.xml_tag\"/></service></services>");
+        host.add_file("src/legacy.yaml", "services:\n    z:\n        tags: [src.tag]\n");
+        host.add_file("translations/t.yaml", "services:\n    z:\n        tags: [translation.tag]\n");
+        host.add_file(
+            "config/services/commented.yaml",
+            "services:\n    a:\n        # tags: [commented.list]\n        tags:\n            # - { name: commented.item }\n            - app.real\n",
+        );
+        host.add_file("config/services/commented.xml", "<services><!-- <tag name=\"commented.xml\"/> --></services>");
+    }
+
+    const SERVICES_FILE: &str = "/project/config/services.yaml";
+
+    #[test]
+    fn completes_core_and_project_tags_in_yaml_service_tags() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        for marked in [
+            "services:\n    a:\n        tags:\n            - { name: | }\n",
+            "services:\n    a:\n        tags:\n            - name: |\n",
+            "services:\n    a:\n        tags: ['|']\n",
+            "services:\n    a:\n        tags: [{ name: '|' }]\n",
+            "services:\n    a:\n        tags:\n            - |\n",
+            "services:\n    a:\n        tags:\n            - priority: 3\n              name: app.fl|\n",
+        ] {
+            let offered = complete_marked(&mut plugin, SERVICES_FILE, "yaml", marked);
+            for expected in ["kernel.event_listener", "console.command", "twig.extension", "app.flow_tag", "app.block_tag", "app.bare_tag", "app.list_tag", "app.xml_tag", "app.real"] {
+                assert!(offered.contains(&expected.to_owned()), "{expected} in {marked:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn completes_tags_in_xml_tag_elements() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/config/services.xml", "xml", "<service id=\"a\"><tag name=\"|\"/></service>");
+        assert!(offered.contains(&"kernel.event_subscriber".to_owned()));
+        assert!(offered.contains(&"app.flow_tag".to_owned()));
+        assert!(offered.contains(&"app.xml_tag".to_owned()));
+    }
+
+    #[test]
+    fn tag_completion_is_quiet_outside_tags_and_in_other_files() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let quiet = |plugin: &mut Main, path: &str, language: &str, marked: &str| {
+            let offered = complete_marked(plugin, path, language, marked);
+            assert!(!offered.contains(&"kernel.event_listener".to_owned()), "{marked:?}");
+        };
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "parameters:\n    tags: ['|']\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "parameters:\n    tags:\n        - |\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        arguments:\n            - name: |\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        arguments: [{ name: '|' }]\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags:\n            - { priority: |, name: x }\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags:\n            - { name: x }\n        calls:\n            - |\n");
+        quiet(&mut plugin, "/project/src/Controller/HomeController.php", "php", "<?php\n$x->tags('|');\n");
+        quiet(&mut plugin, "/project/templates/a.html.twig", "twig", "{{ include('|') }}");
+        quiet(&mut plugin, "/project/config/services.xml", "xml", "<service id=\"a\"><argument name=\"|\"/></service>");
+        quiet(&mut plugin, "/project/config/services.xml", "xml", "<service id=\"a\"><tags name=\"|\"/></service>");
+    }
+
+    #[test]
+    fn project_tags_come_from_config_files_only() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['|']\n");
+        assert!(offered.contains(&"app.list_tag".to_owned()));
+        assert!(!offered.contains(&"src.tag".to_owned()));
+        assert!(!offered.contains(&"translation.tag".to_owned()));
+    }
+
+    #[test]
+    fn tag_completion_ignores_commented_lines() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['|']\n");
+        assert!(offered.contains(&"app.real".to_owned()));
+        for hidden in ["commented.list", "commented.item", "commented.xml"] {
+            assert!(!offered.contains(&hidden.to_owned()), "{hidden}");
+        }
+
+        let commented = complete_marked(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags:\n            # - { name: |\n");
+        assert!(!commented.contains(&"kernel.event_listener".to_owned()));
+    }
+
+    #[test]
+    fn tag_names_have_no_definition_and_no_problem() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let yaml = doc(SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['app.list_tag', 'unknown.tag']\n");
+        assert!(plugin.definition(&yaml, Position::new(2, 20)).is_empty());
+        let index = plugin.index_for(SERVICES_FILE).unwrap();
+        assert!(problems(index, SERVICES_FILE, "yaml", &yaml.text).is_empty());
+    }
+
+    #[test]
+    fn core_tags_are_documented_symfony_tags() {
+        assert!(!CORE_TAGS.contains(&"runtime.reset"));
+        assert!(!CORE_TAGS.contains(&"security.authenticator.login_linker"));
+        assert!(CORE_TAGS.contains(&"kernel.reset"));
+    }
+
+    #[test]
+    fn project_tags_keep_the_core_tag_detail() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let yaml = doc(SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['kernel.reset']\n");
+        let project_entry = Entry { detail: Some("project".into()), path: "x".into(), at: Position::new(0, 0) };
+        plugin.indexes.values_mut().for_each(|index| {
+            index.tags.insert("kernel.reset".into(), project_entry.clone());
+        });
+        let reference = refs::reference_at("yaml", &yaml.text, yaml.text.find("kernel.reset").unwrap() + 2).unwrap();
+        let index = plugin.index_for(SERVICES_FILE).unwrap();
+        let names = candidates(index, SERVICES_FILE, "yaml", &yaml.text, &reference);
+        assert_eq!(names["kernel.reset"].detail.as_deref(), Some("Symfony core tag"));
+    }
+
+    #[test]
+    fn twig_namespaces_setting_resolves_templates() {
+        let host = MockHost::install();
+        host.set_setting("twigNamespaces", r#""emails=templates/mail""#);
+        host.add_file("templates/mail/welcome.html.twig", "hi");
+        let mut plugin = activated(&host);
+
+        let twig = doc("/project/templates/a.html.twig", "twig", "{% include '@emails/welcome.html.twig' %}");
+        assert_eq!(plugin.definition(&twig, Position::new(0, 16))[0].path, "/project/templates/mail/welcome.html.twig");
+
+        let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% include '@|' %}");
+        assert!(offered.contains(&"@emails/welcome.html.twig".to_owned()));
+    }
+
+    #[test]
+    fn twig_namespaces_setting_merges_with_twig_yaml_paths() {
+        let host = MockHost::install();
+        host.set_setting("twigNamespaces", r#""emails=templates/mail""#);
+        host.add_file("config/packages/twig.yaml", "twig:\n    paths:\n        'templates/pdf': pdf\n");
+        host.add_file("templates/mail/welcome.html.twig", "hi");
+        host.add_file("templates/pdf/invoice.html.twig", "pdf");
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% include '@|' %}");
+        assert!(offered.contains(&"@emails/welcome.html.twig".to_owned()));
+        assert!(offered.contains(&"@pdf/invoice.html.twig".to_owned()));
+    }
+
+    #[test]
+    fn twig_namespaces_setting_ignores_malformed_pairs() {
+        let host = MockHost::install();
+        host.set_setting("twigNamespaces", r#""nodelimiter, a=, b=../mail, c=templates/ok""#);
+        host.add_file("mail/welcome.html.twig", "hi");
+        host.add_file("templates/ok/fine.html.twig", "ok");
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% include '|' %}");
+        assert!(offered.contains(&"@c/fine.html.twig".to_owned()));
+        assert!(!offered.iter().any(|name| name.contains("welcome") || name.starts_with("@a/") || name.starts_with("@b/")), "{offered:?}");
+    }
+
+    #[test]
+    fn missing_file_is_treated_as_absent() {
+        let host = MockHost::install();
+        host.set_setting("twigNamespaces", r#""gone=templates/gone""#);
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['|']\n");
+        assert!(offered.contains(&"kernel.event_listener".to_owned()));
+        assert!(plugin.index_for(SERVICES_FILE).unwrap().tags.is_empty());
+    }
+
     #[test]
     fn profiler_view_lists_requests_latest_first() {
         let host = MockHost::install();
@@ -1193,7 +1650,8 @@ mod tests {
         let yaml = doc("/project/config/services.yaml", "yaml", text);
 
         let index = plugin.index_for("/project/x").unwrap();
-        let found = problems(index, &yaml.path, "yaml", text);
+        let read = |_: &str| None;
+        let found = extra_problems(index, Groups::all_on(), &read, &yaml.path, "yaml", text);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].code.as_deref(), Some("unquoted-yaml-scalar"));
         assert_eq!(found[0].range, Range::new(Position::new(2, 20), Position::new(2, 27)));
@@ -1206,7 +1664,40 @@ mod tests {
 
         let other = doc("/project/docker/compose.yaml", "yaml", "a: @x\n");
         assert!(plugin.code_actions(&other, at).is_empty());
-        assert!(problems(plugin.index_for("/project/x").unwrap(), &other.path, "yaml", &other.text).is_empty());
+        assert!(extra_problems(plugin.index_for("/project/x").unwrap(), Groups::all_on(), &read, &other.path, "yaml", &other.text).is_empty());
+    }
+
+    #[test]
+    fn replacement_fixes_follow_diagnostics_setting_and_partial_index() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let yaml = doc("/project/config/services.yaml", "yaml", "b: \"App\\Foo\"\n");
+        let all = Range::new(Position::new(0, 0), Position::new(1, 0));
+        let replaces = |plugin: &mut Main| plugin.code_actions(&yaml, all).iter().any(|a| a.title.starts_with("Replace with"));
+        assert!(replaces(&mut plugin));
+
+        host.set_setting("diagnostics", "false");
+        assert!(!replaces(&mut plugin));
+        host.set_setting("diagnostics", "true");
+        assert!(replaces(&mut plugin));
+
+        plugin.indexes.values_mut().for_each(|index| index.partial = true);
+        assert!(!replaces(&mut plugin));
+    }
+
+    #[test]
+    fn quick_fixes_honour_the_group_settings() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let text = "a: @x\nb: \"App\\Foo\"\n";
+        let yaml = doc("/project/config/services.yaml", "yaml", text);
+        let all = Range::new(Position::new(0, 0), Position::new(2, 0));
+
+        let titles: Vec<String> = plugin.code_actions(&yaml, all).into_iter().map(|a| a.title).collect();
+        assert_eq!(titles, ["Quote '@x'", "Replace with \\\\"]);
+
+        host.set_setting("yamlSyntaxChecks", "false");
+        assert!(plugin.code_actions(&yaml, all).is_empty());
     }
 
     #[test]
@@ -1227,8 +1718,8 @@ mod tests {
             paths.extend(value(line, "path"));
         }
 
-        assert_eq!(ids.len(), 9);
-        assert_eq!((names.len(), paths.len()), (9, 9));
+        assert_eq!(ids.len(), 12);
+        assert_eq!((names.len(), paths.len()), (12, 12));
         for list in [&ids, &names, &paths] {
             let unique: BTreeSet<_> = list.iter().collect();
             assert_eq!(unique.len(), list.len(), "{list:?}");
@@ -1237,8 +1728,10 @@ mod tests {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/");
         for path in &paths {
             let text = std::fs::read_to_string(format!("{root}{path}")).unwrap_or_else(|_| panic!("{path} is missing"));
-            assert!(text.contains("namespace App\\"), "{path}");
-            assert!(text.contains("$NAME$"), "{path}");
+            if !path.contains("Services") {
+                assert!(text.contains("namespace App\\"), "{path}");
+                assert!(text.contains("$NAME$"), "{path}");
+            }
 
             let mut rest = text.as_str();
             while let Some(at) = rest.find('$') {
@@ -1251,5 +1744,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn service_templates_use_the_documented_defaults() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/templates/");
+        for file in ["ServicesYaml.yaml", "ServicesXml.xml", "ServicesPhp.php"] {
+            let text = std::fs::read_to_string(format!("{root}{file}")).unwrap();
+            assert!(text.contains("autowire"), "{file}");
+            assert!(text.contains("autoconfigure"), "{file}");
+            let namespace = match file {
+                "ServicesYaml.yaml" => "App\\:",
+                "ServicesPhp.php" => "'App\\\\'",
+                _ => "namespace=\"App\\\"",
+            };
+            assert!(text.contains(namespace), "{file}");
+            assert!(text.contains("$END$"), "{file}");
+        }
+
+        let yaml = std::fs::read_to_string(format!("{root}ServicesYaml.yaml")).unwrap();
+        let keys = index::yaml_keys(&yaml);
+        assert!(keys.iter().any(|key| key.key == "services" && key.parents.is_empty()));
+        assert!(keys.iter().any(|key| key.key == "_defaults"));
+    }
+
+    #[test]
+    fn file_icon_files_exist_and_use_the_theme_colour() {
+        let manifest = include_str!("../plugin.toml");
+        assert!(manifest.contains("[[contributes.fileIcons]]\nid = \"symfony\""));
+        assert!(manifest.contains("icons/symfony.svg") && manifest.contains("icons/symfony_dark.svg"));
+        for name in ["services.yaml", "services.yml", "routes.yaml", "routes.yml", "bundles.php", "symfony.lock"] {
+            assert!(manifest.contains(&format!("\"{name}\"")), "{name}");
+        }
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/icons/");
+        let light = std::fs::read_to_string(format!("{root}symfony.svg")).unwrap();
+        assert!(light.contains("#6C707E"));
+        let dark = std::fs::read_to_string(format!("{root}symfony_dark.svg")).unwrap();
+        assert!(!dark.contains("#6C707E"));
+    }
+
+    #[test]
+    fn status_item_shows_framework_version() {
+        let host = MockHost::install();
+        symfony_project(&host);
+        host.add_file("composer.json", r#"{"require": {"symfony/framework-bundle": "^7.1"}}"#);
+        let _plugin = {
+            let mut plugin = Main::default();
+            plugin.activate(&host.context("aritti.symfony")).unwrap();
+            plugin
+        };
+
+        let item = &host.status_items()["symfony"];
+        assert_eq!(item.text, "Symfony 7.1");
+        assert_eq!(item.command.as_deref(), Some("reindex"));
+        assert!(item.tooltip.as_deref().unwrap().contains("routes"));
+    }
+
+    #[test]
+    fn status_item_is_removed_for_non_symfony_projects() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        assert!(host.status_items().contains_key("symfony"));
+
+        host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0"}}"#);
+        plugin.run_command("reindex", &host.invocation(), None).unwrap();
+        assert!(!host.status_items().contains_key("symfony"));
+    }
+
+    #[test]
+    fn status_item_stays_while_another_symfony_project_is_indexed() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+
+        plugin.update_status_item("/not-symfony");
+        assert!(host.status_items().contains_key("symfony"));
+
+        plugin.indexes.clear();
+        plugin.update_status_item("/not-symfony");
+        assert!(!host.status_items().contains_key("symfony"));
     }
 }

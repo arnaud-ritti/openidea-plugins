@@ -1282,3 +1282,647 @@ fn slash_star_inside_a_multiline_template_literal_silences_later_lines() {
 fn multiline_template_plain_text_after_interpolation_is_quiet() {
     assert!(route_names("const t = `a ${x}\nplain |text`;\nroute('home')").is_empty());
 }
+
+fn env_snippets(path: &str, language: &str, text: &str) -> Vec<(&'static str, String)> {
+    function_checks::env_outside_config(path, language, text).into_iter().map(|f| (f.code, text[f.start..f.end].to_owned())).collect()
+}
+
+fn env_problems_of(host: &MockHost, relative: &str, body: &str) -> Vec<Diagnostic> {
+    host.add_file(relative, body);
+    let mut plugin = activated(host);
+    let path = format!("/project/{relative}");
+
+    plugin.handle_events(&[Event::FileOpened(path.clone())], &host.invocation());
+    host.diagnostics().get(&path).cloned().unwrap_or_default()
+}
+
+#[test]
+fn env_outside_config_warns_in_app_code() {
+    let text = "<?php\n$a = env('APP_KEY');\n$b = env('X', 1);\n";
+    let found = env_snippets("/project/app/Services/Mailer.php", "php", text);
+    assert_eq!(found.iter().map(|(code, _)| *code).collect::<Vec<_>>(), ["env-outside-config"; 2]);
+    assert_eq!(found[0].1, "env('APP_KEY')");
+    assert_eq!(found[1].1, "env('X', 1)");
+
+    let host = MockHost::install();
+    let found = env_problems_of(&host, "app/Services/Mailer.php", "<?php\n$a = env('APP_KEY');\n");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].severity, Severity::Warning);
+}
+
+#[test]
+fn env_check_survives_non_ascii_text_and_still_warns_after_it() {
+    let text = "<?php\n$pr\u{e9}nom = 1;\n?>\n<p>caf\u{e9} \u{20ac} \u{1F600}</p>\n<?php\n$a = env('APP_KEY');\n";
+    let found = env_snippets("app/Views/a.php", "php", text);
+    assert_eq!(found, [("env-outside-config", "env('APP_KEY')".to_owned())]);
+}
+
+#[test]
+fn env_quiet_directories_match_the_project_relative_path() {
+    let text = "<?php\n$a = env('APP_KEY');\n";
+    assert_eq!(env_snippets("app/Services/A.php", "php", text).len(), 1);
+
+    for path in ["config/app.php", "bootstrap/app.php", "vendor/a/b.php", "tests/Feature/AExampleTest.php"] {
+        assert!(env_snippets(path, "php", text).is_empty(), "{path}");
+    }
+}
+
+#[test]
+fn env_in_config_bootstrap_and_tests_is_quiet() {
+    let text = "<?php\n$a = env('APP_KEY');\n";
+    for path in ["/project/config/app.php", "/project/bootstrap/app.php", "/project/vendor/a/b.php", "/project/tests/Feature/AExampleTest.php"] {
+        assert!(env_snippets(path, "php", text).is_empty(), "{path}");
+    }
+    assert!(env_snippets("/project/resources/views/a.blade.php", "blade", text).is_empty());
+}
+
+#[test]
+fn env_method_and_other_functions_named_like_env_are_quiet() {
+    let text = "<?php\n$a = $this->env('X');\n$b = getenv('X');\n$c = app_env('X');\n$d = Foo::env('X');\nfunction env($k) {}\n$e = $env('X');\n$f = env;\n";
+    assert!(env_snippets("/project/app/A.php", "php", text).is_empty());
+}
+
+#[test]
+fn env_in_comments_is_quiet() {
+    let text = "<?php\n// env('A')\n# env('B')\n/* env('C') */\n";
+    assert!(env_snippets("/project/app/A.php", "php", text).is_empty());
+}
+
+#[test]
+fn env_in_strings_and_heredocs_is_quiet() {
+    let text = "<?php\n$m = \"use env('X') here\"; $n = 'env(1)'; $o = 'it\\'s env(2)';\n$h = <<<TXT\nCall env('Y') instead\nTXT;\n$r = env('REAL');\n";
+    let found = env_snippets("/project/app/A.php", "php", text);
+    assert_eq!(found, [("env-outside-config", "env('REAL')".into())]);
+}
+
+#[test]
+fn env_with_a_leading_backslash_is_a_real_call() {
+    let found = env_snippets("/project/app/A.php", "php", "<?php\n$a = \\env('X');\n");
+    assert_eq!(found, [("env-outside-config", "env('X')".into())]);
+}
+
+#[test]
+fn namespaced_env_functions_are_quiet() {
+    assert!(env_snippets("/project/app/A.php", "php", "<?php\n$a = Ns\\env('X');\n$b = \\Ns\\env('X');\n").is_empty());
+}
+
+#[test]
+fn heredoc_does_not_end_at_a_longer_identifier() {
+    let text = "<?php\n$h = <<<TXT\nTXTX env('A')\nTXT;\n$r = env('REAL');\n";
+    assert_eq!(env_snippets("/project/app/A.php", "php", text), [("env-outside-config", "env('REAL')".into())]);
+}
+
+#[test]
+fn nested_env_calls_report_only_the_outer_call() {
+    let found = env_snippets("/project/app/A.php", "php", "<?php\n$a = env('A', env('B'));\n");
+    assert_eq!(found, [("env-outside-config", "env('A', env('B'))".into())]);
+}
+
+#[test]
+fn env_check_can_be_switched_off() {
+    let host = MockHost::install();
+    host.set_setting("checkFunctions", "false");
+    assert!(env_problems_of(&host, "app/A.php", "<?php\n$a = env('APP_KEY');\n").is_empty());
+}
+
+#[test]
+fn env_check_ranges_use_utf16_columns_with_multibyte_text() {
+    let host = MockHost::install();
+    let found = env_problems_of(&host, "app/A.php", "<?php\n// é日本😀\n$x = 'é日'; env('A');\n");
+    let range = found[0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.character), (2, 11, 19));
+}
+
+#[test]
+fn env_check_crlf_files_report_correct_lines() {
+    let host = MockHost::install();
+    let found = env_problems_of(&host, "app/A.php", "<?php\r\n\r\n$x = env('A');\r\n");
+    assert_eq!((found[0].range.start.line, found[0].range.start.character), (2, 5));
+}
+
+#[test]
+fn env_check_fixed_file_publishes_empty_list() {
+    let host = MockHost::install();
+    host.add_file("app/A.php", "<?php\n$x = env('A');\n");
+    let mut plugin = activated(&host);
+    plugin.handle_events(&[Event::FileOpened("/project/app/A.php".into())], &host.invocation());
+    assert_eq!(host.diagnostics()["/project/app/A.php"].len(), 1);
+
+    host.add_file("app/A.php", "<?php\n$x = config('a.b');\n");
+    plugin.handle_events(&[Event::FileSaved("/project/app/A.php".into())], &host.invocation());
+    assert!(host.diagnostics().get("/project/app/A.php").is_none_or(Vec::is_empty));
+}
+
+fn order_by_fix(text: &str, marker: &str) -> String {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    apply_rewrite(&mut plugin, "/project/app/A.php", "php", text, marker)
+}
+
+#[test]
+fn order_by_updated_at_desc_suggests_latest_with_the_column() {
+    let text = "<?php\n$a = Post::orderBy('updated_at', 'desc')->get();\n";
+    assert_eq!(order_by_fix(text, "orderBy('updated_at'"), "<?php\n$a = Post::latest('updated_at')->get();\n");
+}
+
+#[test]
+fn order_by_published_at_asc_suggests_oldest_with_the_column() {
+    let text = "<?php\n$a = Post::orderBy('published_at', 'asc')->get();\n$b = Post::orderBy('date')->get();\n$c = Post::orderBy('due_date', 'desc')->get();\n";
+    assert_eq!(order_by_fix(text, "orderBy('published_at'"), text.replace("orderBy('published_at', 'asc')", "oldest('published_at')"));
+    assert_eq!(order_by_fix(text, "orderBy('date')"), text.replace("orderBy('date')", "oldest('date')"));
+    assert_eq!(order_by_fix(text, "orderBy('due_date'"), text.replace("orderBy('due_date', 'desc')", "latest('due_date')"));
+}
+
+#[test]
+fn order_by_non_date_column_is_quiet() {
+    static NOTHING: [(&str, &str); 0] = [];
+    let text = "<?php\n$a = Post::orderBy('title', 'desc');\n$b = Post::orderBy('attendance');\n$c = Post::orderBy('updated_at_x');\n$d = Post::orderBy('_at');\n";
+    assert!(eloquent_snippets(text, &NOTHING).is_empty());
+}
+
+#[test]
+fn order_by_keeps_double_quotes() {
+    let text = "<?php\n$a = Post::orderBy(\"updated_at\", \"desc\")->get();\n";
+    assert_eq!(order_by_fix(text, "orderBy(\"updated_at\""), "<?php\n$a = Post::latest(\"updated_at\")->get();\n");
+}
+
+fn apply_titled(plugin: &mut Main, path: &str, language: &str, text: &str, marker: &str, title: &str) -> String {
+    let at = text.find(marker).unwrap() + 1;
+    let position = text::position(text, at);
+    let action = plugin.code_actions(&doc(path, language, text), Range::new(position, position)).into_iter().find(|a| a.title == title).unwrap_or_else(|| panic!("no action {title}"));
+    let mut edits: Vec<_> = action.edits[0].1.iter().map(|e| (text::offset(text, e.range.start).unwrap(), text::offset(text, e.range.end).unwrap(), e.text.clone())).collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut result = text.to_owned();
+    for (start, end, replacement) in edits {
+        result.replace_range(start..end, &replacement);
+    }
+    result
+}
+
+const NEW_BLADE: &str = "/project/resources/views/a.blade.php";
+const NEW_RULES: &str = "/project/app/A.php";
+
+#[test]
+fn static_class_attribute_converts_to_class_directive() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<div class=\"btn btn-primary\">x</div>\n";
+    let result = apply_titled(&mut plugin, NEW_BLADE, "blade", text, "btn-primary", "Convert class attribute to @class");
+    assert_eq!(result, "<div @class(['btn', 'btn-primary'])>x</div>\n");
+}
+
+#[test]
+fn class_attribute_with_echo_wraps_into_class_directive() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<div id=\"a\" class=\"btn {{ $size }}\">x</div>\n";
+    let result = apply_titled(&mut plugin, NEW_BLADE, "blade", text, "btn {{", "Wrap class attribute in @class");
+    assert_eq!(result, "<div id=\"a\" @class(['btn', $size])>x</div>\n");
+}
+
+#[test]
+fn class_directive_is_not_offered_for_conditionals_unescaped_echo_or_existing_directive() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    for text in [
+        "<div class=\"btn @if($a) on @endif\">x</div>\n",
+        "<div class=\"btn {!! $size !!}\">x</div>\n",
+        "<div @class(['a']) class=\"btn\">x</div>\n",
+        "<div class=\"\">x</div>\n",
+        "<div class=\"it's\">x</div>\n",
+        "<div class=\"btn-{{ $size }}\">x</div>\n",
+    ] {
+        let titles = rewrite_titles(&mut plugin, NEW_BLADE, "blade", text, "class=");
+        assert!(titles.iter().all(|t| !t.contains("@class")), "{text}");
+    }
+    let php = "<?php\n$x = '<div class=\"btn\">';\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/A.php", "php", php, "btn").is_empty());
+}
+
+#[test]
+fn all_rule_strings_in_an_array_convert_together() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['a' => 'required|email', 'b' => 'max:5|min:1', 'c' => 'required']);\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "required|email", "Convert all validation rules in this array to arrays");
+    assert_eq!(result, "<?php\n$request->validate(['a' => ['required', 'email'], 'b' => ['max:5', 'min:1'], 'c' => 'required']);\n");
+}
+
+#[test]
+fn all_rules_is_not_offered_for_a_single_convertible_item() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['a' => 'required|email', 'b' => 'required', 'c' => ['x', 'y']]);\n";
+    let titles = rewrite_titles(&mut plugin, NEW_RULES, "php", text, "required|email");
+    assert!(!titles.contains(&"Convert all validation rules in this array to arrays".to_owned()));
+}
+
+#[test]
+fn all_rules_leaves_regex_and_non_convertible_items_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['a' => 'required|email', 'r' => 'regex:/a|b/', 'b' => 'max:5|min:1', 'n' => ['x', 'y|z'], 'o' => Rule::in(['a'])]);\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "required|email", "Convert all validation rules in this array to arrays");
+    assert_eq!(
+        result,
+        "<?php\n$request->validate(['a' => ['required', 'email'], 'r' => 'regex:/a|b/', 'b' => ['max:5', 'min:1'], 'n' => ['x', 'y|z'], 'o' => Rule::in(['a'])]);\n"
+    );
+}
+
+const NEW_ROUTES: &str = "/project/routes/web.php";
+
+#[test]
+fn all_controller_strings_convert_together() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse App\\Http\\Controllers\\UserController;\nuse App\\Http\\Controllers\\PostController;\nRoute::get('/u', 'UserController@index');\nRoute::post('/p', 'PostController@store');\nRoute::get('/x', 'Missing@index');\n";
+    let result = apply_titled(&mut plugin, NEW_ROUTES, "php", text, "UserController@", "Convert all controller strings in this file");
+    assert_eq!(
+        result,
+        "<?php\nuse App\\Http\\Controllers\\UserController;\nuse App\\Http\\Controllers\\PostController;\nRoute::get('/u', [UserController::class, 'index']);\nRoute::post('/p', [PostController::class, 'store']);\nRoute::get('/x', 'Missing@index');\n"
+    );
+}
+
+#[test]
+fn resource_controller_string_converts_to_class_constant() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse App\\Http\\Controllers\\PhotoController;\nuse App\\Http\\Controllers\\UserController;\nRoute::resource('photos', 'PhotoController');\nRoute::get('/u', 'UserController@index');\n";
+    let result = apply_titled(&mut plugin, NEW_ROUTES, "php", text, "PhotoController'", "Convert controller string to ::class");
+    assert!(result.contains("Route::resource('photos', PhotoController::class);"));
+    let all = apply_titled(&mut plugin, NEW_ROUTES, "php", text, "PhotoController'", "Convert all controller strings in this file");
+    assert!(all.contains("Route::resource('photos', PhotoController::class);"));
+    assert!(all.contains("[UserController::class, 'index']"));
+}
+
+#[test]
+fn all_controllers_is_quiet_for_unresolvable_names() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse App\\Http\\Controllers\\UserController;\nRoute::get('/u', 'UserController@index');\nRoute::get('/x', 'Other@index');\nRoute::resource('p', 'Gone');\n";
+    let titles = rewrite_titles(&mut plugin, NEW_ROUTES, "php", text, "UserController@");
+    assert!(!titles.contains(&"Convert all controller strings in this file".to_owned()));
+}
+
+#[test]
+fn controllers_namespace_setting_is_used() {
+    let host = MockHost::install();
+    host.set_setting("controllersNamespace", r#""App\\Http\\Controllers\\Api""#);
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App\\Http\\Controllers\\Api;\nRoute::get('/u', 'UserController@index');\nRoute::get('/v', 'PostController@index');\n";
+    assert_eq!(rewrite_titles(&mut plugin, NEW_ROUTES, "php", text, "UserController@").len(), 2);
+
+    let default = "<?php\nnamespace App\\Http\\Controllers;\nRoute::get('/u', 'UserController@index');\n";
+    assert!(rewrite_titles(&mut plugin, NEW_ROUTES, "php", default, "UserController@").is_empty());
+}
+
+#[test]
+fn rule_object_replaces_exists_unique_in_and_not_in() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let base = "<?php\nnamespace App\\Http\\Requests;\n\nuse Foo\\Bar;\n\n$request->validate(['f' => ['required', 'EXPR']]);\n";
+    let cases = [
+        ("exists:users,id", "Convert to Rule::exists('users', 'id')", "Rule::exists('users', 'id')"),
+        ("unique:users,email", "Convert to Rule::unique('users', 'email')", "Rule::unique('users', 'email')"),
+        ("exists:users", "Convert to Rule::exists('users')", "Rule::exists('users')"),
+        ("in:a,b", "Convert to Rule::in(['a', 'b'])", "Rule::in(['a', 'b'])"),
+        ("not_in:a,b", "Convert to Rule::notIn(['a', 'b'])", "Rule::notIn(['a', 'b'])"),
+    ];
+    for (rule, title, call) in cases {
+        let text = base.replace("EXPR", rule);
+        let result = apply_titled(&mut plugin, NEW_RULES, "php", &text, rule, title);
+        assert_eq!(result, "<?php\nnamespace App\\Http\\Requests;\n\nuse Foo\\Bar;\nuse Illuminate\\Validation\\Rule;\n\n$request->validate(['f' => ['required', EXPR]]);\n".replace("EXPR", call));
+    }
+}
+
+#[test]
+fn rule_object_is_not_offered_for_extra_arguments_or_pipe_strings() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    for text in [
+        "<?php\n$request->validate(['f' => ['required', 'unique:users,email,5']]);\n",
+        "<?php\n$request->validate(['f' => ['required', 'exists:users,id|max:5']]);\n",
+        "<?php\n$request->validate(['f' => 'exists:users,id']);\n",
+        "<?php\n$request->validate(['f' => ['required', 'max:5']]);\n",
+    ] {
+        let titles: Vec<String> = ["required", "users", "max:5"].into_iter().filter(|m| text.contains(m)).flat_map(|m| rewrite_titles(&mut plugin, NEW_RULES, "php", text, m)).collect();
+        assert!(titles.iter().all(|t| !t.starts_with("Convert to Rule::")), "{text}");
+    }
+}
+
+#[test]
+fn rule_object_is_not_offered_when_another_rule_class_is_imported() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse Acme\\Rule;\n\n$request->validate(['f' => ['required', 'in:a,b']]);\n";
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "in:a").iter().all(|t| !t.starts_with("Convert to Rule::")));
+}
+
+#[test]
+fn rule_object_reuses_an_existing_import() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse Illuminate\\Validation\\Rule;\n\n$request->validate(['f' => ['required', 'in:a,b']]);\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "in:a", "Convert to Rule::in(['a', 'b'])");
+    assert_eq!(result, "<?php\nuse Illuminate\\Validation\\Rule;\n\n$request->validate(['f' => ['required', Rule::in(['a', 'b'])]]);\n");
+}
+
+#[test]
+fn root_facade_adds_the_import() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App;\n\nclass A\n{\n    function f() { return Route::get('/'); }\n}\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "Route::", "Import Illuminate\\Support\\Facades\\Route");
+    assert_eq!(result, "<?php\nnamespace App;\n\nuse Illuminate\\Support\\Facades\\Route;\n\nclass A\n{\n    function f() { return Route::get('/'); }\n}\n");
+
+    let text = "<?php\nnamespace App;\n\nclass A { function f() { return Str::of('a'); } }\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "Str::", "Import Illuminate\\Support\\Str");
+    assert!(result.contains("use Illuminate\\Support\\Str;"));
+}
+
+#[test]
+fn root_facade_import_is_quiet_when_the_name_is_imported_elsewhere() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    for import in ["Illuminate\\Support\\Facades\\Route", "Acme\\Route", "Acme\\Thing as Route"] {
+        let text = format!("<?php\nnamespace App;\n\nuse {import};\n\nclass A {{ function f() {{ return Route::get('/'); }} }}\n");
+        assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", &text, "Route::get").is_empty(), "{import}");
+    }
+}
+
+#[test]
+fn root_facade_is_quiet_without_a_namespace_or_for_unknown_aliases() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    assert!(rewrite_titles(&mut plugin, NEW_ROUTES, "php", "<?php\nRoute::get('/');\n", "Route::").is_empty());
+    let text = "<?php\nnamespace App;\n\nFoo::bar(); \\Route::get('/'); $x->Route::y;\n";
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "Foo::").is_empty());
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "Route::get").is_empty());
+}
+
+#[test]
+fn rewrites_applied_twice_do_not_duplicate_imports() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App;\n\n$request->validate(['f' => ['required', 'in:a,b', 'not_in:c']]);\n";
+    let once = apply_titled(&mut plugin, NEW_RULES, "php", text, "in:a", "Convert to Rule::in(['a', 'b'])");
+    let twice = apply_titled(&mut plugin, NEW_RULES, "php", &once, "not_in:c", "Convert to Rule::notIn(['c'])");
+    assert_eq!(twice.matches("use Illuminate\\Validation\\Rule;").count(), 1);
+    assert!(twice.contains("Rule::in(['a', 'b'])"));
+    assert!(twice.contains("Rule::notIn(['c'])"));
+
+    let facade = apply_titled(&mut plugin, NEW_RULES, "php", "<?php\nnamespace App;\n\nRoute::get('/');\nRoute::post('/');\n", "Route::get", "Import Illuminate\\Support\\Facades\\Route");
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", &facade, "Route::post").is_empty());
+}
+
+#[test]
+fn new_rewrites_survive_multibyte_text_and_crlf() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\r\nnamespace App;\r\n\r\nuse Foo\\Bar;\r\n\r\n// é日本\r\n$request->validate(['f' => ['é', 'in:a,b']]);\r\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "in:a", "Convert to Rule::in(['a', 'b'])");
+    assert_eq!(result, "<?php\r\nnamespace App;\r\n\r\nuse Foo\\Bar;\r\nuse Illuminate\\Validation\\Rule;\r\n\r\n// é日本\r\n$request->validate(['f' => ['é', Rule::in(['a', 'b'])]]);\r\n");
+
+    let text = "<?php\r\nnamespace App;\r\n\r\n// é日本\r\nRoute::get('é');\r\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "Route::", "Import Illuminate\\Support\\Facades\\Route");
+    assert_eq!(result, "<?php\r\nnamespace App;\r\n\r\nuse Illuminate\\Support\\Facades\\Route;\r\n\r\n// é日本\r\nRoute::get('é');\r\n");
+
+    let blade = "<p>é日本</p>\r\n<div class=\"a {{ $é }}\">x</div>\r\n";
+    let result = apply_titled(&mut plugin, NEW_BLADE, "blade", blade, "a {{", "Wrap class attribute in @class");
+    assert_eq!(result, "<p>é日本</p>\r\n<div @class(['a', $é])>x</div>\r\n");
+
+    let rules = "<?php\r\n$request->validate(['é' => 'a|b', 'x' => 'c|d']);\r\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", rules, "a|b", "Convert all validation rules in this array to arrays");
+    assert_eq!(result, "<?php\r\n$request->validate(['é' => ['a', 'b'], 'x' => ['c', 'd']]);\r\n");
+}
+
+#[test]
+fn context_facade_imports_from_the_facades_namespace() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App;\n\nContext::add('a', 1);\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "Context::", "Import Illuminate\\Support\\Facades\\Context");
+    assert!(result.contains("use Illuminate\\Support\\Facades\\Context;"));
+}
+
+#[test]
+fn root_facade_ignores_longer_class_names_but_not_a_declared_one() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    for (declared, call) in [("AppServiceProvider", "App"), ("RouteServiceProvider", "Route"), ("Authenticate", "Auth"), ("LogController", "Log")] {
+        let text = format!("<?php\nnamespace App;\n\nclass {declared}\n{{\n    function f() {{ return {call}::x(); }}\n}}\n");
+        let marker = format!("{call}::x");
+        assert_eq!(rewrite_titles(&mut plugin, NEW_RULES, "php", &text, &marker).len(), 1, "{declared}");
+    }
+    for keyword in ["class", "interface", "trait", "enum"] {
+        let text = format!("<?php\nnamespace App;\n\n{keyword} Route {{}}\nRoute::x();\n");
+        assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", &text, "Route::x").is_empty(), "{keyword}");
+    }
+}
+
+#[test]
+fn rule_object_is_quiet_when_a_rule_class_is_declared_in_the_file() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App;\n\nclass Rule {}\n$request->validate(['f' => ['required', 'in:a,b']]);\n";
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "in:a").iter().all(|t| !t.starts_with("Convert to Rule::")));
+}
+
+fn views_of(host: &MockHost) -> Vec<String> {
+    let plugin = activated(host);
+    plugin.index_for("/project/x").unwrap().views.keys().cloned().collect()
+}
+
+#[test]
+fn ide_blade_json_namespace_indexes_views_as_namespaced_names() {
+    let host = MockHost::install();
+    host.add_file("ide-blade.json", r#"{"namespaces": [{"namespace": "admin", "path": "/modules/admin/views/"}]}"#);
+    host.add_file("modules/admin/views/users/index.blade.php", "<p></p>\n");
+
+    assert!(views_of(&host).contains(&"admin::users.index".to_owned()));
+}
+
+#[test]
+fn ide_blade_json_entry_without_namespace_adds_a_view_root() {
+    let host = MockHost::install();
+    host.add_file("ide-blade.json", r#"{"namespaces": [{"namespace": "", "path": "extra/views"}, {"path": "other"}]}"#);
+    host.add_file("extra/views/banner.blade.php", "<p></p>\n");
+    host.add_file("other/footer.blade.php", "<p></p>\n");
+
+    let views = views_of(&host);
+    assert!(views.contains(&"banner".to_owned()) && views.contains(&"footer".to_owned()));
+}
+
+#[test]
+fn ide_blade_json_entries_without_a_path_are_ignored() {
+    assert_eq!(
+        index::ide_blade_namespaces(r#"{"namespaces": [{"namespace": "a"}, {"namespace": "b", "path": "  "}, {"namespace": "c", "path": "ok"}]}"#),
+        [(Some("c".to_owned()), "ok".to_owned())]
+    );
+}
+
+#[test]
+fn ide_blade_json_strips_a_leading_dot_slash() {
+    assert_eq!(
+        index::ide_blade_namespaces(r#"{"namespaces": [{"namespace": "m", "path": "./modules/views"}]}"#),
+        [(Some("m".to_owned()), "modules/views".to_owned())]
+    );
+}
+
+#[test]
+fn ide_blade_json_nested_values_do_not_drop_the_file() {
+    let text = r#"{"namespaces": [{"namespace": "a", "meta": {"x": [1, {"y": "}"}], "z": "],"}, "path": "one"}, {"namespace": "b", "tags": ["p", "q"], "path": "two"}]}"#;
+    assert_eq!(index::ide_blade_namespaces(text), [(Some("a".to_owned()), "one".to_owned()), (Some("b".to_owned()), "two".to_owned())]);
+}
+
+#[test]
+fn ide_blade_json_handles_escaped_quotes_bom_and_trailing_garbage() {
+    let text = "\u{feff}{\"namespaces\": [{\"namespace\": \"a\\\"b\", \"skip\": \"x\\\"},y\", \"path\": \"p\"}]} trailing garbage";
+    assert_eq!(index::ide_blade_namespaces(text), [(Some("a\"b".to_owned()), "p".to_owned())]);
+}
+
+#[test]
+fn ide_blade_json_malformed_is_ignored() {
+    for text in ["", "{", "[1,2", r#"{"namespaces": [{"namespace": "a", "path": "b""#, r#"{"namespaces": 3}"#, "not json"] {
+        assert!(index::ide_blade_namespaces(text).is_empty(), "{text}");
+    }
+
+    let host = MockHost::install();
+    host.add_file("ide-blade.json", "{ nope");
+    assert!(views_of(&host).contains(&"welcome".to_owned()));
+}
+
+#[test]
+fn ide_blade_json_in_a_hidden_directory_is_read() {
+    let host = MockHost::install();
+    host.add_file(".idea/ide-blade.json", r#"{"namespaces": [{"namespace": "hidden", "path": "mods"}]}"#);
+    host.add_file("mods/a.blade.php", "<p></p>\n");
+
+    assert!(views_of(&host).contains(&"hidden::a".to_owned()));
+}
+
+#[test]
+fn ide_blade_json_save_triggers_a_reindex() {
+    for saved in ["ide-blade.json", ".idea/ide-blade.json"] {
+        let host = MockHost::install();
+        host.add_file("mods/a.blade.php", "<p></p>\n");
+        let mut plugin = activated(&host);
+        assert!(!plugin.index_for("/project/x").unwrap().views.contains_key("n::a"));
+
+        host.add_file(saved, r#"{"namespaces": [{"namespace": "n", "path": "mods"}]}"#);
+        plugin.handle_events(&[Event::FileSaved(format!("/project/{saved}"))], &host.invocation());
+        assert!(plugin.index_for("/project/x").unwrap().views.contains_key("n::a"), "{saved}");
+    }
+}
+
+#[test]
+fn missing_file_is_treated_as_absent() {
+    for error in [Error::NotFound("x".into()), Error::Invalid("x".into())] {
+        let roots = index::ide_blade_roots(|_| Err(error.clone()));
+        assert!(roots.is_empty());
+    }
+
+    let host = MockHost::install();
+    assert!(views_of(&host).contains(&"welcome".to_owned()));
+}
+
+fn directive_item(plugin: &mut Main, marked: &str, label: &str) -> CompletionItem {
+    let (text, at) = cursor(marked);
+    plugin
+        .completion(&doc("/project/resources/views/posts/show.blade.php", "blade", &text), at, None)
+        .into_iter()
+        .find(|item| item.label == label)
+        .unwrap()
+}
+
+#[test]
+fn snippet_items_carry_arguments_and_the_closing_directive() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let item = directive_item(&mut plugin, "@i|", "if");
+
+    assert!(item.snippet);
+    assert!(item.insert_text.starts_with("if("));
+    assert!(item.insert_text.ends_with("@endif"));
+    let each = directive_item(&mut plugin, "@fore|", "foreach");
+    assert!(each.insert_text.contains("\\$items"));
+}
+
+#[test]
+fn snippet_items_replace_only_the_typed_name() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let item = directive_item(&mut plugin, "<p>\n@fo|\n", "foreach");
+
+    let replace = item.replace.unwrap();
+    assert_eq!((replace.start.line, replace.start.character), (1, 1));
+    assert_eq!((replace.end.line, replace.end.character), (1, 3));
+}
+
+#[test]
+fn directives_without_a_snippet_and_custom_directives_stay_name_only() {
+    let host = MockHost::install();
+    host.add_file("app/Providers/AppServiceProvider.php", "<?php\nBlade::directive('datetime', fn ($e) => $e);\n");
+    let mut plugin = activated(&host);
+
+    for (marked, label) in [("@end|", "endif"), ("@dat|", "datetime"), ("@els|", "else")] {
+        let item = directive_item(&mut plugin, marked, label);
+        assert!(!item.snippet, "{label}");
+        assert_eq!(item.insert_text, label, "{label}");
+    }
+}
+
+#[test]
+fn every_snippet_names_a_core_directive() {
+    for (name, _) in crate::directives::SNIPPETS {
+        assert!(crate::directives::CORE.contains(name), "{name}");
+    }
+    for name in ["if", "unless", "isset", "empty", "auth", "guest", "env", "production", "section", "push", "pushOnce",
+        "prepend", "for", "foreach", "forelse", "while", "switch", "php", "verbatim", "can", "cannot", "canany", "error",
+        "component", "slot", "extends", "yield", "include", "includeIf", "includeWhen", "includeUnless", "includeFirst",
+        "each", "stack", "props", "class", "style", "csrf", "method", "json", "vite", "lang", "inject", "livewire"]
+    {
+        assert!(crate::directives::SNIPPETS.iter().any(|(n, _)| *n == name), "no snippet for {name}");
+    }
+}
+
+#[test]
+fn snippet_placeholders_are_balanced() {
+    for (name, body) in crate::directives::SNIPPETS {
+        assert!(body.matches("$0").count() <= 1, "{name}");
+        assert_eq!(body.matches("${").count(), body.matches('}').count(), "{name}");
+        assert!(!body.starts_with('@'), "{name}");
+
+        let mut numbers: Vec<u32> = body
+            .match_indices("${")
+            .map(|(i, _)| body[i + 2..].split(':').next().unwrap().parse().unwrap())
+            .collect();
+        numbers.sort();
+        assert_eq!(numbers, (1..=numbers.len() as u32).collect::<Vec<_>>(), "{name}");
+    }
+}
+
+#[test]
+fn block_snippets_contain_their_closing_directive() {
+    let closers = [
+        ("if", "endif"), ("unless", "endunless"), ("isset", "endisset"), ("empty", "endempty"), ("auth", "endauth"),
+        ("guest", "endguest"), ("env", "endenv"), ("production", "endproduction"), ("section", "endsection"),
+        ("push", "endpush"), ("pushOnce", "endPushOnce"), ("prepend", "endprepend"), ("for", "endfor"),
+        ("foreach", "endforeach"), ("forelse", "endforelse"), ("while", "endwhile"), ("switch", "endswitch"),
+        ("php", "endphp"), ("verbatim", "endverbatim"), ("can", "endcan"), ("cannot", "endcannot"),
+        ("canany", "endcanany"), ("error", "enderror"), ("component", "endcomponent"), ("slot", "endslot"),
+    ];
+    for (name, closer) in closers {
+        let (_, body) = crate::directives::SNIPPETS.iter().find(|(n, _)| *n == name).unwrap();
+        assert!(body.ends_with(&format!("@{closer}")), "{name}");
+    }
+}
+
+#[test]
+fn forelse_snippet_has_an_empty_branch_before_its_closing_directive() {
+    let (_, body) = crate::directives::SNIPPETS.iter().find(|(n, _)| *n == "forelse").unwrap();
+
+    assert!(body.find("@empty").unwrap() < body.find("@endforelse").unwrap());
+}

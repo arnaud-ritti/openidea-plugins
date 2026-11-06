@@ -25,6 +25,11 @@
       "title": "Public directory that asset() paths start from (project-relative)",
       "default": "public"
     },
+    "controllersNamespace": {
+      "type": "string",
+      "title": "Namespace that 'Name@action' controller strings resolve in",
+      "default": "App\\Http\\Controllers"
+    },
     "reportUnknownComponents": {
       "type": "boolean",
       "title": "Report <x-\u2026> Blade components that have no file or class",
@@ -52,7 +57,12 @@
     },
     "checkEloquent": {
       "type": "boolean",
-      "title": "Report mass assignment of unguarded models, unscheduled prunable models and orderBy('created_at') that latest() or oldest() replace",
+      "title": "Report mass assignment of unguarded models, unscheduled prunable models and orderBy() on date columns that latest() or oldest() replace",
+      "default": true
+    },
+    "checkFunctions": {
+      "type": "boolean",
+      "title": "Report env() calls outside the config directory (they return null once the configuration is cached)",
       "default": true
     }
   }

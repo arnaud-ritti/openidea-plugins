@@ -51,6 +51,8 @@ pub struct Index {
     /// Webpack Encore and AssetMapper entry points.
     pub entries: Names,
     pub roles: Names,
+    /// Service tags used in `config/**`, at their first use.
+    pub tags: Names,
     pub renders: Vec<Render>,
     /// `symfony/framework-bundle` constraint of composer.json as (major, minor).
     pub framework_version: Option<(u32, u32)>,
@@ -129,7 +131,8 @@ impl Index {
         }
 
         let twig_config = project.read_file("config/packages/twig.yaml").unwrap_or_default();
-        for (directory, namespace) in twig_paths(&twig_config) {
+        let extra_namespaces = twig_namespaces(&host::setting_string("twigNamespaces").unwrap_or_default());
+        for (directory, namespace) in twig_paths(&twig_config).into_iter().chain(extra_namespaces) {
             for path in files(&[&format!("{directory}/**/*.twig")]) {
                 let Some(file) = relative(&path).strip_prefix(&format!("{directory}/")).map(str::to_owned) else { continue };
                 let name = if namespace.is_empty() { file } else { format!("@{namespace}/{file}") };
@@ -184,6 +187,7 @@ impl Index {
             if relative.ends_with(".xml") {
                 xml_services(path, &text, &mut index.services);
                 xml_routes(path, &text, &mut index.routes);
+                xml_service_tags(path, &text, &mut index.tags);
                 continue;
             }
 
@@ -193,6 +197,7 @@ impl Index {
             }
 
             yaml_services(path, &text, &mut index.services);
+            yaml_service_tags(path, &text, &mut index.tags);
         }
 
         for path in &controllers {
@@ -596,6 +601,224 @@ pub fn yaml_services(path: &str, text: &str, names: &mut impl Sink) {
         let alias = key.value.trim_matches(['\'', '"']).strip_prefix('@').map(|target| format!("alias of {target}"));
         names.add(&key.key, class.or(alias), path, lines.position(key.offset));
     }
+}
+
+/// Byte ranges of the tag names in the `tags:` of YAML services: `- { name: x }`,
+/// `- name: x`, `tags: ['x']` and `- x`. An empty name is an empty range.
+pub(crate) fn yaml_tag_slots(text: &str) -> Vec<(usize, usize)> {
+    let mut slots = Vec::new();
+
+    for key in yaml_keys(text) {
+        if key.key != "tags" || key.parents.len() != 2 || key.parents[0] != "services" {
+            continue;
+        }
+
+        let line_start = text[..key.offset].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = text[key.offset..].find('\n').map_or(text.len(), |i| key.offset + i);
+        let line = text[line_start..line_end].trim_end_matches('\r');
+        let Some(colon) = line[key.offset - line_start..].find(':').map(|i| key.offset - line_start + i) else { continue };
+
+        let inline = without_comment(&line[colon + 1..]);
+        if !inline.trim().is_empty() {
+            flow_tag_slots(inline, line_start + colon + 1, &mut slots);
+            continue;
+        }
+
+        let tags_indent = line.len() - line.trim_start().len();
+        block_tag_slots(text, line_end, tags_indent, &mut slots);
+    }
+
+    slots
+}
+
+fn without_comment(value: &str) -> &str {
+    value.find(" #").map_or(value, |i| &value[..i])
+}
+
+fn block_tag_slots(text: &str, after: usize, tags_indent: usize, slots: &mut Vec<(usize, usize)>) {
+    let mut offset = after;
+
+    for line in text[after..].split_inclusive('\n') {
+        let line_offset = offset;
+        offset += line.len();
+        let line = line.trim_end_matches(['\n', '\r']);
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() && line_offset == after {
+            continue;
+        }
+
+        if trimmed.trim().is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let indent = line.len() - trimmed.len();
+        let is_item = trimmed.starts_with("- ") || trimmed == "-";
+        if indent < tags_indent || (indent == tags_indent && !is_item) {
+            return;
+        }
+
+        let (item, item_offset) = match trimmed.strip_prefix("- ") {
+            Some(item) => (item.trim_start(), line_offset + line.len() - item.trim_start().len()),
+            None if is_item => continue,
+            None => (trimmed, line_offset + indent),
+        };
+        let item = without_comment(item);
+
+        if item.starts_with('{') {
+            mapping_tag_slots(item, item_offset, slots);
+            continue;
+        }
+
+        if let Some(value) = item.strip_prefix("name:") {
+            slots.push(scalar_slot(value, item_offset + 5));
+            continue;
+        }
+
+        if is_item && !item.contains(": ") && !item.ends_with(':') {
+            slots.push(scalar_slot(item, item_offset));
+        }
+    }
+}
+
+/// `[a, { name: b }]`.
+fn flow_tag_slots(value: &str, base: usize, slots: &mut Vec<(usize, usize)>) {
+    let leading = value.len() - value.trim_start().len();
+    let Some(inner) = value.trim_start().strip_prefix('[') else { return };
+    let inner = inner.trim_end().strip_suffix(']').unwrap_or(inner);
+
+    for (offset, part) in split_flow(inner, base + leading + 1) {
+        let trimmed = part.trim_start();
+        if trimmed.starts_with('{') {
+            mapping_tag_slots(trimmed, offset + part.len() - trimmed.len(), slots);
+            continue;
+        }
+
+        if !trimmed.contains(": ") {
+            slots.push(scalar_slot(part, offset));
+        }
+    }
+}
+
+/// `{ name: x, priority: 1 }`.
+fn mapping_tag_slots(mapping: &str, base: usize, slots: &mut Vec<(usize, usize)>) {
+    let Some(inner) = mapping.trim_end().strip_prefix('{') else { return };
+    let inner = inner.strip_suffix('}').unwrap_or(inner);
+
+    for (offset, part) in split_flow(inner, base + 1) {
+        let trimmed = part.trim_start();
+        if let Some(value) = trimmed.strip_prefix("name:") {
+            slots.push(scalar_slot(value, offset + part.len() - trimmed.len() + 5));
+        }
+    }
+}
+
+/// `text` split at the commas outside quotes and brackets, with the offsets.
+fn split_flow(text: &str, base: usize) -> Vec<(usize, &str)> {
+    let mut parts = Vec::new();
+    let (mut depth, mut quote, mut from) = (0_u32, None, 0);
+
+    for (i, c) in text.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '{' | '[') => depth += 1,
+            (None, '}' | ']') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                parts.push((base + from, &text[from..i]));
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    parts.push((base + from, &text[from..]));
+    parts
+}
+
+/// The unquoted name in a scalar at `base`; an empty one sits at the end.
+fn scalar_slot(value: &str, base: usize) -> (usize, usize) {
+    let trimmed = value.trim();
+    let leading = value.len() - value.trim_start().len();
+    if trimmed.is_empty() {
+        return (base + value.len().min(1), base + value.len());
+    }
+
+    let start = base + leading;
+    let Some(quote) = trimmed.chars().next().filter(|c| *c == '\'' || *c == '"') else { return (start, start + trimmed.len()) };
+    let inner = &trimmed[1..];
+    (start + 1, start + 1 + inner.find(quote).unwrap_or(inner.len()))
+}
+
+/// Byte ranges of `name="…"` of the `<tag>` elements of service XML.
+pub(crate) fn xml_tag_slots(text: &str) -> Vec<(usize, usize)> {
+    let visible = blank_xml_comments(text);
+
+    xml_tags(&visible, "tag")
+        .into_iter()
+        .filter_map(|(tag, at)| xml_attribute(tag, "name").map(|(value, offset)| (at + offset, at + offset + value.len())))
+        .collect()
+}
+
+/// The text with the XML comments replaced by spaces, so offsets stay the same.
+fn blank_xml_comments(text: &str) -> String {
+    let mut visible = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(open) = rest.find("<!--") {
+        let close = rest[open..].find("-->").map_or(rest.len(), |i| open + i + 3);
+        visible.push_str(&rest[..open]);
+        visible.extend(rest[open..close].chars().flat_map(|c| {
+            let blank = if c == '\n' || c == '\r' { c } else { ' ' };
+            std::iter::repeat_n(blank, c.len_utf8())
+        }));
+        rest = &rest[close..];
+    }
+
+    visible.push_str(rest);
+    visible
+}
+
+/// The tag name slot containing `at`, in a YAML or XML service file.
+pub(crate) fn tag_slot_at(language: &str, text: &str, at: usize) -> Option<(usize, usize)> {
+    let slots = match language {
+        "yaml" => yaml_tag_slots(text),
+        "xml" => xml_tag_slots(text),
+        _ => return None,
+    };
+
+    slots.into_iter().find(|&(start, end)| start <= at && at <= end)
+}
+
+fn add_tags(path: &str, text: &str, slots: Vec<(usize, usize)>, names: &mut impl Sink) {
+    let lines = Lines::new(text);
+
+    for (start, end) in slots {
+        names.add(text[start..end].trim(), None, path, lines.position(start));
+    }
+}
+
+pub fn yaml_service_tags(path: &str, text: &str, names: &mut impl Sink) {
+    add_tags(path, text, yaml_tag_slots(text), names);
+}
+
+pub fn xml_service_tags(path: &str, text: &str, names: &mut impl Sink) {
+    add_tags(path, text, xml_tag_slots(text), names);
+}
+
+/// `name=directory` pairs of the `twigNamespaces` setting as (project-relative
+/// directory, namespace); an empty name is Twig's main namespace.
+pub fn twig_namespaces(value: &str) -> Vec<(String, String)> {
+    value
+        .split(',')
+        .filter_map(|pair| {
+            let (namespace, directory) = pair.split_once('=')?;
+            let namespace = namespace.trim().trim_start_matches('@');
+            let directory = directory.trim().replace("%kernel.project_dir%", "");
+            let directory = directory.trim_start_matches("./").trim_matches('/').to_owned();
+            (!directory.is_empty() && !directory.contains("..")).then(|| (directory, namespace.to_owned()))
+        })
+        .collect()
 }
 
 /// Top-level keys of a routing file, except imports (`resource:`).
@@ -1018,6 +1241,58 @@ final class BlogController extends AbstractController
 
         let importmap = "<?php\nreturn [\n    'app' => [\n        'path' => './assets/app.js',\n        'entrypoint' => true,\n    ],\n];\n";
         assert_eq!(names(importmap_entries, "/p/importmap.php", importmap), [name("app", None, 2, 5)]);
+    }
+
+    #[test]
+    fn indexes_service_tags_from_yaml_and_xml() {
+        let yaml = "services:\n    a:\n        tags:\n            - { name: one.tag, priority: 1 }\n            - name: two.tag\n            - three.tag\n    b:\n        tags: ['four.tag', { name: five.tag }]\nparameters:\n    tags: [nope.tag]\n";
+        let found: Vec<_> = names(yaml_service_tags, "/p/config/s.yaml", yaml).into_iter().map(|n| (n.0, n.2)).collect();
+        assert_eq!(
+            found,
+            [("five.tag".into(), 7), ("four.tag".into(), 7), ("one.tag".into(), 3), ("three.tag".into(), 5), ("two.tag".into(), 4)]
+        );
+
+        let xml = "<services>\n  <service id=\"a\">\n    <tag name=\"x.tag\"/>\n    <!-- <tag name=\"old.tag\"/> -->\n  </service>\n</services>";
+        assert_eq!(names(xml_service_tags, "/p/config/s.xml", xml), [name("x.tag", None, 2, 15)]);
+    }
+
+    #[test]
+    fn ranges_use_utf16_columns_with_multibyte_text() {
+        let yaml = "services:\n    a:\n        tags: [{ name: 'é𝄞.tag' }]\n";
+        assert_eq!(names(yaml_service_tags, "/p/config/s.yaml", yaml), [name("é𝄞.tag", None, 2, 24)]);
+
+        let xml = "<!-- é𝄞 --><service id=\"é𝄞\"><tag name=\"x.tag\"/></service>";
+        assert_eq!(names(xml_service_tags, "/p/config/s.xml", xml), [name("x.tag", None, 0, 41)]);
+    }
+
+    #[test]
+    fn crlf_files_report_correct_lines() {
+        let yaml = "services:\r\n    a:\r\n        tags:\r\n            - name: one.tag\r\n            - { name: two.tag }\r\n";
+        assert_eq!(
+            names(yaml_service_tags, "/p/config/s.yaml", yaml),
+            [name("one.tag", None, 3, 20), name("two.tag", None, 4, 22)]
+        );
+
+        let xml = "<service id=\"a\">\r\n<tag name=\"x.tag\"/>\r\n</service>";
+        assert_eq!(names(xml_service_tags, "/p/config/s.xml", xml), [name("x.tag", None, 1, 11)]);
+    }
+
+    #[test]
+    fn twig_namespaces_setting_parses_pairs() {
+        assert_eq!(
+            twig_namespaces("emails=templates/mail, =templates/main ,pdf=./pdf/"),
+            [("templates/mail".into(), "emails".into()), ("templates/main".into(), String::new()), ("pdf".into(), "pdf".into())]
+        );
+    }
+
+    #[test]
+    fn twig_namespaces_setting_strips_a_leading_at_sign() {
+        assert_eq!(twig_namespaces("@emails=templates/mail"), [("templates/mail".into(), "emails".into())]);
+    }
+
+    #[test]
+    fn twig_namespaces_setting_ignores_malformed_pairs() {
+        assert!(twig_namespaces("nodelimiter, a=, b=../up, ,=, c=/").is_empty());
     }
 
     #[test]
