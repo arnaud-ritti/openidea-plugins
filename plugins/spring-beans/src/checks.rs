@@ -34,6 +34,8 @@ pub struct Groups {
     pub naming: bool,
     pub self_invocation: bool,
     pub unresolved_references: bool,
+    pub aop: bool,
+    pub xml: bool,
 }
 
 impl Default for Groups {
@@ -46,6 +48,8 @@ impl Default for Groups {
             naming: true,
             self_invocation: false,
             unresolved_references: false,
+            aop: true,
+            xml: true,
         }
     }
 }
@@ -62,6 +66,8 @@ impl Groups {
             naming: on("checkNaming", defaults.naming),
             self_invocation: on("checkSelfInvocation", defaults.self_invocation),
             unresolved_references: on("checkUnresolvedReferences", defaults.unresolved_references),
+            aop: on("checkAop", defaults.aop),
+            xml: on("checkXml", defaults.xml),
         }
     }
 }

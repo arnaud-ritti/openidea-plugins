@@ -945,3 +945,122 @@ fn unresolved_references_are_quiet_on_a_partial_index() {
     let found = checks::check_java(&format!("{ROOT}/Subject.java"), &file, text, &world, checks::Groups::from_settings());
     assert!(found.iter().all(|f| f.code != "unresolved-depends-on"));
 }
+
+const XML_PATH: &str = "/project/src/main/resources/aop.xml";
+
+fn beans_xml(body: &str) -> String {
+    format!(
+        "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:aop=\"http://www.springframework.org/schema/aop\">\n{body}\n</beans>\n"
+    )
+}
+
+fn xml_findings(host: &MockHost, text: &str) -> Vec<(String, String)> {
+    let document = doc(XML_PATH, text);
+    Navigator::default().line_markers(&document);
+    host.diagnostics()
+        .get(XML_PATH)
+        .into_iter()
+        .flatten()
+        .map(|d| {
+            let (from, to) = (offset(text, d.range.start).unwrap(), offset(text, d.range.end).unwrap());
+            (d.code.clone().unwrap(), text[from..to].to_owned())
+        })
+        .collect()
+}
+
+fn aop_found(body: &str) -> Vec<(String, String)> {
+    xml_findings(&MockHost::install(), &beans_xml(body))
+}
+
+#[test]
+fn aop_pointcut_without_expression_is_reported() {
+    let found = aop_found("<aop:config><aop:pointcut id=\"p\"/></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:pointcut")]);
+    assert_eq!(aop_found("<aop:config><aop:pointcut expression=\"within(a..*)\"/></aop:config>").len(), 1);
+}
+
+#[test]
+fn aop_aspect_without_ref_is_reported() {
+    let found = aop_found("<aop:config><aop:aspect id=\"a\"/></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:aspect")]);
+}
+
+#[test]
+fn aop_advice_without_pointcut_is_reported() {
+    let found = aop_found("<aop:config><aop:aspect ref=\"a\"><aop:before method=\"m\"/></aop:aspect></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:before")]);
+    let no_method = aop_found("<aop:config><aop:aspect ref=\"a\"><aop:around pointcut-ref=\"p\"/></aop:aspect></aop:config>");
+    assert_eq!(no_method, [pair("aop-structure", "aop:around")]);
+}
+
+#[test]
+fn aop_advice_with_both_pointcut_and_pointcut_ref_is_reported() {
+    let found = aop_found("<aop:config><aop:aspect ref=\"a\"><aop:after method=\"m\" pointcut=\"x\" pointcut-ref=\"p\"/></aop:aspect></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:after")]);
+}
+
+#[test]
+fn aop_advisor_without_advice_ref_is_reported() {
+    let found = aop_found("<aop:config><aop:advisor pointcut-ref=\"p\"/></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:advisor")]);
+}
+
+#[test]
+fn aop_structure_is_quiet_for_library_or_dynamic_name() {
+    let dynamic = "<aop:config><aop:aspect ref=\"${aspect}\"><aop:before method=\"m\" pointcut=\"${a}\" pointcut-ref=\"${b}\"/></aop:aspect></aop:config>";
+    assert!(aop_found(dynamic).is_empty());
+    let lookalike = "<x:config xmlns:x=\"urn:other\"><x:pointcut/><x:aspect/><x:advisor/></x:config>";
+    assert!(aop_found(lookalike).is_empty());
+    let outside_config = "<aop:pointcut id=\"p\"/>";
+    assert!(aop_found(outside_config).is_empty());
+    let not_beans = "<project xmlns:aop=\"http://www.springframework.org/schema/aop\"><aop:config><aop:aspect/></aop:config></project>";
+    assert!(xml_findings(&MockHost::install(), not_beans).is_empty());
+}
+
+#[test]
+fn xml_ranges_use_utf16_columns_with_multibyte_text() {
+    let host = MockHost::install();
+    let text = beans_xml("<!-- caf\u{e9}\u{1F600} --><aop:config><aop:aspect id=\"a\"/></aop:config>");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (2, 28, 38));
+}
+
+#[test]
+fn xml_crlf_files_report_correct_lines() {
+    let host = MockHost::install();
+    let text = beans_xml("<aop:config>\n<aop:aspect id=\"a\"/>\n</aop:config>").replace('\n', "\r\n");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character), (3, 1));
+}
+
+#[test]
+fn fixed_xml_file_publishes_empty_list() {
+    let host = MockHost::install();
+    let broken = beans_xml("<aop:config><aop:aspect id=\"a\"/></aop:config>");
+    assert_eq!(xml_findings(&host, &broken).len(), 1);
+    let fixed = broken.replace("id=\"a\"", "ref=\"a\"");
+    assert!(xml_findings(&host, &fixed).is_empty());
+    assert!(host.diagnostics().get(XML_PATH).is_none_or(Vec::is_empty), "no stale problem is left");
+}
+
+#[test]
+fn switched_off_aop_group_is_quiet() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkAop", "false");
+    assert!(xml_findings(&host, &beans_xml("<aop:config><aop:aspect id=\"a\"/></aop:config>")).is_empty());
+}
+
+#[test]
+fn saved_xml_is_checked_and_pom_is_not() {
+    let host = MockHost::install();
+    let broken = beans_xml("<aop:config><aop:aspect id=\"a\"/></aop:config>");
+    host.add_file("src/main/resources/aop.xml", &broken);
+    host.add_file("pom.xml", "<project><bean id=\"a\" class=\"x.Y\"/></project>");
+    let mut n = Navigator::default();
+    n.handle_events(&[Event::FileSaved(XML_PATH.into())], &host.invocation());
+    assert_eq!(host.diagnostics()[XML_PATH].len(), 1);
+    n.handle_events(&[Event::FileSaved("/project/pom.xml".into())], &host.invocation());
+    assert!(host.diagnostics().get("/project/pom.xml").is_none_or(Vec::is_empty));
+}

@@ -8,6 +8,7 @@ mod checks;
 mod kotlin;
 mod model;
 mod sites;
+mod xml_checks;
 
 pub use model::{Bean, FileModel, Injection, parse};
 
@@ -341,6 +342,12 @@ impl Navigator {
     /// Publishes the problems of a Java or Kotlin source; a fixed file gets an empty list.
     fn diagnose(&mut self, path: &str, language: &str, text: &str) {
         if language == "xml" {
+            let mut problems = Vec::new();
+            if let Some(index) = self.indexes.for_document(path, text, PROVIDER_BUDGET) {
+                let findings = xml_checks::check_xml(path, text, &World::new(index), checks::Groups::from_settings());
+                problems.extend(findings.iter().map(|f| f.diagnostic(text)));
+            }
+            let _ = host::publish_diagnostics(path, &problems);
             return;
         }
         let mut problems = field_injection_problems(&model::parse(path, text).unwrap_or_default());
@@ -693,7 +700,7 @@ impl Plugin for Navigator {
                 Event::FileSaved(path) | Event::FileOpened(path) => Some(path.as_str()),
                 _ => None,
             })
-            .filter(|path| path.ends_with(".java"))
+            .filter(|path| [".java", ".kt", ".xml"].iter().any(|ext| path.ends_with(ext)))
             .collect();
         for path in paths {
             let Some(project) = host::projects().unwrap_or_default().into_iter().find(|p| {
@@ -702,7 +709,12 @@ impl Plugin for Navigator {
                 continue;
             };
             let Ok(text) = project.read_file(path) else { continue };
-            self.diagnose(path, "java", &text);
+            let language = match path.rsplit('.').next() {
+                Some("kt") => "kotlin",
+                Some("xml") => "xml",
+                _ => "java",
+            };
+            self.diagnose(path, language, &text);
         }
     }
 

@@ -34,6 +34,16 @@
       "type": "boolean",
       "title": "Warn about @DependsOn names no project bean defines and @ComponentScan packages without sources (beans from libraries and auto-configuration are invisible, so this may over-report)",
       "default": false
+    },
+    "springBeans.checkAop": {
+      "type": "boolean",
+      "title": "Report incomplete AOP configuration (aop:config, pointcuts, aspects, advisors, advice) in Spring XML files",
+      "default": true
+    },
+    "springBeans.checkXml": {
+      "type": "boolean",
+      "title": "Run the other checks on Spring XML configuration files",
+      "default": true
     }
   }
 }
