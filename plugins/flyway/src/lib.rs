@@ -39,6 +39,18 @@ pub struct Flyway {
     targets: BTreeMap<String, String>,
 }
 
+/// The configured runner and its arguments for a goal; `json` asks for machine-readable output.
+fn runner_args(goal: &str, json: bool) -> (&'static str, Vec<String>) {
+    let maven = host::setting_string("runner").as_deref() == Some("mvn");
+    let mut args = vec![if maven { format!("flyway:{goal}") } else { goal.to_owned() }];
+    if json {
+        args.push(if maven { "-Dflyway.outputType=json" } else { "-outputType=json" }.to_owned());
+    }
+    // ponytail: no shell quoting; quote-aware split when someone needs spaces in a value
+    args.extend(host::setting_string("arguments").unwrap_or_default().split_whitespace().map(str::to_owned));
+    (if maven { "mvn" } else { "flyway" }, args)
+}
+
 fn root_relative<'a>(path: &'a str, root: &str) -> &'a str {
     path.strip_prefix(root).map_or(path, |rest| rest.trim_start_matches('/'))
 }
@@ -158,11 +170,7 @@ impl Flyway {
             }
         }
 
-        let maven = host::setting_string("runner").as_deref() == Some("mvn");
-        let program = if maven { "mvn" } else { "flyway" };
-        let mut args = vec![if maven { format!("flyway:{goal}") } else { goal.to_owned() }];
-        // ponytail: no shell quoting; quote-aware split when someone needs spaces in a value
-        args.extend(host::setting_string("arguments").unwrap_or_default().split_whitespace().map(str::to_owned));
+        let (program, args) = runner_args(goal, false);
 
         match host::open_terminal(&format!("Flyway {goal}"), program, &args) {
             Ok(()) => {}
@@ -236,7 +244,7 @@ impl Providers for Flyway {
 }
 
 impl Flyway {
-    fn migration_file(&self, files: &[String], migration: &info::Migration, naming: &naming::Naming) -> Option<String> {
+    fn migration_file(&self, project: &Project, files: &[String], migration: &info::Migration, naming: &naming::Naming) -> Option<String> {
         let normalized = |text: &str| text.replace('_', " ").to_lowercase();
         let same_description = |description: &str| normalized(description) == normalized(&migration.description);
         let found = files
@@ -244,24 +252,27 @@ impl Flyway {
             .filter_map(|path| {
                 let file_name = path.rsplit('/').next().unwrap_or(path);
                 let Name::Migration { kind, version, description } = parse(file_name, naming) else { return None };
-                if migration.repeatable {
+                if migration.kind == Kind::Repeatable {
                     return (kind == Kind::Repeatable && same_description(&description)).then_some((path, true));
                 }
-                (kind == Kind::Versioned && version_key(&version) == version_key(&migration.version))
+                (kind == migration.kind && version_key(&version) == version_key(&migration.version))
                     .then(|| (path, same_description(&description)))
             })
             .min_by_key(|(_, matches)| !matches)
             .map(|(path, _)| path);
-        found.cloned().or_else(|| migration.filepath.clone())
+        if let Some(path) = found {
+            return Some(path.clone());
+        }
+
+        let root = project.root().ok()?;
+        let path = migration.filepath.as_deref()?;
+        let path = if path.starts_with('/') { path.to_owned() } else { format!("{}/{path}", root.trim_end_matches('/')) };
+        project.read_file(&path).ok().map(|_| path)
     }
 
     fn migrations_view(&mut self, project: &Project) -> View {
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
-        let runner = host::setting_string("runner").filter(|runner| runner == "mvn").unwrap_or_else(|| "flyway".to_owned());
-        let maven = runner == "mvn";
-        let mut args = vec![if maven { "flyway:info".to_owned() } else { "info".to_owned() }];
-        args.push(if maven { "-Dflyway.outputType=json" } else { "-outputType=json" }.to_owned());
-        args.extend(host::setting_string("arguments").unwrap_or_default().split_whitespace().map(str::to_owned));
+        let (runner, args) = runner_args("info", true);
 
         let _task = host::begin_task("Flyway info", false);
         let output = match project.run_process(&runner, &args, None) {
@@ -293,7 +304,7 @@ impl Flyway {
         let mut items = Vec::new();
         for (index, migration) in migrations.iter().enumerate() {
             let key = format!("m:{index}");
-            if let Some(path) = self.migration_file(&files, migration, &config.naming) {
+            if let Some(path) = self.migration_file(project, &files, migration, &config.naming) {
                 self.targets.insert(key.clone(), path);
             }
             items.push(TreeItem::new(&key, &migration.label).detail(migration.state).icon(migration.icon));
@@ -315,7 +326,7 @@ impl Views for Flyway {
             ViewEvent::Button(button) if button == "refresh" => host::refresh_view(view),
             ViewEvent::Activate(key) => {
                 if let Some(path) = self.targets.get(&key) {
-                    host::open_location(path, 0, 0)?;
+                    let _ = host::open_location(path, 0, 0);
                 }
             }
             _ => {}
@@ -551,8 +562,8 @@ mod tests {
             ("V1 init", Some("Applied"), Some("success")),
             ("V2 add users", Some("Failed"), Some("error")),
             ("V3 gone", Some("Missing"), Some("warning")),
-            ("R views", Some("Pending"), Some("pending")),
-            ("V4 later", Some("Pending"), Some("pending")),
+            ("R views", Some("Pending"), Some("ci-pending")),
+            ("V4 later", Some("Pending"), Some("ci-pending")),
         ]);
 
         flyway.handle("migrations", ViewEvent::Activate(items[0].key.clone()), &host.invocation()).unwrap();
@@ -587,5 +598,42 @@ mod tests {
 
         let denied = MockHost::install().with_capabilities(&["project.read", "events"]);
         assert_eq!(message(&denied), "Allow running flyway for Flyway Migrations in Settings › Plugins to list migrations.");
+    }
+
+    #[test]
+    fn info_runs_through_mvn_with_the_maven_output_flag() {
+        let host = info_host();
+        host.set_setting("runner", "\"mvn\"");
+        host.set_setting("arguments", "\"-Dflyway.url=x\"");
+        host.on_process("mvn", |args, _| {
+            assert_eq!(args, ["flyway:info", "-Dflyway.outputType=json", "-Dflyway.url=x"]);
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: INFO_JSON.into(), stderr: String::new() })
+        });
+        assert_eq!(tree(&host, &mut Flyway::default()).len(), 5);
+    }
+
+    #[test]
+    fn undo_rows_open_u_files_and_relative_paths_join_the_root() {
+        let host = host();
+        host.add_file("src/main/resources/db/migration/U2__x.sql", "");
+        host.add_file("sql/V9__elsewhere.sql", "");
+        host.on_process("flyway", |_, _| {
+            let json = r#"{"migrations":[
+              {"category":"Undo","version":"2","description":"x","state":"Pending"},
+              {"category":"Versioned","version":"9","description":"zzz","state":"Success","filepath":"sql/V9__elsewhere.sql"},
+              {"category":"Versioned","version":"8","description":"nope","state":"Success","filepath":"sql/V8__gone.sql"}]}"#;
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: json.into(), stderr: String::new() })
+        });
+        host.set_setting("locations", "\"filesystem:none\"");
+        let mut flyway = Flyway::default();
+        let items = tree(&host, &mut flyway);
+        host.set_setting("locations", "\"\"");
+        let items2 = tree(&host, &mut flyway);
+        assert_eq!(items.len(), 3);
+        for item in &items2 {
+            flyway.handle("migrations", ViewEvent::Activate(item.key.clone()), &host.invocation()).unwrap();
+        }
+        let opened: Vec<String> = host.opened_locations().into_iter().map(|l| l.0).collect();
+        assert_eq!(opened, [format!("{DIR}/U2__x.sql"), "/project/sql/V9__elsewhere.sql".to_owned()]);
     }
 }
