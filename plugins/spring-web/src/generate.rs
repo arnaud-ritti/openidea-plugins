@@ -101,11 +101,18 @@ fn import_edit(file: &JavaFile, text: &str, annotation: &str) -> Option<TextEdit
     let line = format!("import {qualified};");
     let after = match file.imports.iter().filter(|i| !i.is_static).chain(file.imports.iter().filter(|i| i.is_static)).max_by_key(|i| i.end) {
         Some(last) => text[last.end..].find(';').map(|semicolon| last.end + semicolon + 1).map(|at| (at, format!("{newline}{line}"))),
-        None => text.find("package ").and_then(|p| text[p..].find(';').map(|s| p + s + 1)).map(|at| (at, format!("{newline}{newline}{line}"))),
+        None => package_end(text).map(|at| (at, format!("{newline}{newline}{line}"))),
     };
     let (at, inserted) = after.unwrap_or((0, format!("{line}{newline}{newline}")));
 
     Some(TextEdit { range: range(text, at, at), text: inserted })
+}
+
+fn package_end(text: &str) -> Option<usize> {
+    let tokens = java::tokens(text);
+    let package = tokens.iter().position(|t| t.s == "package")?;
+
+    tokens[package..].iter().find(|t| t.s == ";").map(|t| t.at + 1)
 }
 
 fn method_edit(decl: &TypeDecl, text: &str, template: &Template) -> TextEdit {
@@ -121,7 +128,9 @@ fn method_edit(decl: &TypeDecl, text: &str, template: &Template) -> TextEdit {
     let line_start = text[..close].rfind('\n').map_or(0, |n| n + 1);
     let alone = text[line_start..close].trim().is_empty();
     let at = if alone { line_start } else { close };
-    let lead = if decl.members.is_empty() { "" } else { newline };
+    let blank_before = text[..line_start].trim_end_matches([' ', '\t']).ends_with("\n\n")
+        || text[..line_start].trim_end_matches([' ', '\t']).ends_with("\r\n\r\n");
+    let lead = if decl.members.is_empty() || blank_before { "" } else { newline };
     let inserted = if alone {
         format!("{lead}{method}")
     } else {
@@ -226,6 +235,28 @@ mod tests {
         assert!(applied.contains("import org.springframework.web.bind.annotation.RequestMapping;"));
         assert!(applied.ends_with(
             "\n\n    @RequestMapping(\"/path\")\n    public String handle() {\n        return \"\";\n    }\n}\n"
+        ));
+    }
+
+    #[test]
+    fn blank_line_before_the_closing_brace_is_not_doubled() {
+        let with_blank = CONTROLLER;
+        let without_blank = CONTROLLER.replace("\n\n}\n", "\n}\n");
+        let method = "    @RequestMapping(\"/path\")\n    public String handle() {\n        return \"\";\n    }\n";
+
+        let edit = |text: &str| actions(PATH, text, at(8, 0))[0].edits[0].1[1].text.clone();
+
+        assert_eq!(edit(with_blank), method);
+        assert_eq!(edit(&without_blank), format!("\n{method}"));
+    }
+
+    #[test]
+    fn package_in_a_header_comment_is_ignored() {
+        let text = "/* licensed under the package terms; see LICENSE */\npackage com.acme;\n\n@Controller\nclass A {\n}\n";
+        let applied = apply(text, &actions(PATH, text, at(4, 9))[0]);
+
+        assert!(applied.contains(
+            "package com.acme;\n\nimport org.springframework.web.bind.annotation.RequestMapping;\n\n@Controller"
         ));
     }
 

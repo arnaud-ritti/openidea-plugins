@@ -509,8 +509,7 @@ impl Providers for WebTools {
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
-        let mut actions = generate::actions(&doc.path, &doc.text, selection);
-        actions.extend(problems(doc)
+        let mut actions: Vec<CodeAction> = problems(doc)
             .into_iter()
             .filter(|p| contains(p.diagnostic.range, selection.start))
             .filter_map(|p| p.fix)
@@ -520,7 +519,9 @@ impl Providers for WebTools {
                 preferred: true,
                 edits: vec![(doc.path.clone(), vec![edit])],
                 data: None,
-            }));
+            })
+            .collect();
+        actions.extend(generate::actions(&doc.path, &doc.text, selection));
         actions
     }
 }
@@ -618,6 +619,21 @@ class PetApi {
         assert_eq!(edit.text, "PathVariable(\"petId\")");
         let fixed = API.replace("@PathVariable(\"id\")", "@PathVariable(\"petId\")");
         assert_eq!(path_problems(&fixed, &java::parse(&fixed)).len(), 0);
+    }
+
+    #[test]
+    fn generate_actions_follow_the_quick_fixes() {
+        let mut tools = WebTools::default();
+        let source = "package a;\nimport org.springframework.web.bind.annotation.*;\n@RestController\nclass A {\n    @GetMapping(\"/{id}\")\n    String x(@PathVariable(\"idd\") long id) { return \"\"; }\n\n}\n";
+        let d = doc("A.java", source);
+        let at = Position::new(6, 0);
+
+        let kinds: Vec<_> = tools.code_actions(&d, Range::new(at, at)).into_iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, vec![Some("refactor".to_string()); 2]);
+
+        let at = Position::new(5, 30);
+        let kinds: Vec<_> = tools.code_actions(&d, Range::new(at, at)).into_iter().map(|a| a.kind.unwrap()).collect();
+        assert_eq!(kinds, vec!["quickfix"]);
     }
 
     const CONTROLLER: &str = r#"package com.acme.web;
