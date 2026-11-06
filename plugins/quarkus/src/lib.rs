@@ -370,6 +370,106 @@ mod tests {
     }
 
     #[test]
+    fn bundled_catalog_covers_top_extensions() {
+        let lookup = Lookup(vec![bundled()]);
+        let extensions = [
+        ("quarkus-core", "quarkus.analytics.disabled"),
+        ("quarkus-arc", "quarkus.arc.auto-inject-fields"),
+        ("quarkus-vertx", "quarkus.vertx.cache-directory"),
+        ("quarkus-vertx-http", "quarkus.http.accept-backlog"),
+        ("quarkus-vertx-graphql", "quarkus.vertx-graphql.ui.always-include"),
+        ("quarkus-undertow", "quarkus.servlet.buffer-size"),
+        ("quarkus-web-dependency-locator", "quarkus.web-dependency-locator.app-root"),
+        ("quarkus-info", "quarkus.info.build"),
+        ("quarkus-tls-registry", "quarkus.tls.alpn"),
+        ("quarkus-rest", "quarkus.rest.multipart.input-part.default-charset"),
+        ("quarkus-rest-jackson", "quarkus.rest.jackson.optimization.enable-reflection-free-serializers"),
+        ("quarkus-rest-client", "quarkus.rest-client.disable-smart-produces"),
+        ("quarkus-rest-client-oidc-filter", "quarkus.rest-client-oidc-filter.client-name"),
+        ("quarkus-rest-client-oidc-token-propagation", "quarkus.rest-client-oidc-token-propagation.client-name"),
+        ("quarkus-rest-qute", "quarkus.rest.qute.template-instance-non-blocking-type"),
+        ("quarkus-resteasy", "quarkus.resteasy.vertx.response-buffer-size"),
+        ("quarkus-websockets-next", "quarkus.websockets-next.client.auto-ping-interval"),
+        ("quarkus-jackson", "quarkus.jackson.accept-case-insensitive-enums"),
+        ("quarkus-jaxb", "quarkus.jaxb.exclude-classes"),
+        ("quarkus-grpc", "quarkus.generate-code.grpc.kotlin.generate"),
+        ("quarkus-smallrye-graphql", "quarkus.smallrye-graphql.authorization-client-init-payload-name"),
+        ("quarkus-smallrye-graphql-client", "quarkus.smallrye-graphql-client.enable-build-time-scanning"),
+        ("quarkus-hibernate-orm", "quarkus.hibernate-orm.active"),
+        ("quarkus-hibernate-envers", "quarkus.hibernate-envers.active"),
+        ("quarkus-hibernate-search-orm-elasticsearch", "quarkus.hibernate-search-orm.active"),
+        ("quarkus-hibernate-validator", "quarkus.hibernate-validator.expression-language.constraint-expression-feature-level"),
+        ("quarkus-narayana-jta", "quarkus.transaction-manager.default-transaction-timeout"),
+        ("quarkus-narayana-lra", "quarkus.lra.base-uri"),
+        ("quarkus-datasource", "quarkus.datasource.active"),
+        ("quarkus-agroal", "quarkus.datasource.dev-ui.allow-sql"),
+        ("quarkus-reactive-datasource", "quarkus.datasource.reactive"),
+        ("quarkus-reactive-pg-client", "quarkus.datasource.reactive.postgresql.pipelining-limit"),
+        ("quarkus-reactive-mysql-client", "quarkus.datasource.reactive.mysql.authentication-plugin"),
+        ("quarkus-reactive-mssql-client", "quarkus.datasource.reactive.mssql.packet-size"),
+        ("quarkus-reactive-db2-client", "quarkus.datasource.reactive.db2.ssl"),
+        ("quarkus-flyway", "quarkus.flyway.active"),
+        ("quarkus-liquibase", "quarkus.liquibase.allow-duplicated-changeset-identifiers"),
+        ("quarkus-liquibase-mongodb", "quarkus.liquibase-mongodb.change-log"),
+        ("quarkus-mongodb-client", "quarkus.mongodb.active"),
+        ("quarkus-redis-client", "quarkus.redis.active"),
+        ("quarkus-infinispan-client", "quarkus.infinispan-client.auth-password"),
+        ("quarkus-elasticsearch-rest-client", "quarkus.elasticsearch.api-key"),
+        ("quarkus-cache", "quarkus.cache.caffeine.expire-after-access"),
+        ("quarkus-smallrye-health", "quarkus.smallrye-health.additional.property"),
+        ("quarkus-smallrye-openapi", "quarkus.smallrye-openapi.enable"),
+        ("quarkus-smallrye-fault-tolerance", "quarkus.fault-tolerance.enabled"),
+        ("quarkus-smallrye-jwt", "quarkus.smallrye-jwt.blocking-authentication"),
+        ("quarkus-micrometer", "quarkus.micrometer.binder-enabled-default"),
+        ("quarkus-opentelemetry", "quarkus.otel.attribute.count.limit"),
+        ("quarkus-observability-devservices", "quarkus.observability.dev-resources"),
+        ("quarkus-oidc", "quarkus.oidc.allow-token-introspection-cache"),
+        ("quarkus-oidc-client", "quarkus.oidc-client.absolute-expires-in"),
+        ("quarkus-oidc-db-token-state-manager", "quarkus.oidc.db-token-state-manager.access-token-column-size"),
+        ("quarkus-oidc-redis-token-state-manager", "quarkus.oidc.redis-token-state-manager.enabled"),
+        ("quarkus-keycloak-authorization", "quarkus.keycloak.connection-pool-size"),
+        ("quarkus-security", "quarkus.security.auth.enabled-in-dev-mode"),
+        ("quarkus-security-jpa", "quarkus.security-jpa.persistence-unit-name"),
+        ("quarkus-security-webauthn", "quarkus.webauthn.attestation"),
+        ("quarkus-elytron-security-properties-file", "quarkus.security.users.embedded.algorithm"),
+        ("quarkus-elytron-security-jdbc", "quarkus.security.jdbc.enabled"),
+        ("quarkus-elytron-security-oauth2", "quarkus.oauth2.ca-cert-file"),
+        ("quarkus-messaging-kafka", "quarkus.messaging.kafka.enable-graceful-shutdown-in-dev-and-test-mode"),
+        ("quarkus-kafka-client", "quarkus.kafka.devservices.container-env"),
+        ("quarkus-kafka-streams", "quarkus.kafka-streams.application-id"),
+        ("quarkus-messaging-amqp", "quarkus.amqp.devservices.container-env"),
+        ("quarkus-messaging-rabbitmq", "quarkus.rabbitmq.credentials-provider"),
+        ("quarkus-messaging-pulsar", "quarkus.messaging.pulsar.schema-autodetection.enabled"),
+        ("quarkus-scheduler", "quarkus.scheduler.cron-type"),
+        ("quarkus-quartz", "quarkus.quartz.batch-trigger-acquisition-fire-ahead-time-window"),
+        ("quarkus-mailer", "quarkus.mailer.allow-rcpt-errors"),
+        ("quarkus-qute", "quarkus.qute.alt-expr-syntax"),
+        ("quarkus-amazon-lambda", "quarkus.lambda.expected-exceptions"),
+        ("quarkus-google-cloud-functions", "quarkus.google-cloud-functions.function"),
+        ("quarkus-container-image-jib", "quarkus.jib.always-cache-base-image"),
+        ("quarkus-container-image-docker", "quarkus.docker.additional-args"),
+        ("quarkus-container-image-buildpack", "quarkus.buildpack.builder-env"),
+        ("quarkus-container-image-openshift", "quarkus.openshift.base-jvm-image"),
+        ("quarkus-container-image-podman", "quarkus.podman.additional-args"),
+        ("quarkus-kubernetes", "quarkus.knative.add-build-timestamp"),
+        ("quarkus-kubernetes-config", "quarkus.kubernetes-config.config-maps"),
+        ("quarkus-kubernetes-service-binding", "quarkus.kubernetes-service-binding.bind-as-files"),
+        ("quarkus-logging-json", "quarkus.log.console.json"),
+        ("quarkus-logging-gelf", "quarkus.log.handler.gelf.dynamic-mdc-field-types"),
+        ("quarkus-picocli", "quarkus.picocli.top-command"),
+        ("quarkus-jacoco", "quarkus.jacoco.aggregate-report-data"),
+        ("quarkus-cyclonedx", "quarkus.cyclonedx.embedded.compress"),
+        ];
+        assert!(extensions.len() >= 80);
+        let missing: Vec<&str> = extensions
+            .iter()
+            .filter(|(_, key)| lookup.prop(key).is_none())
+            .map(|(extension, _)| *extension)
+            .collect();
+        assert!(missing.is_empty(), "no metadata for {missing:?}");
+    }
+
+    #[test]
     fn opens_code_quarkus_io() {
         let host = MockHost::install();
         QuarkusTools::default().run_command("open-code-quarkus", &host.invocation(), None).unwrap();
