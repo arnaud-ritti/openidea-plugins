@@ -1,19 +1,20 @@
 id = "aritti.devcontainer"
 name = "Dev Container CLI"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Starts, rebuilds and stops the project's Dev Container (containers.dev) and opens a shell in it, using the devcontainer CLI. Adds a devcontainer.json template to the New menu. Requires the devcontainer CLI (npm i -g @devcontainers/cli) and Docker. The IDE itself keeps running on the host."
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0: first release. Start, Rebuild, Open Shell and Stop commands, and devcontainer.json templates."
+change-notes = "Dev Container: Clone Repository and Start… clones a URL next to the project (git) and starts its container. 0.2.0: pick a configuration when several default files exist, confirm before Rebuild. Needs OpenIDEA API 1.2. 0.1.0: first release. Start, Rebuild, Open Shell and Stop commands, and devcontainer.json templates."
 categories = ["tools"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved"]
 
 [capabilities]
 required = ["project.read", "process:devcontainer"]
-# events: the inspections run when a devcontainer.json is opened or saved.
-optional = ["process:docker", "events"]
+# git: Clone Repository and Start. events: the inspections run when a devcontainer.json is opened or saved.
+optional = ["process:docker", "process:git", "events"]
 
 [[contributes.commands]]
 id = "up"
@@ -38,6 +39,11 @@ category = "Dev Container"
 [[contributes.commands]]
 id = "info"
 title = "Dev Container: Show Configuration"
+category = "Dev Container"
+
+[[contributes.commands]]
+id = "clone"
+title = "Dev Container: Clone Repository and Start…"
 category = "Dev Container"
 
 [[contributes.menus]]

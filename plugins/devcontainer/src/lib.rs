@@ -8,7 +8,7 @@ use std::path::Path;
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, Providers};
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::{
-    Context as PluginContext, Diagnostic, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Position, Project, Range, host, register_plugin,
+    Context as PluginContext, Diagnostic, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, PickItem, Plugin, Position, Project, Range, host, register_plugin,
 };
 
 use checks::{Context, FEATURES_MALFORMED, UNKNOWN_PROPERTY};
@@ -55,6 +55,14 @@ impl Plugin for Main {
 
         if id == "info" {
             return info(&project, &root);
+        }
+
+        if id == "clone" {
+            return clone(&project, &root);
+        }
+
+        if id == "rebuild" && !host::confirm("Rebuild Dev Container", "The existing container is removed and built again.").unwrap_or(true) {
+            return Ok(None);
         }
 
         let mut args = vec!["--workspace-folder".to_owned(), root.clone(), "--config".to_owned(), config_file(&project)?];
@@ -137,12 +145,24 @@ fn config_file(project: &Project) -> Result<String, Error> {
         return Ok(configured.trim().to_owned());
     }
 
+    let mut found = Vec::new();
     for path in DEFAULT_CONFIGS {
         match project.read_file(path) {
-            Ok(_) => return Ok(path.to_owned()),
+            Ok(_) => found.push(path.to_owned()),
             Err(Error::Denied(cap)) => return Err(Error::Denied(cap)),
             Err(_) => continue,
         }
+    }
+
+    if found.len() > 1 {
+        let items: Vec<PickItem> = found.iter().map(|path| PickItem::new(path, path)).collect();
+        if let Ok(Some(chosen)) = host::pick("Dev Container configuration", &items) {
+            return Ok(chosen);
+        }
+    }
+
+    if let Some(path) = found.into_iter().next() {
+        return Ok(path);
     }
 
     Err("No .devcontainer/devcontainer.json or .devcontainer.json found in this project. To use another file, set it in Settings › Plugins › Dev Container CLI › Configuration file.".into())
@@ -205,6 +225,43 @@ fn summarise(stdout: &str) -> Option<String> {
     lines.push(format!("postCreateCommand: {}", if has_post_create { "yes" } else { "no" }));
 
     Some(lines.join("\n"))
+}
+
+fn repository_name(url: &str) -> &str {
+    let name = url.trim_end_matches('/').rsplit(['/', ':']).next().unwrap_or("");
+
+    name.strip_suffix(".git").unwrap_or(name)
+}
+
+fn clone(project: &Project, root: &str) -> Result<Option<String>, Error> {
+    let Some(url) = host::input("Repository URL to clone", None)? else { return Ok(None) };
+    let url = url.trim();
+    let name = repository_name(url);
+    if url.starts_with('-') || url.contains(char::is_whitespace) || name.is_empty() {
+        host::notify(NotificationLevel::Warning, "Dev Container", &format!("\"{url}\" is not a repository URL."));
+        return Ok(None);
+    }
+
+    let parent = Path::new(root).parent().map_or(root.to_owned(), |p| p.to_string_lossy().into_owned());
+    let suggested = format!("{}/{name}", parent.trim_end_matches('/'));
+    let Some(target) = host::input("Clone into (a new folder)", Some(&suggested))? else { return Ok(None) };
+    let target = target.trim();
+    if target.is_empty() {
+        return Ok(None);
+    }
+
+    let cloned = {
+        let _task = host::begin_task("Cloning the repository", false);
+        project.run_process("git", &["clone".into(), "--".into(), url.into(), target.into()], None)?
+    };
+    if cloned.status != Some(0) {
+        return Err(format!("git clone failed: {}", cloned.stderr.trim()).into());
+    }
+
+    let args = ["up".to_owned(), "--workspace-folder".to_owned(), target.to_owned()];
+    host::open_terminal("Dev Container: Start Cloned Container", "devcontainer", &args)?;
+
+    Ok(None)
 }
 
 /// The CLI has no stop command; its containers carry the workspace folder as a label.
@@ -315,6 +372,7 @@ mod tests {
     fn rebuild_falls_back_to_the_root_config() {
         let host = host();
         host.add_file(".devcontainer.json", "{}");
+        host.answer_next_prompt(Some(&[""]));
 
         Main.run_command("rebuild", &host.invocation(), None).unwrap();
 
@@ -322,6 +380,29 @@ mod tests {
             host.terminals()[0].args,
             ["up", "--workspace-folder", "/work/app", "--config", ".devcontainer.json", "--remove-existing-container"]
         );
+    }
+
+    #[test]
+    fn declining_the_rebuild_confirm_starts_nothing() {
+        let host = host();
+        host.add_file(".devcontainer.json", "{}");
+        host.answer_next_prompt(None);
+
+        Main.run_command("rebuild", &host.invocation(), None).unwrap();
+
+        assert!(host.terminals().is_empty());
+    }
+
+    #[test]
+    fn several_default_configs_let_the_user_pick() {
+        let host = host();
+        host.add_file(".devcontainer/devcontainer.json", "{}");
+        host.add_file(".devcontainer.json", "{}");
+        host.answer_next_prompt(Some(&[".devcontainer.json"]));
+
+        Main.run_command("up", &host.invocation(), None).unwrap();
+
+        assert_eq!(host.terminals()[0].args[4], ".devcontainer.json");
     }
 
     #[test]
@@ -365,6 +446,43 @@ mod tests {
         Main.run_command("stop", &host.invocation(), None).unwrap();
 
         assert_eq!(host.notifications()[0].body, "Stopped 2 containers.");
+    }
+
+    #[test]
+    fn clone_clones_next_to_the_project_then_starts_the_container() {
+        let host = host().with_capabilities(&["project.read", "process:devcontainer", "process:git"]);
+        host.on_process("git", |args, _| {
+            assert_eq!(args, ["clone", "--", "https://example.com/acme/tool.git", "/work/tool"]);
+            ok("")
+        });
+
+        host.answer_next_prompt(Some(&["https://example.com/acme/tool.git"]));
+        host.answer_next_prompt(Some(&["/work/tool"]));
+        Main.run_command("clone", &host.invocation(), None).unwrap();
+
+        assert_eq!(host.terminals()[0].args, ["up", "--workspace-folder", "/work/tool"]);
+    }
+
+    #[test]
+    fn clone_stops_on_dismissal_bad_url_or_failed_git() {
+        let host = host().with_capabilities(&["project.read", "process:devcontainer", "process:git"]);
+        host.on_process("git", |_, _| Ok(ProcessOutput { status: Some(128), stdout: String::new(), stderr: "fatal: nope".into() }));
+
+        host.answer_next_prompt(None);
+        Main.run_command("clone", &host.invocation(), None).unwrap();
+        host.answer_next_prompt(Some(&["--upload-pack=x"]));
+        Main.run_command("clone", &host.invocation(), None).unwrap();
+        host.answer_next_prompt(Some(&["https://example.com/acme/tool.git"]));
+        host.answer_next_prompt(None);
+        Main.run_command("clone", &host.invocation(), None).unwrap();
+        assert!(host.process_runs().is_empty() && host.terminals().is_empty());
+        assert_eq!(host.notifications().len(), 1);
+
+        host.answer_next_prompt(Some(&["https://example.com/acme/tool.git"]));
+        host.answer_next_prompt(Some(&["/work/tool"]));
+        let error = Main.run_command("clone", &host.invocation(), None).unwrap_err();
+        assert!(error.to_string().contains("fatal: nope"));
+        assert!(host.terminals().is_empty());
     }
 
     #[test]
