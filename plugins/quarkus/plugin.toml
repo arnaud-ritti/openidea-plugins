@@ -6,7 +6,8 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "Red Hat, Inc. (original Qua
 license = "EPL-2.0"
 change-notes = "0.1.0: first release, with key and value completion, profiles, project keys from @ConfigProperty and @ConfigMapping, deprecated and unknown key warnings, Quarkus Dev Mode run detectors and the Open code.quarkus.io command. Ported from com.redhat.devtools.intellij.quarkus 2.6.1 (source: redhat-developer/intellij-quarkus tag 2.6.1, be058542ce55eda5a72d3b35a205d3027e8a906f). Bundled configuration metadata from Quarkus 3.40.1 (Apache-2.0)."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [
     "on-file:**/application*.properties",
