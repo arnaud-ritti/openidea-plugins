@@ -67,9 +67,12 @@ Swagger UI 5.34.1 beside the text. It opens automatically for `openapi.*`,
 extension. For any other YAML or JSON file, use Open With and pick API Preview.
 The preview follows edits as you type.
 
-- Relative `$ref`s to other files resolve: the plugin reads the files the open
-  document references and hands them to the page, which serves them to Swagger
-  UI. Only one level is loaded (files referenced from those files are not).
+- Relative `$ref`s to other files: implemented, not yet verified in a live IDE
+  (an `openidea-plugin link` check is pending). The plugin reads the files the
+  open document references and hands them to the page, which serves them to
+  Swagger UI. Only one level is loaded (files referenced from those files are
+  not), at most 50 files and 512 KiB in total; larger ones are skipped. The
+  files are re-sent only when they changed.
 - There is no Try it out: the frame has no network.
 - The dark theme is a colour inversion of the light one.
 

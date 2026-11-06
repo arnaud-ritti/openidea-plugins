@@ -20,13 +20,17 @@ const show = (text) => {
 };
 let timer = 0;
 let latest = "";
+let name = "";
+let known = "";
 const render = (text) => {
   latest = text;
-  window.openidea.postMessage("files");
+  window.openidea.postMessage(`files\t${known}\t${name}`);
   show(text);
 };
 window.openidea.onMessage((message) => {
-  const received = JSON.parse(message).files ?? {};
+  const reply = JSON.parse(message);
+  known = reply.hash;
+  const received = reply.files ?? {};
   files = new Map(Object.entries(received).map(([name, text]) => [new URL(name, root).href.split("#")[0], text]));
   show(latest);
 });
@@ -34,4 +38,7 @@ window.openidea.document.onChange((state) => {
   clearTimeout(timer);
   timer = setTimeout(() => render(state.text), 300);
 });
-window.openidea.document.get().then((doc) => render(doc.text));
+window.openidea.document.get().then((doc) => {
+  name = doc.name;
+  render(doc.text);
+});

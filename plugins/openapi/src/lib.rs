@@ -53,10 +53,22 @@ fn escape_json(text: &str) -> String {
     out
 }
 
+const MAX_PREVIEW_FILES: usize = 50;
+const MAX_PREVIEW_BYTES: usize = 512 * 1024;
+
+fn fingerprint(text: &str) -> String {
+    let hash = text.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3));
+
+    format!("{hash:016x}")
+}
+
 /// The files `$ref`s of `text` point at, keyed as written, for the preview to resolve them.
-fn preview_files(project: &Project, path: &str, text: &str) -> String {
+/// `None` when they are the ones the page already has (`known` is its fingerprint).
+fn preview_files(project: &Project, path: &str, text: &str, known: &str) -> Option<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut members = Vec::new();
+    let mut bytes = 0;
+    let mut skipped = 0;
     for r in spec::refs(text) {
         let Some((file, _)) = spec::split_ref(&r.target) else {
             continue;
@@ -66,12 +78,25 @@ fn preview_files(project: &Project, path: &str, text: &str) -> String {
         }
 
         seen.push(file.to_owned());
-        if let Fetched::Text(content) = fetch(project.read_file(&resolve_path(path, file))) {
-            members.push(format!("\"{}\":\"{}\"", escape_json(file), escape_json(&content)));
+        let Fetched::Text(content) = fetch(project.read_file(&resolve_path(path, file))) else {
+            continue;
+        };
+        if members.len() >= MAX_PREVIEW_FILES || bytes + content.len() > MAX_PREVIEW_BYTES {
+            skipped += 1;
+            continue;
         }
+
+        bytes += content.len();
+        members.push(format!("\"{}\":\"{}\"", escape_json(file), escape_json(&content)));
     }
 
-    format!("{{\"files\":{{{}}}}}", members.join(","))
+    let files = format!("{{\"skipped\":{skipped},\"files\":{{{}}}", members.join(","));
+    let hash = fingerprint(&files);
+    if hash == known {
+        return None;
+    }
+
+    Some(format!("{files},\"hash\":\"{hash}\"}}"))
 }
 
 /// `./schemas/pet.yaml`, or `../common/pet.yaml`, from the directory of `from_file`.
@@ -146,7 +171,7 @@ impl OpenApi {
     }
 
     fn ref_file_items(&self, doc: &Document, typed_file: &str) -> Vec<String> {
-        if typed_file.starts_with("http") {
+        if typed_file.starts_with("http://") || typed_file.starts_with("https://") {
             return Vec::new();
         }
 
@@ -225,6 +250,10 @@ fn read_sibling(doc: &Document, file: &str) -> Option<String> {
 
 impl Providers for OpenApi {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        if !spec::maybe_spec(&doc.text) {
+            return Vec::new();
+        }
+
         let Some(typed) = ref_at(&doc.text, at) else {
             return Vec::new();
         };
@@ -265,6 +294,10 @@ impl Providers for OpenApi {
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        if !spec::maybe_spec(&doc.text) {
+            return Vec::new();
+        }
+
         let Some(typed) = ref_at(&doc.text, at) else {
             return Vec::new();
         };
@@ -365,15 +398,24 @@ impl Views for OpenApi {
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         if PREVIEWS.contains(&view) {
-            let ViewEvent::Message(_) = event else {
+            let ViewEvent::Message(request) = event else {
+                return Ok(());
+            };
+            let mut parts = request.splitn(3, '\t');
+            let (Some("files"), Some(known), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
                 return Ok(());
             };
             let editor = ctx.editor().ok_or_else(|| Error::Invalid("the preview needs its document".into()))?;
             let path = editor.path();
-            let project = project_for(&path)?;
-            let files = preview_files(&project, &path, &editor.document()?.text);
+            if path.rsplit('/').next() != Some(name) {
+                return Ok(());
+            }
 
-            return host::post_view_message(view, &files);
+            let project = project_for(&path)?;
+            return match preview_files(&project, &path, &editor.document()?.text, known) {
+                Some(files) => host::post_view_message(view, &files),
+                None => Ok(()),
+            };
         }
 
         match event {
@@ -654,17 +696,137 @@ mod tests {
         assert!(OpenApi::default().completion(&doc(text), at(text, "./sc", 4), None).is_empty());
     }
 
+    const PREVIEW_TEXT: &str = "openapi: 3.0.0\nx:\n  $ref: './schemas/pet.yaml#/Pet'\ny:\n  $ref: 'gone.yaml'\nz:\n  $ref: '#/x'\n";
+
+    fn request(hash: &str, name: &str) -> ViewEvent {
+        ViewEvent::Message(format!("files\t{hash}\t{name}"))
+    }
+
     #[test]
     fn preview_receives_referenced_files() {
         let host = MockHost::install();
-        let text = "openapi: 3.0.0\nx:\n  $ref: './schemas/pet.yaml#/Pet'\ny:\n  $ref: 'gone.yaml'\nz:\n  $ref: '#/x'\n";
-        host.open_editor("/project/api.yaml", "yaml", text, &[(0, 0, 0, 0)]);
+        host.open_editor("/project/api.yaml", "yaml", PREVIEW_TEXT, &[(0, 0, 0, 0)]);
         host.add_file("/project/schemas/pet.yaml", "Pet:\n  type: \"object\"\n");
-        OpenApi::default().handle("preview", ViewEvent::Message("files".into()), &host.invocation()).unwrap();
-        assert_eq!(host.view_messages(), [(
-            "preview".to_owned(),
-            r#"{"files":{"./schemas/pet.yaml":"Pet:\n  type: \"object\"\n"}}"#.to_owned()
-        )]);
+        let mut plugin = OpenApi::default();
+        plugin.handle("preview", request("", "api.yaml"), &host.invocation()).unwrap();
+
+        let messages = host.view_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "preview");
+        let prefix = r#"{"skipped":0,"files":{"./schemas/pet.yaml":"Pet:\n  type: \"object\"\n"},"hash":""#;
+        assert!(messages[0].1.starts_with(prefix), "{}", messages[0].1);
+
+        let hash = messages[0].1[prefix.len()..].trim_end_matches("\"}").to_owned();
+        plugin.handle("preview", request(&hash, "api.yaml"), &host.invocation()).unwrap();
+        assert_eq!(host.view_messages().len(), 1);
+
+        host.add_file("/project/schemas/pet.yaml", "Pet: {}\n");
+        plugin.handle("preview", request(&hash, "api.yaml"), &host.invocation()).unwrap();
+        assert_eq!(host.view_messages().len(), 2);
+    }
+
+    #[test]
+    fn preview_answers_only_for_its_own_document() {
+        let host = MockHost::install();
+        host.open_editor("/project/api.yaml", "yaml", PREVIEW_TEXT, &[(0, 0, 0, 0)]);
+        host.add_file("/project/schemas/pet.yaml", "Pet: {}\n");
+        OpenApi::default().handle("preview", request("", "other.yaml"), &host.invocation()).unwrap();
+        assert!(host.view_messages().is_empty());
+    }
+
+    #[test]
+    fn preview_files_are_capped() {
+        let host = MockHost::install();
+        let mut text = String::from("openapi: 3.0.0\n");
+        for i in 0..53 {
+            text.push_str(&format!("a{i}:\n  $ref: 'f{i}.yaml'\n"));
+            host.add_file(&format!("/project/f{i}.yaml"), "A: {}\n");
+        }
+        text.push_str("big:\n  $ref: 'big.yaml'\n");
+        host.add_file("/project/big.yaml", &"x".repeat(600 * 1024));
+        host.open_editor("/project/api.yaml", "yaml", &text, &[(0, 0, 0, 0)]);
+        OpenApi::default().handle("preview", request("", "api.yaml"), &host.invocation()).unwrap();
+
+        let message = &host.view_messages()[0].1;
+        assert!(message.starts_with(r#"{"skipped":4,"#), "{}", &message[..40]);
+        assert_eq!(message.matches(".yaml\":\"A: {}").count(), 50);
+        assert!(!message.contains("big.yaml"));
+    }
+
+    #[test]
+    fn relative_path_handles_parent_and_nested() {
+        assert_eq!(relative_path("/p/api.yaml", "/p/schemas/pet.yaml"), "./schemas/pet.yaml");
+        assert_eq!(relative_path("/p/a/s.yaml", "/p/a/b/c/d.json"), "./b/c/d.json");
+        assert_eq!(relative_path("/p/a/s.yaml", "/p/x.yaml"), "../x.yaml");
+        assert_eq!(relative_path("/p/api/v1/openapi.yaml", "/p/common/pet.yaml"), "../../common/pet.yaml");
+    }
+
+    #[test]
+    fn json_ref_positions_survive_multibyte_and_escapes() {
+        let host = MockHost::install();
+        let text = "{\"description\": \"é \\\"q\\\" \\\\ 日本 😀\", \"é日本\": {\"x\": \"a\\\\b\"}, \"openapi\": \"3.0.0\", \"paths\": {}, \"components\": {\"schemas\": {\"Pet\": {\"$ref\": \"#/components/schemas/Nope\"}, \"日本\": {\"$ref\": \"#/é\"}}}}";
+        host.add_file("/project/api.json", text);
+        OpenApi::default().handle_events(&[Event::FileOpened("/project/api.json".into())], &host.invocation());
+
+        let found = &host.diagnostics()["/project/api.json"];
+        assert_eq!(found.len(), 2);
+        for (target, diagnostic) in ["#/components/schemas/Nope", "#/é"].iter().zip(found) {
+            let from = text.find(target).unwrap();
+            assert_eq!(diagnostic.range, spring_text::range(text, from, from + target.len()));
+            assert_eq!(diagnostic.message, format!("Cannot find `{target}`"));
+        }
+        for r in spec::refs(text) {
+            assert_eq!(&text[r.at..r.end], r.target);
+        }
+
+        for end in (0..=text.len()).filter(|&e| text.is_char_boundary(e)) {
+            let prefix = &text[..end];
+            for r in spec::refs(prefix) {
+                let _ = &prefix[r.at..r.end];
+            }
+            if let Some(spec) = spec::parse(prefix) {
+                spec::ref_targets(prefix, &spec.keys);
+            }
+        }
+        assert!(text.len() > text.chars().count());
+    }
+
+    #[test]
+    fn json_refs_with_escaped_slashes_resolve() {
+        let host = MockHost::install();
+        let text = "{\n  \"openapi\": \"3.0.0\",\n  \"paths\": { \"\\/pets\": { \"get\": { \"operationId\": \"a\", \"responses\": { \"200\": {\n    \"$ref\": \"#\\/components\\/schemas\\/Pet\" } } } } },\n  \"components\": { \"schemas\": { \"Pet\": {}, \"Bad\": { \"$ref\": \"#\\/components\\/schemas\\/Nope\" } } }\n}\n";
+        host.add_file("/project/api.json", text);
+        OpenApi::default().handle_events(&[Event::FileOpened("/project/api.json".into())], &host.invocation());
+        let found = &host.diagnostics()["/project/api.json"];
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].message, "Cannot find `#/components/schemas/Nope`");
+
+        let json_doc = Document { path: "/project/api.json".into(), language: "json".into(), version: 1, text: text.into() };
+        let target = OpenApi::default().definition(&json_doc, at(text, "schemas\\/Pet", 10));
+        assert_eq!(target.len(), 1);
+        let ops = spec::operations(text, &spec::parse(text).unwrap().keys);
+        assert_eq!(ops[0].path, "/pets");
+    }
+
+    #[test]
+    fn non_spec_json_is_ignored() {
+        let host = MockHost::install();
+        let documents = [
+            ("/project/package.json", "{\n  \"name\": \"x\",\n  \"dependencies\": { \"a\": \"1\" },\n  \"r\": { \"$ref\": \"#/nope\" }\n}\n"),
+            ("/project/tsconfig.json", "{ \"compilerOptions\": { \"strict\": true } }"),
+            ("/project/nested.json", "{ \"info\": { \"openapi\": \"3.0.0\" }, \"r\": { \"$ref\": \"#/nope\" } }"),
+        ];
+        for (path, text) in documents {
+            host.add_file(path, text);
+            OpenApi::default().handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+            assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty), "{path}");
+
+            let json_doc = Document { path: path.into(), language: "json".into(), version: 1, text: text.into() };
+            let cursor = text.find("#/nope").map_or(1, |i| i + 3);
+            assert!(OpenApi::default().completion(&json_doc, position(text, cursor), None).is_empty(), "{path}");
+            assert!(OpenApi::default().definition(&json_doc, position(text, cursor)).is_empty(), "{path}");
+            assert!(OpenApi::default().code_actions(&json_doc, Range::default()).is_empty(), "{path}");
+        }
     }
 
     #[test]

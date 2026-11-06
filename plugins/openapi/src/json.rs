@@ -16,12 +16,58 @@ pub fn keys(text: &str) -> Vec<Key> {
     scanner.keys
 }
 
-fn unescape(raw: &str) -> String {
+pub fn unescape(raw: &str) -> String {
     if !raw.contains('\\') {
         return raw.to_owned();
     }
 
-    raw.replace("\\\"", "\"").replace("\\/", "/").replace("\\\\", "\\")
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('b') => out.push('\u{8}'),
+            Some('f') => out.push('\u{c}'),
+            Some('u') => out.push(unicode(&mut chars)),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+
+    out
+}
+
+fn hex4(chars: &mut std::str::Chars) -> Option<u32> {
+    let digits: String = chars.clone().take(4).collect();
+    let code = u32::from_str_radix(&digits, 16).ok().filter(|_| digits.len() == 4)?;
+    chars.nth(3);
+    Some(code)
+}
+
+fn unicode(chars: &mut std::str::Chars) -> char {
+    let Some(high) = hex4(chars) else {
+        return '\u{fffd}';
+    };
+    if !(0xD800..0xDC00).contains(&high) {
+        return char::from_u32(high).unwrap_or('\u{fffd}');
+    }
+
+    let mut ahead = chars.clone();
+    let low = (ahead.next() == Some('\\') && ahead.next() == Some('u')).then(|| hex4(&mut ahead)).flatten();
+    match low.filter(|l| (0xDC00..0xE000).contains(l)) {
+        Some(low) => {
+            *chars = ahead;
+            char::from_u32(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)).unwrap_or('\u{fffd}')
+        }
+        None => '\u{fffd}',
+    }
 }
 
 impl Scanner<'_> {
