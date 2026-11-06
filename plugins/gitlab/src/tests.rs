@@ -1087,6 +1087,49 @@ mod ci_tests {
     }
 
     #[test]
+    fn multiline_flow_stages_is_quiet() {
+        assert!(codes("stages: [build,\n  test]\njob:\n  stage: test\n").is_empty());
+    }
+
+    #[test]
+    fn aliased_stages_is_quiet() {
+        assert!(codes("x: &s [a]\nstages: *s\njob:\n  stage: a\n").is_empty());
+    }
+
+    #[test]
+    fn tagged_stages_is_quiet() {
+        assert!(codes("stages: !reference [.s]\njob:\n  stage: a\n").is_empty());
+    }
+
+    #[test]
+    fn flow_mapping_job_counts_as_defined() {
+        assert!(codes("build: {script: [make]}\ntest:\n  needs: [build]\n  extends: build\n").is_empty());
+    }
+
+    #[test]
+    fn tagged_job_counts_as_defined() {
+        assert!(codes("build: !reference [.x, y]\ntest:\n  needs: [build]\n").is_empty());
+    }
+
+    #[test]
+    fn review_thread_and_ci_problem_on_same_path_are_both_published() {
+        let host = setup();
+        host.set_vcs_status(Some(status("feature")));
+        host.add_file("/project/.gitlab-ci.yml", "job:\n  needs: [ghost]\n");
+        host.on_fetch(|r| match r.url.contains("/discussions") {
+            true => ok(&DISCUSSIONS.replace("src/a.rs", ".gitlab-ci.yml")),
+            false => gitlab(r),
+        });
+        let path = "/project/.gitlab-ci.yml";
+
+        GitLab::default().handle_events(&[Event::VcsChanged("/project".into()), Event::FileOpened(path.into())], &host.invocation());
+
+        let messages: Vec<_> = host.diagnostics()[path].iter().map(|d| d.code.clone()).collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages.contains(&Some("undefined-job".to_owned())));
+    }
+
+    #[test]
     fn is_ci_path_matches_the_icon_patterns() {
         for path in [".gitlab-ci.yml", "/p/.gitlab-ci.yaml", "/p/team.gitlab-ci.yml", "x.gitlab-ci.yaml", "/p/a.gitlab-ci.deploy.yml", "a.gitlab-ci.b.yaml"] {
             assert!(ci::is_ci_path(path), "{path}");

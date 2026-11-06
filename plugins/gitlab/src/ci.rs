@@ -40,6 +40,8 @@ pub struct Job {
 pub struct CiFile {
     pub jobs: Vec<Job>,
     pub stages: Option<Vec<Ref>>,
+    /// `stages:` is present but not fully read (alias, tag, multi-line flow list): its contents are unknown.
+    pub stages_unknown: bool,
     pub has_include: bool,
 }
 
@@ -353,14 +355,20 @@ pub fn parse(text: &str) -> CiFile {
                 let body = &ls[i + 1..end];
 
                 match name {
-                    "stages" => file.stages = Some(refs(text, items(text, body, rest), false)),
+                    "stages" => {
+                        let listed = items(text, body, rest);
+                        let count = listed.len();
+                        let stages = refs(text, listed, false);
+                        file.stages_unknown = count == 0 || stages.len() != count;
+                        file.stages = Some(stages);
+                    }
                     "include" => file.has_include = true,
                     _ if RESERVED.contains(&name) => {}
-                    _ if rest.1.is_empty() || rest.1.starts_with(['&', '*']) => {
+                    _ => {
                         let range = ls[i].start + key.start..ls[i].start + key.end;
-                        file.jobs.push(parse_job(text, name, range, body));
+                        let block = rest.1.is_empty() || rest.1.starts_with(['&', '*']);
+                        file.jobs.push(parse_job(text, name, range, if block { body } else { &[] }));
                     }
-                    _ => {}
                 }
             }
         }
@@ -378,6 +386,7 @@ pub fn check(file: &CiFile) -> Vec<Finding> {
     let mut out = Vec::new();
     let defined: HashSet<&str> = file.jobs.iter().map(|j| j.name.as_str()).collect();
     let stages: Option<HashSet<&str>> = match &file.stages {
+        Some(_) if file.stages_unknown => None,
         Some(stages) => Some(stages.iter().map(|s| s.name.as_str()).collect()),
         None if file.has_include => None,
         None => Some(DEFAULT_STAGES.into()),
