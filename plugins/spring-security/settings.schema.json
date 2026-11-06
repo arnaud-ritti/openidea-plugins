@@ -5,6 +5,11 @@
       "title": "Warn about request matchers placed after anyRequest() and narrower matchers shadowed by an earlier broader one",
       "default": true
     },
+    "springSecurity.checkPathPatterns": {
+      "type": "boolean",
+      "title": "Warn about a ** before the last segment of request matcher path patterns (rejected by PathPatternParser)",
+      "default": true
+    },
     "springSecurity.checkDebug": {
       "type": "boolean",
       "title": "Warn when security debug logging is enabled (@EnableWebSecurity(debug = true), WebSecurity.debug(true), <debug/>)",
