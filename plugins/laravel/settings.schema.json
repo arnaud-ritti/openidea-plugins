@@ -25,6 +25,11 @@
       "title": "Public directory that asset() paths start from (project-relative)",
       "default": "public"
     },
+    "controllersNamespace": {
+      "type": "string",
+      "title": "Namespace that 'Name@action' controller strings resolve in",
+      "default": "App\\Http\\Controllers"
+    },
     "reportUnknownComponents": {
       "type": "boolean",
       "title": "Report <x-\u2026> Blade components that have no file or class",

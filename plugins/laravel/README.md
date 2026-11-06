@@ -68,6 +68,24 @@ in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
   `'UserController@index'` becomes `[UserController::class, 'index']` when the
   file is in `App\Http\Controllers` or already imports the class (no import is
   added); in a `.blade.php` file `{{ $x }}` and `{!! $x !!}` toggle.
+- More intentions (⌥⏎), each editing the open file only:
+  - Blade `class="btn btn-primary"` becomes `@class(['btn', 'btn-primary'])`, and
+    `class="btn {{ $size }}"` becomes `@class(['btn', $size])` (not offered with
+    `{!! !!}`, `@if`/`@php`, a single quote, an empty value or an existing `@class`).
+  - "Convert all validation rules in this array to arrays": every `'a|b'` of the
+    array that can be converted (at least two; `regex:` and non-string items stay).
+  - "Convert all controller strings in this file": every `'Name@action'` and
+    `Route::resource('x', 'Name')` string whose class is in the controllers
+    namespace or imported (at least two). A single `Route::resource` string
+    converts to `Name::class`.
+  - `'exists:users,id'`, `'unique:users,email'` (at most two arguments),
+    `'in:a,b'` and `'not_in:a,b'` in a rule list become `Rule::exists(...)`,
+    `Rule::unique(...)`, `Rule::in([...])`, `Rule::notIn([...])` with the
+    `Illuminate\Validation\Rule` import (not offered when another `Rule` is imported).
+  - `Route::`, `Auth::`, `Str::` and the other core facades get their `use` line
+    when the file has a namespace and does not import the name.
+- Setting `controllersNamespace` (default `App\Http\Controllers`): the namespace
+  that `'Name@action'` strings resolve in.
 - Gutter: `view()` → view file; controller method → its route; view → views
   extending or including it and the controllers rendering it; `@section` →
   parent section and the views filling it; `@push` ↔ `@stack`.

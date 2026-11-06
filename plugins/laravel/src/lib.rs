@@ -669,7 +669,8 @@ impl Providers for Main {
             }));
         }
 
-        found.extend(actions::rewrites(&doc.path, language, &doc.text, offset).into_iter().map(|rewrite| CodeAction {
+        let controllers_namespace = host::setting_string("controllersNamespace").filter(|namespace| !namespace.is_empty()).unwrap_or_else(|| "App\\Http\\Controllers".into());
+        found.extend(actions::rewrites(&doc.path, language, &doc.text, offset, &controllers_namespace).into_iter().map(|rewrite| CodeAction {
             title: rewrite.title,
             kind: Some(rewrite.kind.into()),
             preferred: false,

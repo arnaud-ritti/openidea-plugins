@@ -1428,3 +1428,253 @@ fn order_by_keeps_double_quotes() {
     let text = "<?php\n$a = Post::orderBy(\"updated_at\", \"desc\")->get();\n";
     assert_eq!(order_by_fix(text, "orderBy(\"updated_at\""), "<?php\n$a = Post::latest(\"updated_at\")->get();\n");
 }
+
+fn apply_titled(plugin: &mut Main, path: &str, language: &str, text: &str, marker: &str, title: &str) -> String {
+    let at = text.find(marker).unwrap() + 1;
+    let position = text::position(text, at);
+    let action = plugin.code_actions(&doc(path, language, text), Range::new(position, position)).into_iter().find(|a| a.title == title).unwrap_or_else(|| panic!("no action {title}"));
+    let mut edits: Vec<_> = action.edits[0].1.iter().map(|e| (text::offset(text, e.range.start).unwrap(), text::offset(text, e.range.end).unwrap(), e.text.clone())).collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut result = text.to_owned();
+    for (start, end, replacement) in edits {
+        result.replace_range(start..end, &replacement);
+    }
+    result
+}
+
+const NEW_BLADE: &str = "/project/resources/views/a.blade.php";
+const NEW_RULES: &str = "/project/app/A.php";
+
+#[test]
+fn static_class_attribute_converts_to_class_directive() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<div class=\"btn btn-primary\">x</div>\n";
+    let result = apply_titled(&mut plugin, NEW_BLADE, "blade", text, "btn-primary", "Convert class attribute to @class");
+    assert_eq!(result, "<div @class(['btn', 'btn-primary'])>x</div>\n");
+}
+
+#[test]
+fn class_attribute_with_echo_wraps_into_class_directive() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<div id=\"a\" class=\"btn {{ $size }}\">x</div>\n";
+    let result = apply_titled(&mut plugin, NEW_BLADE, "blade", text, "btn {{", "Wrap class attribute in @class");
+    assert_eq!(result, "<div id=\"a\" @class(['btn', $size])>x</div>\n");
+}
+
+#[test]
+fn class_directive_is_not_offered_for_conditionals_unescaped_echo_or_existing_directive() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    for text in [
+        "<div class=\"btn @if($a) on @endif\">x</div>\n",
+        "<div class=\"btn {!! $size !!}\">x</div>\n",
+        "<div @class(['a']) class=\"btn\">x</div>\n",
+        "<div class=\"\">x</div>\n",
+        "<div class=\"it's\">x</div>\n",
+        "<div class=\"btn-{{ $size }}\">x</div>\n",
+    ] {
+        let titles = rewrite_titles(&mut plugin, NEW_BLADE, "blade", text, "class=");
+        assert!(titles.iter().all(|t| !t.contains("@class")), "{text}");
+    }
+    let php = "<?php\n$x = '<div class=\"btn\">';\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/A.php", "php", php, "btn").is_empty());
+}
+
+#[test]
+fn all_rule_strings_in_an_array_convert_together() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['a' => 'required|email', 'b' => 'max:5|min:1', 'c' => 'required']);\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "required|email", "Convert all validation rules in this array to arrays");
+    assert_eq!(result, "<?php\n$request->validate(['a' => ['required', 'email'], 'b' => ['max:5', 'min:1'], 'c' => 'required']);\n");
+}
+
+#[test]
+fn all_rules_is_not_offered_for_a_single_convertible_item() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['a' => 'required|email', 'b' => 'required', 'c' => ['x', 'y']]);\n";
+    let titles = rewrite_titles(&mut plugin, NEW_RULES, "php", text, "required|email");
+    assert!(!titles.contains(&"Convert all validation rules in this array to arrays".to_owned()));
+}
+
+#[test]
+fn all_rules_leaves_regex_and_non_convertible_items_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['a' => 'required|email', 'r' => 'regex:/a|b/', 'b' => 'max:5|min:1', 'n' => ['x', 'y|z'], 'o' => Rule::in(['a'])]);\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "required|email", "Convert all validation rules in this array to arrays");
+    assert_eq!(
+        result,
+        "<?php\n$request->validate(['a' => ['required', 'email'], 'r' => 'regex:/a|b/', 'b' => ['max:5', 'min:1'], 'n' => ['x', 'y|z'], 'o' => Rule::in(['a'])]);\n"
+    );
+}
+
+const NEW_ROUTES: &str = "/project/routes/web.php";
+
+#[test]
+fn all_controller_strings_convert_together() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse App\\Http\\Controllers\\UserController;\nuse App\\Http\\Controllers\\PostController;\nRoute::get('/u', 'UserController@index');\nRoute::post('/p', 'PostController@store');\nRoute::get('/x', 'Missing@index');\n";
+    let result = apply_titled(&mut plugin, NEW_ROUTES, "php", text, "UserController@", "Convert all controller strings in this file");
+    assert_eq!(
+        result,
+        "<?php\nuse App\\Http\\Controllers\\UserController;\nuse App\\Http\\Controllers\\PostController;\nRoute::get('/u', [UserController::class, 'index']);\nRoute::post('/p', [PostController::class, 'store']);\nRoute::get('/x', 'Missing@index');\n"
+    );
+}
+
+#[test]
+fn resource_controller_string_converts_to_class_constant() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse App\\Http\\Controllers\\PhotoController;\nuse App\\Http\\Controllers\\UserController;\nRoute::resource('photos', 'PhotoController');\nRoute::get('/u', 'UserController@index');\n";
+    let result = apply_titled(&mut plugin, NEW_ROUTES, "php", text, "PhotoController'", "Convert controller string to ::class");
+    assert!(result.contains("Route::resource('photos', PhotoController::class);"));
+    let all = apply_titled(&mut plugin, NEW_ROUTES, "php", text, "PhotoController'", "Convert all controller strings in this file");
+    assert!(all.contains("Route::resource('photos', PhotoController::class);"));
+    assert!(all.contains("[UserController::class, 'index']"));
+}
+
+#[test]
+fn all_controllers_is_quiet_for_unresolvable_names() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse App\\Http\\Controllers\\UserController;\nRoute::get('/u', 'UserController@index');\nRoute::get('/x', 'Other@index');\nRoute::resource('p', 'Gone');\n";
+    let titles = rewrite_titles(&mut plugin, NEW_ROUTES, "php", text, "UserController@");
+    assert!(!titles.contains(&"Convert all controller strings in this file".to_owned()));
+}
+
+#[test]
+fn controllers_namespace_setting_is_used() {
+    let host = MockHost::install();
+    host.set_setting("controllersNamespace", r#""App\\Http\\Controllers\\Api""#);
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App\\Http\\Controllers\\Api;\nRoute::get('/u', 'UserController@index');\nRoute::get('/v', 'PostController@index');\n";
+    assert_eq!(rewrite_titles(&mut plugin, NEW_ROUTES, "php", text, "UserController@").len(), 2);
+
+    let default = "<?php\nnamespace App\\Http\\Controllers;\nRoute::get('/u', 'UserController@index');\n";
+    assert!(rewrite_titles(&mut plugin, NEW_ROUTES, "php", default, "UserController@").is_empty());
+}
+
+#[test]
+fn rule_object_replaces_exists_unique_in_and_not_in() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let base = "<?php\nnamespace App\\Http\\Requests;\n\nuse Foo\\Bar;\n\n$request->validate(['f' => ['required', 'EXPR']]);\n";
+    let cases = [
+        ("exists:users,id", "Convert to Rule::exists('users', 'id')", "Rule::exists('users', 'id')"),
+        ("unique:users,email", "Convert to Rule::unique('users', 'email')", "Rule::unique('users', 'email')"),
+        ("exists:users", "Convert to Rule::exists('users')", "Rule::exists('users')"),
+        ("in:a,b", "Convert to Rule::in(['a', 'b'])", "Rule::in(['a', 'b'])"),
+        ("not_in:a,b", "Convert to Rule::notIn(['a', 'b'])", "Rule::notIn(['a', 'b'])"),
+    ];
+    for (rule, title, call) in cases {
+        let text = base.replace("EXPR", rule);
+        let result = apply_titled(&mut plugin, NEW_RULES, "php", &text, rule, title);
+        assert_eq!(result, "<?php\nnamespace App\\Http\\Requests;\n\nuse Foo\\Bar;\nuse Illuminate\\Validation\\Rule;\n\n$request->validate(['f' => ['required', EXPR]]);\n".replace("EXPR", call));
+    }
+}
+
+#[test]
+fn rule_object_is_not_offered_for_extra_arguments_or_pipe_strings() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    for text in [
+        "<?php\n$request->validate(['f' => ['required', 'unique:users,email,5']]);\n",
+        "<?php\n$request->validate(['f' => ['required', 'exists:users,id|max:5']]);\n",
+        "<?php\n$request->validate(['f' => 'exists:users,id']);\n",
+        "<?php\n$request->validate(['f' => ['required', 'max:5']]);\n",
+    ] {
+        let titles: Vec<String> = ["required", "users", "max:5"].into_iter().filter(|m| text.contains(m)).flat_map(|m| rewrite_titles(&mut plugin, NEW_RULES, "php", text, m)).collect();
+        assert!(titles.iter().all(|t| !t.starts_with("Convert to Rule::")), "{text}");
+    }
+}
+
+#[test]
+fn rule_object_is_not_offered_when_another_rule_class_is_imported() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse Acme\\Rule;\n\n$request->validate(['f' => ['required', 'in:a,b']]);\n";
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "in:a").iter().all(|t| !t.starts_with("Convert to Rule::")));
+}
+
+#[test]
+fn rule_object_reuses_an_existing_import() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nuse Illuminate\\Validation\\Rule;\n\n$request->validate(['f' => ['required', 'in:a,b']]);\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "in:a", "Convert to Rule::in(['a', 'b'])");
+    assert_eq!(result, "<?php\nuse Illuminate\\Validation\\Rule;\n\n$request->validate(['f' => ['required', Rule::in(['a', 'b'])]]);\n");
+}
+
+#[test]
+fn root_facade_adds_the_import() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App;\n\nclass A\n{\n    function f() { return Route::get('/'); }\n}\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "Route::", "Import Illuminate\\Support\\Facades\\Route");
+    assert_eq!(result, "<?php\nnamespace App;\n\nuse Illuminate\\Support\\Facades\\Route;\n\nclass A\n{\n    function f() { return Route::get('/'); }\n}\n");
+
+    let text = "<?php\nnamespace App;\n\nclass A { function f() { return Str::of('a'); } }\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "Str::", "Import Illuminate\\Support\\Str");
+    assert!(result.contains("use Illuminate\\Support\\Str;"));
+}
+
+#[test]
+fn root_facade_import_is_quiet_when_the_name_is_imported_elsewhere() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    for import in ["Illuminate\\Support\\Facades\\Route", "Acme\\Route", "Acme\\Thing as Route"] {
+        let text = format!("<?php\nnamespace App;\n\nuse {import};\n\nclass A {{ function f() {{ return Route::get('/'); }} }}\n");
+        assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", &text, "Route::get").is_empty(), "{import}");
+    }
+}
+
+#[test]
+fn root_facade_is_quiet_without_a_namespace_or_for_unknown_aliases() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    assert!(rewrite_titles(&mut plugin, NEW_ROUTES, "php", "<?php\nRoute::get('/');\n", "Route::").is_empty());
+    let text = "<?php\nnamespace App;\n\nFoo::bar(); \\Route::get('/'); $x->Route::y;\n";
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "Foo::").is_empty());
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "Route::get").is_empty());
+}
+
+#[test]
+fn rewrites_applied_twice_do_not_duplicate_imports() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App;\n\n$request->validate(['f' => ['required', 'in:a,b', 'not_in:c']]);\n";
+    let once = apply_titled(&mut plugin, NEW_RULES, "php", text, "in:a", "Convert to Rule::in(['a', 'b'])");
+    let twice = apply_titled(&mut plugin, NEW_RULES, "php", &once, "not_in:c", "Convert to Rule::notIn(['c'])");
+    assert_eq!(twice.matches("use Illuminate\\Validation\\Rule;").count(), 1);
+    assert!(twice.contains("Rule::in(['a', 'b'], ") || twice.contains("Rule::in(['a', 'b'])"));
+    assert!(twice.contains("Rule::notIn(['c'])"));
+
+    let facade = apply_titled(&mut plugin, NEW_RULES, "php", "<?php\nnamespace App;\n\nRoute::get('/');\nRoute::post('/');\n", "Route::get", "Import Illuminate\\Support\\Facades\\Route");
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", &facade, "Route::post").is_empty());
+}
+
+#[test]
+fn new_rewrites_survive_multibyte_text_and_crlf() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\r\nnamespace App;\r\n\r\nuse Foo\\Bar;\r\n\r\n// é日本\r\n$request->validate(['f' => ['é', 'in:a,b']]);\r\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "in:a", "Convert to Rule::in(['a', 'b'])");
+    assert_eq!(result, "<?php\r\nnamespace App;\r\n\r\nuse Foo\\Bar;\r\nuse Illuminate\\Validation\\Rule;\r\n\r\n// é日本\r\n$request->validate(['f' => ['é', Rule::in(['a', 'b'])]]);\r\n");
+
+    let text = "<?php\r\nnamespace App;\r\n\r\n// é日本\r\nRoute::get('é');\r\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "Route::", "Import Illuminate\\Support\\Facades\\Route");
+    assert_eq!(result, "<?php\r\nnamespace App;\r\n\r\nuse Illuminate\\Support\\Facades\\Route;\r\n\r\n// é日本\r\nRoute::get('é');\r\n");
+
+    let blade = "<p>é日本</p>\r\n<div class=\"a {{ $é }}\">x</div>\r\n";
+    let result = apply_titled(&mut plugin, NEW_BLADE, "blade", blade, "a {{", "Wrap class attribute in @class");
+    assert_eq!(result, "<p>é日本</p>\r\n<div @class(['a', $é])>x</div>\r\n");
+
+    let rules = "<?php\r\n$request->validate(['é' => 'a|b', 'x' => 'c|d']);\r\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", rules, "a|b", "Convert all validation rules in this array to arrays");
+    assert_eq!(result, "<?php\r\n$request->validate(['é' => ['a', 'b'], 'x' => ['c', 'd']]);\r\n");
+}
