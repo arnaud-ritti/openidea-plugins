@@ -171,15 +171,28 @@ pub fn is_conditional(annotations: &[Annotation]) -> bool {
     annotations.iter().any(|a| a.name.starts_with("Conditional"))
 }
 
+/// `Outer.Inner` for a nested type: Spring's default bean name derives from it.
+pub fn short_name(file: &java::JavaFile, ty: &java::TypeDecl) -> String {
+    let mut parts = vec![ty.name.as_str()];
+    let mut outer = ty.outer;
+    while let Some(i) = outer {
+        let Some(t) = file.types.get(i) else { break };
+        parts.push(t.name.as_str());
+        outer = t.outer;
+    }
+    parts.reverse();
+    parts.join(".")
+}
+
 /// A class bean's declaration from its annotations; `None` when it isn't one.
-pub fn class_bean(text: &str, name: &str, at: usize, annotations: &[Annotation], repository: bool) -> Option<Bean> {
+pub fn class_bean(text: &str, name: &str, short_name: &str, at: usize, annotations: &[Annotation], repository: bool) -> Option<Bean> {
     let stereotype = annotations.iter().find(|a| java::STEREOTYPES.contains(&a.name.as_str()));
     if stereotype.is_none() && !repository {
         return None;
     }
     let explicit = stereotype.and_then(|a| strings_of(a, &["value"]).pop());
     Some(Bean {
-        name: explicit.unwrap_or_else(|| decapitalize(name)),
+        name: explicit.unwrap_or_else(|| decapitalize(short_name)),
         aliases: Vec::new(),
         kind: stereotype.map_or("Spring Data repository".into(), |a| format!("@{}", a.name)),
         ty: name.to_owned(),
@@ -227,7 +240,7 @@ fn java_model(text: &str) -> FileModel {
             range: range(text, t.at, t.at + t.name.len()),
         });
         let repository = is_repository(&t.kind, supers.iter().map(String::as_str));
-        let bean = if t.kind == "@interface" { None } else { class_bean(text, &t.name, t.at, &t.annotations, repository) };
+        let bean = if t.kind == "@interface" { None } else { class_bean(text, &t.name, &short_name(&file, t), t.at, &t.annotations, repository) };
         let class_profiles = bean.as_ref().map(|b| b.profiles.clone()).unwrap_or_default();
         let class_conditional = bean.as_ref().is_some_and(|b| b.conditional);
         let owner = bean.map(|b| {

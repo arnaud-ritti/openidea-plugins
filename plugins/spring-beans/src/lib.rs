@@ -36,6 +36,8 @@ const MAX_CLASSES: usize = 200;
 struct World<'a> {
     files: &'a BTreeMap<String, FileModel>,
     supers: BTreeMap<&'a str, Vec<&'a str>>,
+    /// Every file has been read at least once.
+    complete: bool,
 }
 
 type Found<'a> = (&'a str, &'a Bean);
@@ -48,7 +50,7 @@ impl<'a> World<'a> {
                 supers.entry(&t.name).or_default().extend(t.supers.iter().map(String::as_str));
             }
         }
-        Self { files: index.files(), supers }
+        Self { files: index.files(), supers, complete: index.complete() }
     }
 
     fn beans(&self) -> impl Iterator<Item = Found<'a>> + '_ {

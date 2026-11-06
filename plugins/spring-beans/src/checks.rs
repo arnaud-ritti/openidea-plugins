@@ -2,7 +2,7 @@
 //! check stays quiet when an annotation comes from a library other than
 //! Spring or a name is not a plain string literal.
 
-use crate::model::{Bean, class_bean, method_bean};
+use crate::model::{Bean, class_bean, method_bean, short_name};
 use crate::{World, file_name};
 use openidea_plugin::{Severity, host};
 use spring_text::finding::Finding;
@@ -21,6 +21,7 @@ const PROXY_ANNOTATIONS: [&str; 11] = [
     "PostFilter",
     "Retryable",
 ];
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
 const SPRING_PACKAGES: [&str; 3] = ["org.springframework.", "jakarta.transaction.", "javax.transaction."];
 
 /// Which groups of checks run.
@@ -86,7 +87,7 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         if groups.self_invocation {
             self_invocation(file, ty, text, &mut out);
         }
-        if groups.unresolved_references {
+        if groups.unresolved_references && world.complete {
             depends_on(file, ty, world, &mut out);
             component_scan(file, ty, world, &mut out);
         }
@@ -217,6 +218,41 @@ fn profiles_overlap(a: &[String], b: &[String]) -> bool {
     a.iter().any(|p| b.contains(p))
 }
 
+fn is_test_source(path: &str) -> bool {
+    path.contains("/src/test/")
+}
+
+/// The nearest ancestor directory holding a build file.
+fn build_module(path: &str) -> Option<String> {
+    let project = spring_text::index::project_of(path)?;
+    let root = project.root().ok()?;
+    let mut dir = path;
+    while let Some((parent, _)) = dir.rsplit_once('/') {
+        if !parent.starts_with(&root) {
+            return None;
+        }
+        if BUILD_FILES.iter().any(|f| project.read_file(&format!("{parent}/{f}")).is_ok()) {
+            return Some(parent.to_owned());
+        }
+        dir = parent;
+    }
+    None
+}
+
+/// Beans only clash inside one build module and one source set (main or test).
+fn same_scope(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if is_test_source(a) != is_test_source(b) {
+        return false;
+    }
+    match (build_module(a), build_module(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    }
+}
+
 fn static_name(annotations: &[Annotation], keys: &[&str]) -> bool {
     !annotations.iter().any(|a| is_dynamic(a, keys))
 }
@@ -224,7 +260,7 @@ fn static_name(annotations: &[Annotation], keys: &[&str]) -> bool {
 fn duplicate_names(path: &str, file: &JavaFile, ty: &TypeDecl, text: &str, world: &World, out: &mut Vec<Finding>) {
     let mut mine: Vec<(Bean, usize, usize)> = Vec::new();
     let stereotype = STEREOTYPES.iter().any(|s| spring(file, &ty.annotations, s).is_some());
-    let class = stereotype.then(|| class_bean(text, &ty.name, ty.at, &ty.annotations, false)).flatten();
+    let class = stereotype.then(|| class_bean(text, &ty.name, &short_name(file, ty), ty.at, &ty.annotations, false)).flatten();
     let class_profiles = class.as_ref().map(|b| b.profiles.clone()).unwrap_or_default();
     let class_conditional = class.as_ref().is_some_and(|b| b.conditional);
     if let Some(bean) = class.filter(|_| static_name(&ty.annotations, &["value"])) {
@@ -245,7 +281,12 @@ fn duplicate_names(path: &str, file: &JavaFile, ty: &TypeDecl, text: &str, world
             let same = *other_path == path && other.range == bean.range;
             let overload = *other_path == path && other.kind == "@Bean" && bean.kind == "@Bean" && other.name == bean.name;
             let shares_name = names_of(other).any(|n| names_of(&bean).any(|m| m == n));
-            !same && !overload && !other.conditional && shares_name && profiles_overlap(&bean.profiles, &other.profiles)
+            !same
+                && !overload
+                && !other.conditional
+                && shares_name
+                && profiles_overlap(&bean.profiles, &other.profiles)
+                && same_scope(path, other_path)
         });
         let Some((other_path, other)) = clash else { continue };
         out.push(Finding::new(

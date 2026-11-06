@@ -874,3 +874,74 @@ fn unresolved_reference_ranges_use_utf16_columns() {
     let d = &host.diagnostics()[&document.path][0];
     assert_eq!((d.range.start.character, d.range.end.character), (12, 18));
 }
+
+fn findings_in(host: &MockHost, n: &mut Navigator, relative: &str, text: &str) -> Vec<(String, String)> {
+    host.add_file(relative, text);
+    let document = doc(&format!("/project/{relative}"), text);
+    n.line_markers(&document);
+    host.diagnostics()
+        .get(&document.path)
+        .into_iter()
+        .flatten()
+        .filter(|d| d.code.as_deref() == Some("duplicate-bean-name"))
+        .map(|d| (d.code.clone().unwrap(), d.message.clone()))
+        .collect()
+}
+
+#[test]
+fn nested_configuration_classes_do_not_clash() {
+    let host = setup();
+    let mut n = Navigator::default();
+    let nested = |outer: &str| format!("class {outer} {{\n    @Configuration\n    static class Config {{}}\n}}\n");
+    let a = nested("ATests");
+    let b = nested("BTests");
+    assert!(findings_in(&host, &mut n, "src/test/java/com/acme/ATests.java", &a).is_empty());
+    assert!(findings_in(&host, &mut n, "src/test/java/com/acme/BTests.java", &b).is_empty());
+    assert!(findings_in(&host, &mut n, "src/test/java/com/acme/ATests.java", &a).is_empty());
+}
+
+#[test]
+fn same_simple_name_in_different_modules_is_quiet() {
+    let host = setup();
+    host.add_file("one/pom.xml", "<project/>");
+    host.add_file("two/pom.xml", "<project/>");
+    let app = "@SpringBootApplication\nclass Application {}\n";
+    let mut n = Navigator::default();
+    findings_in(&host, &mut n, "two/src/main/java/org/two/Application.java", app);
+    assert!(findings_in(&host, &mut n, "one/src/main/java/org/one/Application.java", app).is_empty());
+    assert!(findings_in(&host, &mut n, "two/src/main/java/org/two/Application.java", app).is_empty());
+}
+
+#[test]
+fn same_name_in_main_and_test_source_sets_is_quiet() {
+    let host = setup();
+    let service = "@Service(\"dispatcher\")\nclass Dispatcher {}\n";
+    let mut n = Navigator::default();
+    findings_in(&host, &mut n, "src/test/java/com/acme/Dispatcher.java", service);
+    assert!(findings_in(&host, &mut n, "src/main/java/com/acme/Dispatcher.java", service).is_empty());
+}
+
+#[test]
+fn same_name_in_same_module_and_source_set_still_warns() {
+    let host = setup();
+    host.add_file("one/pom.xml", "<project/>");
+    let service = "@Service(\"dispatcher\")\nclass Dispatcher {}\n";
+    let other = "@Service(\"dispatcher\")\nclass Other {}\n";
+    let mut n = Navigator::default();
+    findings_in(&host, &mut n, "one/src/main/java/org/one/other/Other.java", other);
+    assert_eq!(findings_in(&host, &mut n, "one/src/main/java/org/one/Dispatcher.java", service).len(), 1);
+}
+
+#[test]
+fn unresolved_references_are_quiet_on_a_partial_index() {
+    let host = setup();
+    host.set_setting("springBeans.checkUnresolvedReferences", "true");
+    let text = "@Service\n@DependsOn(\"cache\")\nclass A {}\n";
+    let mut index = spring_text::index::Index::new(GLOBS, model::parse);
+    index.update(&format!("{ROOT}/Subject.java"), text);
+    assert!(!index.complete());
+    let file = java::parse(text);
+    let world = World::new(&index);
+    let found = checks::check_java(&format!("{ROOT}/Subject.java"), &file, text, &world, checks::Groups::from_settings());
+    assert!(found.iter().all(|f| f.code != "unresolved-depends-on"));
+}
