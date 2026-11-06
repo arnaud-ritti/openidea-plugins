@@ -31,6 +31,16 @@ pub struct Versioning {
     pub configured: bool,
     pub custom_parser: bool,
     pub inserter: bool,
+    pub custom_view_resolver: bool,
+}
+
+/// Sources that bring their own view resolution, so a view name may be served by something other than a template file.
+const VIEW_RESOLVER_MARKERS: [&str; 5] =
+    ["ViewResolver", "configureViewResolvers", "TilesConfigurer", "AbstractView", "ViewResolverRegistry"];
+
+/// Whether every source was read and none brings a view resolver of its own.
+pub fn project_has_default_views(complete: bool, files: &[Versioning]) -> bool {
+    complete && files.iter().all(|f| !f.custom_view_resolver)
 }
 
 /// Reads one source or `application*` file: `None` for a source that does not mention API versioning.
@@ -40,7 +50,14 @@ pub fn versioning(path: &str, text: &str) -> Option<Versioning> {
     let configured = lower.contains("apiversion") || lower.contains("api-version") || lower.contains("api_version");
     let custom_parser = text.contains("ApiVersionParser");
     let inserter = text.contains("ApiVersionInserter");
-    (is_config_file || configured).then_some(Versioning { is_config_file, configured, custom_parser, inserter })
+    let custom_view_resolver = !is_config_file && VIEW_RESOLVER_MARKERS.iter().any(|m| text.contains(m));
+    (is_config_file || configured || custom_view_resolver).then_some(Versioning {
+        is_config_file,
+        configured,
+        custom_parser,
+        inserter,
+        custom_view_resolver,
+    })
 }
 
 /// Whether the project configures versioning; `None` unless every file was read and an `application*` file exists.
@@ -125,7 +142,7 @@ fn invalid_api_version(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
 fn init_binder_signature(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     for m in ty.methods().filter(|m| m.annotation("InitBinder").is_some() && from_spring(file, "InitBinder")) {
         let end = m.at + m.name.len();
-        if m.ty.as_ref().is_some_and(|t| t.name != "void") {
+        if m.ty.as_ref().is_some_and(|t| t.name != "void" && t.name != "Unit") {
             out.push(
                 Finding::new(m.at, end, "init-binder-signature", "@InitBinder methods must return void; Spring throws IllegalStateException otherwise.")
                     .with_severity(Severity::Error),
@@ -187,11 +204,11 @@ mod tests {
         assert_eq!(none("/p/application.properties", "spring.mvc.apiversion.use.header=X"), Some(true));
         assert_eq!(none("/p/A.java", "class A {}"), None);
         assert_eq!(none("/p/C.java", "class C implements WebMvcConfigurer { void configureApiVersioning(ApiVersionConfigurer c) {} }"), Some(true));
-        let cfg = Versioning { is_config_file: true, configured: false, custom_parser: false, inserter: false };
+        let cfg = Versioning { is_config_file: true, ..Versioning::default() };
         assert_eq!(project_versioning(true, &[cfg]), Some(false));
         assert_eq!(project_versioning(false, &[cfg]), None);
-        assert_eq!(project_versioning(true, &[Versioning { is_config_file: false, configured: true, custom_parser: false, inserter: false }]), None);
-        assert_eq!(project_versioning(true, &[cfg, Versioning { is_config_file: false, configured: true, custom_parser: false, inserter: false }]), Some(true));
+        assert_eq!(project_versioning(true, &[Versioning { configured: true, ..Versioning::default() }]), None);
+        assert_eq!(project_versioning(true, &[cfg, Versioning { configured: true, ..Versioning::default() }]), Some(true));
     }
 
     const BINDERS: &str = "import org.springframework.web.bind.annotation.InitBinder;\n@Controller\nclass A {\n    @InitBinder\n    String bad(WebDataBinder b) { return \"\"; }\n    @InitBinder(\"x\")\n    void none(Locale l) {}\n    @InitBinder\n    void ok(WebDataBinder b, WebRequest r) {}\n}\n";
@@ -213,6 +230,14 @@ mod tests {
         assert!(run(&foreign, None).is_empty());
         let fixed = "class A {\n    @InitBinder\n    void ok(DataBinder b) {}\n}\n";
         assert!(run(fixed, None).is_empty());
+    }
+
+    #[test]
+    fn kotlin_init_binder_and_versions_are_checked() {
+        let text = "import org.springframework.web.bind.annotation.*\n@RestController\nclass A {\n    @InitBinder\n    fun bad(b: WebDataBinder): String = \"\"\n    @InitBinder\n    fun unit(b: WebDataBinder): Unit {}\n    @GetMapping(\"/a\", version = \"latest\")\n    fun a() {}\n}\n";
+        let found = check_java(&spring_text::kotlin::parse(text), Some(true), Some(true), ALL);
+        let codes: Vec<_> = found.iter().map(|f| (f.code, text[f.start..f.end].to_owned())).collect();
+        assert_eq!(codes, [("init-binder-signature", "bad".to_owned()), ("invalid-api-version", "\"latest\"".to_owned())]);
     }
 
     #[test]
@@ -252,6 +277,19 @@ mod tests {
         assert!(run_with(&bad, Some(true), None, ALL).is_empty());
         let foreign = bad.replace("org.springframework.web.bind.annotation.*", "org.acme.GetMapping");
         assert!(run(&foreign, Some(true)).is_empty());
+    }
+
+    #[test]
+    fn custom_view_resolvers_are_seen_in_sources_only() {
+        let mark = |p, t| versioning(p, t).is_some_and(|v| v.custom_view_resolver);
+        assert!(mark("/p/C.java", "class C implements WebMvcConfigurer { void configureViewResolvers(ViewResolverRegistry r) {} }"));
+        assert!(!mark("/p/application.yml", "ViewResolver: x"));
+        assert!(!mark("/p/A.java", "class A {}"));
+        let plain = Versioning::default();
+        let custom = Versioning { custom_view_resolver: true, ..plain };
+        assert!(project_has_default_views(true, &[plain]));
+        assert!(!project_has_default_views(true, &[plain, custom]));
+        assert!(!project_has_default_views(false, &[plain]));
     }
 
     #[test]

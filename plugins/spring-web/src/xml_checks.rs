@@ -7,9 +7,18 @@ use spring_text::xml_check::{Rule, check as run};
 
 const NAMESPACE: &str = "http://www.springframework.org/schema/mvc";
 
+const BOOLEAN: &[&str] = &["true", "false"];
+
 const RULES: &[Rule] = &[
     Rule { required: &["path"], ..Rule::new("view-controller") },
-    Rule { required: &["path", "redirect-url"], ..Rule::new("redirect-view-controller") },
+    Rule {
+        required: &["path", "redirect-url"],
+        enums: &[("context-relative", BOOLEAN), ("keep-query-params", BOOLEAN)],
+        ..Rule::new("redirect-view-controller")
+    },
+    Rule { enums: &[("ignore-default-model-on-redirect", BOOLEAN)], ..Rule::new("annotation-driven") },
+    Rule { enums: &[("register-defaults", BOOLEAN)], ..Rule::new("message-converters") },
+    Rule { required: &["resource-cache"], enums: &[("resource-cache", BOOLEAN)], ..Rule::new("resource-chain") },
     Rule { required: &["path", "status-code"], ..Rule::new("status-controller") },
     Rule { required: &["mapping", "location"], ..Rule::new("resources") },
     Rule { required: &["path"], ..Rule::new("mapping") },
@@ -32,13 +41,16 @@ mod tests {
   <mvc:resources mapping="/x/**"/>
   <mvc:interceptors><mvc:interceptor><mvc:mapping path="/a"/><mvc:exclude-mapping/></mvc:interceptor></mvc:interceptors>
   <mapping/>
+  <mvc:annotation-driven ignore-default-model-on-redirect="yes"/>
+  <mvc:redirect-view-controller path="/a" redirect-url="/b" keep-query-params="${keep}"/>
+  <mvc:resource-chain/>
 </beans>"#;
 
     #[test]
     fn reports_missing_attributes_of_mvc_elements_only() {
         let found: Vec<_> = check(XML).into_iter().map(|f| (f.code, XML[f.start..f.end].to_owned(), f.message)).collect();
         let names: Vec<_> = found.iter().map(|f| f.1.as_str()).collect();
-        assert_eq!(names, ["mvc:view-controller", "mvc:resources", "mvc:exclude-mapping"]);
+        assert_eq!(names, ["mvc:view-controller", "mvc:resources", "mvc:exclude-mapping", "yes", "mvc:resource-chain"]);
         assert!(found[1].2.contains("\"location\""));
     }
 }

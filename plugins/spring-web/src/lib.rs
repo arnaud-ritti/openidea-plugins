@@ -330,9 +330,6 @@ impl Default for WebTools {
 impl WebTools {
     /// The findings of the text checks over a Java document.
     fn checked(&mut self, doc: &Document) -> Vec<Diagnostic> {
-        if is_kotlin(&doc.path) {
-            return Vec::new();
-        }
         let groups = checks::Groups::from_settings();
         let (configured, standard_parser) = match self.versioning.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
             Some(index) if groups.api_versioning || groups.version_format => {
@@ -341,7 +338,7 @@ impl WebTools {
             }
             _ => (None, None),
         };
-        checks::check_java(&java::parse(&doc.text), configured, standard_parser, groups)
+        checks::check_java(&parse_source(&doc.path, &doc.text), configured, standard_parser, groups)
             .iter()
             .map(|f| f.diagnostic(&doc.text))
             .collect()
@@ -444,9 +441,14 @@ impl WebTools {
 }
 
 impl WebTools {
-    /// Opt-in hints for view names no template answers, once the project has templates at all.
+    /// Hints for view names no template answers, once the project has templates, every source was read and none brings a view resolver of its own.
     fn unresolved_views(&mut self, doc: &Document) -> Vec<Diagnostic> {
-        if !host::setting_bool("springWeb.reportUnresolvedViews").unwrap_or(false) {
+        if !host::setting_bool("springWeb.reportUnresolvedViews").unwrap_or(true) {
+            return Vec::new();
+        }
+        let Some(index) = self.versioning.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        let files: Vec<_> = index.iter().map(|(_, v)| *v).collect();
+        if !checks::project_has_default_views(index.complete(), &files) {
             return Vec::new();
         }
         let views = self.views(doc);
@@ -565,41 +567,110 @@ const MAPPING_SNIPPETS: [(&str, &str, &str); 6] = [
     ("reqm", "@RequestMapping(value = \"${1:/}\", method = RequestMethod.${2:GET})", "handle"),
 ];
 
-/// The mapping snippets whose abbreviation starts with the word before `offset`, inside a controller's class body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    TopLevel,
+    Controller,
+    Class,
+}
+
+/// Abbreviation, scope, detail, Java body and Kotlin body of the structure snippets.
+const STRUCTURE_SNIPPETS: [(&str, Scope, &str, &str, &str); 6] = [
+    (
+        "restc",
+        Scope::TopLevel,
+        "Spring REST controller",
+        "@RestController\n@RequestMapping(\"${1:/}\")\npublic class ${2:Name}Controller {\n    $0\n}",
+        "@RestController\n@RequestMapping(\"${1:/}\")\nclass ${2:Name}Controller {\n    $0\n}",
+    ),
+    (
+        "ctrl",
+        Scope::TopLevel,
+        "Spring controller",
+        "@Controller\n@RequestMapping(\"${1:/}\")\npublic class ${2:Name}Controller {\n    $0\n}",
+        "@Controller\n@RequestMapping(\"${1:/}\")\nclass ${2:Name}Controller {\n    $0\n}",
+    ),
+    (
+        "advice",
+        Scope::TopLevel,
+        "Spring controller advice",
+        "@RestControllerAdvice\npublic class ${1:Global}ExceptionHandler {\n    $0\n}",
+        "@RestControllerAdvice\nclass ${1:Global}ExceptionHandler {\n    $0\n}",
+    ),
+    (
+        "exh",
+        Scope::Controller,
+        "Spring exception handler",
+        "@ExceptionHandler(${1:Exception}.class)\npublic ${2:ResponseEntity<?>} ${3:handle}(${1:Exception} ${4:e}) {\n    $0\n}",
+        "@ExceptionHandler(${1:Exception}::class)\nfun ${3:handle}(${4:e}: ${1:Exception}) {\n    $0\n}",
+    ),
+    (
+        "initb",
+        Scope::Controller,
+        "Spring init binder",
+        "@InitBinder\npublic void ${1:initBinder}(WebDataBinder binder) {\n    $0\n}",
+        "@InitBinder\nfun ${1:initBinder}(binder: WebDataBinder) {\n    $0\n}",
+    ),
+    (
+        "router",
+        Scope::Class,
+        "Spring functional router bean",
+        "@Bean\npublic RouterFunction<ServerResponse> ${1:routes}(${2:Handler handler}) {\n    return RouterFunctions.route()\n        .GET(\"${3:/}\", handler::${4:list})\n        .build();\n}",
+        "@Bean\nfun ${1:routes}(${2:handler: Handler}) = router {\n    GET(\"${3:/}\", handler::${4:list})\n}",
+    ),
+];
+
+fn word_before(text: &str, offset: usize) -> &str {
+    text[..offset].rsplit(|c: char| !c.is_alphanumeric()).next().unwrap_or("")
+}
+
+/// The snippets whose abbreviation starts with the word before `offset`: mapping methods and handlers
+/// in a controller body, routers in any class body, controller classes outside every type.
 fn mapping_snippets(doc: &Document, offset: usize) -> Vec<CompletionItem> {
-    let before = &doc.text[..offset];
-    let word = before.rsplit(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+    let word = word_before(&doc.text, offset);
     if word.is_empty() {
         return Vec::new();
     }
     let file = parse_source(&doc.path, &doc.text);
-    let in_controller = file.types.iter().any(|t| {
-        t.has(&["Controller", "RestController"])
-            && t.start < offset
-            && offset < t.end
-            && !t.methods().any(|m| m.body.is_some_and(|(from, to)| from < offset && offset < to))
-    });
-    if !in_controller {
-        return Vec::new();
-    }
+    let in_class_body = |t: &spring_text::java::TypeDecl| {
+        t.start < offset && offset < t.end && !t.methods().any(|m| m.body.is_some_and(|(from, to)| from < offset && offset < to))
+    };
+    let in_controller = file.types.iter().any(|t| t.has(&["Controller", "RestController"]) && in_class_body(t));
+    let in_class = file.types.iter().any(|t| in_class_body(t));
+    let top_level = !file.types.iter().any(|t| t.start < offset && offset < t.end);
     let kotlin = is_kotlin(&doc.path);
-    MAPPING_SNIPPETS
-        .iter()
-        .filter(|(abbreviation, _, _)| abbreviation.starts_with(word))
-        .map(|(abbreviation, annotation, name)| {
+    let mut items = Vec::new();
+    if in_controller {
+        for (abbreviation, annotation, name) in MAPPING_SNIPPETS.iter().filter(|(a, _, _)| a.starts_with(word)) {
             let handler = if kotlin {
                 format!("fun ${{3:{name}}}(${{4}}) {{\n    $0\n}}")
             } else {
                 format!("public ${{3:ResponseEntity<?>}} ${{4:{name}}}(${{5}}) {{\n    $0\n}}")
             };
-            CompletionItem {
+            items.push(CompletionItem {
                 detail: Some("Spring request mapping".into()),
                 insert_text: format!("{annotation}\n{handler}"),
                 snippet: true,
                 ..CompletionItem::new(abbreviation, CompletionKind::Snippet)
-            }
-        })
-        .collect()
+            });
+        }
+    }
+    for (abbreviation, scope, detail, java, kotlin_body) in STRUCTURE_SNIPPETS.iter().filter(|(a, ..)| a.starts_with(word)) {
+        let fits = match scope {
+            Scope::TopLevel => top_level,
+            Scope::Controller => in_controller,
+            Scope::Class => in_class,
+        };
+        if fits {
+            items.push(CompletionItem {
+                detail: Some((*detail).into()),
+                insert_text: (if kotlin { kotlin_body } else { java }).to_string(),
+                snippet: true,
+                ..CompletionItem::new(abbreviation, CompletionKind::Snippet)
+            });
+        }
+    }
+    items
 }
 
 const STATIC_EXTENSIONS: [&str; 13] =
@@ -776,7 +847,32 @@ fn curl_command(endpoint: &endpoints::Endpoint, base: &str) -> String {
     }
 }
 
+fn http_request(endpoint: &endpoints::Endpoint, base: &str) -> String {
+    let verb = if endpoint.verb.is_empty() { "GET" } else { endpoint.verb.as_str() };
+    let url = format!("{}/{}", base.trim().trim_end_matches('/'), endpoint.path.trim_start_matches('/'));
+    format!("### {verb} {}\n{verb} {url}\n", endpoint.path)
+}
+
+fn http_file_name(endpoint: &endpoints::Endpoint) -> String {
+    let verb = if endpoint.verb.is_empty() { "ANY" } else { endpoint.verb.as_str() };
+    let slug: String = endpoint.path.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let slug = slug.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+    format!("{}-{}.http", verb.to_ascii_lowercase(), if slug.is_empty() { "root" } else { slug.as_str() })
+}
+
 impl WebTools {
+    /// Writes `http/<verb>-<path>.http` under the project root and opens it; an existing file is opened untouched.
+    fn open_http_request(&self, project: &Project, request: &str, file: &str) -> Result<(), Error> {
+        let path = format!("{}/http/{file}", project.root()?.trim_end_matches('/'));
+        if project.read_file(&path).is_err() {
+            let out = host::run_process("tee", &[path.clone()], Some(request))?;
+            if out.status != Some(0) {
+                return Err(Error::Invalid(format!("tee failed: {}", out.stderr.trim())));
+            }
+        }
+        host::open_location(&path, 0, 0)
+    }
+
     fn endpoint_of(&mut self, project: &Project, key: &str) -> Option<endpoints::Endpoint> {
         let mut parts = key.splitn(4, ':');
         let (Some("e"), Some(line), Some(column), Some(path)) = (parts.next(), parts.next(), parts.next(), parts.next())
@@ -835,7 +931,7 @@ impl Views for WebTools {
 
 impl Plugin for WebTools {
     fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
-        if id != "copy-endpoint-curl" {
+        if id != "copy-endpoint-curl" && id != "create-endpoint-http" {
             return Err(Error::NotFound(format!("command {id}")));
         }
         let Some(project) = ctx.project() else { return Ok(None) };
@@ -843,6 +939,24 @@ impl Plugin for WebTools {
         let Some(base) = host::input("Base URL of the running application", Some(DEFAULT_BASE_URL))? else {
             return Ok(None);
         };
+        if id == "create-endpoint-http" {
+            let request = http_request(&endpoint, &base);
+            match self.open_http_request(&project, &request, &http_file_name(&endpoint)) {
+                Err(Error::Denied(_)) => match host::copy_to_clipboard(&request) {
+                    Err(Error::Denied(_)) => host::notify(
+                        NotificationLevel::Warning,
+                        "Spring Web",
+                        "Creating the .http file needs the tee process capability; copying it needs the clipboard capability.",
+                    ),
+                    result => {
+                        result?;
+                        host::notify(NotificationLevel::Info, "Spring Web", "The tee capability is not granted; the request is on the clipboard.");
+                    }
+                },
+                result => result?,
+            }
+            return Ok(None);
+        }
         match host::copy_to_clipboard(&curl_command(&endpoint, &base)) {
             Err(Error::Denied(_)) => host::notify(
                 NotificationLevel::Warning,
@@ -1139,6 +1253,25 @@ class UserApiTests {
     }
 
     #[test]
+    fn offers_controller_and_router_snippets_by_scope() {
+        let _host = MockHost::install();
+        let mut tools = WebTools::default();
+        let labels = |tools: &mut WebTools, path: &str, text: &str, line: u32, column: u32| -> Vec<String> {
+            let d = Document { path: format!("/project/{path}"), language: "java".into(), version: 1, text: text.into() };
+            tools.completion(&d, Position::new(line, column), None).into_iter().map(|i| i.label).collect()
+        };
+        assert_eq!(labels(&mut tools, "A.java", "restc\n", 0, 5), ["restc"]);
+        assert_eq!(labels(&mut tools, "A.java", "class A {\n}\nrestc\n", 2, 5), ["restc"]);
+        assert!(labels(&mut tools, "A.java", "class A {\n    restc\n}\n", 1, 9).is_empty());
+        assert_eq!(labels(&mut tools, "A.java", "class A {\n    rout\n}\n", 1, 8), ["router"]);
+        assert_eq!(labels(&mut tools, "A.java", "@Controller\nclass A {\n    exh\n}\n", 2, 7), ["exh"]);
+        assert!(labels(&mut tools, "A.java", "class A {\n    exh\n}\n", 1, 7).is_empty());
+        let kotlin = Document { path: "/project/A.kt".into(), language: "kotlin".into(), version: 1, text: "class A {\n    router\n}\n".into() };
+        let items = tools.completion(&kotlin, Position::new(1, 10), None);
+        assert!(items[0].insert_text.contains("= router {"));
+    }
+
+    #[test]
     fn url_markers_can_be_turned_off() {
         let host = MockHost::install();
         host.set_setting("springWeb.showUrlMarkers", "false");
@@ -1181,21 +1314,36 @@ class UserApiTests {
     }
 
     #[test]
-    fn unresolved_views_are_a_hint_only_when_asked() {
+    fn unresolved_views_are_a_hint_without_a_custom_resolver() {
         let host = web_project();
+        let mut tools = WebTools::default();
+        let src = CONTROLLER.replace("return \"home\";", "return \"nowhere\";");
+        let d = doc("src/main/java/com/acme/web/UserController.java", &src);
+        let path = "/project/src/main/java/com/acme/web/UserController.java";
+        let unresolved = |host: &MockHost| {
+            host.diagnostics().get(path).map_or(0, |d| d.iter().filter(|p| p.code.as_deref() == Some("unresolved-view")).count())
+        };
+        tools.line_markers(&d);
+        let hints: Vec<_> = host.diagnostics()[path].iter().filter(|p| p.code.as_deref() == Some("unresolved-view")).cloned().collect();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].severity, Severity::Hint);
+        assert!(hints[0].message.contains("nowhere"));
+
+        host.set_setting("springWeb.reportUnresolvedViews", "false");
+        tools.line_markers(&d);
+        assert_eq!(unresolved(&host), 0);
+    }
+
+    #[test]
+    fn unresolved_views_are_quiet_with_a_custom_view_resolver() {
+        let host = web_project();
+        host.add_file("src/main/java/com/acme/Cfg.java", "class Cfg { ViewResolver r() { return null; } }");
         let mut tools = WebTools::default();
         let src = CONTROLLER.replace("return \"home\";", "return \"nowhere\";");
         let d = doc("src/main/java/com/acme/web/UserController.java", &src);
         tools.line_markers(&d);
         let path = "/project/src/main/java/com/acme/web/UserController.java";
         assert!(host.diagnostics().get(path).is_none_or(|d| d.iter().all(|p| p.code.as_deref() != Some("unresolved-view"))));
-
-        host.set_setting("springWeb.reportUnresolvedViews", "true");
-        tools.line_markers(&d);
-        let hints: Vec<_> = host.diagnostics()[path].iter().filter(|p| p.code.as_deref() == Some("unresolved-view")).cloned().collect();
-        assert_eq!(hints.len(), 1);
-        assert_eq!(hints[0].severity, Severity::Hint);
-        assert!(hints[0].message.contains("nowhere"));
     }
 
     #[test]
@@ -1372,6 +1520,34 @@ class Users {
         assert_eq!(curl_of(&host, &mut tools, "POST /api/users").as_deref(), Some("curl -X POST 'http://localhost:9000/api/users'"));
         host.answer_next_prompt(Some(&["http://h"]));
         assert_eq!(curl_of(&host, &mut tools, "GET /api/users").as_deref(), Some("curl 'http://h/api/users'"));
+    }
+
+    #[test]
+    fn creates_an_http_file_for_an_endpoint() {
+        let host = MockHost::install().with_capabilities(&["project.read", "process:tee", "clipboard"]);
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        let written = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let sink = written.clone();
+        host.on_process("tee", move |_, stdin| {
+            *sink.borrow_mut() = stdin.unwrap_or_default().to_owned();
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+        });
+        let mut tools = WebTools::default();
+        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
+        let key = items.iter().find(|i| i.label == "POST /api/users").unwrap().key.clone();
+        host.answer_next_prompt(Some(&["http://localhost:9000"]));
+        tools.run_command("create-endpoint-http", &host.invocation(), Some(&key)).unwrap();
+        let run = host.process_runs().remove(0);
+        assert_eq!(run.args, ["/project/http/post-api-users.http"]);
+        assert_eq!(*written.borrow(), "### POST /api/users\nPOST http://localhost:9000/api/users\n");
+        assert_eq!(host.opened_locations()[0].0, run.args[0]);
+    }
+
+    #[test]
+    fn http_file_names_come_from_verb_and_path() {
+        let endpoint = |verb: &str, path: &str| endpoints::Endpoint { verb: verb.into(), path: path.into(), range: Range::default(), handler: None };
+        assert_eq!(http_file_name(&endpoint("GET", "/users/{id}")), "get-users-id.http");
+        assert_eq!(http_file_name(&endpoint("", "/")), "any-root.http");
     }
 
     #[test]

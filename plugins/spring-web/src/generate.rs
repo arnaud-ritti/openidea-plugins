@@ -2,7 +2,7 @@ use openidea_plugin::providers::CodeAction;
 use openidea_plugin::text::offset;
 use openidea_plugin::{Range, TextEdit};
 use spring_text::java::{self, JavaFile, TypeDecl};
-use spring_text::range;
+use spring_text::{parse_source, range};
 
 const ANNOTATION_PACKAGE: &str = "org.springframework.web.bind.annotation";
 
@@ -12,6 +12,7 @@ struct Template {
     signature: &'static str,
     name: &'static str,
     mark: &'static str,
+    kotlin_mark: &'static str,
 }
 
 const REQUEST_MAPPING: Template = Template {
@@ -20,6 +21,7 @@ const REQUEST_MAPPING: Template = Template {
     signature: "@RequestMapping(\"/path\")",
     name: "handle",
     mark: "public String handle() {",
+    kotlin_mark: "fun handle(): String {",
 };
 
 const EXCEPTION_HANDLER: Template = Template {
@@ -28,14 +30,16 @@ const EXCEPTION_HANDLER: Template = Template {
     signature: "@ExceptionHandler(Exception.class)",
     name: "handleException",
     mark: "public String handleException(Exception exception) {",
+    kotlin_mark: "fun handleException(exception: Exception): String {",
 };
 
 pub fn actions(doc_path: &str, text: &str, selection: Range) -> Vec<CodeAction> {
-    if !doc_path.ends_with(".java") {
+    let kotlin = doc_path.ends_with(".kt");
+    if !kotlin && !doc_path.ends_with(".java") {
         return Vec::new();
     }
 
-    let file = java::parse(text);
+    let file = parse_source(doc_path, text);
     let Some(caret) = offset(text, selection.start) else {
         return Vec::new();
     };
@@ -64,7 +68,7 @@ pub fn actions(doc_path: &str, text: &str, selection: Range) -> Vec<CodeAction> 
             title: template.title.into(),
             kind: Some("refactor".into()),
             preferred: false,
-            edits: vec![(doc_path.to_owned(), edits(&file, decl, text, template))],
+            edits: vec![(doc_path.to_owned(), edits(&file, decl, text, template, kotlin))],
             data: None,
         })
         .collect()
@@ -82,14 +86,14 @@ fn enclosing_type<'f>(file: &'f JavaFile, text: &str, caret: usize) -> Option<&'
         .min_by_key(|t| t.end - t.start)
 }
 
-fn edits(file: &JavaFile, decl: &TypeDecl, text: &str, template: &Template) -> Vec<TextEdit> {
+fn edits(file: &JavaFile, decl: &TypeDecl, text: &str, template: &Template, kotlin: bool) -> Vec<TextEdit> {
     let mut edits = Vec::new();
-    edits.extend(import_edit(file, text, template.annotation));
-    edits.push(method_edit(decl, text, template));
+    edits.extend(import_edit(file, text, template.annotation, kotlin));
+    edits.push(method_edit(decl, text, template, kotlin));
     edits
 }
 
-fn import_edit(file: &JavaFile, text: &str, annotation: &str) -> Option<TextEdit> {
+fn import_edit(file: &JavaFile, text: &str, annotation: &str, kotlin: bool) -> Option<TextEdit> {
     let qualified = format!("{ANNOTATION_PACKAGE}.{annotation}");
     let wildcard = format!("{ANNOTATION_PACKAGE}.*");
     let imported = file.imports.iter().any(|i| !i.is_static && (i.path == qualified || i.path == wildcard));
@@ -98,31 +102,44 @@ fn import_edit(file: &JavaFile, text: &str, annotation: &str) -> Option<TextEdit
     }
 
     let newline = newline(text);
-    let line = format!("import {qualified};");
+    let line = if kotlin { format!("import {qualified}") } else { format!("import {qualified};") };
+    let end_of = |from: usize| match kotlin {
+        true => Some(line_end(text, from)),
+        false => text[from..].find(';').map(|semicolon| from + semicolon + 1),
+    };
     let after = match file.imports.iter().filter(|i| !i.is_static).chain(file.imports.iter().filter(|i| i.is_static)).max_by_key(|i| i.end) {
-        Some(last) => text[last.end..].find(';').map(|semicolon| last.end + semicolon + 1).map(|at| (at, format!("{newline}{line}"))),
-        None => package_end(text).map(|at| (at, format!("{newline}{newline}{line}"))),
+        Some(last) => end_of(last.end).map(|at| (at, format!("{newline}{line}"))),
+        None => package_end(text, kotlin).map(|at| (at, format!("{newline}{newline}{line}"))),
     };
     let (at, inserted) = after.unwrap_or((0, format!("{line}{newline}{newline}")));
 
     Some(TextEdit { range: range(text, at, at), text: inserted })
 }
 
-fn package_end(text: &str) -> Option<usize> {
+fn line_end(text: &str, from: usize) -> usize {
+    let end = text[from..].find('\n').map_or(text.len(), |n| from + n);
+    text[..end].trim_end_matches('\r').len()
+}
+
+fn package_end(text: &str, kotlin: bool) -> Option<usize> {
     let tokens = java::tokens(text);
     let package = tokens.iter().position(|t| t.s == "package")?;
+    if kotlin {
+        return Some(line_end(text, tokens[package].at));
+    }
 
     tokens[package..].iter().find(|t| t.s == ";").map(|t| t.at + 1)
 }
 
-fn method_edit(decl: &TypeDecl, text: &str, template: &Template) -> TextEdit {
+fn method_edit(decl: &TypeDecl, text: &str, template: &Template, kotlin: bool) -> TextEdit {
     let newline = newline(text);
     let indent = indent(decl, text);
     let body_indent = format!("{indent}{}", indent_unit(&indent));
     let name = free_name(decl, template.name);
-    let mark = template.mark.replace(template.name, &name);
-    let signature = template.signature;
-    let method = format!("{indent}{signature}{newline}{indent}{mark}{newline}{body_indent}return \"\";{newline}{indent}}}{newline}");
+    let mark = if kotlin { template.kotlin_mark } else { template.mark }.replace(template.name, &name);
+    let signature = if kotlin { template.signature.replace(".class)", "::class)") } else { template.signature.to_owned() };
+    let semicolon = if kotlin { "" } else { ";" };
+    let method = format!("{indent}{signature}{newline}{indent}{mark}{newline}{body_indent}return \"\"{semicolon}{newline}{indent}}}{newline}");
 
     let close = decl.end - 1;
     let line_start = text[..close].rfind('\n').map_or(0, |n| n + 1);
@@ -314,9 +331,30 @@ mod tests {
         ));
     }
 
+    const KOTLIN: &str = "package com.acme\n\nimport org.springframework.stereotype.Controller\n\n@Controller\nclass UserController {\n    @GetMapping\n    fun list(): String = \"\"\n\n}\n";
+
     #[test]
-    fn kotlin_file_offers_nothing() {
-        assert!(actions("/p/UserController.kt", CONTROLLER, at(8, 0)).is_empty());
+    fn kotlin_controller_gets_kotlin_methods() {
+        let path = "/p/UserController.kt";
+        let all = actions(path, KOTLIN, at(8, 0));
+        assert_eq!(all.len(), 2);
+        let applied = apply(KOTLIN, &all[0]);
+        assert!(applied.contains("import org.springframework.stereotype.Controller\nimport org.springframework.web.bind.annotation.RequestMapping\n"));
+        assert!(applied.contains("    @RequestMapping(\"/path\")\n    fun handle(): String {\n        return \"\"\n    }\n}"));
+        let handler = apply(KOTLIN, &all[1]);
+        assert!(handler.contains("@ExceptionHandler(Exception::class)\n    fun handleException(exception: Exception): String {"));
+    }
+
+    #[test]
+    fn kotlin_import_goes_after_the_package_line_without_imports() {
+        let bare = "package com.acme\n\n@Controller\nclass A {\n}\n";
+        let applied = apply(bare, &actions("/p/A.kt", bare, at(3, 9))[0]);
+        assert!(applied.starts_with("package com.acme\n\nimport org.springframework.web.bind.annotation.RequestMapping\n\n@Controller"));
+    }
+
+    #[test]
+    fn other_extensions_offer_nothing() {
+        assert!(actions("/p/UserController.groovy", CONTROLLER, at(8, 0)).is_empty());
     }
 
     #[test]

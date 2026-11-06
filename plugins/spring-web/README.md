@@ -12,16 +12,17 @@ Spring MVC helpers for Java controllers in OpenIDEA:
 - **URL markers**: every request mapping and functional route shows its URL (`URL: GET /users/{id}`) in the gutter, unless a link marker already uses the line. Setting `springWeb.showUrlMarkers`. The marker has no target.
 - **URL completion in tests**: inside the URL literal of `mockMvc.perform(get("…"))`, `webTestClient.get().uri("…")` and `restTemplate.getForObject("…")`, the project's mapping paths for that HTTP method are offered. Unverified in the IDE: completion inside string literals.
 - **Static resources**: Go to Definition on a string literal such as `"/css/app.css"` or `"classpath:/static/js/a.js"` opens the file under a `static/`, `public/` or `META-INF/resources/` folder of the project (`css`, `js`, images, fonts, `html`).
-- **Snippets**: in a controller class body, typing `getm`, `postm`, `putm`, `delm`, `patm` or `reqm` offers a mapping method with tab stops (Java and Kotlin).
+- **Snippets** (Java and Kotlin, with tab stops): in a controller class body `getm`, `postm`, `putm`, `delm`, `patm`, `reqm` (mapping methods), `exh` (exception handler) and `initb` (init binder); in any class body `router` (functional `RouterFunction` bean, Kotlin `router {}`); outside every type `restc`, `ctrl` and `advice` (controller classes). Snippets add no imports.
 - **File templates**: New menu entries Spring Controller, REST Controller and Controller Advice, for Java and Kotlin (`$PACKAGE$`, `$NAME$` and `$END$`; the host drops the `package` line when there is no package).
-- **Kotlin controllers**: the path variable checks also run on Kotlin controllers.
-- **Unresolved views** (opt-in, `springWeb.reportUnresolvedViews`, default off): a Hint on a returned view name that no template of the known folders answers, once the project has at least one template.
-- **`<mvc:…>` XML**: required attributes of `view-controller`, `redirect-view-controller`, `status-controller`, `resources`, `mapping` and `exclude-mapping`, from a hard-coded table. Unverified in the IDE: the `xml` provider activation.
+- **Kotlin controllers**: the path variable, API version and `@InitBinder` checks run on Kotlin controllers, and the Add `@RequestMapping`/`@ExceptionHandler` method actions generate Kotlin (`fun handle(): String`, no semicolons in the import).
+- **HTTP request files**: on an endpoint in the Endpoints view, Create HTTP Request File for Endpoint asks for the base URL and writes `http/<verb>-<path>.http` under the project root (`### GET /users` plus the request line) and opens it; an existing file is opened untouched. Needs the optional `process:tee` capability; without it the request goes to the clipboard (optional `clipboard`). Sending a request stays with the IDE's HTTP client. Unverified in the IDE.
+- **Unresolved views** (`springWeb.reportUnresolvedViews`, default on): a Hint on a returned view name that no template of the known folders answers, once the project has at least one template. Quiet until every source was read, and for good when any source mentions `ViewResolver`, `ViewResolverRegistry`, `configureViewResolvers`, `TilesConfigurer` or `AbstractView`, since another resolver may serve the name.
+- **`<mvc:…>` XML**: required attributes of `view-controller`, `redirect-view-controller`, `status-controller`, `resources`, `mapping`, `exclude-mapping` and `resource-chain`, and `true`/`false` values of `annotation-driven` (`ignore-default-model-on-redirect`), `message-converters` (`register-defaults`), `redirect-view-controller` (`context-relative`, `keep-query-params`) and `resource-chain` (`resource-cache`), from a hard-coded table of elements listed completely; the other elements of the namespace are not checked. Unverified in the IDE: the `xml` provider activation.
 - **API version in tests**: a Hint on `apiVersion(...)` in a test when the project mentions neither `ApiVersionInserter` nor `spring.mvc.apiversion.*` in any file.
 
 Matching is text-based. Mapping paths written as constants, concatenations or `${…}` placeholders are not checked.
 
-Not ported: HTTP client (built into OpenIDEA), URL completion in HTTP clients other than the test calls above, model variable resolution in JSP/Thymeleaf templates, static resource references in templates.
+Not ported: HTTP client (built into OpenIDEA), URL completion in HTTP clients other than the test calls above, model variable resolution in JSP/Thymeleaf templates; static resource references inside templates (Java string literals are covered, see above).
 
 ```sh
 cargo test

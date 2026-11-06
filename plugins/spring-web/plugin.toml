@@ -4,7 +4,7 @@ version = "0.1.0" # x-release-please-version
 description = "Spring MVC helpers for Java controllers. Checks @PathVariable parameters against the URI templates of their request mappings, with a quick fix for a misnamed variable, and links the view names a @Controller returns to their template files (Thymeleaf, FreeMarker, Mustache, Pebble, JTE, JSP) with gutter arrows, Go to Definition and completion, and links functional routes (RouterFunctions, Kotlin router DSL) and test URLs to their handlers. Checks the format of API version values, offers actions that add a @RequestMapping or @ExceptionHandler method, and lists every endpoint of the project in an Endpoints tool window. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "Unreleased: URL gutter markers on request mappings, mapping URL completion in test URL literals, Go to Definition from static resource literals, getm/postm/putm/delm/patm/reqm snippets, Controller/REST Controller/Controller Advice file templates (Java, Kotlin), path variable checks for Kotlin controllers, opt-in hint for unresolved view names, <mvc:...> attribute checks, hint for apiVersion() in tests without an ApiVersionInserter. Copy as curl on the Endpoints tree context menu (needs the optional clipboard capability). 0.1.0 (first release): path variable checks with a quick fix, view name navigation and completion, API version format check, generate actions for request mapping and exception handler methods, Endpoints tool window."
+change-notes = "Unreleased: URL gutter markers on request mappings, mapping URL completion in test URL literals, Go to Definition from static resource literals, getm/postm/putm/delm/patm/reqm snippets, Controller/REST Controller/Controller Advice file templates (Java, Kotlin), path variable checks for Kotlin controllers, opt-in hint for unresolved view names, <mvc:...> attribute checks, hint for apiVersion() in tests without an ApiVersionInserter. Copy as curl on the Endpoints tree context menu (needs the optional clipboard capability). Create HTTP Request File for Endpoint writes http/<verb>-<path>.http under the project root (optional process:tee, clipboard fallback); the unresolved-view hint is now on by default but quiet when a source defines its own ViewResolver; controller, REST controller, advice, exception handler, init binder and router snippets; the generate actions, the api-version and @InitBinder checks also run on Kotlin controllers; more <mvc:...> attribute checks. 0.1.0 (first release): path variable checks with a quick fix, view name navigation and completion, API version format check, generate actions for request mapping and exception handler methods, Endpoints tool window."
 categories = ["frameworks"]
 icon = "icon.svg"
 engines.openidea = "^1.2"
@@ -13,7 +13,7 @@ activation = ["on-language:java", "on-language:kotlin", "on-language:xml", "on-v
 
 [capabilities]
 required = ["project.read"]
-optional = ["clipboard"]
+optional = ["clipboard", "process:tee"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers", "code-actions"]
@@ -74,8 +74,19 @@ id = "copy-endpoint-curl"
 title = "Copy Endpoint as curl"
 category = "Spring Web"
 
+[[contributes.commands]]
+id = "create-endpoint-http"
+title = "Create HTTP Request File for Endpoint"
+category = "Spring Web"
+
 [[contributes.menus]]
 menu = "viewItem.context"
 view = "endpoints"
 command = "copy-endpoint-curl"
+when = "viewItemKind == e"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "endpoints"
+command = "create-endpoint-http"
 when = "viewItemKind == e"
