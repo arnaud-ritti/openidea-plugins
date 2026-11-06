@@ -21,7 +21,7 @@ in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
 | Names           | Indexed from                                                                                    | Referenced in                                                                                                                                 |
 | --------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Routes          | `->name()`, `['as' => …]`, `Route::resource` (`only`, `except`, `names`) in `routes/`, with the name prefixes of the groups around them | `route()`, `to_route()`, `redirect()->route()`, `Redirect::route()`, `URL::signedRoute()`, `Route::has()`, `routeIs()`                       |
-| Views           | `resources/views/**` (`.blade.php`, `.php`), `vendor/<package>/` overrides as `package::name`, extra directories from the settings | `view()`, `View::make/exists/first`, `Route::view`, `->view()`, `->markdown()`, `new Content(view:)`; Blade `@extends`, `@include*`, `@each`, `@component` |
+| Views           | `resources/views/**` (`.blade.php`, `.php`), `vendor/<package>/` overrides as `package::name`, extra directories from the settings and from `ide-blade.json` (see below) | `view()`, `View::make/exists/first`, `Route::view`, `->view()`, `->markdown()`, `new Content(view:)`; Blade `@extends`, `@include*`, `@each`, `@component` |
 | Config          | `return [...]` of `config/**/*.php`, nested keys joined with `.`                                | `config()`, `Config::get/has/set/string/…`                                                                                                    |
 | Translations    | `lang/<locale>/<file>.php` (`file.key`), `lang/<locale>.json`, `lang/vendor/<package>/…`, main locale first | `__()`, `trans()`, `trans_choice()`, `Lang::get/has/choice`, Blade `@lang`                                                                  |
 | Env keys        | `.env.example`, `.env` (names only, values are never read)                                      | `env()`, `Env::get()`                                                                                                                         |
@@ -174,10 +174,17 @@ API has no equivalent for (see `LIMITATIONS.md`):
 - Eloquent relations and attributes added by accessors, and `where('column')`
   on a query whose model is lost (`$user->posts()->where(...)`); dropped and
   renamed columns aren't tracked; config `providers` class completion;
-- the _Extract partial view_ refactoring, and the `ide-blade.json` view
-  namespaces;
+- the _Extract partial view_ refactoring;
 - artisan `make:*` commands, which need a name and the plugin API has no
   input dialog.
+
+View namespaces and extra view roots come from `ide-blade.json` at the project
+root or `.idea/ide-blade.json` (both are read when present):
+`{"namespaces": [{"namespace": "admin", "path": "modules/admin/views"}]}`
+indexes those views as `admin::users.index`; a blank or missing `namespace`
+adds a plain view root, an entry without `path` is ignored, and malformed JSON
+is ignored. Limit: only these two paths are read, not an `ide-blade.json`
+elsewhere in the project, and saving either file reindexes.
 
 Vite entries, components and Livewire components are indexed when the project
 is, so a new file under `resources/js` or `resources/css` shows up after a

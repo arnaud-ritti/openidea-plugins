@@ -1710,3 +1710,81 @@ fn rule_object_is_quiet_when_a_rule_class_is_declared_in_the_file() {
     let text = "<?php\nnamespace App;\n\nclass Rule {}\n$request->validate(['f' => ['required', 'in:a,b']]);\n";
     assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "in:a").iter().all(|t| !t.starts_with("Convert to Rule::")));
 }
+
+fn views_of(host: &MockHost) -> Vec<String> {
+    let plugin = activated(host);
+    plugin.index_for("/project/x").unwrap().views.keys().cloned().collect()
+}
+
+#[test]
+fn ide_blade_json_namespace_indexes_views_as_namespaced_names() {
+    let host = MockHost::install();
+    host.add_file("ide-blade.json", r#"{"namespaces": [{"namespace": "admin", "path": "/modules/admin/views/"}]}"#);
+    host.add_file("modules/admin/views/users/index.blade.php", "<p></p>\n");
+
+    assert!(views_of(&host).contains(&"admin::users.index".to_owned()));
+}
+
+#[test]
+fn ide_blade_json_entry_without_namespace_adds_a_view_root() {
+    let host = MockHost::install();
+    host.add_file("ide-blade.json", r#"{"namespaces": [{"namespace": "", "path": "extra/views"}, {"path": "other"}]}"#);
+    host.add_file("extra/views/banner.blade.php", "<p></p>\n");
+    host.add_file("other/footer.blade.php", "<p></p>\n");
+
+    let views = views_of(&host);
+    assert!(views.contains(&"banner".to_owned()) && views.contains(&"footer".to_owned()));
+}
+
+#[test]
+fn ide_blade_json_entries_without_a_path_are_ignored() {
+    assert_eq!(
+        index::ide_blade_namespaces(r#"{"namespaces": [{"namespace": "a"}, {"namespace": "b", "path": "  "}, {"namespace": "c", "path": "ok"}]}"#),
+        [(Some("c".to_owned()), "ok".to_owned())]
+    );
+}
+
+#[test]
+fn ide_blade_json_malformed_is_ignored() {
+    for text in ["", "{", "[1,2", r#"{"namespaces": [{"namespace": "a", "path": "b""#, r#"{"namespaces": 3}"#, "not json"] {
+        assert!(index::ide_blade_namespaces(text).is_empty(), "{text}");
+    }
+
+    let host = MockHost::install();
+    host.add_file("ide-blade.json", "{ nope");
+    assert!(views_of(&host).contains(&"welcome".to_owned()));
+}
+
+#[test]
+fn ide_blade_json_in_a_hidden_directory_is_read() {
+    let host = MockHost::install();
+    host.add_file(".idea/ide-blade.json", r#"{"namespaces": [{"namespace": "hidden", "path": "mods"}]}"#);
+    host.add_file("mods/a.blade.php", "<p></p>\n");
+
+    assert!(views_of(&host).contains(&"hidden::a".to_owned()));
+}
+
+#[test]
+fn ide_blade_json_save_triggers_a_reindex() {
+    for saved in ["ide-blade.json", ".idea/ide-blade.json"] {
+        let host = MockHost::install();
+        host.add_file("mods/a.blade.php", "<p></p>\n");
+        let mut plugin = activated(&host);
+        assert!(!plugin.index_for("/project/x").unwrap().views.contains_key("n::a"));
+
+        host.add_file(saved, r#"{"namespaces": [{"namespace": "n", "path": "mods"}]}"#);
+        plugin.handle_events(&[Event::FileSaved(format!("/project/{saved}"))], &host.invocation());
+        assert!(plugin.index_for("/project/x").unwrap().views.contains_key("n::a"), "{saved}");
+    }
+}
+
+#[test]
+fn missing_file_is_treated_as_absent() {
+    for error in [Error::NotFound("x".into()), Error::Invalid("x".into())] {
+        let roots = index::ide_blade_roots(|_| Err(error.clone()));
+        assert!(roots.is_empty());
+    }
+
+    let host = MockHost::install();
+    assert!(views_of(&host).contains(&"welcome".to_owned()));
+}

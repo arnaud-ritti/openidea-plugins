@@ -38,6 +38,10 @@ const CONTROLLERS_DIRECTORY: &str = "app/Http/Controllers/";
 
 /// Whether a saved file (project-relative) feeds the index.
 fn affects_index(relative: &str) -> bool {
+    if matches!(relative, "ide-blade.json" | ".idea/ide-blade.json") {
+        return true;
+    }
+
     let directory = [
         "routes/",
         "config/",
