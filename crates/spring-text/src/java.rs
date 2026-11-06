@@ -429,6 +429,15 @@ pub struct JavaFile {
 }
 
 impl JavaFile {
+    /// False when the file imports `simple` from a package outside Spring.
+    pub fn from_spring(&self, simple: &str) -> bool {
+        let suffix = format!(".{simple}");
+        self.imports
+            .iter()
+            .filter(|i| !i.is_static && i.path.ends_with(&suffix))
+            .all(|i| i.path.starts_with("org.springframework."))
+    }
+
     /// The fully qualified name of `types[i]` (`com.acme.Outer.Inner`).
     pub fn qualified(&self, i: usize) -> String {
         let mut names = vec![self.types[i].name.as_str()];
@@ -923,6 +932,19 @@ pub fn join_paths(prefix: &str, path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_spring_accepts_spring_wildcard_and_missing_imports() {
+        assert!(parse("package a;\nclass A {}").from_spring("Query"));
+        assert!(parse("import org.springframework.data.jpa.repository.*;\nclass A {}").from_spring("Query"));
+        assert!(parse("import org.springframework.data.jpa.repository.Query;\nclass A {}").from_spring("Query"));
+    }
+
+    #[test]
+    fn from_spring_rejects_foreign_import() {
+        assert!(!parse("import com.acme.Query;\nclass A {}").from_spring("Query"));
+        assert!(parse("import com.acme.Query;\nclass A {}").from_spring("Page"));
+    }
 
     const SRC: &str = r#"package com.acme.web;
 
