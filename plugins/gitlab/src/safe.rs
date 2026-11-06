@@ -35,7 +35,6 @@ pub fn remote_name(s: &str) -> Result<&str, Error> {
     accept("name", s, charset(s, 64, b"_.-") && !s.starts_with(['-', '.']))
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "consumed by the later GitLab tasks"))]
 pub fn username(s: &str) -> Result<&str, Error> {
     accept("username", s, charset(s, 255, b"_.-") && !s.starts_with('-'))
 }

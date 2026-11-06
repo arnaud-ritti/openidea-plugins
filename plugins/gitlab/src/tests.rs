@@ -62,6 +62,11 @@ fn gitlab(req: &HttpRequest) -> Result<HttpResponse, Error> {
             ok(r#"[{"created_at": "2026-01-04", "user": {"username": "bob"}, "state": "reopened"}]"#)
         }
         ("GET", p) if p.starts_with(&format!("{mr}/resource_")) => ok("[]"),
+        ("GET", p) if p.starts_with("/api/v4/projects/g%2Fp/repository/branches?") => ok(r#"[{"name": "main"}, {"name": "develop"}, {"name": "feature"}]"#),
+        ("GET", "/api/v4/users?username=ann") => ok(r#"[{"id": 2, "username": "ann"}]"#),
+        ("GET", "/api/v4/users?username=bob") => ok(r#"[{"id": 3, "username": "bob"}]"#),
+        ("GET", p) if p.starts_with("/api/v4/users?") => ok("[]"),
+        ("POST", "/api/v4/projects/g%2Fp/merge_requests") => ok(r#"{"iid": 8, "title": "Add parser", "web_url": "https://gitlab.com/g/p/-/merge_requests/8"}"#),
         ("POST", "/api/v4/snippets") => ok(r#"{"web_url": "https://gitlab.com/-/snippets/9"}"#),
         ("POST", "/api/v4/projects") => ok(
             r#"{"web_url": "https://gitlab.com/me/project", "http_url_to_repo": "https://gitlab.com/me/project.git",
@@ -680,6 +685,11 @@ fn the_token_never_appears_in_requests_logs_notifications_or_views() {
     views.push(format!("{:?}", plugin.render(DETAILS, None, &host.invocation()).unwrap()));
     views.push(format!("{:?}", plugin.render(PROJECTS, None, &host.invocation()).unwrap()));
     plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(NEW_MR, None, &host.invocation()).unwrap()));
+    plugin.handle(NEW_MR, field("title", "Add parser"), &host.invocation()).unwrap();
+    plugin.handle(NEW_MR, field("assignee", "ann"), &host.invocation()).unwrap();
+    plugin.handle(NEW_MR, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(NEW_MR, None, &host.invocation()).unwrap()));
     host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
     GitLab::default().run_command("share-project", &host.invocation(), None).unwrap();
 
@@ -1461,5 +1471,234 @@ mod worktree_tests {
         let error = GitLab::default().run_command("update-merge-request-branch", &host.invocation(), None).unwrap_err();
 
         assert_eq!(error.to_string(), "Rebase of !7 failed: Rebase failed. Please rebase locally");
+    }
+}
+
+mod merge_request_form_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn on_feature() -> MockHost {
+        let host = setup();
+        host.set_vcs_status(Some(status("feature")));
+        host
+    }
+
+    fn open(host: &MockHost) -> (GitLab, View) {
+        let mut plugin = GitLab::default();
+        let view = plugin.render(NEW_MR, None, &host.invocation()).unwrap();
+        (plugin, view)
+    }
+
+    fn fill(plugin: &mut GitLab, host: &MockHost, fields: &[(&str, &str)]) {
+        for (key, value) in fields {
+            plugin.handle(NEW_MR, field(key, value), &host.invocation()).unwrap();
+        }
+    }
+
+    fn create(plugin: &mut GitLab, host: &MockHost) -> View {
+        plugin.handle(NEW_MR, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
+        plugin.render(NEW_MR, None, &host.invocation()).unwrap()
+    }
+
+    fn created(host: &MockHost) -> Vec<Value> {
+        writes(host)
+            .into_iter()
+            .filter(|(method, url, _)| method == "POST" && url == "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests")
+            .map(|(_, _, body)| serde_json::from_str(&body).unwrap())
+            .collect()
+    }
+
+    fn value<'a>(view: &'a View, key: &str) -> &'a FieldValue {
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+        &fields.iter().find(|f| f.key == key).unwrap().value
+    }
+
+    #[test]
+    fn form_lists_the_branches_and_defaults_the_target_to_the_project_default() {
+        let host = on_feature();
+
+        let (_, view) = open(&host);
+
+        let branches = vec!["main".to_owned(), "develop".to_owned(), "feature".to_owned()];
+        assert_eq!(value(&view, "target-branch"), &FieldValue::Choice(branches, "main".into()));
+        assert_eq!(view.status.as_deref(), Some("feature → main"));
+        assert_eq!(buttons(&view), ["create", "refresh"]);
+        assert!(host.requests().iter().any(|r| r.url.contains("/repository/branches?per_page=100&page=1")));
+    }
+
+    #[test]
+    fn create_posts_title_source_target_and_options() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(
+            &mut plugin,
+            &host,
+            &[
+                ("title", "Add parser"),
+                ("description", "Adds it"),
+                ("target-branch", "develop"),
+                ("source-branch", "evil"),
+                ("squash", "true"),
+                ("remove-source-branch", "true"),
+            ],
+        );
+
+        create(&mut plugin, &host);
+
+        let body = &created(&host)[0];
+        assert_eq!(body["source_branch"], "feature");
+        assert_eq!(body["target_branch"], "develop");
+        assert_eq!(body["title"], "Add parser");
+        assert_eq!(body["description"], "Adds it");
+        assert_eq!(body["squash"], true);
+        assert_eq!(body["remove_source_branch"], true);
+        assert_eq!(body["labels"], "");
+        assert_eq!(body["reviewer_ids"], serde_json::json!([]));
+        assert!(body.get("assignee_id").is_none());
+    }
+
+    #[test]
+    fn draft_prefixes_the_title_with_draft() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("draft", "true")]);
+
+        create(&mut plugin, &host);
+
+        assert_eq!(created(&host)[0]["title"], "Draft: Add parser");
+    }
+
+    #[test]
+    fn assignee_and_reviewers_are_resolved_by_username_lookup() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("assignee", "ann"), ("reviewers", "ann, @bob")]);
+
+        create(&mut plugin, &host);
+
+        let body = &created(&host)[0];
+        assert_eq!(body["assignee_id"], 2);
+        assert_eq!(body["reviewer_ids"], serde_json::json!([2, 3]));
+        assert!(host.requests().iter().any(|r| r.url == "https://gitlab.com/api/v4/users?username=bob"));
+    }
+
+    #[test]
+    fn an_unknown_username_fails_and_creates_nothing() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("reviewers", "ann ghost")]);
+
+        let view = create(&mut plugin, &host);
+
+        assert!(writes(&host).is_empty());
+        assert!(view.status.as_deref().unwrap().contains("ghost"), "{view:?}");
+    }
+
+    #[test]
+    fn usernames_with_url_metacharacters_are_refused_before_any_request() {
+        for (key, name) in [("assignee", "a&b#c/d"), ("assignee", "-x"), ("reviewers", "ann, a&b#c/d"), ("reviewers", "-x")] {
+            let host = on_feature();
+            let (mut plugin, _) = open(&host);
+            fill(&mut plugin, &host, &[("title", "Add parser"), (key, name)]);
+
+            let view = create(&mut plugin, &host);
+
+            assert!(host.requests().iter().all(|r| !r.url.contains("/users")), "{name}");
+            assert!(writes(&host).is_empty(), "{name}");
+            assert!(view.status.as_deref().unwrap().contains("refusing the username"), "{view:?}");
+        }
+    }
+
+    #[test]
+    fn a_target_branch_outside_the_listed_branches_is_ignored() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("target-branch", "develop"), ("target-branch", "main\"}, \"x"), ("target-branch", "--evil")]);
+
+        let view = plugin.render(NEW_MR, None, &host.invocation()).unwrap();
+        create(&mut plugin, &host);
+
+        let FieldValue::Choice(_, chosen) = value(&view, "target-branch") else { panic!("{view:?}") };
+        assert_eq!(chosen, "develop");
+        assert_eq!(created(&host)[0]["target_branch"], "develop");
+    }
+
+    #[test]
+    fn labels_are_trimmed_and_empty_ones_dropped() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("labels", " bug , ,ui ,,")]);
+
+        create(&mut plugin, &host);
+
+        assert_eq!(created(&host)[0]["labels"], "bug,ui");
+    }
+
+    #[test]
+    fn a_detached_head_refuses_and_says_so() {
+        let host = setup();
+        host.set_vcs_status(Some(RepositoryStatus { branch: None, ..status("main") }));
+        let (mut plugin, view) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser")]);
+
+        create(&mut plugin, &host);
+
+        assert_eq!(view.body, Body::Message(DETACHED.into()));
+        assert!(writes(&host).is_empty());
+    }
+
+    #[test]
+    fn an_empty_title_is_refused() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "   ")]);
+
+        let view = create(&mut plugin, &host);
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(view.status.as_deref(), Some("Write a title first. · feature → main"));
+    }
+
+    #[test]
+    fn creating_reports_the_web_url_in_a_notification_and_refreshes_the_list() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser")]);
+
+        let view = create(&mut plugin, &host);
+
+        let notification = &host.notifications()[0];
+        assert_eq!(notification.title, "Merge request created");
+        assert!(notification.body.contains("https://gitlab.com/g/p/-/merge_requests/8"), "{notification:?}");
+        assert!(host.refreshed_views().iter().any(|v| v == LIST));
+        assert_eq!(value(&view, "title"), &FieldValue::Text(String::new()));
+
+        create(&mut plugin, &host);
+        assert_eq!(created(&host).len(), 1, "a second click on the emptied form creates nothing");
+    }
+
+    #[test]
+    fn the_form_is_quiet_when_forms_setting_is_off() {
+        let host = on_feature();
+        host.set_setting("forms", "false");
+
+        let (mut plugin, view) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser")]);
+        create(&mut plugin, &host);
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert!(host.requests().is_empty());
+    }
+
+    #[test]
+    fn without_a_token_the_form_asks_for_one() {
+        let host = MockHost::install().with_capabilities(CAPS);
+        host.set_vcs_status(Some(status("feature")));
+
+        let (_, view) = open(&host);
+
+        assert_eq!(view.body, Body::Message(NO_TOKEN.into()));
+        assert!(host.requests().is_empty());
     }
 }

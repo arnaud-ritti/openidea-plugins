@@ -25,6 +25,11 @@
       "title": "Report $VARIABLE inside single quotes in script lines",
       "default": true
     },
+    "forms": {
+      "type": "boolean",
+      "title": "Show the GitLab form views (Create Merge Request)",
+      "default": true
+    },
     "cloneUsingSsh": {
       "type": "boolean",
       "title": "Clone and share using SSH",

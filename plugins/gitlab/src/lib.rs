@@ -9,6 +9,7 @@
 mod api;
 mod branch;
 mod ci;
+mod forms;
 mod repo;
 mod review;
 mod safe;
@@ -28,6 +29,7 @@ const LIST: &str = "merge-requests";
 const DETAILS: &str = "merge-request";
 const CHANGES: &str = "merge-request-changes";
 const PROJECTS: &str = "gitlab-projects";
+const NEW_MR: &str = "new-merge-request";
 
 const FILTER_KEY: &str = "filter";
 const SELECTED_KEY: &str = "selected";
@@ -36,6 +38,7 @@ const COMMENT_KEY: &str = "comment";
 const AS_DRAFT_KEY: &str = "as-draft";
 const EVENTS_KEY: &str = "show-events";
 
+const DETACHED: &str = "HEAD is detached. Check out a branch first.";
 const NO_TOKEN: &str = "Enter a gitlab.com personal access token (scopes api, read_user) under Settings › Plugins › GitLab.";
 
 /// The original's quick filters, in its order; "assigned" is its default.
@@ -259,6 +262,10 @@ pub struct GitLab {
     projects: Option<Vec<ProjectInfo>>,
     /// The `CONFIRMED` button clicked once, waiting for its second click.
     confirm: Option<String>,
+    new_merge_request: forms::MergeRequestForm,
+    /// The project's branches, the only values the target branch can take.
+    branches: Option<Vec<String>>,
+    form_status: Option<String>,
 }
 
 impl GitLab {
@@ -817,6 +824,10 @@ fn details_fields(details: &Details, thread: Option<&Discussion>, comment: Strin
     fields
 }
 
+fn forms_enabled() -> bool {
+    host::setting_bool("forms").unwrap_or(true)
+}
+
 fn copy_link(url: &str) -> Result<(), Error> {
     match host::copy_to_clipboard(url) {
         Err(Error::Denied(_)) => {
@@ -979,6 +990,74 @@ impl GitLab {
         Ok(Some(format!("Rebase of !{iid} requested.")))
     }
 
+    fn render_new_merge_request(&mut self, ctx: &Invocation) -> Result<View, Error> {
+        let repo = gitlab_project(ctx)?;
+        let source = safe::ref_name(repo.status.branch.as_deref().ok_or(DETACHED)?)?.to_owned();
+        let branches = match self.branches.clone() {
+            Some(branches) => branches,
+            None => {
+                let _task = host::begin_task("Loading branches", false);
+                let branches = api::Project(&repo.path).branches()?;
+                self.branches = Some(branches.clone());
+                branches
+            }
+        };
+
+        if !branches.contains(&self.new_merge_request.target) {
+            let default = self.default_branch(&repo.path)?;
+            self.new_merge_request.target = match branches.contains(&default) {
+                true => default,
+                false => branches.first().cloned().unwrap_or_default(),
+            };
+        }
+
+        let mut view = self.new_merge_request.render(&branches, &source);
+        if let (Some(status), Some(summary)) = (&self.form_status, &mut view.status) {
+            *summary = format!("{status} · {summary}");
+        }
+
+        Ok(view)
+    }
+
+    fn handle_new_merge_request(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        match event {
+            ViewEvent::Field(key, value) => {
+                let listed = self.branches.iter().flatten().any(|b| *b == value);
+                if key != "target-branch" || listed {
+                    self.new_merge_request.field(&key, &value);
+                }
+                return Ok(());
+            }
+            ViewEvent::Button(id) if id == "refresh" => {
+                self.branches = None;
+                self.form_status = None;
+            }
+            ViewEvent::Button(id) if id == "create" => self.form_status = self.create_merge_request(ctx).err().map(|e| e.to_string()),
+            _ => return Ok(()),
+        }
+
+        host::refresh_view(NEW_MR);
+
+        Ok(())
+    }
+
+    fn create_merge_request(&mut self, ctx: &Invocation) -> Result<(), Error> {
+        let repo = gitlab_project(ctx)?;
+        let source = repo.status.branch.as_deref().ok_or(DETACHED)?;
+        let branches = self.branches.as_deref().ok_or("The branches are not loaded. Refresh the form.")?;
+
+        let _task = host::begin_task("Creating merge request", false);
+        let new = self.new_merge_request.request(source, branches)?;
+        let mr = api::Project(&repo.path).create_merge_request(&new)?;
+        host::notify(NotificationLevel::Info, "Merge request created", &format!("!{} {}\n{}", mr.iid, mr.title, mr.web_url));
+
+        self.new_merge_request = forms::MergeRequestForm::default();
+        self.loaded = None;
+        host::refresh_view(LIST);
+
+        Ok(())
+    }
+
     fn check_ci_files(&mut self, events: &[Event], ctx: &Invocation) {
         let Some(project) = ctx.project() else { return };
 
@@ -1057,6 +1136,8 @@ impl Views for GitLab {
             DETAILS => self.render_details(ctx),
             CHANGES => self.render_changes(ctx),
             PROJECTS => self.render_projects(ctx),
+            NEW_MR if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
+            NEW_MR => self.render_new_merge_request(ctx),
             _ => return Err(Error::NotFound(format!("view {view}"))),
         };
 
@@ -1076,6 +1157,7 @@ impl Views for GitLab {
             DETAILS => self.handle_details(event, ctx),
             CHANGES => self.handle_changes(event, ctx),
             PROJECTS => self.handle_projects(event, ctx),
+            NEW_MR if forms_enabled() => self.handle_new_merge_request(event, ctx),
             _ => Ok(()),
         }
     }

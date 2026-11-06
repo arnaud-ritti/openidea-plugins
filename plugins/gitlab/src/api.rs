@@ -203,6 +203,24 @@ pub struct ProjectInfo {
     pub ssh_url_to_repo: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NewMergeRequest {
+    pub source_branch: String,
+    pub target_branch: String,
+    pub title: String,
+    pub description: String,
+    pub assignee_id: Option<u64>,
+    pub reviewer_ids: Vec<u64>,
+    pub labels: Vec<String>,
+    pub squash: bool,
+    pub remove_source_branch: bool,
+}
+
+#[derive(Deserialize)]
+struct Branch {
+    name: String,
+}
+
 /// The `position` of a new diff comment on line `old`/`new` (1-based; both for a context line).
 pub fn diff_position(refs: &DiffRefs, old_path: &str, new_path: &str, old: Option<u32>, new: Option<u32>) -> Value {
     json!({
@@ -406,6 +424,12 @@ pub fn create_snippet(title: &str, file_path: &str, content: &str) -> Result<Str
     snippet["web_url"].as_str().map(str::to_owned).ok_or_else(|| "GitLab returned no snippet URL.".into())
 }
 
+pub fn user_id(username: &str) -> Result<u64, Error> {
+    let users: Vec<User> = parse(rest("GET", &format!("/users?username={}", encode(safe::username(username)?)), None)?)?;
+
+    users.first().map(|u| u.id).ok_or_else(|| format!("No GitLab user is named {username}.").into())
+}
+
 /// Projects the user is a member of, most recently active first.
 pub fn member_projects() -> Result<Vec<ProjectInfo>, Error> {
     paged("/projects?membership=true&simple=true&order_by=last_activity_at", 100)
@@ -435,6 +459,31 @@ impl Project<'_> {
 
     pub fn merge_request(&self, iid: u64) -> Result<MergeRequest, Error> {
         parse(rest("GET", &self.mr(iid, ""), None)?)
+    }
+
+    /// Names a `git` ref can carry; anything else the server lists is dropped.
+    pub fn branches(&self) -> Result<Vec<String>, Error> {
+        let branches: Vec<Branch> = paged(&self.path("/repository/branches"), 100)?;
+
+        Ok(branches.into_iter().map(|b| b.name).filter(|name| safe::ref_name(name).is_ok()).collect())
+    }
+
+    pub fn create_merge_request(&self, new: &NewMergeRequest) -> Result<MergeRequest, Error> {
+        let mut body = json!({
+            "source_branch": new.source_branch,
+            "target_branch": new.target_branch,
+            "title": new.title,
+            "description": new.description,
+            "reviewer_ids": new.reviewer_ids,
+            "labels": new.labels.join(","),
+            "squash": new.squash,
+            "remove_source_branch": new.remove_source_branch,
+        });
+        if let Some(id) = new.assignee_id {
+            body["assignee_id"] = json!(id);
+        }
+
+        parse(rest("POST", &self.path("/merge_requests"), Some(body))?)
     }
 
     pub fn approvals(&self, iid: u64) -> Result<Approvals, Error> {

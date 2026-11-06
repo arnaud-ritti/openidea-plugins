@@ -224,7 +224,7 @@ impl GitLab {
         }
     }
 
-    fn default_branch(&mut self, project: &str) -> Result<String, Error> {
+    pub(crate) fn default_branch(&mut self, project: &str) -> Result<String, Error> {
         if let Some(branch) = self.default_branches.get(project) {
             return Ok(branch.clone());
         }
