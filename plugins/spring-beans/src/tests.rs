@@ -448,3 +448,32 @@ class C {
     let types: Vec<_> = model.beans.iter().skip(1).map(|b| (b.name.as_str(), b.ty.as_str())).collect();
     assert_eq!(types, [("a", "Foo"), ("b", "FooImpl"), ("c", ""), ("d", ""), ("e", ""), ("f", ""), ("g", ""), ("h", "Typed")]);
 }
+
+fn apply(text: &str, mut edits: Vec<TextEdit>) -> String {
+    edits.sort_by_key(|e| std::cmp::Reverse(offset(text, e.range.start)));
+    let mut fixed = text.to_owned();
+    for e in edits {
+        let (s, t) = (offset(&fixed, e.range.start).unwrap(), offset(&fixed, e.range.end).unwrap());
+        fixed.replace_range(s..t, &e.text);
+    }
+    fixed
+}
+
+#[test]
+fn use_constructor_injection_merges_into_existing_constructor() {
+    let class = |members: &str| format!("package com.acme;\n\n@Service\nclass S {{\n    @Autowired\n    private Foo foo;\n\n{members}}}\n");
+    let fix = |text: &str| constructor_injection(text, 4).map(|e| apply(text, e));
+
+    let text = class("    private int n;\n\n    S(Bar bar) {\n        this.bar = bar;\n    }\n");
+    let fixed = fix(&text).unwrap();
+    assert!(fixed.contains("    private final Foo foo;\n"), "{fixed}");
+    assert!(fixed.contains("    S(Bar bar, Foo foo) {\n        this.bar = bar;\n        this.foo = foo;\n    }\n"), "{fixed}");
+
+    let fixed = fix(&class("    S() {}\n")).unwrap();
+    assert!(fixed.contains("    S(Foo foo) {\n        this.foo = foo;\n    }\n"), "{fixed}");
+
+    assert_eq!(fix(&class("    S() {}\n    S(int a) {}\n")), None, "several constructors");
+    assert_eq!(fix(&class("    S() {\n        if (x) {\n    }\n")), None, "braces mismatch");
+    assert_eq!(fix(&class("    S() {\n        this.foo = new Foo();\n    }\n")), None, "already assigned");
+    assert_eq!(fix(&class("    S() {}\n    @Autowired void setBar(Bar bar) {}\n")), None, "autowired setter");
+}

@@ -164,7 +164,7 @@ fn hits(doc: &Document) -> Vec<Hit> {
 }
 
 /// Removes the field annotations of a class's injected fields, makes them
-/// final and adds a constructor taking them. Only for classes without one.
+/// final and adds a constructor taking them, or extends the class's only constructor.
 fn constructor_injection(text: &str, line: u32) -> Option<Vec<TextEdit>> {
     let file = java::parse(text);
     let on_line = |m: &java::Member| position(text, m.start).line <= line && line <= position(text, m.end).line;
@@ -172,7 +172,12 @@ fn constructor_injection(text: &str, line: u32) -> Option<Vec<TextEdit>> {
         let fields: Vec<&java::Member> = t.fields().filter(|m| m.has(&["Autowired", "Inject"])).collect();
         fields.iter().any(|m| on_line(m)).then_some((t, fields))
     })?;
-    if class.members.iter().any(|m| m.kind == MemberKind::Constructor) {
+    let mut constructors = class.members.iter().filter(|m| m.kind == MemberKind::Constructor);
+    let existing = constructors.next();
+    if constructors.next().is_some() {
+        return None;
+    }
+    if existing.is_some() && class.members.iter().any(|m| m.kind == MemberKind::Method && m.has(&["Autowired", "Inject"])) {
         return None;
     }
     let mut edits = Vec::new();
@@ -191,6 +196,10 @@ fn constructor_injection(text: &str, line: u32) -> Option<Vec<TextEdit>> {
         }
         params.push((ty.text.clone(), f.name.clone()));
     }
+    if let Some(constructor) = existing {
+        edits.extend(merge_into(text, constructor, &params)?);
+        return Some(edits);
+    }
     let last = class.fields().last()?;
     let line_start = text[..last.start].rfind('\n').map_or(0, |i| i + 1);
     let indent: String = text[line_start..].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
@@ -200,6 +209,68 @@ fn constructor_injection(text: &str, line: u32) -> Option<Vec<TextEdit>> {
     let constructor = format!("\n\n{indent}{visibility}{}({}) {{\n{body}{indent}}}", class.name, list.join(", "));
     edits.push(TextEdit { range: range(text, last.end, last.end), text: constructor });
     Some(edits)
+}
+
+/// Adds `params` to the parameter list of `constructor` and assigns them at the end of its body.
+fn merge_into(text: &str, constructor: &java::Member, params: &[(String, String)]) -> Option<Vec<TextEdit>> {
+    let (from, to) = constructor.body?;
+    let body = text.get(from..to)?;
+    if !body.starts_with('{') || !body.ends_with('}') || !braces_balanced(text) || body.contains("this(") {
+        return None;
+    }
+    for (_, name) in params {
+        let assigned = body.match_indices(&format!("this.{name}")).any(|(i, m)| {
+            let rest = body[i + m.len()..].trim_start();
+            rest.starts_with('=') && !rest.starts_with("==")
+        });
+        if assigned || constructor.params.iter().any(|p| &p.name == name) {
+            return None;
+        }
+    }
+    let open = constructor.at + text[constructor.at..].find('(')?;
+    let mut depth = 0;
+    let close = text[open..].char_indices().find_map(|(i, c)| {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        (depth == 0).then_some(open + i)
+    })?;
+    if close > from {
+        return None;
+    }
+    let line_start = text[..constructor.start].rfind('\n').map_or(0, |i| i + 1);
+    let indent: String = text[line_start..].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let list: Vec<String> = params.iter().map(|(t, n)| format!("{t} {n}")).collect();
+    let separator = if text[open + 1..close].trim().is_empty() { "" } else { ", " };
+    let assignments: String = params.iter().map(|(_, n)| format!("\n{indent}    this.{n} = {n};")).collect();
+    let inner = &body[1..body.len() - 1];
+    let (at, end, replacement) = if inner.trim().is_empty() {
+        (from + 1, to - 1, format!("{assignments}\n{indent}"))
+    } else {
+        let at = from + 1 + inner.trim_end().len();
+        (at, at, assignments)
+    };
+    Some(vec![
+        TextEdit { range: range(text, close, close), text: format!("{separator}{}", list.join(", ")) },
+        TextEdit { range: range(text, at, end), text: replacement },
+    ])
+}
+
+fn braces_balanced(text: &str) -> bool {
+    let mut depth = 0i32;
+    for c in text.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+    depth == 0
 }
 
 pub struct Navigator {

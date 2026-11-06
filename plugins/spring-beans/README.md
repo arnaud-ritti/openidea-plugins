@@ -9,7 +9,7 @@ Spring bean support for Java, Kotlin and Spring XML files in OpenIDEA:
 - **SpEL**: `#parameter` completion in `@Cacheable`/`@CachePut`/`@CacheEvict` keys and conditions, `@EventListener` conditions and `@PreAuthorize`-style expressions.
 - **AspectJ pointcuts** in `@Pointcut`/`@Before`/`@After…`/`@Around`: designator completion, named pointcut completion and navigation (`inApp()`, `Aspects.inApp()`), bean names in `bean(…)`.
 - **Spring Beans** tool window, grouped by kind, and a **Spring Bean Graph** of who depends on whom.
-- **Field injection** warning on `@Autowired`/`@Inject` fields, with a _Use constructor injection_ quick fix for classes without a constructor.
+- **Field injection** warning on `@Autowired`/`@Inject` fields, with a _Use constructor injection_ quick fix that adds the constructor, or extends the class's only one (not offered with several constructors, `@Autowired` setters or an unparsable body). XML `p:`/`c:` `*-ref` attributes (prefixes bound to the Spring `p`/`c` namespaces) are followed like `ref`; a Kotlin `@Bean fun x() = Foo(…)` is typed `Foo`.
 
 Endpoints, Spring Boot run configurations and `@Value` key navigation are built into the IDE.
 
