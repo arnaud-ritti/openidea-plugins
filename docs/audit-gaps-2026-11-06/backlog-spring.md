@@ -5,7 +5,7 @@
 Derived from `change-notes`, README and code on branch `arnaud-ritti/implement-new-feature`. DONE = built per the change-notes/README; every item is tested against the mock host only and unverified in the IDE. 'not verified' = I could not confirm it from the change-notes, README or code.
 
 - DONE: SP-FND (`crates/spring-text` changed), BOOT-VAL, BEANS-ANN-a, BEANS-ANN-b, BEANS-XML-REF, BEANS-XML-CLASS, BEANS-REFS, BEANS-KOTLIN, BEANS-CMD, OSGI, BOOT-META, BOOT-CFG-NAV, DATA-TYPES, DATA-MONGO, WEB-VIEW, WEB-URL, SEC-REFS, CLOUD-STREAM, GQL, MSG, BATCH, WS-XML.
-- PARTIAL: TPL (file templates for spring-beans, spring-boot, spring-data, spring-web done; spring-beans snippet items skipped, spring-web snippets `getm`... done). BOOT-BUILD (Reactor debug agent hint and opt-in JDBC driver check done; the `@EventListener` visibility rule stays dropped, no documented source). CLOUD-MISC (Feign Clients view and `@BootstrapConfiguration` hint done; key hints skipped, `spring-boot` covers them).
+- PARTIAL: TPL (file templates for spring-beans, spring-boot, spring-data, spring-web done; spring-beans snippet items done in audit v2 round 2 as live-template completions, plus three beans-XML file templates; spring-web snippets `getm`... done). BOOT-BUILD (Reactor debug agent hint and opt-in JDBC driver check done; the `@EventListener` visibility rule stays dropped, no documented source). CLOUD-MISC (Feign Clients view and `@BootstrapConfiguration` hint done; key hints skipped, `spring-boot` covers them).
 - DONE per change-notes, detail not verified: DATA-NAV (derived query tooltips, Show Repository Inherited Members), WEB-KX (Copy as curl, templates).
 - SKIPPED: Qute (P5 #12, tooling backlog) is not part of this file.
 

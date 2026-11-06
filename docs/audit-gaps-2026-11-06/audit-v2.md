@@ -42,3 +42,37 @@ Before the work the same files had, for example, A2: 0 Done, 18 Partial, 72 Miss
 3. The small F rows: Reload from cluster, log viewer leftovers (Clear, Scroll to end), JPA entity graph names, OpenAPI live-template names and root skeleton, devcontainer recent containers, Spring live templates as snippet completions and the three beans-XML templates.
 4. The ten best rows listed in each `audit-v2-*.md`.
 5. Verify in the IDE ([checklist](../ide-verification-checklist.md)), then the upstream requests for the B rows.
+
+## Round 2 (implementation of the open F/F* rows)
+
+Second implementation round on branch `arnaud-ritti/implement-new-feature` (commits `3907ace` to `a7eed2c`, one per plugin) and the fixes of the findings above. Status comes from the agent reports and from the commit `change-notes` and READMEs; "not verified" means the change-notes did not let me confirm the detail. Nothing was run in the IDE; the mock host proves logic only. Row ids are those of the `audit-v2-*.md` files. B rows were not touched unless listed.
+
+| Area | DONE | PARTIAL | SKIPPED / still B |
+|---|---|---|---|
+| A1 spring-beans | three beans-XML file templates, live templates as snippet completions, some XML and class checks | the round stopped midway; the remaining rows of audit-v2-A1 are not done and the change-notes were not updated | spring-osgi untouched |
+| A2 spring-boot | Boot 13, 15, 17, 1, 3, 7 | Boot 16 | |
+| A2 spring-data | Data 13, 9, 10 | | |
+| A2 spring-cloud | Cloud 2 | | Cloud 6; the other Cloud rows of the web agent |
+| A2 spring-web, security, messaging, batch | Web 6, 10, 1 and the extra row 8; Messaging 3; Batch 2 | Web 14; Security 3; Messaging 1; Batch 1 | |
+| A2 graphql, runtime, initializr | | | GraphQL 2, Runtime 8, Initializr 1 |
+| B kube-explorer | K-A5.3, K-A4.3, K-A4.4, K-A4.5, K-I1a, K-I1b, K-I1c, K-I2, K-I3 (Reload Manifest from Cluster, Log Viewer leftovers, hints, project-wide markers) | K-I4 | |
+| B flyway | FW2 (New Migration through `process:tee`) | | FW4, 5, 7, 10 (B) |
+| B liquibase | New Changeset, New Changelog | | LQ3-6, 7, 11-15, 17 (B) |
+| B devcontainer | DC9 | | DC1, 3, 6, 8, 12, 13 (B) |
+| B openapi | OA19, 20, 3, 9, 4, 16 | | OA10 |
+| B jpa-assist | JPA8, 9, 15, 30; New Entity writes the file | | |
+| C symfony | rows 10 (12 of 14), 22, 24, 20, 15, 17, 18 (6 of 8), 3, 8, 11, I6, I10, I11; macros; Make, Create Twig Template, Insert Form Rows from a Form Type | rows 10 and 18 (sub-checks counted as reported) | ClearParameter, JoinWithToOn, AutowireControllerAsService, `@Template`, Vite, run config |
+| C laravel | LA26, 27, 2, 11, 31, 33, 17, 19, 20, 5, 39 | | LA14, 21, 24, 25, 29, 30 (B) |
+| C twig | macro completion and navigation, project extensions, unbalanced-bracket check | | vendor extensions |
+| C blade | | | unchanged (B) |
+| D gitlab | #3, #11, #4 | | #9, #12 |
+| D dependency-audit | DA5 (12 formats, quick fix in `libs.versions.toml` and `requirements.txt`) | | DA8 |
+| D tasks, dotenv | | | no change (B or discontinued) |
+| D ignore | #3, #4 | | other rows B |
+| D ideolog | #1, #10 | | |
+| D quarkus | #8 | #6 | other rows B |
+| D properties | #7 | | |
+
+Fixes from "Problems found in our own work", checked against the diff: `add_selected` in ignore now uses notifications instead of a returned string; gitlab README and change-notes mention local includes; dependency-audit change-notes list 12 formats; kube-explorer change-notes describe Reload as a command and the project-wide markers with `project.read`; the openapi `specGlobs` claim is corrected (problems and endpoints view, not previews). Not verified: the JPA-3 `@NamedEntityGraph` claim (the new entity graph checks are in the jpa-assist change-notes), the spring-osgi, spring-web (static resources) and spring-boot README corrections, and the Symfony README Twig extension names.
+
+Still true after the round: no references, rename or hover providers, no type resolution, quick fixes cannot create files (commands can, through optional `process:tee`), all B rows. Details per plugin: the "Added by the audit v2 pass" blocks in [LIMITATIONS.md](../../LIMITATIONS.md) and the section in [PARITY.md](../../PARITY.md).
