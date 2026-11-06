@@ -2,6 +2,7 @@
   "properties": {
     "missingGitignore": { "type": "boolean", "title": "Warn about a Git project without a .gitignore file", "default": true },
     "ignoredEditing": { "type": "boolean", "title": "Show Ignored in the status bar when editing an ignored file", "default": true },
-    "insertAtCursor": { "type": "boolean", "title": "Insert templates at the caret instead of at the end of the file", "default": false }
+    "insertAtCursor": { "type": "boolean", "title": "Insert templates at the caret instead of at the end of the file", "default": false },
+    "unignoreActions": { "type": "boolean", "title": "Offer Add to .gitignore (unignore) in the quick-fix menu", "default": true }
   }
 }
