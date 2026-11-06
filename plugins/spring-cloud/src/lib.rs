@@ -8,7 +8,7 @@ mod checks;
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
+use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host};
 use spring_text::config::{self, Key};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java;
@@ -508,7 +508,7 @@ impl CloudTools {
             .collect();
         let groups = checks::Groups::from_settings();
         let Some((java, config)) = self.indexes(doc) else {
-            let _ = host::publish_diagnostics(&doc.path, &problems);
+            publish(&doc.path, &problems);
             return Vec::new();
         };
         if groups.stream_bindings {
@@ -518,7 +518,7 @@ impl CloudTools {
         if groups.legacy_stream {
             problems.extend(checks::legacy_stream(&doc.path, &doc.text, java).iter().map(|f| f.diagnostic(&doc.text)));
         }
-        let _ = host::publish_diagnostics(&doc.path, &problems);
+        publish(&doc.path, &problems);
         let endpoints = |pick: fn(&JavaFacts) -> &Vec<Endpoint>, matches: &dyn Fn(&Endpoint) -> bool| {
             java.iter()
                 .flat_map(|(p, f)| pick(f).iter().map(move |e| (p, e)))
@@ -558,7 +558,7 @@ impl CloudTools {
             problems.extend(missing.iter().map(|f| f.diagnostic(&doc.text)));
         }
         let Some((java, config)) = self.indexes(doc) else {
-            let _ = host::publish_diagnostics(&doc.path, &problems);
+            publish(&doc.path, &problems);
             return;
         };
         if groups.stream_bindings {
@@ -605,7 +605,7 @@ impl CloudTools {
                 problems.push(Diagnostic::new(at, severity, message).code(format!("unknown-gateway-{}", &list[..list.len() - 1])));
             }
         }
-        let _ = host::publish_diagnostics(&doc.path, &problems);
+        publish(&doc.path, &problems);
     }
 }
 
@@ -702,7 +702,7 @@ impl CloudTools {
         let index = self.java.get(project, budget);
         let complete = index.complete();
         if !complete {
-            host::refresh_view(view);
+            refresh(view);
         }
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
         let mut files: Vec<(&str, &Vec<Endpoint>)> =
@@ -738,7 +738,7 @@ impl Views for CloudTools {
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         if self.expansion.handle(&event) {
-            host::refresh_view(view);
+            refresh(view);
             return Ok(());
         }
         match event {
@@ -748,7 +748,7 @@ impl Views for CloudTools {
                 {
                     self.java.reset();
                 }
-                host::refresh_view(view);
+                refresh(view);
             }
             ViewEvent::Activate(key) => {
                 let mut parts = key.splitn(4, ':');
@@ -764,9 +764,52 @@ impl Views for CloudTools {
     }
 }
 
-register_plugin!(CloudTools, providers, views);
+pub const WINDOW_SECTION: &str = "cloud";
+
+const OWNER_WINDOW: &str = "endpoints";
+
+fn window(view: &str) -> &str {
+    if cfg!(feature = "embedded") { OWNER_WINDOW } else { view }
+}
+
+pub(crate) fn refresh(view: &str) {
+    host::refresh_view(window(view));
+}
+
+thread_local! {
+    static PROBLEMS: std::cell::RefCell<Vec<openidea_plugin::Diagnostic>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(path: &str, problems: &[openidea_plugin::Diagnostic]) {
+    if cfg!(feature = "embedded") {
+        PROBLEMS.set(problems.to_vec());
+        return;
+    }
+    let _ = host::publish_diagnostics(path, problems);
+}
+
+pub fn take_problems() -> Vec<openidea_plugin::Diagnostic> {
+    PROBLEMS.take()
+}
+
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const DEPENDENCY_MARKERS: [&str; 10] = ["spring-cloud", "springframework.cloud", "springCloud", "feign", "<module>", "include(", "include '", "include \"", "(libs.", " libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &openidea_plugin::Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+#[cfg(not(feature = "embedded"))]
+openidea_plugin::register_plugin!(CloudTools, providers, views);
 
 #[cfg(test)]
+#[cfg_attr(feature = "embedded", allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
@@ -946,6 +989,7 @@ class StreamFunctions {
 }
 "#;
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn kotlin_feign_client_is_indexed() {
         let host = setup();
@@ -971,6 +1015,7 @@ class StreamFunctions {
         assert_eq!(java_facts(CLIENT).clients.len(), 3);
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn links_feign_clients_and_endpoints() {
         let host = setup();
@@ -1021,6 +1066,7 @@ class StreamFunctions {
         assert!(tools.definition(&yaml(), at(YAML, "destination")).is_empty());
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn checks_bindings_definitions_and_routes() {
         let host = setup();
@@ -1117,6 +1163,7 @@ class StreamFunctions {
             .unwrap_or_default()
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn stream_channel_unbound_warns() {
         let host = setup();
@@ -1158,6 +1205,7 @@ class StreamFunctions {
         assert!(codes(&no_config, SENDER_PATH).is_empty());
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn fixed_sender_publishes_empty_list() {
         let host = setup();
@@ -1183,6 +1231,7 @@ class StreamFunctions {
         codes(&host, BOOTSTRAP_PATH)
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn bootstrap_config_missing_dependency_warns() {
         assert_eq!(
@@ -1206,6 +1255,7 @@ class StreamFunctions {
         assert!(bootstrap_codes(&[("pom.xml", POM), ("src/main/resources/application.properties", "spring.cloud.bootstrap.enabled=true")]).is_empty());
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn fixed_bootstrap_publishes_empty_list() {
         let host = MockHost::install();
@@ -1224,6 +1274,7 @@ class StreamFunctions {
     const LISTENERS: &str = "class L {\n    @StreamListener(\"orders\") void ok(String s) {}\n    @StreamListener(\"ordres\") void typo(String s) {}\n    @StreamListener(\"orders\") String lost(String s) { return s; }\n    @StreamListener(\"orders\") @SendTo(\"shipped\") String sends(String s) { return s; }\n    @StreamListener(\"orders\") @SendTo(\"shipped\") void empty(String s) {}\n    @StreamListener(\"input\") void builtIn(String s) {}\n}\n";
     const LISTENERS_PATH: &str = "src/main/java/com/acme/L.java";
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn legacy_stream_listeners_are_checked_against_declared_channels() {
         let host = setup();
@@ -1240,6 +1291,7 @@ class StreamFunctions {
         assert_eq!(channel.range.start.line, 2);
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn stream_listener_signature_rules_are_enforced() {
         let host = setup();
@@ -1265,6 +1317,7 @@ class StreamFunctions {
         assert!(codes(&host, LISTENERS_PATH).is_empty());
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn bootstrap_configuration_that_is_scannable_gets_a_hint() {
         let host = setup();
@@ -1286,5 +1339,26 @@ class StreamFunctions {
         let Body::Tree(items) = view.body else { panic!("not a tree") };
         let labels: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.detail.as_deref())).collect();
         assert_eq!(labels, [("Users.java", Some("1")), ("GET /users/{id}", Some("Users.get()"))]);
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn refresh_goes_to_the_owner_window_when_embedded() {
+        let host = MockHost::install();
+        refresh("some-view");
+        assert_eq!(host.refreshed_views(), ["endpoints"]);
+    }
+
+    #[test]
+    fn applies_follows_the_root_build_file() {
+        let host = MockHost::install();
+        let project = &host::projects().unwrap()[0];
+        assert!(!applies(project), "no build file");
+        host.add_file("pom.xml", "<project><artifactId>commons-lang3</artifactId></project>");
+        assert!(!applies(project));
+        host.add_file("pom.xml", "<project><artifactId>spring-cloud-starter-openfeign</artifactId></project>");
+        assert!(applies(project));
+        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        assert!(applies(project), "multi-module is unsure");
     }
 }

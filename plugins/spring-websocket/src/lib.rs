@@ -7,7 +7,7 @@ use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineM
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host,
 };
 use spring_text::index::{COMMAND_BUDGET, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::tree::Expansion;
@@ -423,7 +423,7 @@ impl WebSocketTools {
         let snapshot = self.project_snapshot(project, budget);
 
         if !snapshot.complete {
-            host::refresh_view(view);
+            refresh(view);
         }
 
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
@@ -479,7 +479,7 @@ impl Views for WebSocketTools {
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         if self.expansion.handle(&event) {
-            host::refresh_view(view);
+            refresh(view);
             return Ok(());
         }
 
@@ -490,7 +490,7 @@ impl Views for WebSocketTools {
                 {
                     self.index.reset();
                 }
-                host::refresh_view(view);
+                refresh(view);
             }
             ViewEvent::Activate(key) => {
                 let mut parts = key.splitn(5, ':');
@@ -519,7 +519,7 @@ impl WebSocketTools {
         let is_bean = |name: &str| names.as_ref().is_some_and(|n| n.contains(name));
         let found = xml_checks::check(&doc.text, names.is_some().then_some(&is_bean as &dyn Fn(&str) -> bool));
         let diagnostics: Vec<Diagnostic> = found.iter().map(|f| f.diagnostic(&doc.text)).collect();
-        let _ = host::publish_diagnostics(&doc.path, &diagnostics);
+        publish(&doc.path, &diagnostics);
     }
 }
 
@@ -571,7 +571,7 @@ impl Providers for WebSocketTools {
                 }
             }
         }
-        let _ = host::publish_diagnostics(&doc.path, &problems);
+        publish(&doc.path, &problems);
         markers
     }
 
@@ -624,9 +624,51 @@ impl Plugin for WebSocketTools {
     }
 }
 
-register_plugin!(WebSocketTools, providers, views);
+pub const WINDOW_SECTION: &str = "websocket";
+
+const OWNER_WINDOW: &str = "endpoints";
+
+fn window(view: &str) -> &str {
+    if cfg!(feature = "embedded") { OWNER_WINDOW } else { view }
+}
+
+pub(crate) fn refresh(view: &str) {
+    host::refresh_view(window(view));
+}
+
+thread_local! {
+    static PROBLEMS: std::cell::RefCell<Vec<openidea_plugin::Diagnostic>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(path: &str, problems: &[openidea_plugin::Diagnostic]) {
+    if cfg!(feature = "embedded") {
+        PROBLEMS.set(problems.to_vec());
+        return;
+    }
+    let _ = host::publish_diagnostics(path, problems);
+}
+
+pub fn take_problems() -> Vec<openidea_plugin::Diagnostic> {
+    PROBLEMS.take()
+}
+
+const DEPENDENCY_MARKERS: [&str; 9] = ["spring-boot-starter-websocket", "spring-messaging", "spring-websocket", "<module>", "include(", "include '", "include \"", "(libs.", " libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &openidea_plugin::Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+#[cfg(not(feature = "embedded"))]
+openidea_plugin::register_plugin!(WebSocketTools, providers, views);
 
 #[cfg(test)]
+#[cfg_attr(feature = "embedded", allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
@@ -769,6 +811,7 @@ class KtChatController(private val messagingTemplate: SimpMessagingTemplate) {
         assert!(parse("", "class A { void f() { x.y(); } }").is_none());
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn marks_handlers_and_links_destinations() {
         let host = setup();
@@ -807,6 +850,7 @@ class KtChatController(private val messagingTemplate: SimpMessagingTemplate) {
             .map_or(0, |d| d.iter().filter(|d| d.code.as_deref() == Some("unrouted-destination")).count())
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn unrouted_destination_warns() {
         let host = setup();
@@ -823,6 +867,7 @@ class KtChatController(private val messagingTemplate: SimpMessagingTemplate) {
         assert_eq!(unrouted(&host, "C.java", text), 0);
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn fixed_file_publishes_empty_list() {
         let host = setup();
@@ -1030,6 +1075,7 @@ client.onConnect = () => {
         assert!(handler[1].key.ends_with(":/project/web/src/chat.ts"));
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn view_is_a_message_while_scanning() {
         let host = setup();
@@ -1110,6 +1156,7 @@ client.onConnect = () => {
         assert!(items.iter().any(|i| i.key == "d:/topic/messages"));
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn refresh_keeps_a_scan_in_progress() {
         let host = setup();
@@ -1142,6 +1189,7 @@ client.onConnect = () => {
         assert_eq!(column as usize, line.encode_utf16().count());
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn websocket_xml_is_checked_against_project_beans() {
         let host = MockHost::install();
@@ -1151,5 +1199,26 @@ client.onConnect = () => {
         assert!(WebSocketTools::default().line_markers(&d).is_empty());
         let found: Vec<_> = host.diagnostics()[&d.path].iter().map(|x| (x.code.clone().unwrap(), x.severity)).collect();
         assert_eq!(found, [("unresolved-reference".to_owned(), Severity::Info), ("missing-attribute".to_owned(), Severity::Warning)]);
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn refresh_goes_to_the_owner_window_when_embedded() {
+        let host = MockHost::install();
+        refresh("some-view");
+        assert_eq!(host.refreshed_views(), ["endpoints"]);
+    }
+
+    #[test]
+    fn applies_follows_the_root_build_file() {
+        let host = MockHost::install();
+        let project = &host::projects().unwrap()[0];
+        assert!(!applies(project), "no build file");
+        host.add_file("pom.xml", "<project><artifactId>commons-lang3</artifactId></project>");
+        assert!(!applies(project));
+        host.add_file("pom.xml", "<project><artifactId>spring-boot-starter-websocket</artifactId></project>");
+        assert!(applies(project));
+        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        assert!(applies(project), "multi-module is unsure");
     }
 }

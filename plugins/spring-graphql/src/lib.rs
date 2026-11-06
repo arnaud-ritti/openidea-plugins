@@ -6,7 +6,7 @@ use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineM
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::text::offset;
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host,
 };
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, Member, Str, TypeDecl};
@@ -658,7 +658,7 @@ impl GraphQlTools {
             let file = if doc.language == "kotlin" { kotlin::parse(&doc.text) } else { java::parse(&doc.text) };
             problems.extend(checks::batch_mapping_return(&file, &doc.text).iter().map(|f| f.diagnostic(&doc.text)));
         }
-        let _ = host::publish_diagnostics(&doc.path, &problems);
+        publish(&doc.path, &problems);
         links
     }
 
@@ -705,7 +705,7 @@ impl GraphQlTools {
                 }
             }
         }
-        let _ = host::publish_diagnostics(&doc.path, &problems);
+        publish(&doc.path, &problems);
         links
     }
 }
@@ -841,7 +841,7 @@ impl GraphQlTools {
         let schemas = self.schemas.get(project, budget / 2);
         let schema_complete = schemas.complete();
         if !complete || !schema_complete {
-            host::refresh_view(view);
+            refresh(view);
         }
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
 
@@ -877,7 +877,7 @@ impl Views for GraphQlTools {
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         if self.expansion.handle(&event) {
-            host::refresh_view(view);
+            refresh(view);
             return Ok(());
         }
         match event {
@@ -888,7 +888,7 @@ impl Views for GraphQlTools {
                     self.settings.reset();
                     self.schemas.reset();
                 }
-                host::refresh_view(view);
+                refresh(view);
             }
             ViewEvent::Activate(key) => {
                 let mut parts = key.splitn(4, ':');
@@ -910,9 +910,52 @@ impl Plugin for GraphQlTools {
     }
 }
 
-register_plugin!(GraphQlTools, providers, views);
+pub const WINDOW_SECTION: &str = "graphql";
+
+const OWNER_WINDOW: &str = "endpoints";
+
+fn window(view: &str) -> &str {
+    if cfg!(feature = "embedded") { OWNER_WINDOW } else { view }
+}
+
+pub(crate) fn refresh(view: &str) {
+    host::refresh_view(window(view));
+}
+
+thread_local! {
+    static PROBLEMS: std::cell::RefCell<Vec<openidea_plugin::Diagnostic>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(path: &str, problems: &[openidea_plugin::Diagnostic]) {
+    if cfg!(feature = "embedded") {
+        PROBLEMS.set(problems.to_vec());
+        return;
+    }
+    let _ = host::publish_diagnostics(path, problems);
+}
+
+pub fn take_problems() -> Vec<openidea_plugin::Diagnostic> {
+    PROBLEMS.take()
+}
+
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const DEPENDENCY_MARKERS: [&str; 7] = ["graphql", "<module>", "include(", "include '", "include \"", "(libs.", " libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &openidea_plugin::Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+#[cfg(not(feature = "embedded"))]
+openidea_plugin::register_plugin!(GraphQlTools, providers, views);
 
 #[cfg(test)]
+#[cfg_attr(feature = "embedded", allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
@@ -1053,6 +1096,7 @@ class BookController {
         position(text, text.find(needle).unwrap() + 1)
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn links_handlers_to_schema_fields() {
         let host = setup();
@@ -1116,6 +1160,7 @@ class BookController {
         host.diagnostics()["/project/src/main/java/com/acme/C.java"].iter().filter_map(|d| d.code.clone()).filter(|c| c.starts_with("batch")).collect()
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn batch_mapping_group_can_be_switched_off() {
         let host = setup();
@@ -1126,6 +1171,7 @@ class BookController {
 
     const MAPPED: &str = "@Controller\nclass C {\n    @QueryMapping\n    public Book nope() { return null; }\n}\n";
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn unknown_schema_field_warns() {
         let host = setup();
@@ -1145,6 +1191,7 @@ class BookController {
         assert!(problems_of(&empty, MAPPED).is_empty(), "no schema file");
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn fixed_file_publishes_empty_list() {
         let host = setup();
@@ -1154,6 +1201,7 @@ class BookController {
         assert!(host.diagnostics().get("/project/src/main/java/com/acme/C.java").is_none_or(Vec::is_empty));
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn links_schema_fields_to_handlers() {
         let host = setup();
@@ -1255,6 +1303,7 @@ class BookController {
 }
 "#;
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn kotlin_query_mapping_links_to_schema() {
         let host = MockHost::install();
@@ -1413,6 +1462,7 @@ class BookController {
 
     const ARGS_SCHEMA: &str = "type Query { author(id: ID!): Author }\ntype Author { name: String books(first: Int): [Book] }\ntype Book { title(upper: Boolean): String }\n";
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn unmapped_fields_with_arguments_are_info_when_nothing_serves_the_type() {
         let host = MockHost::install();
@@ -1429,5 +1479,26 @@ class BookController {
         host.add_file("src/main/java/com/acme/Wiring.java", "class W { RuntimeWiringConfigurer c() { return null; } }");
         GraphQlTools::default().line_markers(&schema);
         assert!(host.diagnostics().get(&schema.path).is_none_or(Vec::is_empty), "hand wiring anywhere silences it");
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn refresh_goes_to_the_owner_window_when_embedded() {
+        let host = MockHost::install();
+        refresh("some-view");
+        assert_eq!(host.refreshed_views(), ["endpoints"]);
+    }
+
+    #[test]
+    fn applies_follows_the_root_build_file() {
+        let host = MockHost::install();
+        let project = &host::projects().unwrap()[0];
+        assert!(!applies(project), "no build file");
+        host.add_file("pom.xml", "<project><artifactId>commons-lang3</artifactId></project>");
+        assert!(!applies(project));
+        host.add_file("pom.xml", "<project><artifactId>spring-boot-starter-graphql</artifactId></project>");
+        assert!(applies(project));
+        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        assert!(applies(project), "multi-module is unsure");
     }
 }

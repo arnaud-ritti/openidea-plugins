@@ -6,7 +6,7 @@
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, EventKind, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin,
+    Diagnostic, Error, Event, EventKind, Invocation, Location, Plugin, Position, Range, Severity, host,
 };
 use spring_text::diagram::{self, Edge, Node};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET};
@@ -444,8 +444,8 @@ impl Providers for WebFlow {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let Some(flow) = parse_flow(&doc.text) else { return Vec::new() };
         let world = World::new(self.index(doc));
-        let _ = host::publish_diagnostics(&doc.path, &problems(&doc.path, &flow, &world));
-        host::refresh_view(VIEW);
+        publish(&doc.path, &problems(&doc.path, &flow, &world));
+        refresh(VIEW);
         Vec::new()
     }
 }
@@ -461,7 +461,7 @@ impl Views for WebFlow {
 
     fn handle(&mut self, view: &str, event: ViewEvent, _ctx: &Invocation) -> Result<(), Error> {
         if matches!(&event, ViewEvent::Button(b) if b == "refresh") {
-            host::refresh_view(view);
+            refresh(view);
         }
         Ok(())
     }
@@ -474,14 +474,57 @@ impl Plugin for WebFlow {
 
     fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
         if events.iter().any(|e| matches!(e, Event::EditorFocused(_))) {
-            host::refresh_view(VIEW);
+            refresh(VIEW);
         }
     }
 }
 
-register_plugin!(WebFlow, providers, views);
+pub const WINDOW_SECTION: &str = "webflow";
+
+const OWNER_WINDOW: &str = "endpoints";
+
+fn window(view: &str) -> &str {
+    if cfg!(feature = "embedded") { OWNER_WINDOW } else { view }
+}
+
+pub(crate) fn refresh(view: &str) {
+    host::refresh_view(window(view));
+}
+
+thread_local! {
+    static PROBLEMS: std::cell::RefCell<Vec<openidea_plugin::Diagnostic>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(path: &str, problems: &[openidea_plugin::Diagnostic]) {
+    if cfg!(feature = "embedded") {
+        PROBLEMS.set(problems.to_vec());
+        return;
+    }
+    let _ = host::publish_diagnostics(path, problems);
+}
+
+pub fn take_problems() -> Vec<openidea_plugin::Diagnostic> {
+    PROBLEMS.take()
+}
+
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const DEPENDENCY_MARKERS: [&str; 7] = ["webflow", "<module>", "include(", "include '", "include \"", "(libs.", " libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &openidea_plugin::Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+#[cfg(not(feature = "embedded"))]
+openidea_plugin::register_plugin!(WebFlow, providers, views);
 
 #[cfg(test)]
+#[cfg_attr(feature = "embedded", allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
@@ -654,6 +697,7 @@ mod tests {
         assert_eq!(item.detail.as_deref(), Some("subflow-state"));
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn reports_unknown_and_duplicate_states_and_subflows() {
         let host = setup();
@@ -674,6 +718,7 @@ mod tests {
         ]);
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn reports_a_missing_start_state_and_end_state() {
         let host = setup();
@@ -690,6 +735,7 @@ mod tests {
         assert!(!host.diagnostics().contains_key(&path), "states may come from a parent that isn't found");
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn draws_the_active_flow() {
         let host = setup();
@@ -711,5 +757,26 @@ mod tests {
         w.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
         w.handle_events(&[Event::EditorFocused(Some(FLOW_PATH.into()))], &host.invocation());
         assert_eq!(host.refreshed_views(), [VIEW, VIEW]);
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn refresh_goes_to_the_owner_window_when_embedded() {
+        let host = MockHost::install();
+        refresh("some-view");
+        assert_eq!(host.refreshed_views(), ["endpoints"]);
+    }
+
+    #[test]
+    fn applies_follows_the_root_build_file() {
+        let host = MockHost::install();
+        let project = &host::projects().unwrap()[0];
+        assert!(!applies(project), "no build file");
+        host.add_file("pom.xml", "<project><artifactId>commons-lang3</artifactId></project>");
+        assert!(!applies(project));
+        host.add_file("pom.xml", "<project><artifactId>spring-webflow</artifactId></project>");
+        assert!(applies(project));
+        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        assert!(applies(project), "multi-module is unsure");
     }
 }

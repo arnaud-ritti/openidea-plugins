@@ -5,7 +5,7 @@
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Range, host, register_plugin};
+use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Range, host};
 use spring_text::index::{COMMAND_BUDGET, Indexes, PROVIDER_BUDGET, project_of};
 use openidea_plugin::Project;
 use spring_text::constants::Constants;
@@ -631,7 +631,7 @@ impl Providers for Messaging {
                 Some(beans) => listener_xml::problems(&doc.text, beans),
                 None => Vec::new(),
             };
-            let _ = host::publish_diagnostics(&doc.path, &problems);
+            publish(&doc.path, &problems);
         }
         let all = self.endpoints(doc);
         links(doc, &all)
@@ -711,7 +711,7 @@ impl Views for Messaging {
         let index = self.index.get(&project, COMMAND_BUDGET);
         let complete = index.complete();
         if !complete {
-            host::refresh_view(view);
+            refresh(view);
         }
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
         let mut tree: BTreeMap<Broker, Destinations> = BTreeMap::new();
@@ -763,7 +763,7 @@ impl Views for Messaging {
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         if self.expansion.handle(&event) {
-            host::refresh_view(view);
+            refresh(view);
             return Ok(());
         }
 
@@ -778,7 +778,7 @@ impl Views for Messaging {
                     self.constants.reset();
                     self.listener_beans.reset();
                 }
-                host::refresh_view(view);
+                refresh(view);
             }
             ViewEvent::Activate(key) => {
                 let mut parts = key.splitn(4, ':');
@@ -800,9 +800,52 @@ impl Plugin for Messaging {
     }
 }
 
-register_plugin!(Messaging, providers, views);
+pub const WINDOW_SECTION: &str = "messaging";
+
+const OWNER_WINDOW: &str = "endpoints";
+
+fn window(view: &str) -> &str {
+    if cfg!(feature = "embedded") { OWNER_WINDOW } else { view }
+}
+
+pub(crate) fn refresh(view: &str) {
+    host::refresh_view(window(view));
+}
+
+thread_local! {
+    static PROBLEMS: std::cell::RefCell<Vec<openidea_plugin::Diagnostic>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(path: &str, problems: &[openidea_plugin::Diagnostic]) {
+    if cfg!(feature = "embedded") {
+        PROBLEMS.set(problems.to_vec());
+        return;
+    }
+    let _ = host::publish_diagnostics(path, problems);
+}
+
+pub fn take_problems() -> Vec<openidea_plugin::Diagnostic> {
+    PROBLEMS.take()
+}
+
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const DEPENDENCY_MARKERS: [&str; 12] = ["kafka", "rabbit", "amqp", "jms", "activemq", "artemis", "<module>", "include(", "include '", "include \"", "(libs.", " libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &openidea_plugin::Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+#[cfg(not(feature = "embedded"))]
+openidea_plugin::register_plugin!(Messaging, providers, views);
 
 #[cfg(test)]
+#[cfg_attr(feature = "embedded", allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
@@ -1065,6 +1108,7 @@ class KtEvents(private val kafkaTemplate: KafkaTemplate<String, String>, val rab
         );
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn refresh_keeps_a_scan_in_progress() {
         let host = setup();
@@ -1292,6 +1336,7 @@ class Sender {
         host
     }
 
+    #[cfg(not(feature = "embedded"))]
     #[test]
     fn xml_listener_elements_are_checked_against_the_tables() {
         let host = listener_host();
@@ -1343,5 +1388,26 @@ class Sender {
         let ok = "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:rabbit=\"http://www.springframework.org/schema/rabbit\">\n<bean id=\"mailBean\" class=\"com.acme.mail.MailHandler\"/>\n<rabbit:listener-container acknowledge=\"auto\"><rabbit:listener queues=\"q\" ref=\"mailBean\" method=\"handle\"/></rabbit:listener-container>\n</beans>\n";
         Messaging::default().line_markers(&xml_doc(ok));
         assert!(host.diagnostics().get("/project/src/main/resources/listeners.xml").is_none_or(|found| found.is_empty()));
+    }
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn refresh_goes_to_the_owner_window_when_embedded() {
+        let host = MockHost::install();
+        refresh("some-view");
+        assert_eq!(host.refreshed_views(), ["endpoints"]);
+    }
+
+    #[test]
+    fn applies_follows_the_root_build_file() {
+        let host = MockHost::install();
+        let project = &host::projects().unwrap()[0];
+        assert!(!applies(project), "no build file");
+        host.add_file("pom.xml", "<project><artifactId>commons-lang3</artifactId></project>");
+        assert!(!applies(project));
+        host.add_file("pom.xml", "<project><artifactId>spring-kafka</artifactId></project>");
+        assert!(applies(project));
+        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        assert!(applies(project), "multi-module is unsure");
     }
 }
