@@ -12,6 +12,8 @@ use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::{beans, config, contains, java, range, xml};
 use std::collections::BTreeSet;
 
+mod xml_rules;
+
 const NAMESPACE: &str = "http://www.springframework.org/schema/batch";
 /// Elements a transition can lead to.
 const STATES: [&str; 4] = ["step", "flow", "split", "decision"];
@@ -43,6 +45,8 @@ pub enum Kind {
     Bean,
     /// A `@SpringBootApplication` class.
     BootApp,
+    /// A job parameter key: `#{jobParameters['key']}` or `addString("key", …)`.
+    JobParam,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,8 +185,53 @@ pub fn parse_source(path: &str, text: &str) -> Vec<Name> {
     out
 }
 
+const PARAMETER_ADDERS: [&str; 5] = ["addString", "addLong", "addDouble", "addDate", "addLocalDateTime"];
+
+/// The job parameter keys a file reads in late-binding expressions or sets through `JobParametersBuilder`.
+fn job_parameters(path: &str, text: &str) -> Vec<Name> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find("jobParameters[") {
+        let open = from + found + "jobParameters[".len();
+        from = open;
+        let Some(quote) = text[open..].chars().next().filter(|c| matches!(c, '\'' | '"')) else { continue };
+        let start = open + 1;
+        let Some(len) = text[start..].find(quote) else { continue };
+        out.push((text[start..start + len].to_owned(), start, start + len));
+    }
+    if !path.ends_with(".xml") && text.contains("add") {
+        for c in spring_text::source_calls(path, text).iter().filter(|c| PARAMETER_ADDERS.contains(&c.name.as_str())) {
+            if let Some(s) = c.args.first().and_then(|a| a.string.as_ref()) {
+                out.push((s.value.clone(), s.at, s.end));
+            }
+        }
+    }
+    out.into_iter()
+        .filter(|(name, ..)| !name.is_empty() && !name.contains(['\n', '#', '$']))
+        .map(|(name, from, to)| Name { name, kind: Kind::JobParam, range: range(text, from, to), scope: None, el: 0, detail: "job parameter", goes: Vec::new() })
+        .collect()
+}
+
+/// The key being typed inside `jobParameters['…`: its bytes up to the closing quote.
+fn parameter_key_at(text: &str, caret: usize) -> Option<(usize, usize)> {
+    let head = text.get(..caret)?;
+    let line_start = head.rfind('\n').map_or(0, |i| i + 1);
+    let marker = head[line_start..].rfind("jobParameters[")? + line_start + "jobParameters[".len();
+    let quote = head[marker..].chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let start = marker + 1;
+    if head[start..].contains(quote) {
+        return None;
+    }
+    let tail = &text[caret..];
+    let end = caret + tail.find([quote, '\n']).filter(|&i| tail[i..].starts_with(quote)).unwrap_or(0);
+    Some((start, end))
+}
+
 fn index_file(path: &str, text: &str) -> Option<Vec<Name>> {
-    let names = if path.ends_with(".xml") { parse_xml(text).0 } else { parse_source(path, text) };
+    let mut names = if path.ends_with(".xml") { parse_xml(text).0 } else { parse_source(path, text) };
+    if text.contains("jobParameters") || text.contains("JobParametersBuilder") {
+        names.extend(job_parameters(path, text));
+    }
     Some(names).filter(|n| !beans::ignored(path) && !n.is_empty())
 }
 
@@ -407,6 +456,15 @@ fn config_problems(doc: &Document, index: &Index<Vec<Name>>) -> Vec<Diagnostic> 
 
 impl Providers for Batch {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        if let Some(caret) = offset(&doc.text, at)
+            && let Some((from, to)) = parameter_key_at(&doc.text, caret)
+            && matches!(file_kind(doc), Some("xml" | "java"))
+        {
+            let Some(index) = self.index(doc) else { return Vec::new() };
+            let typing = range(&doc.text, from, to);
+            let keys = all(index).filter(|(p, n)| n.kind == Kind::JobParam && !(*p == doc.path && n.range == typing));
+            return completions(keys.map(|(_, n)| n.name.as_str()), "job parameter", Some(typing));
+        }
         match file_kind(doc) {
             Some("xml") => {
                 let Some((link, names)) = xml_link(doc, at) else { return Vec::new() };
@@ -474,6 +532,7 @@ impl Providers for Batch {
                 if host::setting_bool("springBatch.checkChunk").unwrap_or(true) {
                     found.extend(chunk_problems(&doc.text));
                 }
+                found.extend(xml_rules::problems(&doc.text));
                 found
             }
             Some("java") => java_problems(&doc.text, all(index).any(|(_, n)| n.kind == Kind::BootApp)),
@@ -640,6 +699,10 @@ public class BatchConfig {
         position(text, text.find(needle).unwrap() + 1)
     }
 
+    fn after(text: &str, needle: &str) -> Position {
+        position(text, text.find(needle).unwrap() + needle.len())
+    }
+
     #[test]
     fn reads_jobs_states_and_links() {
         let (names, links) = parse_xml(JOB_XML);
@@ -711,6 +774,53 @@ public class BatchConfig {
         assert!(chunk_codes(&CHUNKLESS.replace("id=\"é\"", "id=\"é\" parent=\"base\"")).is_empty());
         assert!(chunk_codes(&CHUNKLESS.replace("id=\"é\"", "id=\"é\" abstract=\"true\"")).is_empty());
         assert!(chunk_codes(&CHUNKLESS.replace("http://www.springframework.org/schema/batch", "urn:other")).is_empty());
+    }
+
+    const BROKEN: &str = "<job xmlns=\"http://www.springframework.org/schema/batch\" restartable=\"yes\">\n  <step><tasklet allow-start-if-complete=\"maybe\"/></step>\n  <decision id=\"d\"><next on=\"*\"/><end/><stop on=\"X\"/></decision>\n</job>";
+
+    #[test]
+    fn xml_rules_report_missing_attributes_and_wrong_booleans() {
+        let found: Vec<_> = xml_rules::problems(BROKEN)
+            .iter()
+            .map(|d| (d.code.clone().unwrap(), BROKEN.lines().nth(d.range.start.line as usize).unwrap()[d.range.start.character as usize..d.range.end.character as usize].to_owned()))
+            .collect();
+        assert_eq!(found, [
+            ("missing-attribute".to_owned(), "job".to_owned()),
+            ("invalid-attribute-value".into(), "yes".into()),
+            ("missing-attribute".into(), "step".into()),
+            ("invalid-attribute-value".into(), "maybe".into()),
+            ("missing-attribute".into(), "decision".into()),
+            ("missing-attribute".into(), "next".into()),
+            ("missing-attribute".into(), "end".into()),
+            ("missing-attribute".into(), "stop".into()),
+        ]);
+    }
+
+    #[test]
+    fn xml_rules_are_quiet_for_valid_dynamic_and_foreign_elements() {
+        assert!(xml_rules::problems(JOB_XML).is_empty());
+        let dynamic = BROKEN.replace("restartable=\"yes\"", "id=\"j\" restartable=\"${r}\"").replace("<step>", "<step id=\"s\">").replace("maybe", "true");
+        let codes: Vec<_> = xml_rules::problems(&dynamic).iter().map(|d| d.message.clone()).collect();
+        assert!(codes.iter().all(|m| m.contains("decider") || m.contains("\"to\"") || m.contains("\"on\"") || m.contains("restart")), "{codes:?}");
+        assert!(xml_rules::problems(&BROKEN.replace("http://www.springframework.org/schema/batch", "urn:other")).is_empty());
+    }
+
+    const PARAMS_JAVA: &str = "package a;\nimport org.springframework.batch.core.JobParametersBuilder;\nclass P {\n  @Value(\"#{jobParameters['inputFile']}\") String f;\n  void go() { new JobParametersBuilder().addString(\"runId\", \"1\").addLong(\"size\", 2L); }\n}\n";
+
+    #[test]
+    fn completes_job_parameter_keys_in_java_and_xml() {
+        let host = setup();
+        host.add_file("src/main/java/a/P.java", PARAMS_JAVA);
+        let mut b = Batch::default();
+        let xml = JOB_XML.replace("reader=\"csvReader\"", "reader=\"#{jobParameters['in']}\"");
+        let labels = |items: Vec<CompletionItem>| items.into_iter().map(|i| i.label).collect::<Vec<_>>();
+        let d = doc(XML_PATH, "xml", &xml);
+        assert_eq!(labels(b.completion(&d, after(&xml, "jobParameters['i"), None)), ["inputFile", "runId", "size"]);
+        assert!(labels(b.completion(&d, at(&xml, "\"dbWriter\""), None)).contains(&"csvReader".to_owned()), "bean completion stays");
+        let j = doc("/project/src/main/java/a/P.java", "java", PARAMS_JAVA);
+        let items = b.completion(&j, after(PARAMS_JAVA, "jobParameters['inp"), None);
+        assert_eq!(items.len(), 3);
+        assert!(b.completion(&j, after(PARAMS_JAVA, "inputFile'"), None).is_empty(), "closed key");
     }
 
     #[test]

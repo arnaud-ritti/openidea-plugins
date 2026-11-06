@@ -4,7 +4,7 @@ version = "0.1.0" # x-release-please-version
 description = "Spring Batch job configuration: Go to Definition, completion and checks for XML jobs (step/flow/decision transitions, parent steps, tasklet/chunk/listener bean references), job names in spring.batch.job.name, and Spring Batch 5 migration hints in Java (deprecated JobBuilderFactory/StepBuilderFactory, @EnableBatchProcessing next to Spring Boot). Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0 (first release): XML job navigation, completion and transition/bean checks, spring.batch.job.name navigation, Spring Batch 5 builder factory and @EnableBatchProcessing hints."
+change-notes = "Unreleased: required attributes and boolean values of batch XML elements (job, step, split, decision, next, end, fail, stop, tasklet, chunk); jobParameters key completion in XML and Java. 0.1.0 (first release): XML job navigation, completion and transition/bean checks, spring.batch.job.name navigation, Spring Batch 5 builder factory and @EnableBatchProcessing hints."
 categories = ["frameworks"]
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
@@ -25,7 +25,7 @@ kinds = ["completion", "definition", "line-markers"]
 languages = ["xml", "properties", "yaml"]
 
 [[contributes.providers]]
-kinds = ["line-markers"]
+kinds = ["completion", "line-markers"]
 languages = ["java"]
 
 [[contributes.views]]
