@@ -88,6 +88,18 @@ un-namespaced components: any `*/blade-*` package (icon packs such as
 check quiet. None of the five checks reports while the index is partial (the
 3 s reading budget ran out).
 
+## New file templates
+
+New › Laravel Controller, Resource Controller, Job, Event, Listener, Mailable,
+Middleware, Form Request, Policy, Observer, Enum, Seeder, Factory, Migration
+(anonymous class), Pest Feature Test and Pest Unit Test, written from Laravel's
+documentation and default stubs. The host gives a template only the file name
+and the caret position, so each uses the default namespace of its type
+(`App\Http\Controllers`, `App\Jobs`, ...) and has no prompts for a model or
+table; edit the namespace by hand when the file lives in a subfolder. A
+migration file name needs its timestamp prefix typed by hand (see
+`LIMITATIONS.md`).
+
 ## Not ported
 
 These rely on PhpStorm's PHP PSI and type inference, which the OpenIDEA plugin

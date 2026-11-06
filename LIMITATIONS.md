@@ -238,6 +238,13 @@ Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus feat
 - **Workaround in the plugins:** missing routes are an opt-in setting (`reportMissingRoutes`, off by default). Config and translation keys are only reported below an array or file the project itself defines, and views with a `package::` namespace aren't checked.
 - **Would need:** reading `bootstrap/cache/routes-v7.php` (compiled by `route:cache`, serialised PHP), or a host function that runs an allowed command from a provider.
 
+### New-menu file templates have a fixed namespace
+
+- **Blocks:** New › Laravel Controller / Job / Event / … with the `namespace` of the folder the file is created in, and a prompt for the model, table or event class.
+- **Why:** same limit as "Plugin file templates get no package or prompts" for JPA: a template gets only the file name (`$NAME$`) and `$END$`, no package and no extra prompts, and can't create more than one file.
+- **Workaround:** the 16 templates (controller, resource controller, job, event, listener, mailable, middleware, form request, policy, observer, enum, seeder, factory, migration, Pest feature and unit test) use Laravel's default namespace for their type (`App\Http\Controllers`, `App\Jobs`, `Database\Seeders`, …); change it by hand in a subfolder. The migration is an anonymous class, and its file name needs the timestamp prefix typed by hand.
+- **Would need:** `package-style` and prompted variables on `[[contributes.fileTemplates]]`.
+
 ### Not done, possible with the current API
 
 - Dropped and renamed columns (`dropColumn`, `renameColumn`) and columns added by a package's published migrations outside `database/migrations`; irregular plurals for a model without `$table` (`Person` is not `people`).

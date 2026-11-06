@@ -677,3 +677,32 @@ fn chained_and_livewire_validate_rules_are_offered() {
         assert!(rewrite_titles(&mut plugin, path, "php", text, marker).is_empty(), "{marker}");
     }
 }
+
+#[test]
+fn every_template_is_registered_and_parses() {
+    let manifest = include_str!("../plugin.toml");
+    let paths: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.strip_prefix("path = \""))
+        .filter(|rest| rest.starts_with("templates/"))
+        .filter_map(|rest| rest.strip_suffix('"'))
+        .collect();
+    assert_eq!(paths.len(), 16, "{paths:?}");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in paths {
+        let body = std::fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("missing {path}"));
+        assert!(body.starts_with("<?php") || body.starts_with("<?php\n"), "{path}");
+        assert!(!body.contains("{{"), "{path}");
+        let mut rest = body.as_str();
+        while let Some(start) = rest.find('$') {
+            let after = &rest[start + 1..];
+            let is_var = after.find('$').map(|end| &after[..end]).filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_uppercase() || c == '_'));
+            if let Some(var) = is_var {
+                assert!(["NAME", "END"].contains(&var), "{path}: ${var}$");
+                rest = &after[var.len() + 1..];
+            } else {
+                rest = after;
+            }
+        }
+    }
+}
