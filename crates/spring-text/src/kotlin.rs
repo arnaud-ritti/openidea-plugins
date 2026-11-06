@@ -129,8 +129,50 @@ fn params(src: &str, toks: &[Tok]) -> Vec<(Param, bool)> {
         .collect()
 }
 
-/// Parses the declarations of a Kotlin source.
+/// Whether a string literal's raw text has a `$name` or `${…}` template.
+fn is_template(raw: &str) -> bool {
+    let b = raw.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'$' if b.get(i + 1).is_some_and(|c| *c == b'{' || *c == b'_' || c.is_ascii_alphabetic()) => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+fn drop_templates(text: &str, annotations: &mut [Annotation]) {
+    for a in annotations {
+        for arg in &mut a.args {
+            arg.strings.retain(|s| !is_template(&text[s.at..s.end]));
+        }
+    }
+}
+
+/// Parses the declarations of a Kotlin source. A string with a template
+/// (`"$prefix-orders"`) is no literal: annotation strings drop it.
 pub fn parse(text: &str) -> JavaFile {
+    let mut file = parse_declarations(text);
+    drop_templates(text, &mut file.package_annotations);
+    for t in &mut file.types {
+        drop_templates(text, &mut t.annotations);
+        for p in &mut t.components {
+            drop_templates(text, &mut p.annotations);
+        }
+        for m in &mut t.members {
+            drop_templates(text, &mut m.annotations);
+            for p in &mut m.params {
+                drop_templates(text, &mut p.annotations);
+            }
+        }
+    }
+    file
+}
+
+fn parse_declarations(text: &str) -> JavaFile {
     let toks = tokens(text);
     let mut out = JavaFile::default();
     let mut annotations: Vec<Annotation> = Vec::new();
@@ -444,6 +486,11 @@ pub fn calls(text: &str) -> Vec<Call> {
         .into_iter()
         .filter(|c| !NOT_CALLS.contains(&c.name.as_str()))
         .map(|mut c| {
+            for a in &mut c.args {
+                if a.string.as_ref().is_some_and(|s| is_template(&text[s.at..s.end])) {
+                    a.string = None;
+                }
+            }
             if c.receiver.is_none() && !c.chained && c.name.starts_with(|ch: char| ch.is_uppercase()) {
                 c.is_new = true;
             }
@@ -587,5 +634,16 @@ fun main(args: Array<String>) { runApplication<App>(*args) }
             parse(&SRC[..end]);
             calls(&SRC[..end]);
         }
+    }
+
+    #[test]
+    fn kotlin_template_literals_are_not_plain_literals() {
+        let src = r#"@KafkaListener(topics = ["$p-a", "b-$env", "${x}", "plain", "\$esc", "5$", "$ 1", "$5"])
+class A { fun f() { t.send("$p-orders", 1); t.send("orders-$env", 1); t.send("a${b}", 1); t.send("ok\$x", 1); t.send("c$", 1) } }"#;
+        let f = parse(src);
+        let got: Vec<_> = f.types[0].annotation("KafkaListener").unwrap().strings(&["topics"]).iter().map(|s| s.value.clone()).collect();
+        assert_eq!(got, ["plain", "$esc", "5$", "$ 1", "$5"]);
+        let sent: Vec<_> = calls(src).iter().filter(|c| c.name == "send").map(|c| c.args[0].string.as_ref().map(|s| s.value.clone())).collect();
+        assert_eq!(sent, [None, None, None, Some("ok$x".to_owned()), Some("c$".to_owned())]);
     }
 }
