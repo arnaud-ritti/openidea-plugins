@@ -1804,3 +1804,67 @@ fn async_ranges_use_utf16_columns_with_multibyte_text() {
     let diagnostic = host.diagnostics()[&document.path].iter().find(|d| d.code.as_deref() == Some("async-return-type")).unwrap().clone();
     assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 23));
 }
+
+#[test]
+fn cacheable_without_cache_name_is_reported() {
+    let text = "@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n    @CachePut(key = \"#id\")\n    String b() { return null; }\n    @CacheEvict(allEntries = true)\n    void c() {}\n    @Cacheable(\"x\")\n    String d() { return null; }\n}\n";
+    assert_eq!(
+        found(text),
+        [
+            pair("cache-names-missing", "@Cacheable"),
+            pair("cache-names-missing", "@CachePut(key = \"#id\")"),
+            pair("cache-names-missing", "@CacheEvict(allEntries = true)"),
+        ]
+    );
+}
+
+#[test]
+fn cache_config_on_class_supplies_the_name() {
+    let text = "@CacheConfig(cacheNames = \"x\")\n@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn cache_annotation_on_interface_method_is_reported() {
+    let text = "@Cacheable(\"t\")\ninterface A {\n    @Cacheable(\"x\")\n    String a();\n}\n";
+    assert_eq!(found(text), [pair("cache-annotation-on-interface", "@Cacheable(\"t\")"), pair("cache-annotation-on-interface", "@Cacheable(\"x\")")]);
+}
+
+#[test]
+fn cacheable_and_cache_put_together_are_reported() {
+    let text = "@Service\nclass A {\n    @Cacheable(\"x\") @CachePut(\"x\")\n    String a() { return null; }\n}\n";
+    assert_eq!(found(text), [pair("cacheable-and-cache-put", "@CachePut(\"x\")")]);
+}
+
+#[test]
+fn cache_checks_are_quiet_for_library_or_dynamic_name() {
+    let constant = "@Service\nclass A {\n    @Cacheable(NAME)\n    String a() { return null; }\n    @Cacheable(cacheNames = PREFIX + \"x\")\n    String b() { return null; }\n}\n";
+    assert!(found(constant).is_empty());
+    let foreign = "import com.acme.Cacheable;\n\n@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n\ninterface B {\n    @Cacheable\n    String a();\n}\n";
+    assert!(found(foreign).is_empty());
+    let caching = "@Service\nclass A {\n    @Caching(cacheable = @Cacheable(\"x\"), put = @CachePut(\"x\"))\n    String a() { return null; }\n}\n";
+    assert!(found(caching).is_empty());
+    let dynamic_config = "@CacheConfig(cacheNames = NAMES)\n@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    assert!(found(dynamic_config).is_empty());
+    let spring = "import org.springframework.cache.annotation.Cacheable;\n\n@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    assert_eq!(found(spring), [pair("cache-names-missing", "@Cacheable")]);
+}
+
+#[test]
+fn switched_off_cache_group_is_quiet() {
+    let text = "@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    let host = MockHost::install();
+    assert_eq!(findings(&host, &mut Navigator::default(), "Subject.java", text).len(), 1);
+    host.set_setting("springBeans.checkCache", "false");
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", text).is_empty());
+}
+
+#[test]
+fn cache_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\nclass A {\n    @Named(\"é\") @Cacheable String a() { return null; }\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let diagnostic = host.diagnostics()[&document.path].iter().find(|d| d.code.as_deref() == Some("cache-names-missing")).unwrap().clone();
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 16));
+}

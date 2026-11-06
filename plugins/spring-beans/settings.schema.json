@@ -55,6 +55,11 @@
       "title": "Report @Async methods that return a value instead of void or a Future",
       "default": true
     },
+    "springBeans.checkCache": {
+      "type": "boolean",
+      "title": "Report cache annotations without a cache name, on interfaces, or combining @Cacheable with @CachePut",
+      "default": true
+    },
     "springBeans.checkXml": {
       "type": "boolean",
       "title": "Run the other checks on Spring XML configuration files",

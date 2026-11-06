@@ -6,6 +6,9 @@ use openidea_plugin::Severity;
 use spring_text::finding::Finding;
 use spring_text::java::{Annotation, JavaFile, TypeDecl};
 
+const CACHE_ANNOTATIONS: [&str; 3] = ["Cacheable", "CachePut", "CacheEvict"];
+const CACHE_NAME_ARGS: [&str; 3] = ["value", "cacheNames", "cacheResolver"];
+
 const NON_FUTURE_RETURNS: [&str; 18] = [
     "boolean", "byte", "short", "char", "int", "long", "float", "double", "String", "Integer", "Long", "Double",
     "Boolean", "Object", "List", "Set", "Map", "Optional",
@@ -145,5 +148,58 @@ pub fn check_async(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
             "async-return-type",
             format!("An @Async method should return void or a Future: the caller gets null instead of this {}, because the call returns before the work runs.", returned.name),
         ));
+    }
+}
+
+fn lacks_cache_name(annotation: &Annotation) -> bool {
+    CACHE_NAME_ARGS.iter().all(|name| annotation.arg(name).is_none())
+}
+
+/// Cache annotations on `annotations`, as findings on the annotation itself.
+fn cache_annotations<'a>(file: &JavaFile, annotations: &'a [Annotation]) -> Vec<&'a Annotation> {
+    CACHE_ANNOTATIONS.iter().filter_map(|name| spring(file, annotations, name)).collect()
+}
+
+pub fn check_cache(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
+    if ty.kind == "interface" {
+        let on_type = cache_annotations(file, &ty.annotations);
+        let on_methods = ty.methods().flat_map(|m| cache_annotations(file, &m.annotations));
+        for annotation in on_type.into_iter().chain(on_methods) {
+            out.push(Finding::new(
+                annotation.at,
+                annotation.end,
+                "cache-annotation-on-interface",
+                "Spring recommends putting cache annotations on concrete classes: on an interface they only take effect with interface-based proxies, not with class-based ones.",
+            ));
+        }
+        return;
+    }
+
+    let names_supplied_by_class = spring(file, &ty.annotations, "CacheConfig").is_some();
+    for method in ty.methods() {
+        if spring(file, &method.annotations, "Caching").is_some() {
+            continue;
+        }
+        let cache_annotations = cache_annotations(file, &method.annotations);
+        if !names_supplied_by_class {
+            for annotation in cache_annotations.iter().filter(|a| lacks_cache_name(a)) {
+                out.push(Finding::new(
+                    annotation.at,
+                    annotation.end,
+                    "cache-names-missing",
+                    format!("@{} names no cache: set value or cacheNames, or put @CacheConfig(cacheNames = ...) on the class, or Spring fails when the method runs.", annotation.name),
+                ));
+            }
+        }
+        if let Some(put) = cache_annotations.iter().find(|a| a.name == "CachePut") {
+            let Some(cacheable) = cache_annotations.iter().find(|a| a.name == "Cacheable") else { continue };
+            let second = if put.at > cacheable.at { put } else { cacheable };
+            out.push(Finding::new(
+                second.at,
+                second.end,
+                "cacheable-and-cache-put",
+                "@Cacheable skips the method when the entry exists, while @CachePut always runs it: combining them on one method gives surprising results.",
+            ));
+        }
     }
 }

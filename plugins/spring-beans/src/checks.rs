@@ -43,6 +43,7 @@ pub struct Groups {
     pub injection: bool,
     pub profiles: bool,
     pub async_methods: bool,
+    pub cache: bool,
 }
 
 impl Default for Groups {
@@ -60,6 +61,7 @@ impl Default for Groups {
             injection: true,
             profiles: true,
             async_methods: true,
+            cache: true,
         }
     }
 }
@@ -81,12 +83,18 @@ impl Groups {
             injection: on("checkInjectionAnnotations", defaults.injection),
             profiles: on("checkProfiles", defaults.profiles),
             async_methods: on("checkAsync", defaults.async_methods),
+            cache: on("checkCache", defaults.cache),
         }
     }
 }
 
 pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups: Groups) -> Vec<Finding> {
     let mut out = Vec::new();
+    if groups.cache {
+        for ty in file.types.iter().filter(|t| t.kind == "class" || t.kind == "interface") {
+            annotation_checks::check_cache(file, ty, &mut out);
+        }
+    }
     for ty in file.types.iter().filter(|t| t.kind == "class") {
         if groups.proxy_methods {
             proxy_methods(file, ty, &mut out);
