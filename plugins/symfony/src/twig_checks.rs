@@ -8,30 +8,36 @@ use std::ops::Range;
 
 use crate::checks::{self, Context, Finding};
 use crate::refs::{self, is_identifier};
+use crate::php_text::declares_enum;
 use crate::twig::code_regions;
 
 const ROUTE_ATTRIBUTE: &str = "app.request.attributes.get(";
 const CURRENT_ROUTE: &str = "app.current_route";
 
-/// `twig-route-compare` and `twig-missing-translation-domain`.
+/// `twig-route-compare`, `twig-missing-translation-domain`, `twig-assets-tag-missing`,
+/// `twig-enum-class` and `twig-path-replacement`.
 pub fn names(ctx: &Context, text: &str) -> Vec<Finding> {
     let regions = code_regions(text);
     let mut out = Vec::new();
 
     route_compares(ctx, text, &regions, &mut out);
     translation_domains(ctx, text, &regions, &mut out);
+    assets_tags(ctx, text, &regions, &mut out);
+    enum_classes(ctx, text, &regions, &mut out);
+    path_replacements(ctx, text, &regions, &mut out);
     out.sort_by_key(|finding| finding.start);
     out
 }
 
-/// `twig-for-condition`, `twig-component-block-syntax` and
-/// `twig-component-self-import`.
+/// `twig-for-condition`, `twig-component-block-syntax`,
+/// `twig-component-self-import` and `twig-content-outside-block`.
 pub fn syntax(text: &str) -> Vec<Finding> {
     let regions = code_regions(text);
     let mut out = Vec::new();
 
     for_conditions(text, &regions, &mut out);
     component_mistakes(text, &regions, &mut out);
+    root_content(text, &regions, &mut out);
     out.sort_by_key(|finding| finding.start);
     out
 }
@@ -184,6 +190,179 @@ fn translation_domains(ctx: &Context, text: &str, regions: &[Range<usize>], out:
             out.push(Finding::warn(range, "twig-missing-translation-domain", format!("Translation domain \"{domain}\" has no translation files.")));
         }
     }
+}
+
+/// `href="/blog"` / `action="/blog"` that equals the path of exactly one route
+/// without placeholders. Only YAML and XML routes record their path.
+fn path_replacements(ctx: &Context, text: &str, regions: &[Range<usize>], out: &mut Vec<Finding>) {
+    let mut by_path: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+    for (name, entry) in &ctx.index.routes {
+        let path = entry.detail.as_deref().filter(|path| path.starts_with('/') && path.len() > 1 && !path.contains(['{', '?', '#']));
+        if let Some(path) = path.filter(|_| !name.starts_with('_')) {
+            by_path.entry(path).or_default().push(name);
+        }
+    }
+
+    if by_path.is_empty() {
+        return;
+    }
+
+    for attribute in ["href", "action"] {
+        for (at, _) in text.match_indices(attribute) {
+            let boundary = !text[..at].bytes().last().is_some_and(|b| is_identifier(b) || b == b'-');
+            let equals = skip_space(text, at + attribute.len());
+            if !boundary || !text[equals..].starts_with('=') || !in_code(regions, at) {
+                continue;
+            }
+
+            let quote = skip_space(text, equals + 1);
+            let Some((range, _)) = literal_at(text, quote) else { continue };
+            let Some(routes) = by_path.get(&text[range.clone()]).filter(|routes| routes.len() == 1) else { continue };
+
+            let name = routes[0];
+            let message = format!("Use path('{name}') instead of the hard-coded URL \"{}\".", &text[range.clone()]);
+            out.push(Finding { replacement: Some(format!("{{{{ path('{name}') }}}}")), ..Finding::hint(range, "twig-path-replacement", message) });
+        }
+    }
+}
+
+fn assets_tags(ctx: &Context, text: &str, regions: &[Range<usize>], out: &mut Vec<Finding>) {
+    if ctx.index.assets.is_empty() {
+        return;
+    }
+
+    for region in regions {
+        for (at, _) in text[region.start..region.end].match_indices("{%") {
+            let Some((tag, _)) = tag_at(text, region.start + at) else { continue };
+            if !matches!(&text[tag.name.clone()], "javascripts" | "stylesheets") {
+                continue;
+            }
+
+            let mut i = tag.head.start;
+            while i < tag.head.end {
+                let quote = text.as_bytes()[i];
+                if !matches!(quote, b'\'' | b'"') {
+                    i += 1;
+                    continue;
+                }
+
+                let Some(length) = text[i + 1..tag.head.end].bytes().position(|b| b == quote) else { break };
+                let range = i + 1..i + 1 + length;
+                i = range.end + 1;
+
+                let name = &text[range.clone()];
+                let skipped = name.starts_with('@') || name.contains(['*', '\\']) || checks::is_dynamic(name);
+                if !skipped && checks::asset_is_missing(ctx, name) {
+                    out.push(Finding::warn(range, "twig-assets-tag-missing", format!("Asset \"{name}\" does not exist in the public directory.")));
+                }
+            }
+        }
+    }
+}
+
+/// `enum('App\\Suit')` and `enum_cases(...)`: a project namespace class that
+/// does not exist, or whose file declares no enum. Classes outside the
+/// project's PSR-4 namespaces are never reported.
+fn enum_classes(ctx: &Context, text: &str, regions: &[Range<usize>], out: &mut Vec<Finding>) {
+    if ctx.index.psr4_prefixes.is_empty() || ctx.index.partial {
+        return;
+    }
+
+    for needle in ["enum(", "enum_cases("] {
+        for open in checks::call_opens(text, needle) {
+            let before = text[..open + 1 - needle.len()].bytes().last();
+            let is_function = !before.is_some_and(|b| is_identifier(b) || matches!(b, b'.' | b'|' | b'$' | b'>'));
+            if !is_function || !in_code(regions, open) {
+                continue;
+            }
+
+            let arguments = refs::arguments(text, open);
+            let Some(range) = arguments.first().and_then(|argument| checks::literal(text, argument)) else { continue };
+            let class = text[range.clone()].replace("\\\\", "\\");
+            let class = class.trim_start_matches('\\');
+            let in_project = ctx.index.psr4_prefixes.iter().any(|prefix| class.starts_with(prefix.as_str()));
+            if !in_project || checks::is_dynamic(class) {
+                continue;
+            }
+
+            let Some(entry) = ctx.index.classes.get(class) else {
+                if checks::class_is_missing(ctx, class) {
+                    out.push(Finding::warn(range, "twig-enum-class", format!("Class \"{class}\" does not exist.")));
+                }
+                continue;
+            };
+
+            let short = class.rsplit('\\').next().unwrap_or(class);
+            if ctx.source(&entry.path).is_some_and(|source| !declares_enum(&source, short)) {
+                out.push(Finding::warn(range, "twig-enum-class", format!("\"{class}\" is not an enum.")));
+            }
+        }
+    }
+}
+
+/// A template whose first tag is a literal `{% extends %}` may only hold text
+/// inside blocks (Twig raises a syntax error otherwise). Macros, captures
+/// and `embed` bodies are skipped; tags themselves are always allowed.
+fn root_content(text: &str, regions: &[Range<usize>], out: &mut Vec<Finding>) {
+    let Some(first) = regions.first() else { return };
+    let Some(start) = text[first.clone()].find("{%").map(|at| first.start + at) else { return };
+    if !text[first.start..start].trim().is_empty() {
+        return;
+    }
+
+    let Some((tag, _)) = tag_at(text, start) else { return };
+    let head = skip_space(text, tag.head.start);
+    let is_literal_extends = &text[tag.name.clone()] == "extends"
+        && literal_at(text, head).is_some_and(|(_, after)| skip_space(text, after) >= tag.head.end);
+    if !is_literal_extends {
+        return;
+    }
+
+    let mut depth = 0usize;
+    for region in regions {
+        let mut i = region.start;
+
+        while i < region.end {
+            let next = text[i..region.end].find("{%").into_iter().chain(text[i..region.end].find("{{")).min().map_or(region.end, |at| i + at);
+            let gap = &text[i..next];
+            if depth == 0 && !gap.trim().is_empty() {
+                let lead = gap.len() - gap.trim_start().len();
+                out.push(Finding::error(i + lead..i + lead + gap.trim().len(), "twig-content-outside-block", OUTSIDE_BLOCK.into()));
+            }
+
+            if next >= region.end {
+                break;
+            }
+
+            if text[next..].starts_with("{{") {
+                if depth == 0 {
+                    out.push(Finding::error(next..next + 2, "twig-content-outside-block", OUTSIDE_BLOCK.into()));
+                }
+                i = text[next..region.end].find("}}").map_or(region.end, |at| next + at + 2);
+                continue;
+            }
+
+            let Some((tag, end)) = tag_at(text, next) else { return };
+            i = end;
+            let head = &text[tag.head.clone()];
+
+            match &text[tag.name.clone()] {
+                "block" if !has_more_than_name(head) => depth += 1,
+                "macro" | "embed" => depth += 1,
+                "set" if !head.contains('=') => depth += 1,
+                "endblock" | "endmacro" | "endembed" | "endset" => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+}
+
+const OUTSIDE_BLOCK: &str = "A template that extends another one cannot include content outside Twig blocks; put it inside a {% block %} tag.";
+
+fn has_more_than_name(head: &str) -> bool {
+    let head = head.trim();
+    let name_len = head.bytes().position(|b| !is_identifier(b)).unwrap_or(head.len());
+    !head[name_len..].trim().is_empty()
 }
 
 struct Tag {
@@ -698,5 +877,113 @@ mod tests {
         host.add_file("templates/a.html.twig", "{% for a in b if c %}{% endfor %}");
         plugin.handle_events(&[Event::FileOpened(TEMPLATE.into())], &host.invocation());
         assert_eq!(codes(&host.diagnostics()[TEMPLATE]), ["twig-for-condition"]);
+    }
+
+    fn only_codes(found: &[Diagnostic], code: &str) -> usize {
+        only(found, code).len()
+    }
+
+    #[test]
+    fn content_outside_blocks_in_an_extending_template_is_an_error() {
+        let text = "{% extends 'base.html.twig' %}\n<p>stray</p>\n{% block a %}ok{% endblock %}{{ x }}";
+        let found = run(text);
+        let found = only(&found, "twig-content-outside-block");
+        assert_eq!(found.len(), 2);
+        assert_eq!(word(text, found[0]), "<p>stray</p>");
+        assert_eq!(found[0].severity, openidea_plugin::Severity::Error);
+    }
+
+    #[test]
+    fn legal_tags_outside_blocks_are_quiet() {
+        let text = "{# c #}\n{% extends \"base.html.twig\" %}\n{% import 'm.twig' as m %}{% use 'u.twig' %}{% set a = 1 %}\n{% trans_default_domain 'admin' %}\n{% macro f(x) %}<b>{{ x }}</b>{% endmacro %}\n{% set cap %}text{% endset %}\n{% block title 'Short' %}\n{% block body %}<p>{{ a }}</p>{% block inner %}x{% endblock %}tail{% endblock %}\n{% verbatim %}raw{% endverbatim %}";
+        assert_eq!(only_codes(&run(text), "twig-content-outside-block"), 0);
+    }
+
+    #[test]
+    fn content_outside_blocks_is_quiet_unless_extends_is_a_literal_first_tag() {
+        for text in ["<p>a</p>{% extends 'b' %}", "{% set a = 1 %}{% extends 'b' %}x", "{% extends layout %}x", "{% extends 'a' ~ b %}x", "<p>plain</p>", "{% if a %}{% extends 'b' %}{% endif %}x"] {
+            assert_eq!(only_codes(&run(text), "twig-content-outside-block"), 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn content_outside_blocks_ignores_comments_and_reports_crlf_lines() {
+        let text = "{% extends 'b' %}\r\n{# note #}\r\nstray\r\n";
+        let found = run(text);
+        assert_eq!(found[0].range, TextRange::new(Position::new(2, 0), Position::new(2, 5)));
+        assert_eq!(found.len(), 1);
+    }
+
+    fn asset_index() -> Index {
+        let mut index = index();
+        index.assets.insert("js/app.js".into(), entry());
+        index.assets.insert("css/app.css".into(), entry());
+        index
+    }
+
+    #[test]
+    fn assets_tags_report_missing_literals_only() {
+        let text = "{% javascripts 'js/app.js' 'js/gone.js' '@AppBundle/x.js' 'js/*.js' output='js/out.js' %}{% endjavascripts %}{% stylesheets 'css/app.css' 'css/gone.css' %}{% endstylesheets %}";
+        let found = run_with(&asset_index(), text);
+        let found = only(&found, "twig-assets-tag-missing");
+        let words: Vec<_> = found.iter().map(|d| word(text, d)).collect();
+        assert_eq!(words, ["js/gone.js", "js/out.js", "css/gone.css"]);
+    }
+
+    #[test]
+    fn assets_tags_are_quiet_without_an_asset_index() {
+        let found = run("{% javascripts 'js/gone.js' %}{% endjavascripts %}");
+        assert_eq!(only_codes(&found, "twig-assets-tag-missing"), 0);
+    }
+
+    fn enum_index() -> Index {
+        let mut index = index();
+        index.psr4_prefixes.push("App\\".into());
+        index.classes.insert("App\\Enum\\Suit".into(), Entry { detail: None, path: "/project/src/Enum/Suit.php".into(), at: Position::new(0, 0) });
+        index.classes.insert("App\\Service\\Mailer".into(), Entry { detail: None, path: "/project/src/Service/Mailer.php".into(), at: Position::new(0, 0) });
+        index
+    }
+
+    fn run_enum(text: &str) -> Vec<Diagnostic> {
+        let read = |path: &str| match path {
+            "/project/src/Enum/Suit.php" => Some("<?php\nnamespace App\\Enum;\n\nenum Suit: string\n{\n    case Hearts = 'h';\n}\n".to_owned()),
+            "/project/src/Service/Mailer.php" => Some("<?php\nnamespace App\\Service;\n\n// enum Mailer\nclass Mailer {}\n".to_owned()),
+            _ => None,
+        };
+        crate::extra_problems(&enum_index(), crate::Groups::all_on(), &read, TEMPLATE, "twig", text)
+    }
+
+    #[test]
+    fn enum_function_reports_missing_and_non_enum_project_classes() {
+        let text = "{{ enum('App\\Enum\\Suit').cases() }}{{ enum_cases('App\\Enum\\Gone') }}{{ enum(\"App\\\\Service\\\\Mailer\") }}{{ enum('Vendor\\Lib\\Thing') }}{{ enum(name) }}{{ x.enum('App\\Nope') }}";
+        let found = run_enum(text);
+        let found = only(&found, "twig-enum-class");
+        let words: Vec<_> = found.iter().map(|d| word(text, d)).collect();
+        assert_eq!(words, ["App\\Enum\\Gone", "App\\\\Service\\\\Mailer"]);
+        assert_eq!(found[1].message, "\"App\\Service\\Mailer\" is not an enum.");
+    }
+
+    #[test]
+    fn enum_function_is_quiet_when_the_index_is_partial() {
+        let mut index = enum_index();
+        index.partial = true;
+        let read = |_: &str| None;
+        let found = crate::extra_problems(&index, crate::Groups::all_on(), &read, TEMPLATE, "twig", "{{ enum('App\\Gone') }}");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn root_content_and_enum_are_published_on_file_opened() {
+        let host = MockHost::install();
+        host.add_file("composer.json", r#"{"require": {"symfony/framework-bundle": "^7.0"}, "autoload": {"psr-4": {"App\": "src/"}}}"#);
+        host.add_file("src/Foo.php", "<?php\nnamespace App;\nclass Foo {}\n");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        host.add_file("templates/a.html.twig", "{% extends 'base.html.twig' %}stray{{ enum('App\\Foo') }}");
+        plugin.handle_events(&[Event::FileOpened(TEMPLATE.into())], &host.invocation());
+        let published = host.diagnostics()[TEMPLATE].clone();
+        assert_eq!(only_codes(&published, "twig-content-outside-block"), 2);
+        assert_eq!(only_codes(&published, "twig-enum-class"), 1);
     }
 }

@@ -1,7 +1,7 @@
 //! Checks of YAML and XML configuration files: factory settings Symfony 3.0
 //! removed, and plain YAML scalars the parser refuses or reads differently.
 
-use crate::checks::{Finding, is_service_file};
+use crate::checks::{Context, Finding, is_service_file};
 use crate::index::{self, xml_tags};
 use crate::{is_quoted_config, yaml_quotes};
 
@@ -42,6 +42,69 @@ pub fn deprecated_factory_settings(path: &str, language: &str, text: &str) -> Ve
     }
 
     found.sort_by_key(|finding| finding.start);
+    found
+}
+
+fn is_config_file(path: &str) -> bool {
+    path.contains("/config/") && !path.contains("/var/cache/")
+}
+
+/// `%name%` references that neither the project's configuration nor the
+/// compiled container defines. `%env(...)%`, `%kernel.*%`, `%%` and any name
+/// with other characters are never reported, nor is anything without a
+/// compiled container (bundles define parameters this index cannot see).
+pub fn unknown_parameters(ctx: &Context, path: &str, language: &str, text: &str) -> Vec<Finding> {
+    let mut found = Vec::new();
+    let known = ctx.index.compiled_container && !ctx.index.partial;
+    if !known || !is_config_file(path) || !matches!(language, "yaml" | "xml") {
+        return found;
+    }
+
+    let comments = if language == "xml" { xml_comments(text) } else { Vec::new() };
+    let mut offset = 0;
+
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+
+        let mut effective = line;
+        if language == "yaml" {
+            let cut = if line.trim_start().starts_with('#') { Some(0) } else { line.find(" #") };
+            effective = cut.map_or(line, |at| &line[..at]);
+        }
+
+        let bytes = effective.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != b'%' {
+                i += 1;
+                continue;
+            }
+
+            if bytes.get(i + 1) == Some(&b'%') {
+                i += 2;
+                continue;
+            }
+
+            let length = bytes[i + 1..].iter().take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-')).count();
+            if length == 0 || bytes.get(i + 1 + length) != Some(&b'%') {
+                i += 1;
+                continue;
+            }
+
+            let name = &effective[i + 1..i + 1 + length];
+            let start = line_start + i + 1;
+            i += length + 2;
+
+            let known_name = name.starts_with("kernel.") || ctx.index.parameters.contains_key(name) || ctx.index.parameters.keys().any(|key| key.eq_ignore_ascii_case(name));
+            if known_name || comments.iter().any(|comment| comment.contains(&start)) {
+                continue;
+            }
+
+            found.push(Finding::warn(start..start + length, "unknown-parameter", format!("Parameter \"{name}\" is not defined.")));
+        }
+    }
+
     found
 }
 

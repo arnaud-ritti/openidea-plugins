@@ -21,6 +21,13 @@ the free code of the public repository.
 | Roles        | `ROLE_*` in security config and controllers, plus built-in attributes (`IS_AUTHENTICATED_*`, `PUBLIC_ACCESS`, …)  | PHP `isGranted`, `denyAccessUnlessGranted`, `#[IsGranted]`; Twig `is_granted()`                                                                                |
 | Tags         | Symfony's built-in service tags plus the tags used in `config/**` YAML and XML service files                      | YAML `tags:` of a service (`- { name: x }`, `- name: x`, `['x']`, `- x`); XML `<tag name="">` (completion only)                                              |
 
+Beyond these, the project-wide index (go to declaration, gutter) also links
+event listeners (`getSubscribedEvents()`, `#[AsEventListener]`,
+`kernel.event_listener` tags) to the `dispatch()` calls of the same event
+(class literal or string), Twig macros to their `import` / `from` uses, voter
+attributes of `supports()` to `isGranted()` calls (PHP and Twig), and a
+validator constraint to its `…Validator` class.
+
 ## Twig names and structure
 
 In `.twig` files of a Symfony project: completion of tag names (`if`, `for`,
@@ -136,9 +143,53 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     `orm-join-column-nullable` (hint), an explicit `nullable: true` (the
     default) on a join column in PHP, XML (`<join-column>`) or YAML
     (`joinColumn` / `joinColumns`).
+  - _Container references_ (in the _service_ group, `serviceChecks`):
+    `unknown-parameter`, a `%name%` in `config/` YAML or XML that neither the
+    config files nor the compiled container define (silent without a compiled
+    container, for `%env(…)%`, `kernel.*`, `%%` and any other name shape);
+    `service-class-missing`, a `class:` in one of the project's PSR-4
+    namespaces without a file (`Tests` namespaces skipped); `deprecated-class-usage`
+    (PHP calls group), `new X` / `X::class` of a project class marked
+    `@deprecated`, from a file that is not itself deprecated.
+  - _Service wiring_ (`serviceChecks`, `src/wiring.rs`): a small class model
+    (constructor parameters, parent, interfaces, resolved through `use`) checks
+    `service-argument-count` (more positional arguments than the constructor
+    has parameters), `service-argument-type` (a `@service` whose project class
+    cannot be the typed project class or interface), `service-tag-interface`
+    (`kernel.event_subscriber`, `twig.extension`, `form.type`,
+    `validator.constraint_validator`, `security.voter`, `kernel.cache_warmer`,
+    `doctrine.event_subscriber` on a class that lacks the interface),
+    `listener-method-missing` (`kernel.event_listener` with a `method` the class
+    lacks) and `yaml-php-const-missing` (`!php/const` of a project class
+    without that constant). Silent when a parent or interface is outside the
+    project and could matter, for traits, `__call`, `parent`, factories,
+    decorators, aliases, named or nested arguments.
+  - _Practices_ (`practiceChecks`, PHP, hints unless noted): in controllers
+    `controller-container-get`, `controller-superglobal`, `controller-debug-call`,
+    `controller-base-class` (the removed `Controller` base class);
+    `constructor-container-injection`; `twig-extension-get-name`;
+    `twig-legacy-class` (warning, `Twig_Foo` names); `form-type-removed-method`
+    and `form-removed-option` (warnings, the Symfony 3.0 form removals).
+  - More _Deprecations_ (`deprecationChecks`, each with its own composer
+    version gate): `http-kernel-event-argument` (4.3, `GetResponseEvent` family),
+    `controller-get-doctrine` (5.4), `command-default-name` (6.1),
+    `security-class-moved` and `request-get-content-type` (6.2).
+  - More _Doctrine_ checks: `orm-query-iterate`, `orm-entity-manager-merge`,
+    `orm-flush-entity` (removed in ORM 3, on conventionally named entity
+    managers in files that import one), `orm-column-deprecated-type` (`array`,
+    `object`), and `collections-criteria-ordering` (hint, string orderings of
+    `Criteria`).
+  - More _Twig_ checks: `twig-assets-tag-missing` (`{% javascripts %}` /
+    `{% stylesheets %}` literals), `twig-enum-class` (`enum()` / `enum_cases()`
+    naming a missing project class or one that is no enum),
+    `twig-content-outside-block` (error; text or `{{ }}` outside blocks in a
+    template whose first tag is a literal `{% extends %}`; `set`, `import`,
+    `use`, `macro` and tags in general stay legal) and `twig-path-replacement`
+    (hint with a quick fix, `href="/blog"` / `action="/blog"` equal to the path
+    of one YAML or XML route without placeholders).
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
   YAML files; on an unquoted `@` / `%` YAML value, quote it; on an unescaped backslash in a
-  double-quoted YAML string, double it. Quick fixes follow the check settings.
+  double-quoted YAML string, double it; on a missing route, template, translation key or domain, change it to the one known name that differs by a typo (a unique candidate within one or two edits). Quick fixes follow the check settings.
 - Gutter: controller `render()` → template; template → controllers rendering
   it; `{% block %}` → the parent block it overrides; PHP class → its service
   definition; YAML service → its class file.
@@ -167,12 +218,63 @@ with another class of the same short name.
 - _Override block "name"_: with the caret on `{% extends %}`, one action per
   parent block the file does not define; appends a block calling `parent()`
   at the end of the file.
+- _Use Product::class_ (`src/rewrites.rs`): a Doctrine `'App:Product'` alias in
+  `getRepository()`, `find()`, `getReference()` or `getClassMetadata()` whose
+  `App\Entity\Product` is a project class.
+- _Convert to invokable command_: a class with `#[AsCommand]` extending
+  `Command`, with `execute(InputInterface $input, OutputInterface $output): int`
+  and a `configure()` of only `addArgument()` / `addOption()` calls (modes
+  `REQUIRED` / `OPTIONAL`, `VALUE_NONE` / `VALUE_REQUIRED`). `extends` and
+  `configure()` go, `execute` becomes `__invoke` with `#[Argument]` / `#[Option]`
+  parameters, a lone `parent::__construct();` goes. Not offered for anything
+  else (`setName`, defaults, lifecycle methods, `$this` use of inherited
+  members). Needs Symfony 7.3.
+- _Convert Twig extension methods to attributes_: `getFilters()`,
+  `getFunctions()` and `getTests()` holding only `new TwigFilter('x', [$this,
+  'method'])` entries become `#[AsTwigFilter('x')]` (and `AsTwigFunction`,
+  `AsTwigTest`) on the methods. Not offered with options, other callables or
+  other extension methods. Needs Twig 3.21.
+- _Add service definition to services.yaml_: caret on a concrete project class
+  declaration; appends to the first existing `config/services.yaml`, `.yml` or
+  `.xml` (no file is created) named arguments for the constructor's
+  parameters without a default (services for class types, empty literals for
+  scalars) and, without `autoconfigure: true`, the tags the class implies. Not
+  offered for a class already defined or covered by a `resource:` prototype.
+- In a YAML service file: _Resync arguments with the constructor_ (named
+  `$arg` entries only; keeps existing values, adds new parameters, drops
+  removed ones) and _Add tags …_ for a service whose class implies tags and has
+  none.
+- _Extract translation_: with plain text selected in a Twig template, replaces
+  it with `{{ 'blog.index.read_more'|trans }}` and appends the key to the
+  domain's YAML translation file (`{% trans_default_domain %}`, else
+  `messages`; `.en.` file first).
+- _Add form fields for Product_: in a form type whose `configureOptions()` sets
+  `data_class`, appends `$builder->add('field', Type::class);` for the entity
+  properties the form lacks (`#[ORM\Column]` types or typed properties; ids and
+  associations skipped).
+
+## Attribute arguments
+
+Completion inside `#[Route(`, `#[Template(`, `#[IsGranted(`, `#[AsCommand(`,
+`#[AsEventListener(` and the Doctrine mapping attributes (`#[ORM\Column(` …,
+aliases followed) offers the argument names, and the values of `methods:`,
+`schemes:`, `type:`, `fetch:`, `cascade:`, `strategy:` and `onDelete:`. Invoke it
+by hand; the IDE does not pop it up by itself there.
+
+## Twig variables
+
+Completion of variables in Twig also offers what the template defines itself
+(`{% set %}`, `{% for %}` with `loop`, macro arguments, `{% with %}`, `{# @var
+name Type #}`; blocks, macros, loops and `with` have their own scope), what
+other templates pass with `{% include 'x' with {…} %}` / `include()`, the
+`twig: globals:` of `config/packages/twig.yaml`, `app`, `_self` and `_context`.
 
 ## New file templates
 
-New menu entries for a PHP class with a fixed `App\…` namespace: Command,
-Controller, Form Type, Twig Extension, Compiler Pass, Kernel Test, Web Test,
-Event Subscriber and Voter.
+New menu entries for a PHP class with a fixed `App\…` namespace: Command (plain,
+invokable, with argument and option, with `#[Argument]` / `#[Option]`),
+Controller (attributes, annotations), Form Type, Twig Extension (methods,
+attributes), Compiler Pass, Kernel Test, Web Test, Event Subscriber and Voter.
 
 Three more create the default `config/services` file of the Symfony recipe
 (`_defaults` with autowire and autoconfigure, the `App\` resource): Service
@@ -206,7 +308,9 @@ cannot be opened.
 A project counts as Symfony when it has `symfony.lock` or requires
 `symfony/framework-bundle` or `symfony/symfony` in `composer.json`. Twig files
 need the `aritti.twig` plugin (the IDE has no Twig language). Settings: the
-public directory, extra compiled container and route files, and extra Twig
+public directory, extra compiled container and route files, extra service and
+routing files outside `config/` (`extraServiceFiles`, `extraRoutingFiles`), a
+switch for the practice hints (`practiceChecks`), and extra Twig
 namespaces (`twigNamespaces`, comma-separated `name=directory` pairs, an empty
 name is the main namespace; added to `twig: paths:`).
 
@@ -216,8 +320,8 @@ These features rely on PhpStorm's PHP, Twig and YAML PSI and type inference,
 which the OpenIDEA plugin API has no equivalent for:
 
 - container `get()` return types, Twig variable types (`{{ post.| }}`),
-  form types and options, Doctrine (QueryBuilder, repositories, DQL),
-  serializer, event dispatcher, constraint validators;
+  form types and options, Doctrine (DQL, repositories, QueryBuilder beyond
+  the removed methods above), serializer;
 - the remaining inspections and intentions (they need resolved PHP types);
 - refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing

@@ -45,6 +45,11 @@
       "title": "Report deprecated Symfony APIs the project's version no longer supports",
       "default": true
     },
+    "practiceChecks": {
+      "type": "boolean",
+      "title": "Hint at container access in controllers and constructors and report removed form and Twig APIs",
+      "default": true
+    },
     "doctrineChecks": {
       "type": "boolean",
       "title": "Report problems in Doctrine mappings",
@@ -63,6 +68,16 @@
     "compiledRoutes": {
       "type": "string",
       "title": "Extra compiled route files, like url_generating_routes.php (project-relative, comma-separated)",
+      "default": ""
+    },
+    "extraServiceFiles": {
+      "type": "string",
+      "title": "Extra service definition files outside config/ (project-relative, comma-separated YAML or XML)",
+      "default": ""
+    },
+    "extraRoutingFiles": {
+      "type": "string",
+      "title": "Extra routing files outside config/ (project-relative, comma-separated YAML or XML)",
       "default": ""
     },
     "twigNamespaces": {

@@ -406,7 +406,7 @@ pub fn twig_blocks(text: &str) -> Vec<(&str, usize)> {
 }
 
 /// `{% name rest %}` tags: name, the text after it, and the offset of that text.
-fn twig_tags(text: &str) -> impl Iterator<Item = (&str, &str, usize)> {
+pub(crate) fn twig_tags(text: &str) -> impl Iterator<Item = (&str, &str, usize)> {
     text.match_indices("{%").filter_map(|(open, _)| {
         let inside_start = open + 2;
         let close = text[inside_start..].find("%}").map_or(text.len(), |i| inside_start + i);

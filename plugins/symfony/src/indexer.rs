@@ -1,12 +1,15 @@
 //! Project-wide navigation for the host's document index. Keys: `service#id`,
 //! `route#name`, `command#name`, `param#name`, `twig-filter#`, `twig-function#`,
-//! `twig-test#`, `twig-component#`, `stimulus#`; a definition is where the file
+//! `twig-test#`, `twig-component#`, `stimulus#`, `event#`, `event-dispatch#`,
+//! `macro#`, `voter#`, `validator-of#`, `constraint-of#`; a definition is where the file
 //! names it, a reference is a use. Gutter markers use keys of their own
 //! (`template#`, `render#`, `block#`, `override#`, `class#`, `class-service#`,
 //! `route-use#`), so one icon can open several targets. Reuses the scanners of
 //! the project index.
 
 use crate::index::{self, Sink};
+use crate::php_checks::{arguments, named, trimmed};
+use crate::php_text::{attributes, class_model, mask, matching_close, read_word, resolver, skip_whitespace};
 use crate::refs::{self, Kind};
 use crate::Main;
 use openidea_plugin::indexing::{Anchor, Document, DocumentIndexer, Edges};
@@ -255,12 +258,287 @@ fn php(path: &str, text: &str, out: &mut Collected) {
         out.marker(format!("class-service#{class}"), range);
     }
 
+    let masked = mask(text);
+    php_events(text, &masked, out);
+    php_voters(text, &masked, out);
+    php_validators(text, out);
+    granted_references(text, out);
+
     for (start, end) in quoted_after(text, "getParameter(").into_iter().chain(quoted_after(text, "hasParameter(")) {
         out.reference(format!("param#{}", &text[start..end]), range_of(text, start, end));
     }
 
     for (start, end) in quoted_after(text, "->find(") {
         out.reference(format!("command#{}", &text[start..end]), range_of(text, start, end));
+    }
+}
+
+const KERNEL_EVENTS_CLASS: &str = "Symfony\\Component\\HttpKernel\\KernelEvents";
+const KERNEL_EVENTS: [(&str, &str); 8] = [
+    ("REQUEST", "kernel.request"),
+    ("CONTROLLER", "kernel.controller"),
+    ("CONTROLLER_ARGUMENTS", "kernel.controller_arguments"),
+    ("VIEW", "kernel.view"),
+    ("RESPONSE", "kernel.response"),
+    ("FINISH_REQUEST", "kernel.finish_request"),
+    ("TERMINATE", "kernel.terminate"),
+    ("EXCEPTION", "kernel.exception"),
+];
+const AS_EVENT_LISTENER: &str = "Symfony\\Component\\EventDispatcher\\Attribute\\AsEventListener";
+const CONSTRAINT: &str = "Symfony\\Component\\Validator\\Constraint";
+const CONSTRAINT_VALIDATOR: &str = "Symfony\\Component\\Validator\\ConstraintValidator";
+const GRANTED_CALLS: [&str; 3] = ["isGranted(", "denyAccessUnlessGranted(", "is_granted("];
+
+/// The event an expression names (`'kernel.request'`, `Foo::class`,
+/// `KernelEvents::REQUEST`) and the byte range to anchor.
+fn event_of(text: &str, masked: &str, resolve: &dyn Fn(&str) -> String, expression: std::ops::Range<usize>) -> Option<(String, std::ops::Range<usize>)> {
+    let expression = trimmed(masked, expression);
+    let raw = &text[expression.clone()];
+
+    if let Some(quote) = raw.chars().next().filter(|c| matches!(c, '\'' | '"')) {
+        let inner = raw.strip_prefix(quote)?.strip_suffix(quote)?;
+        let valid = !inner.is_empty() && !inner.contains(['$', '{', quote, '\\']);
+        return valid.then(|| (inner.to_owned(), expression.start + 1..expression.end - 1));
+    }
+
+    if let Some(class) = raw.strip_suffix("::class") {
+        let class = class.trim_end();
+        let valid = !class.is_empty() && class.bytes().all(|b| refs::is_identifier(b) || b == b'\\');
+        return valid.then(|| (resolve(class), expression.start..expression.start + class.len()));
+    }
+
+    let (owner, constant) = raw.split_once("::")?;
+    if resolve(owner.trim()) != KERNEL_EVENTS_CLASS {
+        return None;
+    }
+
+    KERNEL_EVENTS.iter().find(|(name, _)| *name == constant.trim()).map(|(_, event)| ((*event).to_owned(), expression))
+}
+
+fn top_level_arrow(masked: &str, item: &std::ops::Range<usize>) -> Option<usize> {
+    let mut depth = 0usize;
+    for at in item.clone() {
+        match masked.as_bytes()[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b'=' if depth == 0 && masked[at..].starts_with("=>") => return Some(at),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn listener(out: &mut Collected, text: &str, event: (String, std::ops::Range<usize>)) {
+    let range = range_of(text, event.1.start, event.1.end);
+    out.definition(format!("event#{}", event.0), range);
+    out.marker(format!("event-dispatch#{}", event.0), range);
+}
+
+fn php_events(text: &str, masked: &str, out: &mut Collected) {
+    let resolve = resolver(text);
+
+    if let Some(at) = masked.find("function getSubscribedEvents") {
+        let body = masked[at..].find('{').map(|found| at + found).and_then(|open| Some(open..matching_close(masked, open)?));
+        let list = body.and_then(|body| Some((masked[body.clone()].find("return")? + body.start, body)));
+        let open = list.and_then(|(from, body)| Some(from + masked[from..body.end].find('[')?));
+        for item in open.map(|open| arguments(masked, open)).unwrap_or_default() {
+            let Some(arrow) = top_level_arrow(masked, &item) else { continue };
+            if let Some(event) = event_of(text, masked, &resolve, item.start..arrow) {
+                listener(out, text, event);
+            }
+        }
+    }
+
+    for attribute in attributes(text).into_iter().filter(|attribute| attribute.name == AS_EVENT_LISTENER) {
+        if !masked[attribute.range.clone()].contains('(') {
+            continue;
+        }
+
+        let list = arguments(masked, attribute.arguments.start - 1);
+        let expression = list.iter().find_map(|argument| named(masked, argument.clone()).filter(|(name, _)| &masked[name.clone()] == "event").map(|(_, value)| value)).or_else(|| list.first().filter(|first| named(masked, (*first).clone()).is_none()).cloned());
+        if let Some(event) = expression.and_then(|expression| event_of(text, masked, &resolve, expression)) {
+            listener(out, text, event);
+        }
+    }
+
+    for (at, _) in masked.match_indices("->dispatch(") {
+        let open = at + "->dispatch".len();
+        let list = arguments(masked, open);
+        let Some(first) = list.first().map(|first| trimmed(masked, first.clone())) else { continue };
+
+        let event = if masked[first.clone()].starts_with("new ") {
+            let name = read_word(masked, skip_whitespace(masked, first.start + 4));
+            (!name.is_empty()).then(|| (resolve(&text[name.clone()]), name))
+        } else {
+            list.get(1).and_then(|second| event_of(text, masked, &resolve, second.clone()))
+        };
+
+        let Some((key, range)) = event else { continue };
+        let range = range_of(text, range.start, range.end);
+        out.reference(format!("event#{key}"), range);
+        out.marker(format!("event#{key}"), range);
+        out.definition(format!("event-dispatch#{key}"), range);
+    }
+}
+
+fn php_voters(text: &str, masked: &str, out: &mut Collected) {
+    let Some(model) = class_model(text) else { return };
+    let is_voter = text.contains("VoterInterface") || model.parent.as_deref().is_some_and(|parent| parent.ends_with("\\Voter"));
+    let Some(supports) = model.method("supports").filter(|_| is_voter) else { return };
+    let Some(open) = masked[supports.parameters.end..model.body.end].find('{').map(|found| supports.parameters.end + found) else { return };
+    let Some(close) = matching_close(masked, open) else { return };
+
+    let attribute_like = |value: &str| value.len() > 1 && value.starts_with(|c: char| c.is_ascii_uppercase()) && value.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    let mut define = |start: usize, end: usize| {
+        out.definition(format!("voter#{}", &text[start..end]), range_of(text, start, end));
+    };
+
+    let mut at = open;
+    while at < close {
+        let byte = masked.as_bytes()[at];
+        if matches!(byte, b'\'' | b'"') {
+            let Some(length) = masked[at + 1..close].bytes().position(|b| b == byte) else { break };
+            if attribute_like(&text[at + 1..at + 1 + length]) {
+                define(at + 1, at + 1 + length);
+            }
+            at += length + 2;
+            continue;
+        }
+        at += 1;
+    }
+
+    for owner in ["self::", "static::"] {
+        for (found, _) in masked[open..close].match_indices(owner) {
+            let name = read_word(masked, open + found + owner.len());
+            let declaration = format!("const {}", &masked[name.clone()]);
+            let Some(declared) = masked[model.body.clone()].find(&declaration).map(|position| model.body.start + position) else { continue };
+            let after = skip_whitespace(masked, declared + declaration.len());
+            let value = skip_whitespace(masked, after + 1);
+            let quote = masked.as_bytes().get(value).copied().filter(|b| matches!(b, b'\'' | b'"'));
+            let length = quote.and_then(|quote| masked[value + 1..].bytes().position(|b| b == quote));
+            if let Some(length) = length.filter(|length| attribute_like(&text[value + 1..value + 1 + length])) {
+                define(value + 1, value + 1 + length);
+            }
+        }
+    }
+}
+
+fn php_validators(text: &str, out: &mut Collected) {
+    let Some(model) = class_model(text) else { return };
+    let range = range_of(text, model.name_range.start, model.name_range.end);
+
+    match model.parent.as_deref() {
+        Some(CONSTRAINT) => {
+            out.definition(format!("constraint-of#{}", model.fqcn), range);
+            out.marker(format!("validator-of#{}", model.fqcn), range);
+        }
+        Some(CONSTRAINT_VALIDATOR) => {
+            let Some(constraint) = model.fqcn.strip_suffix("Validator") else { return };
+            out.definition(format!("validator-of#{constraint}"), range);
+            out.marker(format!("constraint-of#{constraint}"), range);
+        }
+        _ => {}
+    }
+}
+
+fn granted_references(text: &str, out: &mut Collected) {
+    for call in GRANTED_CALLS {
+        for (start, end) in quoted_after(text, call) {
+            out.reference(format!("voter#{}", &text[start..end]), range_of(text, start, end));
+        }
+    }
+}
+
+/// `{% macro name() %}`, `{% from 'x' import name %}` and `{% import 'x' as m %}` with `m.name(`.
+fn twig_macros(text: &str, own: Option<&str>, out: &mut Collected) {
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    let template_of = |source: &str| -> Option<String> {
+        let source = source.trim();
+        if source == "_self" {
+            return own.map(str::to_owned);
+        }
+        source.strip_prefix(['\'', '"']).and_then(|rest| rest.strip_suffix(['\'', '"'])).map(str::to_owned)
+    };
+
+    for (name, rest, offset) in refs::twig_tags(text) {
+        let rest_end = rest.find("%}").map_or(rest.len(), |at| at);
+        let rest = rest[..rest_end].trim_end_matches(['-', '~']);
+
+        match name {
+            "macro" => {
+                let trimmed_rest = rest.trim_start();
+                let length = trimmed_rest.bytes().take_while(|b| refs::is_identifier(*b)).count();
+                if let (Some(own), true) = (own, length > 0) {
+                    let start = offset + (rest.len() - trimmed_rest.len());
+                    out.definition(format!("macro#{own}::{}", &text[start..start + length]), range_of(text, start, start + length));
+                }
+            }
+            "from" => {
+                let Some((source, imported)) = rest.split_once(" import ") else { continue };
+                let Some(template) = template_of(source) else { continue };
+                let mut cursor = offset + source.len() + " import ".len();
+                for item in imported.split(',') {
+                    let leading = item.len() - item.trim_start().len();
+                    let name = item.trim().split_whitespace().next().unwrap_or_default();
+                    if !name.is_empty() && name.bytes().all(refs::is_identifier) {
+                        let start = cursor + leading;
+                        out.reference(format!("macro#{template}::{name}"), range_of(text, start, start + name.len()));
+                    }
+                    cursor += item.len() + 1;
+                }
+            }
+            "import" => {
+                let Some((source, alias)) = rest.rsplit_once(" as ") else { continue };
+                if let Some(template) = template_of(source) {
+                    aliases.push((alias.trim().to_owned(), template));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (alias, template) in aliases {
+        let call = format!("{alias}.");
+        for (at, _) in text.match_indices(&call) {
+            let before = text[..at].bytes().last();
+            let start = at + call.len();
+            let length = text[start..].bytes().take_while(|b| refs::is_identifier(*b)).count();
+            let glued = before.is_some_and(|b| refs::is_identifier(b) || b == b'.');
+            if !glued && length > 0 && text[start + length..].starts_with('(') {
+                out.reference(format!("macro#{template}::{}", &text[start..start + length]), range_of(text, start, start + length));
+            }
+        }
+    }
+}
+
+/// `kernel.event_listener` tags with an `event` attribute, in YAML (one line) and XML.
+fn config_listeners(language: &str, text: &str, out: &mut Collected) {
+    if language == "xml" {
+        for (tag, at) in index::xml_tags(text, "tag") {
+            let is_listener = index::xml_attribute(tag, "name").is_some_and(|(name, _)| name == "kernel.event_listener");
+            if let (true, Some((event, offset))) = (is_listener, index::xml_attribute(tag, "event")) {
+                listener(out, text, (event.replace("\\\\", "\\"), at + offset..at + offset + event.len()));
+            }
+        }
+        return;
+    }
+
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        if !line.contains("kernel.event_listener") {
+            continue;
+        }
+
+        let Some(found) = line.find("event:") else { continue };
+        let value_start = found + "event:".len();
+        let value = index::without_comment(&line[value_start..]);
+        let value = value.split([',', '}']).next().unwrap_or(value);
+        let (start, end) = index::scalar_slot(value, line_start + value_start);
+        if start < end {
+            listener(out, text, (text[start..end].replace("\\\\", "\\"), start..end));
+        }
     }
 }
 
@@ -285,6 +563,8 @@ fn config(path: &str, language: &str, text: &str, services: &Found, out: &mut Co
     for (name, at) in parameters.names() {
         out.definition(format!("param#{name}"), width_range(at, &name));
     }
+
+    config_listeners(language, text, out);
 
     for (start, end) in percent_parameters(text) {
         out.reference(format!("param#{}", &text[start..end]), range_of(text, start, end));
@@ -317,6 +597,9 @@ fn twig(path: &str, text: &str, out: &mut Collected) {
     if let Some(name) = component_of(path) {
         out.definition(format!("twig-component#{name}"), top());
     }
+
+    twig_macros(text, own.as_deref(), out);
+    granted_references(text, out);
 
     let parent = refs::twig_parent(text);
     for (block, offset) in refs::twig_blocks(text) {
@@ -561,5 +844,92 @@ mod tests {
 
         let route = index("/p/src/R.php", "<?php\nclass R {\n  #[Route('/x', name: 'blog')] function a() {}\n  function b() { return $this->generateUrl('blog'); }\n}\n");
         assert!(defined(&route, "route-use#blog"));
+    }
+
+    fn marked(edges: &Edges, key: &str) -> bool {
+        keys(&edges.markers).contains(&key)
+    }
+
+    const SUBSCRIBER: &str = "<?php\nnamespace App\\EventSubscriber;\n\nuse App\\Event\\OrderPlaced;\nuse Symfony\\Component\\HttpKernel\\KernelEvents;\nuse Symfony\\Component\\EventDispatcher\\Attribute\\AsEventListener;\n\nclass S\n{\n    public static function getSubscribedEvents(): array\n    {\n        return [\n            KernelEvents::REQUEST => 'onRequest',\n            OrderPlaced::class => ['onOrder', 10],\n            'custom.event' => 'onCustom',\n        ];\n    }\n\n    #[AsEventListener(event: 'kernel.response')]\n    public function onResponse() {}\n\n    #[AsEventListener(OrderPlaced::class)]\n    public function onOther() {}\n\n    #[AsEventListener]\n    public function untyped($e) {}\n}\n";
+
+    #[test]
+    fn listeners_are_event_definitions_and_dispatches_are_references() {
+        let edges = index("/p/src/EventSubscriber/S.php", SUBSCRIBER);
+        let defined_events: Vec<_> = keys(&edges.definitions).into_iter().filter(|key| key.starts_with("event#")).collect();
+        assert_eq!(defined_events, ["event#kernel.request", "event#App\\Event\\OrderPlaced", "event#custom.event", "event#kernel.response", "event#App\\Event\\OrderPlaced"]);
+        assert!(marked(&edges, "event-dispatch#kernel.request"));
+
+        let dispatcher = "<?php\nnamespace App\\Service;\n\nuse App\\Event\\OrderPlaced;\n\nclass Checkout\n{\n    public function go($dispatcher, $e, $dynamic)\n    {\n        $dispatcher->dispatch(new OrderPlaced($x));\n        $dispatcher->dispatch($e, 'custom.event');\n        $dispatcher->dispatch($e, $dynamic);\n        $dispatcher->dispatch($e);\n    }\n}\n";
+        let edges = index("/p/src/Service/Checkout.php", dispatcher);
+        let references: Vec<_> = keys(&edges.references).into_iter().filter(|key| key.starts_with("event#")).collect();
+        assert_eq!(references, ["event#App\\Event\\OrderPlaced", "event#custom.event"]);
+        assert!(marked(&edges, "event#custom.event"));
+        assert!(defined(&edges, "event-dispatch#App\\Event\\OrderPlaced"));
+    }
+
+    #[test]
+    fn event_listener_tags_in_yaml_and_xml_are_definitions() {
+        let yaml = "services:\n    a:\n        tags:\n            - { name: kernel.event_listener, event: kernel.request, method: on }\n            - { name: kernel.event_listener, event: 'App\\\\Event\\\\Foo' }\n            - { name: other, event: nope }\n";
+        let edges = index("/p/config/services.yaml", yaml);
+        let found: Vec<_> = keys(&edges.definitions).into_iter().filter(|key| key.starts_with("event#")).collect();
+        assert_eq!(found, ["event#kernel.request", "event#App\\Event\\Foo"]);
+
+        let xml = "<container><services><service id=\"a\"><tag name=\"kernel.event_listener\" event=\"kernel.exception\"/><tag name=\"x\" event=\"no\"/></service></services></container>";
+        assert!(defined(&index("/p/config/services.xml", xml), "event#kernel.exception"));
+    }
+
+    #[test]
+    fn twig_macros_link_definitions_to_imports() {
+        let macros = index("/p/templates/forms/_macros.html.twig", "{% macro input(name) %}<input>{% endmacro %}\n{% macro label(t) -%}x{%- endmacro %}");
+        assert!(defined(&macros, "macro#forms/_macros.html.twig::input") && defined(&macros, "macro#forms/_macros.html.twig::label"));
+
+        let user = "{% import 'forms/_macros.html.twig' as forms %}{% from 'forms/_macros.html.twig' import input, label as l %}{{ forms.input('x') }}{{ other.input('y') }}{{ xforms.label('z') }}";
+        let edges = index("/p/templates/a.html.twig", user);
+        let found: Vec<_> = keys(&edges.references).into_iter().filter(|key| key.starts_with("macro#")).collect();
+        assert_eq!(found, ["macro#forms/_macros.html.twig::input", "macro#forms/_macros.html.twig::label", "macro#forms/_macros.html.twig::input"]);
+
+        let own = index("/p/templates/b.html.twig", "{% macro a() %}{% endmacro %}{% import _self as me %}{{ me.a() }}");
+        assert!(keys(&own.references).contains(&"macro#b.html.twig::a"));
+    }
+
+    #[test]
+    fn voter_attributes_link_supports_to_is_granted_calls() {
+        let voter = "<?php\nnamespace App\\Security;\n\nuse Symfony\\Component\\Security\\Core\\Authorization\\Voter\\Voter;\n\nclass PostVoter extends Voter\n{\n    public const VIEW = 'POST_VIEW';\n    const EDIT = 'POST_EDIT';\n\n    protected function supports(string $attribute, mixed $subject): bool\n    {\n        return in_array($attribute, [self::VIEW, static::EDIT, 'POST_DELETE', 'lower_case']);\n    }\n}\n";
+        let edges = index("/p/src/Security/PostVoter.php", voter);
+        let found: Vec<_> = keys(&edges.definitions).into_iter().filter(|key| key.starts_with("voter#")).collect();
+        assert_eq!(found, ["voter#POST_DELETE", "voter#POST_VIEW", "voter#POST_EDIT"]);
+
+        let controller = "<?php\nclass C {\n  function a() { $this->denyAccessUnlessGranted('POST_EDIT', $p); $this->isGranted(\"POST_VIEW\"); }\n}\n";
+        let granted = index("/p/src/C.php", controller);
+        let found: Vec<_> = keys(&granted.references).into_iter().filter(|key| key.starts_with("voter#")).collect();
+        assert_eq!(found, ["voter#POST_VIEW", "voter#POST_EDIT"]);
+
+        let twig = index("/p/templates/a.html.twig", "{% if is_granted('POST_EDIT', post) %}{% endif %}");
+        assert!(keys(&twig.references).contains(&"voter#POST_EDIT"));
+
+        let not_a_voter = "<?php\nclass X { function supports($a) { return $a === 'POST_VIEW'; } }\n";
+        assert!(keys(&index("/p/src/X.php", not_a_voter).definitions).iter().all(|key| !key.starts_with("voter#")));
+    }
+
+    #[test]
+    fn constraints_and_their_validators_point_at_each_other() {
+        let constraint = "<?php\nnamespace App\\Validator;\n\nuse Symfony\\Component\\Validator\\Constraint;\n\nclass NoSpaces extends Constraint\n{\n}\n";
+        let validator = "<?php\nnamespace App\\Validator;\n\nuse Symfony\\Component\\Validator\\ConstraintValidator;\n\nclass NoSpacesValidator extends ConstraintValidator\n{\n}\n";
+        let one = index("/p/src/Validator/NoSpaces.php", constraint);
+        let two = index("/p/src/Validator/NoSpacesValidator.php", validator);
+        assert!(marked(&one, "validator-of#App\\Validator\\NoSpaces") && defined(&one, "constraint-of#App\\Validator\\NoSpaces"));
+        assert!(marked(&two, "constraint-of#App\\Validator\\NoSpaces") && defined(&two, "validator-of#App\\Validator\\NoSpaces"));
+    }
+
+    #[test]
+    fn new_keys_survive_degenerate_input_and_the_anchor_limit() {
+        for text in ["<?php\nfunction getSubscribedEvents", "<?php\nclass A { function getSubscribedEvents() { return [", "<?php\n->dispatch(", "<?php\n#[AsEventListener(", "{% from", "{% macro %}{% import 'x' as %}", "{% import 'x' as m %}m."] {
+            index("/p/src/A.php", text);
+            index("/p/templates/a.html.twig", text);
+        }
+
+        let many = "<?php\nclass A {\n".to_owned() + &"function f() { $d->dispatch($e, 'ev.x'); }\n".repeat(5000) + "}\n";
+        let edges = index("/p/src/A.php", &many);
+        assert!(edges.references.len() <= MAX_ANCHORS && edges.markers.len() <= MAX_ANCHORS);
     }
 }

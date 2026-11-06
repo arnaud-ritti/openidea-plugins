@@ -36,6 +36,14 @@ pub struct Render {
     pub at: Position,
 }
 
+/// `{% include 'target' with {…} %}` in the `caller` template.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateInclude {
+    pub target: String,
+    pub variables: Vec<String>,
+    pub caller: String,
+}
+
 #[derive(Default, Debug)]
 pub struct Index {
     pub routes: Names,
@@ -47,14 +55,22 @@ pub struct Index {
     pub translation_files: BTreeMap<String, Vec<String>>,
     /// Project classes (PSR-4 autoload) and their files.
     pub classes: Names,
+    /// PSR-4 namespace prefixes of the project's own code.
+    pub psr4_prefixes: Vec<String>,
     pub assets: Names,
     /// Webpack Encore and AssetMapper entry points.
     pub entries: Names,
     pub roles: Names,
+    /// Container parameters of the project's config and of the compiled container.
+    pub parameters: Names,
     pub commands: Names,
     /// Service tags used in `config/**`, at their first use.
     pub tags: Names,
     pub renders: Vec<Render>,
+    /// `twig.globals` of config/packages/twig.yaml.
+    pub twig_globals: Names,
+    /// Templates included with variables.
+    pub includes: Vec<TemplateInclude>,
     /// `symfony/framework-bundle` constraint of composer.json as (major, minor).
     pub framework_version: Option<(u32, u32)>,
     /// The compiled routes / container were read: bundles' names are known, so
@@ -141,6 +157,12 @@ impl Index {
             }
         }
 
+        let lines = Lines::new(&twig_config);
+        for key in yaml_keys(&twig_config).into_iter().filter(|key| key.parents == ["twig", "globals"]) {
+            let at = lines.position(key.offset);
+            index.twig_globals.add(key.key.trim_matches(['\'', '"']), Some("Twig global".into()), "config/packages/twig.yaml", at);
+        }
+
         let public = host::setting_string("publicDirectory").filter(|d| !d.is_empty()).unwrap_or("public".into());
         let public = public.trim_end_matches('/');
         for path in files(&[&format!("{public}/**/*")]) {
@@ -153,6 +175,7 @@ impl Index {
         let composer = project.read_file("composer.json").unwrap_or_default();
         index.framework_version = framework_version(&composer);
         for (namespace, directory) in psr4(&composer) {
+            index.psr4_prefixes.push(namespace.clone());
             let directory = format!("{}/", directory.trim_end_matches('/'));
             for path in files(&[&format!("{directory}**/*.php")]) {
                 let Some(class) = relative(&path).strip_prefix(&directory).and_then(|p| p.strip_suffix(".php")).map(str::to_owned)
@@ -161,6 +184,18 @@ impl Index {
                 };
                 let entry = Entry { detail: None, path, at: Position::new(0, 0) };
                 index.classes.insert(format!("{namespace}{}", class.replace('/', "\\")), entry);
+            }
+        }
+
+        let template_paths: Vec<(String, String)> = index.templates.iter().map(|(name, entry)| (name.clone(), entry.path.clone())).collect();
+        for (caller, path) in template_paths {
+            if started.elapsed() > BUDGET / 2 {
+                break;
+            }
+
+            let Ok(text) = project.read_file(&path) else { continue };
+            for (target, variables) in crate::twig::includes(&text).into_iter().filter(|(_, variables)| !variables.is_empty()) {
+                index.includes.push(TemplateInclude { target, variables, caller: caller.clone() });
             }
         }
 
@@ -188,6 +223,7 @@ impl Index {
 
             if relative.ends_with(".xml") {
                 xml_services(path, &text, &mut index.services);
+                xml_params(path, &text, &mut index.parameters);
                 xml_routes(path, &text, &mut index.routes);
                 xml_service_tags(path, &text, &mut index.tags);
                 continue;
@@ -199,7 +235,28 @@ impl Index {
             }
 
             yaml_services(path, &text, &mut index.services);
+            yaml_params(path, &text, &mut index.parameters);
             yaml_service_tags(path, &text, &mut index.tags);
+        }
+
+        for (key, routes) in [("extraServiceFiles", false), ("extraRoutingFiles", true)] {
+            for relative in setting_paths(key) {
+                let path = format!("{root}/{relative}");
+                let Some(text) = read(&path, &mut index) else { continue };
+
+                match (relative.ends_with(".xml"), routes) {
+                    (true, true) => xml_routes(&path, &text, &mut index.routes),
+                    (false, true) => yaml_routes(&path, &text, &mut index.routes),
+                    (true, false) => {
+                        xml_services(&path, &text, &mut index.services);
+                        xml_service_tags(&path, &text, &mut index.tags);
+                    }
+                    (false, false) => {
+                        yaml_services(&path, &text, &mut index.services);
+                        yaml_service_tags(&path, &text, &mut index.tags);
+                    }
+                }
+            }
         }
 
         for path in &controllers {
@@ -246,6 +303,7 @@ impl Index {
             let path = format!("{root}/{relative}");
             if let Some(text) = read(&path, &mut index) {
                 xml_services(&path, &text, &mut index.services);
+                xml_params(&path, &text, &mut index.parameters);
                 index.compiled_container = true;
             }
         }
@@ -511,7 +569,7 @@ impl Sink for Vec<(String, Position)> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct YamlKey {
     /// Parent keys, outermost first, without `when@<env>`.
     pub parents: Vec<String>,
@@ -638,7 +696,7 @@ pub(crate) fn yaml_tag_slots(text: &str) -> Vec<(usize, usize)> {
     slots
 }
 
-fn without_comment(value: &str) -> &str {
+pub(crate) fn without_comment(value: &str) -> &str {
     value.find(" #").map_or(value, |i| &value[..i])
 }
 
@@ -720,7 +778,7 @@ fn mapping_tag_slots(mapping: &str, base: usize, slots: &mut Vec<(usize, usize)>
 }
 
 /// `text` split at the commas outside quotes and brackets, with the offsets.
-fn split_flow(text: &str, base: usize) -> Vec<(usize, &str)> {
+pub(crate) fn split_flow(text: &str, base: usize) -> Vec<(usize, &str)> {
     let mut parts = Vec::new();
     let (mut depth, mut quote, mut from) = (0_u32, None, 0);
 
@@ -744,7 +802,7 @@ fn split_flow(text: &str, base: usize) -> Vec<(usize, &str)> {
 }
 
 /// The unquoted name in a scalar at `base`; an empty one sits at the end.
-fn scalar_slot(value: &str, base: usize) -> (usize, usize) {
+pub(crate) fn scalar_slot(value: &str, base: usize) -> (usize, usize) {
     let trimmed = value.trim();
     let leading = value.len() - value.trim_start().len();
     if trimmed.is_empty() {

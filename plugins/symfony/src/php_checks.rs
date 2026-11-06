@@ -5,13 +5,54 @@ use std::ops::Range;
 
 use crate::checks::{Context, Finding};
 use crate::index::Index;
-use crate::php_text::{attributes, imports, mask, matching_close, read_word, skip_whitespace, Target};
+use crate::php_text::{attributes, class_model, imports, mask, matching_close, read_word, skip_whitespace, ClassModel, Target};
 
 const AS_COMMAND: &str = "Symfony\\Component\\Console\\Attribute\\AsCommand";
 const ATTRIBUTE_NAMESPACE: &str = "Symfony\\Component\\DependencyInjection\\Attribute\\";
 const TAGGED_CLASSES: [&str; 4] = ["TaggedIterator", "TaggedLocator", "AutowireIterator", "AutowireLocator"];
 const DEFAULT_METHOD_ARGUMENTS: [&str; 2] = ["defaultIndexMethod", "defaultPriorityMethod"];
 const FROM_CALLABLE_CONFLICTS: [&str; 8] = ["alias", "parent", "synthetic", "file", "arguments", "properties", "configurator", "calls"];
+
+const ABSTRACT_CONTROLLER: &str = "Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController";
+const LEGACY_CONTROLLER: &str = "Symfony\\Bundle\\FrameworkBundle\\Controller\\Controller";
+const ABSTRACT_FORM_TYPE: &str = "Symfony\\Component\\Form\\AbstractType";
+const ABSTRACT_TWIG_EXTENSION: &str = "Twig\\Extension\\AbstractExtension";
+const CONSOLE_COMMAND: &str = "Symfony\\Component\\Console\\Command\\Command";
+const SERVICE_SUBSCRIBER: &str = "Symfony\\Contracts\\Service\\ServiceSubscriberInterface";
+const CONTAINER_INTERFACES: [&str; 2] = ["Psr\\Container\\ContainerInterface", "Symfony\\Component\\DependencyInjection\\ContainerInterface"];
+const SUPERGLOBALS: [&str; 7] = ["$_GET", "$_POST", "$_COOKIE", "$_FILES", "$_REQUEST", "$_SESSION", "$_SERVER"];
+const DEBUG_CALLS: [&str; 3] = ["var_dump(", "dd(", "die("];
+const HTTP_KERNEL_EVENTS: &str = "Symfony\\Component\\HttpKernel\\Event\\";
+const RENAMED_KERNEL_EVENTS: [(&str, &str); 7] = [
+    ("GetResponseEvent", "RequestEvent"),
+    ("FilterResponseEvent", "ResponseEvent"),
+    ("GetResponseForExceptionEvent", "ExceptionEvent"),
+    ("PostResponseEvent", "TerminateEvent"),
+    ("GetResponseForControllerResultEvent", "ViewEvent"),
+    ("FilterControllerEvent", "ControllerEvent"),
+    ("FilterControllerArgumentsEvent", "ControllerArgumentsEvent"),
+];
+/// Form options removed in Symfony 3.0 (UPGRADE-3.0.md, Form) with their replacements.
+const REMOVED_FORM_OPTIONS: [(&str, &str); 8] = [
+    ("choices_as_values", "nothing: choices are always values"),
+    ("empty_value", "placeholder"),
+    ("read_only", "attr['readonly']"),
+    ("intention", "csrf_token_id"),
+    ("cascade_validation", "a Valid constraint"),
+    ("max_length", "attr['maxlength']"),
+    ("virtual", "inherit_data"),
+    ("precision", "scale"),
+];
+
+/// UPGRADE-4.3.md, HttpKernel: the `GetResponseEvent` family was renamed.
+const KERNEL_EVENT_RENAME_SINCE: (u32, u32) = (4, 3);
+/// UPGRADE-5.4.md, FrameworkBundle: "Deprecate `AbstractController::getDoctrine()`".
+const GET_DOCTRINE_SINCE: (u32, u32) = (5, 4);
+/// UPGRADE-6.1.md, Console: `Command::$defaultName` and `$defaultDescription` give way to `#[AsCommand]`.
+const DEFAULT_NAME_SINCE: (u32, u32) = (6, 1);
+/// UPGRADE-6.2.md: `Security\Core\Security` moved to SecurityBundle, `Request::getContentType()` renamed.
+const SECURITY_CLASS_SINCE: (u32, u32) = (6, 2);
+const CONTENT_TYPE_SINCE: (u32, u32) = (6, 2);
 
 /// UPGRADE-8.1.md, Filesystem: "Deprecate calling `Filesystem::mirror()` with option `copy_on_windows`".
 const MIRROR_COPY_ON_WINDOWS_SINCE: (u32, u32) = (8, 1);
@@ -241,7 +282,217 @@ pub fn deprecations(ctx: &Context, text: &str) -> Vec<Finding> {
         found.extend(from_callable_conflicts(&masked, text));
     }
 
+    let model = class_model(text);
+    let mut add = |gate: (u32, u32), check: &dyn Fn() -> Vec<Finding>| {
+        if reached(ctx.index, gate) {
+            found.extend(check());
+        }
+    };
+    add(KERNEL_EVENT_RENAME_SINCE, &|| renamed_kernel_events(&masked));
+    add(GET_DOCTRINE_SINCE, &|| controller_get_doctrine(&masked, model.as_ref()));
+    add(DEFAULT_NAME_SINCE, &|| command_default_name(&masked, model.as_ref()));
+    add(SECURITY_CLASS_SINCE, &|| moved_security_class(&masked));
+    add(CONTENT_TYPE_SINCE, &|| request_get_content_type(&masked, text));
+
     found.sort_by_key(|finding| finding.start);
+    found
+}
+
+/// Offsets in `range` where `needle` starts a token: not the tail of a longer name or member access.
+fn occurrences<'a>(masked: &'a str, range: Range<usize>, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+    masked[range.clone()].match_indices(needle).filter_map(move |(at, _)| {
+        let at = range.start + at;
+        let before = masked[..at].bytes().last();
+        let glued = before.is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\' | b'$' | b'>' | b':'));
+        (!glued).then_some(at)
+    })
+}
+
+fn is_controller(model: &ClassModel) -> bool {
+    matches!(model.parent.as_deref(), Some(ABSTRACT_CONTROLLER | LEGACY_CONTROLLER))
+}
+
+fn renamed_kernel_events(masked: &str) -> Vec<Finding> {
+    let mut found = Vec::new();
+
+    for (old, new) in RENAMED_KERNEL_EVENTS {
+        let needle = format!("{HTTP_KERNEL_EVENTS}{old}");
+        for (at, _) in masked.match_indices(&needle) {
+            let end = at + needle.len();
+            if masked.as_bytes().get(end).is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\')) {
+                continue;
+            }
+
+            let message = format!("{old} was deprecated in Symfony 4.3 and removed in 5.0: use {new}.");
+            found.push(Finding::warn(at + HTTP_KERNEL_EVENTS.len()..end, "http-kernel-event-argument", message));
+        }
+    }
+
+    found
+}
+
+fn controller_get_doctrine(masked: &str, model: Option<&ClassModel>) -> Vec<Finding> {
+    let Some(model) = model.filter(|model| is_controller(model) && model.method("getDoctrine").is_none()) else { return Vec::new() };
+
+    occurrences(masked, model.body.clone(), "$this->getDoctrine(")
+        .map(|at| {
+            let name = at + "$this->".len();
+            Finding::warn(name..name + "getDoctrine".len(), "controller-get-doctrine", "AbstractController::getDoctrine() is deprecated since Symfony 5.4 and removed in 6.0: inject ManagerRegistry or EntityManagerInterface.".to_owned())
+        })
+        .collect()
+}
+
+fn command_default_name(masked: &str, model: Option<&ClassModel>) -> Vec<Finding> {
+    let Some(model) = model.filter(|model| model.parent.as_deref() == Some(CONSOLE_COMMAND)) else { return Vec::new() };
+    let mut found = Vec::new();
+
+    for property in ["$defaultName", "$defaultDescription"] {
+        for at in occurrences(masked, model.body.clone(), property) {
+            let declared = masked[..at].trim_end().ends_with("static");
+            let end = at + property.len();
+            if declared && !masked.as_bytes().get(end).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+                let message = format!("Command::{property} is deprecated since Symfony 6.1: use the #[AsCommand] attribute.");
+                found.push(Finding::warn(at..end, "command-default-name", message));
+            }
+        }
+    }
+
+    found
+}
+
+fn moved_security_class(masked: &str) -> Vec<Finding> {
+    let old = "Symfony\\Component\\Security\\Core\\Security";
+
+    masked
+        .match_indices(old)
+        .filter(|(at, _)| !masked.as_bytes().get(at + old.len()).is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\')))
+        .map(|(at, _)| {
+            let message = "Core\\Security was deprecated in Symfony 6.2 and removed in 7.0: use Symfony\\Bundle\\SecurityBundle\\Security.".to_owned();
+            Finding::warn(at..at + old.len(), "security-class-moved", message)
+        })
+        .collect()
+}
+
+/// Only the variable `$request` in a file that imports `HttpFoundation\Request`
+/// and types a parameter `Request $request`: the receiver's type is otherwise unknown.
+fn request_get_content_type(masked: &str, text: &str) -> Vec<Finding> {
+    let typed = text.contains("Symfony\\Component\\HttpFoundation\\Request;") && masked.contains("Request $request");
+    if !typed {
+        return Vec::new();
+    }
+
+    occurrences(masked, 0..masked.len(), "$request->getContentType(")
+        .map(|at| {
+            let name = at + "$request->".len();
+            Finding::warn(name..name + "getContentType".len(), "request-get-content-type", "Request::getContentType() is deprecated since Symfony 6.2: use getContentTypeFormat().".to_owned())
+        })
+        .collect()
+}
+
+/// Style and removed-API advice for controllers, forms, Twig extensions and
+/// constructors; the class's role comes from its resolved parent class.
+pub fn practices(text: &str) -> Vec<Finding> {
+    let masked = mask(text);
+    let mut found = legacy_twig_classes(&masked);
+    let Some(model) = class_model(text) else { return found };
+
+    found.extend(controller_practices(&masked, &model));
+    found.extend(constructor_container(&model));
+    found.extend(twig_extension_name(&model));
+    found.extend(form_type_removals(text, &masked, &model));
+    found.sort_by_key(|finding| finding.start);
+    found
+}
+
+fn controller_practices(masked: &str, model: &ClassModel) -> Vec<Finding> {
+    let mut found = Vec::new();
+    if !is_controller(model) {
+        return found;
+    }
+
+    if let Some(range) = model.parent_range.clone().filter(|_| model.parent.as_deref() == Some(LEGACY_CONTROLLER)) {
+        found.push(Finding::hint(range, "controller-base-class", "The Controller base class was removed in Symfony 5.0: extend AbstractController and inject services.".to_owned()));
+    }
+
+    if model.method("get").is_none() {
+        for at in occurrences(masked, model.body.clone(), "$this->get(").chain(occurrences(masked, model.body.clone(), "$this->container->get(")) {
+            let name = at + masked[at..].find("get(").unwrap_or(0);
+            found.push(Finding::hint(name..name + 3, "controller-container-get", "Fetching a service from the container hides the controller's dependencies: inject it as an action argument or constructor parameter.".to_owned()));
+        }
+    }
+
+    for global in SUPERGLOBALS {
+        for at in occurrences(masked, model.body.clone(), global) {
+            let end = at + global.len();
+            if masked.as_bytes().get(end).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+                continue;
+            }
+
+            found.push(Finding::hint(at..end, "controller-superglobal", format!("Read {global} through the Request object instead.")));
+        }
+    }
+
+    for call in DEBUG_CALLS {
+        for at in occurrences(masked, model.body.clone(), call) {
+            let name = call.trim_end_matches('(');
+            found.push(Finding::hint(at..at + name.len(), "controller-debug-call", format!("{name}() looks like leftover debugging in a controller.")));
+        }
+    }
+
+    found
+}
+
+fn constructor_container(model: &ClassModel) -> Vec<Finding> {
+    let implements_subscriber = model.interfaces.iter().any(|interface| interface == SERVICE_SUBSCRIBER);
+    let Some(constructor) = model.method("__construct").filter(|_| !implements_subscriber) else { return Vec::new() };
+
+    constructor
+        .params
+        .iter()
+        .filter(|param| !param.has_attribute && param.type_name.as_deref().is_some_and(|name| CONTAINER_INTERFACES.contains(&name)))
+        .map(|param| Finding::hint(param.range.clone(), "constructor-container-injection", "Injecting the container makes the dependencies of this class invisible: inject the services it uses, or a service locator.".to_owned()))
+        .collect()
+}
+
+fn twig_extension_name(model: &ClassModel) -> Vec<Finding> {
+    let method = model.method("getName").filter(|_| model.parent.as_deref() == Some(ABSTRACT_TWIG_EXTENSION));
+
+    method.map(|method| Finding::hint(method.name_range.clone(), "twig-extension-get-name", "Twig extensions need no getName(); it was removed in Twig 2.".to_owned())).into_iter().collect()
+}
+
+fn legacy_twig_classes(masked: &str) -> Vec<Finding> {
+    masked
+        .match_indices("Twig_")
+        .filter(|(at, _)| {
+            let glued = masked[..*at].bytes().last().is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'>' | b':'));
+            let named = masked.as_bytes().get(at + 5).is_some_and(u8::is_ascii_uppercase);
+            !glued && named
+        })
+        .map(|(at, _)| {
+            let end = at + masked[at..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(masked.len() - at);
+            Finding::warn(at..end, "twig-legacy-class", format!("{} is a legacy class name removed in Twig 3: use the namespaced Twig\\... class.", &masked[at..end]))
+        })
+        .collect()
+}
+
+fn form_type_removals(text: &str, masked: &str, model: &ClassModel) -> Vec<Finding> {
+    let mut found = Vec::new();
+    if model.parent.as_deref() != Some(ABSTRACT_FORM_TYPE) {
+        return found;
+    }
+
+    for (old, new) in [("setDefaultOptions", "configureOptions(OptionsResolver $resolver)"), ("getName", "getBlockPrefix()")] {
+        if let Some(method) = model.method(old) {
+            found.push(Finding::warn(method.name_range.clone(), "form-type-removed-method", format!("{old}() of form types was removed in Symfony 3.0: use {new}.")));
+        }
+    }
+
+    for (key, range, _) in string_keys(masked, text, model.body.clone()) {
+        if let Some((_, replacement)) = REMOVED_FORM_OPTIONS.iter().find(|(old, _)| *old == key) {
+            found.push(Finding::warn(range, "form-removed-option", format!("The \"{key}\" form option was removed in Symfony 3.0: use {replacement}.")));
+        }
+    }
+
     found
 }
 
@@ -673,5 +924,145 @@ mod tests {
         host.set_setting("commandChecks", "true");
         host.set_setting("deprecationChecks", "false");
         assert_eq!(published(&host, &mut plugin, open()), ["command-invokable-return-type"]);
+    }
+
+    fn practice_texts(text: &str) -> Vec<(&'static str, String)> {
+        texts(text, &practices(text))
+    }
+
+    const CONTROLLER: &str = "<?php\nnamespace App\\Controller;\n\nuse Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController;\n\nclass HomeController extends AbstractController\n{\n    public function index()\n    {\n        $mailer = $this->get('mailer');\n        $id = $_GET['id'];\n        var_dump($id);\n        $x = $this->container->get('x');\n    }\n}\n";
+
+    #[test]
+    fn controller_practices_hint_at_container_superglobals_and_debug_calls() {
+        assert_eq!(
+            practice_texts(CONTROLLER),
+            [
+                ("controller-container-get", "get".to_owned()),
+                ("controller-superglobal", "$_GET".to_owned()),
+                ("controller-debug-call", "var_dump".to_owned()),
+                ("controller-container-get", "get".to_owned()),
+            ]
+        );
+        assert!(practices(CONTROLLER).iter().all(|finding| finding.severity == openidea_plugin::Severity::Hint));
+    }
+
+    #[test]
+    fn controller_practices_stay_quiet_outside_controllers_and_for_own_methods() {
+        let other = CONTROLLER.replace("extends AbstractController", "extends BaseController");
+        assert!(practice_texts(&other).is_empty());
+
+        let foreign = CONTROLLER.replace("Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController", "Acme\\AbstractController");
+        assert!(practice_texts(&foreign).is_empty());
+
+        let own = CONTROLLER.replace("public function index()", "public function get($id) { return $this->get($id); }\n    public function index()");
+        assert!(practice_texts(&own).iter().all(|(code, _)| *code != "controller-container-get"));
+
+        let member = "<?php\nuse Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController;\nclass A extends AbstractController\n{\n    public function i() { $this->add(1); $other->get('x'); $this->adds(); dd_x(); $_GETTER; }\n}\n";
+        assert!(practice_texts(member).is_empty());
+    }
+
+    #[test]
+    fn legacy_controller_base_class_is_a_hint_on_the_parent_name() {
+        let text = "<?php\nuse Symfony\\Bundle\\FrameworkBundle\\Controller\\Controller;\n\nclass A extends Controller\n{\n}\n";
+        assert_eq!(practice_texts(text), [("controller-base-class", "Controller".to_owned())]);
+    }
+
+    #[test]
+    fn container_injected_into_a_constructor_is_a_hint_unless_attributed_or_a_subscriber() {
+        let text = "<?php\nnamespace App;\n\nuse Psr\\Container\\ContainerInterface;\n\nclass A\n{\n    public function __construct(private ContainerInterface $container, private int $n = 1)\n    {\n    }\n}\n";
+        assert_eq!(practice_texts(text), [("constructor-container-injection", "private ContainerInterface $container".to_owned())]);
+
+        let attributed = text.replace("private ContainerInterface", "#[AutowireLocator([])] private ContainerInterface");
+        assert!(practice_texts(&attributed).is_empty());
+
+        let subscriber = text.replace("class A", "class A implements ServiceSubscriberInterface").replace("use Psr", "use Symfony\\Contracts\\Service\\ServiceSubscriberInterface;\nuse Psr");
+        assert!(practice_texts(&subscriber).is_empty());
+
+        let other_type = text.replace("use Psr\\Container\\ContainerInterface;", "use Acme\\ContainerInterface;");
+        assert!(practice_texts(&other_type).is_empty());
+    }
+
+    #[test]
+    fn twig_extension_get_name_and_legacy_class_names_are_reported() {
+        let text = "<?php\nnamespace App\\Twig;\n\nuse Twig\\Extension\\AbstractExtension;\n\nclass E extends AbstractExtension\n{\n    public function getName() { return 'e'; }\n}\n";
+        assert_eq!(practice_texts(text), [("twig-extension-get-name", "getName".to_owned())]);
+
+        let legacy = "<?php\nclass E extends \\Twig_Extension\n{\n    // Twig_Ignored\n    public function f() { $x = 'Twig_String'; $y = $this->Twig_Foo; new Twig_Environment(); }\n}\n";
+        assert_eq!(practice_texts(legacy), [("twig-legacy-class", "Twig_Extension".to_owned()), ("twig-legacy-class", "Twig_Environment".to_owned())]);
+    }
+
+    #[test]
+    fn form_type_removed_methods_and_options_are_reported() {
+        let text = "<?php\nnamespace App\\Form;\n\nuse Symfony\\Component\\Form\\AbstractType;\n\nclass T extends AbstractType\n{\n    public function buildForm($builder, array $options)\n    {\n        $builder->add('a', null, ['empty_value' => '', 'label' => 'x', 'read_only' => true]);\n    }\n\n    public function setDefaultOptions($resolver) {}\n\n    public function getName() { return 't'; }\n}\n";
+        assert_eq!(
+            practice_texts(text),
+            [("form-removed-option", "empty_value".to_owned()), ("form-removed-option", "read_only".to_owned()), ("form-type-removed-method", "setDefaultOptions".to_owned()), ("form-type-removed-method", "getName".to_owned())]
+        );
+
+        let plain = text.replace("extends AbstractType", "extends Other");
+        assert!(practice_texts(&plain).is_empty());
+    }
+
+    #[test]
+    fn deprecated_get_doctrine_and_default_name_need_their_version() {
+        let controller = "<?php\nuse Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController;\nclass A extends AbstractController\n{\n    public function i() { return $this->getDoctrine()->getManager(); }\n}\n";
+        assert_eq!(deprecations_in(Some((5, 4)), controller), [("controller-get-doctrine", "getDoctrine".to_owned())]);
+        assert!(deprecations_in(Some((5, 3)), controller).is_empty());
+        assert!(deprecations_in(None, controller).is_empty());
+
+        let command = "<?php\nuse Symfony\\Component\\Console\\Command\\Command;\nclass C extends Command\n{\n    protected static $defaultName = 'app:c';\n    protected static $defaultDescription = 'd';\n    public $defaultNameless;\n}\n";
+        assert_eq!(deprecations_in(Some((6, 1)), command), [("command-default-name", "$defaultName".to_owned()), ("command-default-name", "$defaultDescription".to_owned())]);
+        assert!(deprecations_in(Some((6, 0)), command).is_empty());
+    }
+
+    #[test]
+    fn renamed_kernel_events_security_and_content_type_are_reported() {
+        let events = "<?php\nuse Symfony\\Component\\HttpKernel\\Event\\GetResponseEvent;\nuse Symfony\\Component\\HttpKernel\\Event\\GetResponseEventX;\nuse Symfony\\Component\\HttpKernel\\Event\\FilterResponseEvent as R;\n";
+        let found = deprecations_in(Some((4, 3)), events);
+        assert_eq!(found, [("http-kernel-event-argument", "GetResponseEvent".to_owned()), ("http-kernel-event-argument", "FilterResponseEvent".to_owned())]);
+        assert!(deprecations_in(Some((4, 2)), events).is_empty());
+
+        let security = "<?php\nuse Symfony\\Component\\Security\\Core\\Security;\nuse Symfony\\Component\\Security\\Core\\SecurityEvents;\n";
+        assert_eq!(deprecations_in(Some((6, 2)), security), [("security-class-moved", "Symfony\\Component\\Security\\Core\\Security".to_owned())]);
+
+        let request = "<?php\nuse Symfony\\Component\\HttpFoundation\\Request;\nfunction f(Request $request, $other) { $request->getContentType(); $other->getContentType(); }\n";
+        assert_eq!(deprecations_in(Some((6, 2)), request), [("request-get-content-type", "getContentType".to_owned())]);
+
+        let untyped = "<?php\nfunction f($request) { $request->getContentType(); }\n";
+        assert!(deprecations_in(Some((6, 2)), untyped).is_empty());
+    }
+
+    #[test]
+    fn class_model_reads_parents_interfaces_methods_and_parameters() {
+        let text = "<?php\nnamespace App\\Service;\n\nuse Acme\\Base;\nuse Acme\\Contracts as C;\nuse Psr\\Log\\LoggerInterface;\n\nfinal class Mailer extends Base implements C\\Sender, \\Countable\n{\n    use Helper;\n\n    public function __construct(private LoggerInterface $logger, ?int $retries = 3, string|int $id = 1, #[Autowire('%x%')] string $dsn = '', Other ...$more)\n    {\n        $a = function () {};\n    }\n\n    private static function send(): void {}\n}\n";
+        let model = class_model(text).unwrap();
+        assert_eq!(model.fqcn, "App\\Service\\Mailer");
+        assert_eq!(model.parent.as_deref(), Some("Acme\\Base"));
+        assert_eq!(model.interfaces, ["Acme\\Contracts\\Sender", "Countable"]);
+        assert!(model.has_traits);
+        assert_eq!(model.methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["__construct", "send"]);
+
+        let params = &model.method("__construct").unwrap().params;
+        assert_eq!(params[0].type_name.as_deref(), Some("Psr\\Log\\LoggerInterface"));
+        assert!(params[0].promoted);
+        assert_eq!((params[1].type_name.as_deref(), params[1].nullable, params[1].has_default), (Some("int"), true, true));
+        assert_eq!((params[2].type_name.as_deref(), params[2].typed), (None, true));
+        assert!(params[3].has_attribute);
+        assert_eq!(params[4].type_name.as_deref(), Some("App\\Service\\Other"));
+        assert!(params[4].variadic);
+
+        let send = model.method("send").unwrap();
+        assert_eq!((send.visibility, send.is_static, send.return_type.as_deref()), (crate::php_text::Visibility::Private, true, Some("void")));
+    }
+
+    #[test]
+    fn practice_group_is_published_and_can_be_switched_off() {
+        let host = MockHost::install();
+        let mut plugin = project(&host);
+        host.add_file("src/Command/XCommand.php", CONTROLLER);
+        assert!(published(&host, &mut plugin, Event::FileOpened(PATH.into())).contains(&"controller-superglobal".to_owned()));
+
+        host.set_setting("practiceChecks", "false");
+        assert!(published(&host, &mut plugin, Event::FileSaved(PATH.into())).is_empty());
     }
 }
