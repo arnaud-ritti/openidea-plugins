@@ -107,6 +107,41 @@ pub fn missing_properties(text: &str, offset: usize) -> Vec<&'static str> {
     KNOWN.iter().copied().filter(|name| !present.iter().any(|key| key == name)).collect()
 }
 
+/// The string (quotes included) holding `offset` when it is a key of the top-level `features` object.
+pub fn feature_key_at(text: &str, offset: usize) -> Option<Range<usize>> {
+    let bytes = text.as_bytes();
+    let bom = if bytes.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 };
+    let features = members(bytes, skip_trivia(bytes, bom))
+        .into_iter()
+        .find(|m| m.key == "features" && bytes.get(m.value_range.start) == Some(&b'{') && m.value_range.start < offset && offset <= m.value_range.end)?;
+
+    let line_start = text.get(..offset)?.rfind('\n').map_or(0, |i| i + 1);
+    let before = &text[line_start..offset];
+    if before.matches('"').count() % 2 == 0 {
+        return None;
+    }
+    let quote = line_start + before.rfind('"')?;
+
+    let previous = text[..quote].trim_end();
+    let at_key = match previous.as_bytes().last() {
+        Some(b'{') => previous.len() - 1 == features.value_range.start,
+        Some(b',') => members(bytes, features.value_range.start)
+            .iter()
+            .any(|m| skip_trivia(bytes, m.value_range.end) == previous.len() - 1),
+        _ => false,
+    };
+    if !at_key {
+        return None;
+    }
+
+    let end = match text[offset..].find(['"', '\n']) {
+        Some(i) if text.as_bytes()[offset + i] == b'"' => offset + i + 1,
+        _ => offset,
+    };
+
+    Some(quote..end)
+}
+
 /// The word (with its quotes) around `offset`, replaced when a completion is accepted.
 pub fn word_range(text: &str, offset: usize) -> Range<usize> {
     let bytes = text.as_bytes();
