@@ -1074,7 +1074,7 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 
 ## aritti.properties (port of com.intellij.properties)
 
-Key navigation and the missing-key warning are text scans, not type resolution. Source port (Apache-2.0); the HTML/JSP sites and the missing-key warning are clean-room from the Spring and Thymeleaf documentation.
+Navigation covers `.html`, `.htm` and `.xhtml` (host language `html`) and `.jsp` and `.jspx` (host language `jsp`). Key navigation and the missing-key warning are text scans, not type resolution. Source port (Apache-2.0); the HTML/JSP sites and the missing-key warning are clean-room from the Spring and Thymeleaf documentation.
 
 | Not implemented | Why | Workaround |
 |---|---|---|
@@ -1082,6 +1082,7 @@ Key navigation and the missing-key warning are text scans, not type resolution. 
 | Warnings for `#{key}` in `.xhtml` and JSP | there `#{...}` is Java EL (JSF beans), not a message; navigation still works | none needed |
 | Warnings with several candidate bundles (more than one of `messages`, `ValidationMessages`, `i18n/*`, or the same name in two folders) | without types the plugin can't tell which bundle a call reads | turn on one bundle layout, or ignore: the check stays quiet |
 | Warnings for `bundle.getString("k")` on a variable, or `message("k")` | the receiver's bundle is unknown | use `ResourceBundle.getBundle("name").getString("k")` inline |
+| Keys supplied by library or jar bundles (`typeMismatch`, `javax.validation…`) or by non-`.properties` message sources (YAML, database) | `Project::read_file` can't read jars and the plugin only indexes `.properties` files, so it can't know these keys | none; this is why only `getMessage` on a receiver named like a message source (`messageSource`, `messages`, `…Accessor`) with a `Locale` third argument is checked |
 | Rename of a key across bundles and code, references (Find Usages) | no rename or references API for plugins | Find Unused Properties, and Remove from every locale |
 | Warnings refreshed when a `.properties` file changes | diagnostics are published on open and save of the code file | reopen or save the file |
 

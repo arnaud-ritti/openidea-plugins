@@ -200,7 +200,8 @@ impl Properties {
         }
 
         let mut diagnostics = Vec::new();
-        if enabled {
+        let has_bundle = enabled && self.key_index(path).is_some_and(|index| index.conventional_bundle().is_some());
+        if has_bundle {
             let text = project_for(path)?.read_file(path)?;
             let uses = if is_source_file(path) { source_uses(&text) } else { markup_uses(&text, path) };
             let Some(index) = self.key_index(path) else { return Ok(()) };
@@ -744,7 +745,7 @@ mod tests {
         host.add_file("/project/src/messages.properties", "a.b=Value\n");
         host.add_file("/project/src/messages_fr.properties", "a.b=Valeur\n");
 
-        let java = "x = messageSource.getMessage(\"a.b\", null, l);\ny = messageSource.getMessage(\"no.such\", null, l);\n";
+        let java = "x = messageSource.getMessage(\"a.b\", null, locale);\ny = messageSource.getMessage(\"no.such\", null, locale);\n";
         let found = diagnostics_for(&host, "/project/A.java", java);
         assert_eq!(found, ["Property 'no.such' isn't declared in any resource bundle."]);
 
@@ -756,6 +757,48 @@ mod tests {
 
         let bundle = "ResourceBundle.getBundle(\"messages\").getString(\"missing.k\");";
         assert_eq!(diagnostics_for(&host, "/project/B.java", bundle).len(), 1);
+    }
+
+    #[test]
+    fn missing_key_in_code_needs_a_message_source_receiver() {
+        let host = MockHost::install();
+        host.add_file("/project/src/messages.properties", "a.b=Value\n");
+
+        let warns = ["messageSource.getMessage(\"no.such\", null, Locale.ENGLISH);", "this.messages.getMessage(\"no.such\", null, locale);"];
+        let quiet = [
+            "Foo.getMessage(\"no.such\");",
+            "getMessage(\"no.such\");",
+            "messageSource.getMessage(\"no.such\", null, dflt);",
+            "messageSource.getMessage(\"no.such\", args, \"dflt\");",
+        ];
+        assert_eq!(diagnostics_for(&host, "/project/W.java", warns[0]).len(), 1);
+        assert_eq!(diagnostics_for(&host, "/project/W.java", warns[1]).len(), 1);
+        assert_eq!(diagnostics_for(&host, "/project/W.java", "messageAccessor.getMessage(\"no.such\")").len(), 1);
+        for text in quiet {
+            assert!(diagnostics_for(&host, "/project/W.java", text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn missing_key_setting_off_clears_warnings() {
+        let host = MockHost::install();
+        host.add_file("/project/src/messages.properties", "a.b=Value\n");
+        let path = "/project/A.java";
+        host.add_file(path, "messageSource.getMessage(\"no.such\", null, Locale.ENGLISH);");
+        let mut plugin = Properties::default();
+        let event = [Event::FileSaved(path.into())];
+
+        plugin.handle_events(&event, &host.invocation());
+        assert_eq!(host.diagnostics()[path].len(), 1);
+
+        host.set_setting("reportMissingKeysInCode", "false");
+        plugin.handle_events(&event, &host.invocation());
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
+
+        let fresh = "/project/B.java";
+        host.add_file(fresh, "messageSource.getMessage(\"no.such\", null, Locale.ENGLISH);");
+        plugin.handle_events(&[Event::FileOpened(fresh.into())], &host.invocation());
+        assert!(host.diagnostics().get(fresh).is_none_or(|d| d.is_empty()));
     }
 
     #[test]

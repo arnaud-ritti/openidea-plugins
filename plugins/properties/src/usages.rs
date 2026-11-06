@@ -131,6 +131,15 @@ fn string_literal(arg: &str) -> Option<&str> {
     arg.strip_prefix('"')?.strip_suffix('"').filter(|s| !s.contains('"'))
 }
 
+/// Whether the text before `.getMessage` ends in an identifier that looks like a
+/// `MessageSource`: library bundles and custom helpers aren't in the project's files.
+fn message_source_receiver(before: &str) -> bool {
+    let Some(receiver) = before.strip_suffix('.') else { return false };
+    let name = receiver.rsplit(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or_default();
+    let lower = name.to_lowercase();
+    lower.contains("messagesource") || lower.contains("messages") || name.ends_with("Accessor")
+}
+
 /// Keys read through `MessageSource.getMessage("k", …)` and through
 /// `ResourceBundle.getBundle("name")…getString("k")` in Java/Kotlin source.
 /// Only calls whose key is a plain literal are reported; a default message
@@ -159,8 +168,8 @@ pub fn source_uses(text: &str) -> Vec<KeyUse> {
             }
 
             let bundle = if name == "getMessage" {
-                let has_default = args.len() >= 4 || (args.len() == 3 && args[2].starts_with('"'));
-                if has_default {
+                let third_is_locale = args.get(2).is_none_or(|a| ["Locale", "locale", "LocaleContextHolder"].iter().any(|p| a.starts_with(p)));
+                if args.len() >= 4 || !third_is_locale || !message_source_receiver(&text[..at]) {
                     continue;
                 }
                 None
