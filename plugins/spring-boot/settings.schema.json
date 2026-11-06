@@ -29,6 +29,21 @@
       "type": "boolean",
       "title": "Check @DirtiesContext modes and @BeforeTransaction/@AfterTransaction signatures",
       "default": true
+    },
+    "springBoot.checkPropertyValues": {
+      "type": "boolean",
+      "title": "Warn when a configuration value cannot convert to its key's type (number, boolean, duration, data size)",
+      "default": true
+    },
+    "springBoot.checkMetadataFiles": {
+      "type": "boolean",
+      "title": "Check (additional-)spring-configuration-metadata.json files",
+      "default": true
+    },
+    "springBoot.checkDriverDependency": {
+      "type": "boolean",
+      "title": "Hint when a spring.datasource.url names a JDBC driver the build files do not declare (transitive drivers are not seen)",
+      "default": false
     }
   }
 }
