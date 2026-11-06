@@ -403,3 +403,27 @@ fn graph_says_when_it_is_capped() {
     let status = graph.status.unwrap();
     assert!(status.starts_with(&format!("{MAX_GRAPH} of {} beans shown · ", MAX_GRAPH + 2)), "{status}");
 }
+
+#[test]
+fn p_and_c_namespace_refs_are_followed() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/AppConfig.java", CONFIG);
+    let text = r#"<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:p="http://www.springframework.org/schema/p"
+       xmlns:c="http://www.springframework.org/schema/c"
+       xmlns:x="http://example.com/x">
+  <bean id="a" class="x.A" p:dao-ref="clock" c:repo-ref="guard" c:_0-ref="clock" p:name="literal" x:thing-ref="guard"/>
+</beans>
+"#;
+    let model = parse("beans.xml", text).unwrap();
+    let refs: Vec<_> = model.injections.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(refs, ["clock", "guard", "clock"]);
+
+    let mut n = Navigator::default();
+    let xml = doc("/project/src/main/resources/beans.xml", text);
+    assert_eq!(n_definition(&mut n, &xml, after(text, "dao-ref=\"clo", 1)), [("AppConfig.java", 5)]);
+    assert_eq!(n_definition(&mut n, &xml, after(text, "repo-ref=\"gua", 1)), [("AppConfig.java", 12)]);
+    assert_eq!(n_definition(&mut n, &xml, after(text, "_0-ref=\"clo", 1)), [("AppConfig.java", 5)]);
+    assert!(n_definition(&mut n, &xml, after(text, "p:name=\"lit", 1)).is_empty());
+    assert!(n_definition(&mut n, &xml, after(text, "x:thing-ref=\"gua", 1)).is_empty());
+}

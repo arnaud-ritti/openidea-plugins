@@ -26,7 +26,6 @@ const ADVICE: [&str; 6] = ["Pointcut", "Before", "After", "AfterReturning", "Aft
 const CACHE: [&str; 3] = ["Cacheable", "CachePut", "CacheEvict"];
 const SECURITY: [&str; 4] = ["PreAuthorize", "PostAuthorize", "PreFilter", "PostFilter"];
 const BEAN_NAMES: [&str; 4] = ["Qualifier", "Named", "DependsOn", "Lookup"];
-const XML_REFS: [&str; 6] = ["ref", "parent", "depends-on", "factory-bean", "key-ref", "value-ref"];
 
 fn site(annotation: &str, arg: &str, value: &str, params: &[String]) -> Option<Site> {
     let with = |extra: &[&str]| Site::Spel(params.iter().cloned().chain(extra.iter().map(|s| s.to_string())).collect());
@@ -85,9 +84,9 @@ pub fn xml(text: &str) -> Vec<Hit> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for e in &els {
+    for (i, e) in els.iter().enumerate() {
         for a in &e.attrs {
-            let site = if XML_REFS.contains(&a.local()) || a.local() == "bean" && matches!(e.local(), "ref" | "idref") {
+            let site = if crate::model::is_xml_ref(&els, i, a) {
                 Site::BeanRef
             } else if a.local() == "class" {
                 Site::Class
