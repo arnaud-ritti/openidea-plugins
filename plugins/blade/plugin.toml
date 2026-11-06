@@ -1,0 +1,16 @@
+id = "aritti.blade"
+name = "Blade"
+version = "0.1.0"
+description = "Laravel Blade support for .blade.php files: highlighting of Blade directives, echo statements, PHP and the HTML around them, sections and pushes in the structure view, and folding of directive pairs and multi-line comments."
+authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
+license = "MIT"
+change-notes = "0.1.0: first release, with .blade.php file detection, highlighting, structure view and folding."
+categories = ["languages"]
+engines.openidea = "^1.0"
+# Highlighting, structure and folding come from this component; it is loaded
+# when the first Blade file is opened.
+wasm = "dist/plugin.wasm"
+activation = ["on-language:blade"]
+
+[[contributes.languages]]
+path = "languages/blade.toml"

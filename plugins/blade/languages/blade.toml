@@ -1,0 +1,5 @@
+id = "blade"
+name = "Blade"
+extensions = ["blade.php"]
+block-comment = ["{{--", "--}}"]
+indent = { tab-size = 4, insert-spaces = true }
