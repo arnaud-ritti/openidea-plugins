@@ -123,7 +123,7 @@ fn mass_assignment(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<F
                 continue;
             }
 
-            calls.push((class.rsplit('\\').next().unwrap_or_default().to_owned(), open));
+            calls.push((class.to_owned(), open));
         }
     }
 
@@ -141,7 +141,7 @@ fn mass_assignment(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<F
             continue;
         }
 
-        calls.push((class.rsplit('\\').next().unwrap_or_default().to_owned(), open));
+        calls.push((class.to_owned(), open));
     }
 
     let mut found = Vec::new();
@@ -151,10 +151,19 @@ fn mass_assignment(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<F
         }
 
         let Some(first) = php::arguments(masked, open).into_iter().next() else { continue };
-        let Some(model) = model(read, &class) else { continue };
+        let Some(short) = project_class(masked, &class) else { continue };
 
         let argument = php::trimmed(masked, first.clone());
-        if ALL_INPUT.contains(&&masked[argument.clone()]) {
+        let all_input = ALL_INPUT.contains(&&masked[argument.clone()]);
+        let array = php::array_open(masked, first);
+        if !all_input && array.is_none() {
+            continue;
+        }
+
+        let class = short;
+        let Some(model) = model(read, &class) else { continue };
+
+        if all_input {
             if model.guarded_nothing && model.fillable.is_empty() {
                 found.push(Finding {
                     start: argument.start,
@@ -168,7 +177,7 @@ fn mass_assignment(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<F
             continue;
         }
 
-        let Some(array) = php::array_open(masked, first) else { continue };
+        let Some(array) = array else { continue };
         if model.fillable.is_empty() {
             continue;
         }
@@ -191,6 +200,49 @@ fn mass_assignment(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<F
     }
 
     found
+}
+
+/// The short name of `class` when it is a project class: imported from or
+/// written in `App\`, or, without an import, used in a file of that namespace.
+fn project_class(masked: &str, class: &str) -> Option<String> {
+    let short = class.rsplit('\\').next()?.to_owned();
+    let mut namespace = None;
+    let mut imports: Vec<(String, String)> = Vec::new();
+
+    for line in masked.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix("namespace ") {
+            namespace = Some(name.trim_end_matches(';').trim().to_owned());
+        }
+
+        let Some(import) = line.strip_prefix("use ").and_then(|rest| rest.strip_suffix(';')) else { continue };
+        if import.contains(['{', ',']) {
+            continue;
+        }
+
+        let (path, alias) = import.split_once(" as ").unwrap_or((import, ""));
+        let path = path.trim().trim_start_matches('\\');
+        let alias = if alias.is_empty() { path.rsplit('\\').next().unwrap_or_default() } else { alias.trim() };
+        imports.push((alias.to_owned(), path.to_owned()));
+    }
+
+    let is_project = |full: &str| full == "App" || full.starts_with("App\\");
+    let first = class.trim_start_matches('\\').split('\\').next().unwrap_or_default();
+
+    if class.starts_with('\\') {
+        return is_project(class.trim_start_matches('\\')).then_some(short);
+    }
+
+    if let Some((_, path)) = imports.iter().find(|(alias, _)| alias == first) {
+        let rest = class.strip_prefix(first).unwrap_or_default();
+        let full = format!("{path}{rest}");
+        return is_project(&full).then(|| full.rsplit('\\').next().unwrap_or_default().to_owned());
+    }
+
+    match namespace {
+        Some(namespace) => is_project(&format!("{namespace}\\{class}")).then_some(short),
+        None if class.contains('\\') => is_project(class).then_some(short),
+        None => Some(short),
+    }
 }
 
 fn unscheduled_prunable(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<Finding> {

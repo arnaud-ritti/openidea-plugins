@@ -1003,3 +1003,29 @@ fn intentions_are_offered_only_at_the_caret() {
     assert!(rewrite_titles(&mut plugin, path, "php", text, "validate(").is_empty());
     assert!(rewrite_titles(&mut plugin, path, "php", text, "$y").is_empty());
 }
+
+#[test]
+fn vendor_class_sharing_a_project_model_name_is_quiet() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    for text in [
+        "<?php\nVendor\\Pkg\\Post::create($request->all());\n",
+        "<?php\n\\Vendor\\Post::create($request->all());\n",
+        "<?php\nnamespace App\\Http;\nuse Vendor\\Post;\nPost::create($request->all());\n",
+        "<?php\nnamespace App\\Http;\nuse Vendor\\Thing as Post;\nPost::create($request->all());\n",
+        "<?php\nnamespace Vendor\\Pkg;\nPost::create($request->all());\n",
+    ] {
+        assert!(eloquent_snippets(text, &FILES).is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn imported_project_model_still_warns() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    for text in [
+        "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create($request->all());\n",
+        "<?php\n\\App\\Models\\Post::create($request->all());\n",
+        "<?php\nnamespace App\\Http;\nuse App\\Models\\Post as Article;\nArticle::create($request->all());\n",
+    ] {
+        assert_eq!(eloquent_snippets(text, &FILES).len(), 1, "{text}");
+    }
+}
