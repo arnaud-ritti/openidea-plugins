@@ -9,6 +9,7 @@ mod refs;
 mod spec;
 
 use checks::Fetched;
+use ui_kit::routes::{self, Handler, Route, RouteEvent, RouteList};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, ListItem, View, ViewEvent, Viewport, Views};
@@ -22,6 +23,7 @@ pub struct OpenApi {
     project_files: Vec<String>,
     /// Status line and changes of the last comparison.
     comparison: Option<(String, Vec<ListItem>)>,
+    routes: Option<RouteList>,
 }
 
 fn project_for(path: &str) -> Result<Project, Error> {
@@ -382,7 +384,18 @@ impl Plugin for OpenApi {
         }
     }
 
-    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
+        if id == "copy-route-curl" || id == "create-route-http" {
+            let route = arg
+                .and_then(|key| self.route_list().route(key).cloned())
+                .ok_or_else(|| Error::Invalid("select an endpoint row".into()))?;
+            if id == "copy-route-curl" {
+                routes::copy_as_curl(&route, DEFAULT_BASE)?;
+            } else {
+                routes::create_http_file(&route, DEFAULT_BASE)?;
+            }
+            return Ok(None);
+        }
         if id == "compare-specs" {
             return self.compare_specs(ctx);
         }
@@ -713,14 +726,37 @@ const MAX_SCANNED_FILE_BYTES: usize = 1 << 20;
 pub const ENDPOINTS: &str = "endpoints";
 pub const COMPARE: &str = "compare";
 
+const DEFAULT_BASE: &str = "http://localhost:8080";
+const NO_TAG: &str = "(no tag)";
+
+fn routes(path: &str, text: &str, spec: &spec::Spec) -> Vec<Route> {
+    let by_key = spec::exact(&spec.keys);
+    spec::operations(text, &spec.keys)
+        .into_iter()
+        .map(|operation| {
+            let tag = by_key.get(format!("{}.tags[0]", operation.key).as_str()).map(|k| k.value.clone());
+            let at = position(text, operation.at);
+            Route {
+                method: operation.method,
+                path: operation.path,
+                handler: Handler {
+                    class: tag.filter(|tag| !tag.is_empty()).unwrap_or_else(|| NO_TAG.to_owned()),
+                    member: operation.operation_id,
+                },
+                name: None,
+                location: Some(Location { path: path.into(), range: Range::new(at, at) }),
+            }
+        })
+        .collect()
+}
+
 // ponytail: re-scans the project on every render; cache per file version if large projects make it slow.
-fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
+fn project_routes(project: &Project) -> Result<Vec<Route>, Error> {
     let mut paths = project.find_files("**/*.yaml", 500)?;
     paths.extend(project.find_files("**/*.yml", 500)?);
     paths.extend(project.find_files("**/*.json", 500)?);
 
-    let mut items = Vec::new();
-    let mut files = 0;
+    let mut found = Vec::new();
     for path in paths {
         let Ok(text) = project.read_file(&path) else {
             continue;
@@ -733,20 +769,16 @@ fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
             continue;
         };
 
-        files += 1;
-        let file_name = path.rsplit('/').next().unwrap_or(&path);
-        for operation in spec::operations(&text, &spec.keys) {
-            let at = position(&text, operation.at);
-            let detail = match &operation.operation_id {
-                Some(id) => format!("{id} · {file_name}"),
-                None => file_name.to_owned(),
-            };
-            let key = format!("{}:{}:{path}", at.line, at.character);
-            items.push(ListItem::new(&key, &format!("{} {}", operation.method, operation.path)).detail(&detail));
-        }
+        found.extend(routes(&path, &text, &spec));
     }
 
-    Ok((items, files))
+    Ok(found)
+}
+
+impl OpenApi {
+    fn route_list(&mut self) -> &mut RouteList {
+        self.routes.get_or_insert_with(|| RouteList::new("openapi.routes", "aritti.openapi"))
+    }
 }
 
 impl Views for OpenApi {
@@ -763,13 +795,9 @@ impl Views for OpenApi {
         };
 
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
-        let (items, files) = endpoint_items(&project)?;
-        if items.is_empty() {
-            return Ok(View::message("No OpenAPI files in this project.").button(refresh));
-        }
-
-        let status = format!("{} endpoints in {files} files", items.len());
-        Ok(View::new(Body::List(items)).button(refresh).status(&status))
+        let list = self.route_list();
+        list.set_routes(project_routes(&project)?);
+        Ok(list.render(View::new(Body::List(Vec::new())).button(refresh)))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
@@ -791,7 +819,7 @@ impl Views for OpenApi {
         }
 
         match event {
-            ViewEvent::Activate(key) => {
+            ViewEvent::Activate(key) if view == COMPARE => {
                 let mut parts = key.splitn(3, ':');
                 let (Some(line), Some(column), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
                     return Ok(());
@@ -805,7 +833,20 @@ impl Views for OpenApi {
                 host::refresh_view(ENDPOINTS);
                 Ok(())
             }
-            _ => Ok(()),
+            event => match self.route_list().handle(&event) {
+                RouteEvent::Changed => {
+                    host::refresh_view(ENDPOINTS);
+                    Ok(())
+                }
+                RouteEvent::Open(route) => {
+                    let Some(location) = route.location else {
+                        return Ok(());
+                    };
+                    let start = location.range.start;
+                    host::open_location(&location.path, start.line, start.character)
+                }
+                RouteEvent::Ignored => Ok(()),
+            },
         }
     }
 }
@@ -980,20 +1021,41 @@ mod tests {
     }
 
     #[test]
-    fn lists_endpoints_of_every_spec_and_opens_them() {
+    fn endpoints_list_operations_flat_with_their_tag() {
         let host = MockHost::install();
-        host.add_file("/project/api/openapi.yaml", PETSTORE);
+        let tagged = PETSTORE.replace("      operationId: listPets\n", "      operationId: listPets\n      tags:\n        - Pets\n");
+        host.add_file("/project/api/openapi.yaml", &tagged);
         host.add_file("/project/k8s.yml", "kind: Pod\n");
         let view = OpenApi::default().render(ENDPOINTS, None, &host.invocation()).unwrap();
         let Body::List(items) = view.body else { panic!("expected a list") };
         assert_eq!(
             items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
-            ["GET /pets", "GET /pets/{petId}", "DELETE /pets/{petId}"]
+            ["/pets", "/pets/{petId}", "/pets/{petId}"]
         );
-        assert_eq!(items[0].detail.as_deref(), Some("listPets · openapi.yaml"));
-        OpenApi::default().handle(ENDPOINTS, ViewEvent::Activate(items[1].key.clone()), &host.invocation()).unwrap();
+        assert_eq!(items[0].detail.as_deref(), Some("[GET] Pets"));
+        assert_eq!(items[0].icon.as_deref(), Some("ext:fileIcon/aritti.openapi/route-get"));
+        assert_eq!(items[2].icon.as_deref(), Some("ext:fileIcon/aritti.openapi/route-delete"));
+    }
+
+    #[test]
+    fn untagged_operations_group_under_no_tag() {
+        let host = MockHost::install();
+        host.add_file("/project/api/openapi.yaml", PETSTORE);
+        let view = OpenApi::default().render(ENDPOINTS, None, &host.invocation()).unwrap();
+        let Body::List(items) = view.body else { panic!("expected a list") };
+        assert!(items.iter().all(|i| i.detail.as_deref().unwrap().ends_with("(no tag)")));
+    }
+
+    #[test]
+    fn open_goes_to_the_operation_in_the_spec() {
+        let host = MockHost::install();
+        host.add_file("/project/api/openapi.yaml", PETSTORE);
+        let mut openapi = OpenApi::default();
+        let view = openapi.render(ENDPOINTS, None, &host.invocation()).unwrap();
+        let Body::List(items) = view.body else { panic!("expected a list") };
+        openapi.handle(ENDPOINTS, ViewEvent::Activate(items[1].key.clone()), &host.invocation()).unwrap();
         assert_eq!(host.opened_locations(), [("/project/api/openapi.yaml".to_owned(), 21, 4)]);
-        OpenApi::default().handle(ENDPOINTS, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        openapi.handle(ENDPOINTS, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
         assert_eq!(host.refreshed_views(), [ENDPOINTS]);
     }
 
@@ -1458,13 +1520,12 @@ mod tests {
         let host = MockHost::install();
         host.add_file("/project/a.yaml", PETSTORE);
         host.add_file("/project/b/api.json", JSON_SPEC);
-        let view = OpenApi::default().render(ENDPOINTS, None, &host.invocation()).unwrap();
+        let mut openapi = OpenApi::default();
+        let view = openapi.render(ENDPOINTS, None, &host.invocation()).unwrap();
         let Body::List(items) = view.body else { panic!("expected a list") };
-        let json_item = items.iter().find(|i| i.key.ends_with("/project/b/api.json")).unwrap();
-        assert_eq!(json_item.label, "GET /pets");
-        OpenApi::default().handle(ENDPOINTS, ViewEvent::Activate(json_item.key.clone()), &host.invocation()).unwrap();
+        assert_eq!(items.len(), 5);
+        openapi.handle(ENDPOINTS, ViewEvent::Activate(items[3].key.clone()), &host.invocation()).unwrap();
         assert_eq!(host.opened_locations()[0].0, "/project/b/api.json");
-        assert!(items.iter().any(|i| i.key.ends_with("/project/a.yaml")));
     }
 
     #[test]
@@ -1483,7 +1544,7 @@ mod tests {
         host.add_file("/project/a.yaml", PETSTORE);
         host.add_file("/project/b.json", JSON_SPEC);
         let view = OpenApi::default().render(ENDPOINTS, None, &host.invocation()).unwrap();
-        assert_eq!(view.status.as_deref(), Some("5 endpoints in 2 files"));
+        assert_eq!(view.status.as_deref(), Some("5 endpoints"));
     }
 
     #[test]
@@ -1766,8 +1827,7 @@ mod tests {
         let other: Vec<_> = host.diagnostics()["/project/other/part.yaml"].iter().filter_map(|d| d.code.clone()).collect();
         assert_eq!(other, ["missing-openapi-root"]);
 
-        let (items, files) = endpoint_items(&host.invocation().project().unwrap()).unwrap();
-        assert_eq!((items.len(), files), (2, 1));
+        assert_eq!(project_routes(&host.invocation().project().unwrap()).unwrap().len(), 2);
     }
 
     #[test]
