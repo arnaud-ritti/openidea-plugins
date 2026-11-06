@@ -159,3 +159,95 @@ icon = "icons/k8s/pv.svg"
 id = "node"
 patterns = ["*.kube-explorer-node"]
 icon = "icons/k8s/node.svg"
+
+# New-menu templates ($NAME$ and $END$ are expanded by the IDE).
+
+[[contributes.fileTemplates]]
+id = "k8s-pod"
+name = "Kubernetes Pod"
+extension = "yaml"
+path = "templates/pod.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-deployment"
+name = "Kubernetes Deployment"
+extension = "yaml"
+path = "templates/deployment.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-statefulset"
+name = "Kubernetes StatefulSet"
+extension = "yaml"
+path = "templates/statefulset.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-daemonset"
+name = "Kubernetes DaemonSet"
+extension = "yaml"
+path = "templates/daemonset.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-job"
+name = "Kubernetes Job"
+extension = "yaml"
+path = "templates/job.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-cronjob"
+name = "Kubernetes CronJob"
+extension = "yaml"
+path = "templates/cronjob.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-service"
+name = "Kubernetes Service"
+extension = "yaml"
+path = "templates/service.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-ingress"
+name = "Kubernetes Ingress"
+extension = "yaml"
+path = "templates/ingress.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-configmap"
+name = "Kubernetes ConfigMap"
+extension = "yaml"
+path = "templates/configmap.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-secret"
+name = "Kubernetes Secret"
+extension = "yaml"
+path = "templates/secret.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-namespace"
+name = "Kubernetes Namespace"
+extension = "yaml"
+path = "templates/namespace.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-role"
+name = "Kubernetes Role"
+extension = "yaml"
+path = "templates/role.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-rolebinding"
+name = "Kubernetes RoleBinding"
+extension = "yaml"
+path = "templates/rolebinding.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-clusterrole"
+name = "Kubernetes ClusterRole"
+extension = "yaml"
+path = "templates/clusterrole.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-clusterrolebinding"
+name = "Kubernetes ClusterRoleBinding"
+extension = "yaml"
+path = "templates/clusterrolebinding.yaml"

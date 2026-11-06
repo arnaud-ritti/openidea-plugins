@@ -1387,4 +1387,55 @@ mod tests {
 
         assert_eq!(host.notifications()[0].body, "minikube/(default): deployment.apps/web configured");
     }
+
+    fn registered_templates() -> Vec<(String, String, String)> {
+        let toml = include_str!("../plugin.toml");
+        let field = |block: &str, key: &str| {
+            let prefix = format!("{key} = \"");
+            let line = block.lines().find_map(|l| l.strip_prefix(prefix.as_str())).unwrap_or_default();
+            line.trim_end_matches('"').to_owned()
+        };
+        toml.split("[[contributes.fileTemplates]]")
+            .skip(1)
+            .map(|b| {
+                let b = b.split("\n[").next().unwrap_or(b);
+                (field(b, "id"), field(b, "name"), field(b, "path"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_template_is_registered_and_exists() {
+        let templates = registered_templates();
+        assert_eq!(templates.len(), 15);
+        let ids: BTreeSet<_> = templates.iter().map(|t| &t.0).collect();
+        let names: BTreeSet<_> = templates.iter().map(|t| &t.1).collect();
+        assert_eq!((ids.len(), names.len()), (15, 15));
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/");
+        let mut on_disk = std::fs::read_dir(format!("{dir}templates")).unwrap().count();
+        for (id, _, path) in &templates {
+            let text = std::fs::read_to_string(format!("{dir}{path}")).unwrap_or_else(|_| panic!("{id}: {path} missing"));
+            let mut rest = text.as_str();
+            while let Some((_, after)) = rest.split_once('$') {
+                let (placeholder, tail) = after.split_once('$').unwrap_or_else(|| panic!("{id}: lone $"));
+                assert!(["NAME", "END"].contains(&placeholder), "{id}: placeholder ${placeholder}$");
+                rest = tail;
+            }
+            on_disk -= 1;
+        }
+        assert_eq!(on_disk, 0, "a template file is not registered");
+    }
+
+    #[test]
+    fn templates_pass_the_manifest_checks() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/");
+        for (id, _, path) in registered_templates() {
+            let text = std::fs::read_to_string(format!("{dir}{path}")).unwrap();
+            let found = checks::for_file(&path, &text, false, false);
+            assert!(found.is_empty(), "{id}: {:?}", found.iter().map(|f| &f.message).collect::<Vec<_>>());
+            for deprecated in ["extensions/v1beta1", "v1beta1", "v2beta"] {
+                assert!(!text.contains(deprecated), "{id}");
+            }
+        }
+    }
 }
