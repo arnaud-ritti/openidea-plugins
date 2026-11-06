@@ -10,6 +10,7 @@ permissions:
 
 env:
   REGISTRY: l0ng-ai/openidea-plugins
+  REGISTRY_FORK: arnaud-ritti/openidea-plugins-registry
 
 jobs:
   release:
@@ -89,8 +90,7 @@ jobs:
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/aritti.$NAME-$VERSION.oiplugin"
           branch="aritti.$NAME-$VERSION"
 
-          gh repo fork "$REGISTRY" --clone=false
-          fork="$(gh api user -q .login)/openidea-plugins"
+          fork="$REGISTRY_FORK"
           git clone "https://x-access-token:$GH_TOKEN@github.com/$fork" registry
           cd registry
           git remote add upstream "https://github.com/$REGISTRY"
