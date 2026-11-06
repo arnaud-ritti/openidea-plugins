@@ -1332,6 +1332,25 @@ fn env_in_comments_is_quiet() {
 }
 
 #[test]
+fn env_in_strings_and_heredocs_is_quiet() {
+    let text = "<?php\n$m = \"use env('X') here\"; $n = 'env(1)'; $o = 'it\\'s env(2)';\n$h = <<<TXT\nCall env('Y') instead\nTXT;\n$r = env('REAL');\n";
+    let found = env_snippets("/project/app/A.php", "php", text);
+    assert_eq!(found, [("env-outside-config", "env('REAL')".into())]);
+}
+
+#[test]
+fn env_with_a_leading_backslash_is_a_real_call() {
+    let found = env_snippets("/project/app/A.php", "php", "<?php\n$a = \\env('X');\n");
+    assert_eq!(found, [("env-outside-config", "env('X')".into())]);
+}
+
+#[test]
+fn nested_env_calls_report_only_the_outer_call() {
+    let found = env_snippets("/project/app/A.php", "php", "<?php\n$a = env('A', env('B'));\n");
+    assert_eq!(found, [("env-outside-config", "env('A', env('B'))".into())]);
+}
+
+#[test]
 fn env_check_can_be_switched_off() {
     let host = MockHost::install();
     host.set_setting("checkFunctions", "false");
