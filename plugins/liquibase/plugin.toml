@@ -53,8 +53,15 @@ files = ["liquibase.properties"]
 command = "liquibase"
 args = ["update"]
 
+[[contributes.views]]
+id = "changesets"
+title = "Liquibase Changesets"
+icon = "database"
+location = "bottom"
+
 [[contributes.fileTemplates]]
 id = "changelog-xml"
+
 name = "Liquibase Changelog (XML)"
 extension = "xml"
 path = "templates/changelog.xml"

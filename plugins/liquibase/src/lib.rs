@@ -5,15 +5,24 @@ mod changelog;
 mod checks;
 mod complete;
 
-use changelog::{Include, Target};
+use changelog::{Changelog, Include, Target};
 use openidea_plugin::providers::{CompletionItem, Document, LineMarker, Providers};
+use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
+use spring_text::tree::Expansion;
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 use openidea_plugin::text::offset;
 use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Project, Range, host, register_plugin};
 use spring_text::index::project_of;
 use std::cell::OnceCell;
 
 #[derive(Default)]
-pub struct Liquibase;
+pub struct Liquibase {
+    expansion: Expansion,
+    /// File and 0-based line by tree item key, from the last render of the changesets view.
+    targets: BTreeMap<String, (String, u32)>,
+}
 
 impl Plugin for Liquibase {
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
@@ -62,6 +71,137 @@ fn target(project: &Project, root: &str, changelog: &str, include: &Include) -> 
         }
     }
     if unsure { Target::Unknown } else { Target::Missing }
+}
+
+/// Builds the changesets tree: a node per changelog, holding its changesets and the changelogs it includes, in execution order.
+struct Walk<'a> {
+    project: &'a Project,
+    root: &'a str,
+    found: BTreeMap<String, Rc<(String, Changelog)>>,
+    items: Vec<TreeItem>,
+    targets: BTreeMap<String, (String, u32)>,
+    visited: BTreeSet<String>,
+}
+
+impl<'a> Walk<'a> {
+    fn new(project: &'a Project, root: &'a str) -> Self {
+        Self { project, root, found: BTreeMap::new(), items: Vec::new(), targets: BTreeMap::new(), visited: BTreeSet::new() }
+    }
+
+    // ponytail: reads every xml/yaml/sql file the host lists, up to 3 s, to find the changelogs; index them (spring_text::index) if big projects hit the cap
+    fn discover(&mut self) {
+        let start = Instant::now();
+        let mut paths = BTreeSet::new();
+        for glob in ["**/*.xml", "**/*.yaml", "**/*.yml", "**/*.sql"] {
+            paths.extend(self.project.find_files(glob, 2000).unwrap_or_default());
+        }
+        for path in paths {
+            if start.elapsed() > Duration::from_secs(3) {
+                break;
+            }
+            self.load(&path);
+        }
+    }
+
+    fn load(&mut self, path: &str) -> Option<Rc<(String, Changelog)>> {
+        if let Some(known) = self.found.get(path) {
+            return Some(known.clone());
+        }
+        let text = self.project.read_file(path).ok()?;
+        let log = changelog::parse(path, &text)?;
+        let loaded = Rc::new((text, log));
+        self.found.insert(path.to_owned(), loaded.clone());
+        Some(loaded)
+    }
+
+    /// Changelogs nothing includes, then any left over (an include cycle has no root).
+    fn walk_all(&mut self) {
+        let paths: Vec<String> = self.found.keys().cloned().collect();
+        let mut included = BTreeSet::new();
+        for path in &paths {
+            let log = self.found[path].clone();
+            for include in &log.1.includes {
+                included.extend(self.included_files(path, include).0);
+            }
+        }
+        for path in paths.iter().filter(|path| !included.contains(*path)) {
+            self.file(path, None, &mut Vec::new());
+        }
+        for path in &paths {
+            if !self.visited.contains(path) {
+                self.file(path, None, &mut Vec::new());
+            }
+        }
+    }
+
+    /// The changelogs `include` (written in `path`) pulls in, and where it points.
+    fn included_files(&mut self, path: &str, include: &Include) -> (Vec<String>, Target) {
+        let found = target(self.project, self.root, path, include);
+        let Target::Found(at) = &found else {
+            return (Vec::new(), found);
+        };
+        if !include.dir {
+            return (vec![at.clone()], found);
+        }
+        let prefix = format!("{}/", at.trim_end_matches('/'));
+        let files = self.found.keys().filter(|file| file.starts_with(&prefix)).cloned().collect();
+        (files, found)
+    }
+
+    fn file(&mut self, path: &str, parent: Option<&str>, stack: &mut Vec<String>) {
+        let key = format!("f:{}", self.items.len());
+        let label = path.strip_prefix(&format!("{}/", self.root.trim_end_matches('/'))).unwrap_or(path);
+        let mut item = TreeItem::new(&key, label).icon("file");
+        if let Some(parent) = parent {
+            item = item.parent(parent);
+        }
+        self.targets.insert(key.clone(), (path.to_owned(), 0));
+        if stack.iter().any(|open| open == path) {
+            self.items.push(item.detail("include cycle").icon("warning"));
+            return;
+        }
+        self.items.push(item);
+        self.visited.insert(path.to_owned());
+        let Some(loaded) = self.load(path) else {
+            return;
+        };
+        let (text, log) = (&loaded.0, &loaded.1);
+
+        let mut steps: Vec<(usize, bool, usize)> = Vec::new();
+        steps.extend(log.change_sets.iter().enumerate().map(|(i, set)| (set.at, false, i)));
+        steps.extend(log.includes.iter().enumerate().map(|(i, include)| (include.at, true, i)));
+        steps.sort();
+
+        stack.push(path.to_owned());
+        for (_, is_include, index) in steps {
+            if !is_include {
+                let set = &log.change_sets[index];
+                let label = format!("{} ({})", set.id.as_deref().unwrap_or("?"), set.author.as_deref().unwrap_or("?"));
+                let child = format!("{key}/c{index}");
+                let mut item = TreeItem::new(&child, &label).parent(&key).icon("database");
+                if let Some(description) = changelog::describe(log, text, index) {
+                    item = item.detail(&description);
+                }
+                self.targets.insert(child, (path.to_owned(), changelog::line_of(text, set.at)));
+                self.items.push(item);
+                continue;
+            }
+            let include = &log.includes[index];
+            let (files, found) = self.included_files(path, include);
+            for file in &files {
+                self.file(file, Some(&key), stack);
+            }
+            let problem = match found {
+                Target::Found(_) => continue,
+                Target::Missing => "missing",
+                Target::Unknown => "unresolved",
+            };
+            let child = format!("{key}/i{index}");
+            self.targets.insert(child.clone(), (path.to_owned(), changelog::line_of(text, include.at)));
+            self.items.push(TreeItem::new(&child, &include.path).parent(&key).detail(problem).icon("warning"));
+        }
+        stack.pop();
+    }
 }
 
 impl Providers for Liquibase {
@@ -126,7 +266,51 @@ impl Providers for Liquibase {
     }
 }
 
-register_plugin!(Liquibase, providers);
+impl Views for Liquibase {
+    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let Some(project) = ctx.project() else {
+            return Ok(View::message("Open a project to see its Liquibase changesets."));
+        };
+        let Ok(root) = project.root() else {
+            return Ok(View::message("Open a project to see its Liquibase changesets."));
+        };
+        let mut walk = Walk::new(&project, &root);
+        walk.discover();
+        if walk.found.is_empty() {
+            return Ok(View::message("No Liquibase changelogs found in this project.").button(refresh));
+        }
+        walk.walk_all();
+
+        let mut items = walk.items;
+        for item in items.iter_mut() {
+            item.expanded = true;
+        }
+        self.expansion.apply(&mut items);
+        self.targets = walk.targets;
+        let sets = self.targets.keys().filter(|key| key.contains("/c")).count();
+        Ok(View::new(Body::Tree(items)).button(refresh).status(&format!("{sets} changesets")))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, _ctx: &Invocation) -> Result<(), Error> {
+        if self.expansion.handle(&event) {
+            host::refresh_view(view);
+            return Ok(());
+        }
+        match event {
+            ViewEvent::Button(button) if button == "refresh" => host::refresh_view(view),
+            ViewEvent::Activate(key) => {
+                if let Some((path, line)) = self.targets.get(&key) {
+                    host::open_location(path, *line, 0)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+register_plugin!(Liquibase, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -169,7 +353,7 @@ mod tests {
     }
 
     fn checked(host: &MockHost, path: &str, text: &str) -> Vec<(String, String)> {
-        Liquibase.line_markers(&doc(path, text));
+        Liquibase::default().line_markers(&doc(path, text));
         host.diagnostics()
             .get(path)
             .cloned()
@@ -186,6 +370,88 @@ mod tests {
         host
     }
 
+    fn tree_rows(host: &MockHost, liquibase: &mut Liquibase) -> Vec<(Option<String>, String, Option<String>)> {
+        let Body::Tree(items) = liquibase.render("changesets", None, &host.invocation()).unwrap().body else { panic!("tree expected") };
+        items.into_iter().map(|i| (i.parent, i.label, i.detail)).collect()
+    }
+
+    fn fixture() -> MockHost {
+        let host = MockHost::install();
+        host.add_file(
+            "db/master.xml",
+            "<databaseChangeLog>\n    <changeSet id=\"1\" author=\"ann\">\n        <comment>Create users</comment>\n        <createTable tableName=\"users\"/>\n    </changeSet>\n    <include file=\"changes/002.yaml\" relativeToChangelogFile=\"true\"/>\n    <include file=\"changes/003.sql\" relativeToChangelogFile=\"true\"/>\n    <changeSet id=\"4\" author=\"bob\">\n        <addColumn tableName=\"users\"/>\n    </changeSet>\n</databaseChangeLog>\n",
+        );
+        host.add_file(
+            "db/changes/002.yaml",
+            "databaseChangeLog:\n  - changeSet:\n      id: 2\n      author: cy\n      changes:\n        - createIndex:\n            tableName: users\n",
+        );
+        host.add_file(
+            "db/changes/003.sql",
+            "--liquibase formatted sql\n\n--changeset dee:3\n--comment: seed admin\ninsert into users values (1);\n",
+        );
+        host
+    }
+
+    #[test]
+    fn tree_lists_changesets_across_includes_in_order() {
+        let host = fixture();
+        let mut liquibase = Liquibase::default();
+        let tree = tree_rows(&host, &mut liquibase);
+        assert_eq!(tree[0], (None, "db/master.xml".to_owned(), None));
+        let rows: Vec<_> = tree[1..].iter().map(|(p, l, d)| (p.is_some(), l.as_str(), d.as_deref())).collect();
+        assert_eq!(
+            rows,
+            [
+                (true, "1 (ann)", Some("Create users")),
+                (true, "db/changes/002.yaml", None),
+                (true, "2 (cy)", Some("createIndex")),
+                (true, "db/changes/003.sql", None),
+                (true, "3 (dee)", Some("seed admin")),
+                (true, "4 (bob)", Some("addColumn")),
+            ]
+        );
+
+        let Body::Tree(items) = liquibase.render("changesets", None, &host.invocation()).unwrap().body else { panic!() };
+        for i in &items {
+            liquibase.handle("changesets", ViewEvent::Activate(i.key.clone()), &host.invocation()).unwrap();
+        }
+        let opened: Vec<_> = host.opened_locations().into_iter().map(|(p, l, _)| (p, l)).collect();
+        assert_eq!(
+            opened,
+            [
+                ("/project/db/master.xml".to_owned(), 0),
+                ("/project/db/master.xml".to_owned(), 1),
+                ("/project/db/changes/002.yaml".to_owned(), 0),
+                ("/project/db/changes/002.yaml".to_owned(), 1),
+                ("/project/db/changes/003.sql".to_owned(), 0),
+                ("/project/db/changes/003.sql".to_owned(), 2),
+                ("/project/db/master.xml".to_owned(), 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn tree_survives_cycles_and_missing_includes_and_empty_projects() {
+        let host = MockHost::install();
+        let mut liquibase = Liquibase::default();
+        let Body::Message(text) = liquibase.render("changesets", None, &host.invocation()).unwrap().body else { panic!("message expected") };
+        assert_eq!(text, "No Liquibase changelogs found in this project.");
+
+        host.add_file("db/a.xml", "<databaseChangeLog>\n<include file=\"b.xml\" relativeToChangelogFile=\"true\"/>\n<include file=\"gone.xml\" relativeToChangelogFile=\"true\"/>\n</databaseChangeLog>");
+        host.add_file("db/b.xml", "<databaseChangeLog>\n<changeSet id=\"1\" author=\"x\"/>\n<include file=\"a.xml\" relativeToChangelogFile=\"true\"/>\n</databaseChangeLog>");
+        let rows: Vec<_> = tree_rows(&host, &mut liquibase).into_iter().map(|(_, label, detail)| (label, detail)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("db/a.xml".to_owned(), None),
+                ("db/b.xml".to_owned(), None),
+                ("1 (x)".to_owned(), None),
+                ("db/a.xml".to_owned(), Some("include cycle".to_owned())),
+                ("gone.xml".to_owned(), Some("missing".to_owned())),
+            ]
+        );
+    }
+
     #[test]
     fn goes_to_included_changelogs() {
         let host = MockHost::install();
@@ -193,10 +459,10 @@ mod tests {
         let text = "<databaseChangeLog>\n    <include file=\"changes/001.xml\" relativeToChangelogFile=\"true\"/>\n    <changeSet id=\"1\" author=\"a\"/>\n</databaseChangeLog>";
         let d = doc("/project/db/master.xml", text);
         let start = Position::new(0, 0);
-        assert_eq!(Liquibase.definition(&d, Position::new(1, 25)), [Location { path: "/project/db/changes/001.xml".into(), range: Range::new(start, start) }]);
-        assert!(Liquibase.definition(&d, Position::new(2, 8)).is_empty());
+        assert_eq!(Liquibase::default().definition(&d, Position::new(1, 25)), [Location { path: "/project/db/changes/001.xml".into(), range: Range::new(start, start) }]);
+        assert!(Liquibase::default().definition(&d, Position::new(2, 8)).is_empty());
         let yaml = "databaseChangeLog:\n  - include:\n      file: db/changes/001.xml\n";
-        assert_eq!(Liquibase.definition(&doc("/project/master.yaml", yaml), Position::new(2, 14)).len(), 1);
+        assert_eq!(Liquibase::default().definition(&doc("/project/master.yaml", yaml), Position::new(2, 14)).len(), 1);
     }
 
     #[test]
@@ -303,7 +569,7 @@ mod tests {
     }
 
     fn complete_at_end(path: &str, text: &str) -> Vec<CompletionItem> {
-        Liquibase.completion(&doc(path, text), openidea_plugin::text::position(text, text.len()), None)
+        Liquibase::default().completion(&doc(path, text), openidea_plugin::text::position(text, text.len()), None)
     }
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {
@@ -351,7 +617,7 @@ mod tests {
 
         let existing = format!("{SET}        - createTable:\n            tab: x");
         let caret = existing.len() - ": x".len();
-        let items = Liquibase.completion(&doc(y, &existing), openidea_plugin::text::position(&existing, caret), None);
+        let items = Liquibase::default().completion(&doc(y, &existing), openidea_plugin::text::position(&existing, caret), None);
         assert_eq!(item(&items, "tableName").insert_text, "tableName");
 
         assert!(complete_at_end(y, "databaseChangeLog:\n  - changeSet:\n      author: ").is_empty());
