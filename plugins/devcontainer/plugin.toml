@@ -90,6 +90,11 @@ name = "Dev Container (Docker Compose)"
 extension = "json"
 path = "templates/compose.json"
 
+# The completion provider's language ids are json and jsonc; "jsonc" is unverified in the IDE.
+[[contributes.providers]]
+kinds = ["completion"]
+languages = ["json", "jsonc"]
+
 [contributes.settings]
 title = "Dev Container CLI"
 schema = "settings.schema.json"

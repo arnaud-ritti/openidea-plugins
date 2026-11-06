@@ -7,6 +7,7 @@ use openidea_plugin::Severity;
 
 pub const UNKNOWN_PROPERTY: &str = "unknown-property";
 pub const FEATURES_MALFORMED: &str = "features-malformed";
+pub const FOLDER_STRUCTURE: &str = "folder-structure";
 
 /// The properties of the Development Containers specification (containers.dev/implementors/json_reference).
 const KNOWN: &[&str] = &[
@@ -31,10 +32,196 @@ impl Finding {
     }
 }
 
+pub enum Context {
+    Key,
+    Value { key: String },
+}
+
 struct Member {
     key: String,
     key_range: Range<usize>,
     value_range: Range<usize>,
+}
+
+pub fn folder_structure(path: &str) -> Option<Finding> {
+    let path = path.replace('\\', "/");
+    let mut segments = path.rsplit('/');
+
+    if segments.next() != Some("devcontainer.json") || segments.take(2).any(|folder| folder == ".devcontainer") {
+        return None;
+    }
+
+    Some(Finding {
+        start: 0,
+        end: 0,
+        code: FOLDER_STRUCTURE,
+        message: "Dev Container tools only read devcontainer.json from .devcontainer/, from one folder below it (.devcontainer/<name>/), or as .devcontainer.json at the project root.".into(),
+        severity: Severity::Info,
+    })
+}
+
+pub fn first_token(text: &str) -> Range<usize> {
+    let bytes = text.as_bytes();
+    let start = skip_trivia(bytes, if bytes.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 });
+
+    start..(start + 1).min(text.len()).max(start)
+}
+
+const SHUTDOWN_ACTIONS: &[&str] = &["none", "stopContainer", "stopCompose"];
+const ENV_PROBES: &[&str] = &["none", "loginShell", "loginInteractiveShell", "interactiveShell"];
+const WAIT_FOR: &[&str] =
+    &["initializeCommand", "onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand", "postAttachCommand"];
+
+/// Each value with whether it is written as a JSON string.
+pub fn value_choices(key: &str) -> Vec<(&'static str, bool)> {
+    let strings: &[&'static str] = match key {
+        "shutdownAction" => SHUTDOWN_ACTIONS,
+        "userEnvProbe" => ENV_PROBES,
+        "waitFor" => WAIT_FOR,
+        "updateRemoteUserUID" | "overrideCommand" | "init" | "privileged" => return vec![("true", false), ("false", false)],
+        _ => &[],
+    };
+
+    strings.iter().map(|value| (*value, true)).collect()
+}
+
+/// The properties not yet present at the top level (the one being typed at `offset` does not count as present).
+pub fn missing_properties(text: &str, offset: usize) -> Vec<&'static str> {
+    let bytes = text.as_bytes();
+    let start = skip_trivia(bytes, if bytes.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 });
+    let present: Vec<String> = members(bytes, start)
+        .into_iter()
+        .filter(|m| !(m.key_range.start < offset && offset <= m.key_range.end))
+        .map(|m| m.key)
+        .collect();
+
+    KNOWN.iter().copied().filter(|name| !present.iter().any(|key| key == name)).collect()
+}
+
+/// The word (with its quotes) around `offset`, replaced when a completion is accepted.
+pub fn word_range(text: &str, offset: usize) -> Range<usize> {
+    let bytes = text.as_bytes();
+    let part = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'"' | b'_' | b'-' | b'.');
+    let mut start = offset;
+    let mut end = offset;
+
+    while start > 0 && part(&bytes[start - 1]) {
+        start -= 1;
+    }
+    while end < bytes.len() && part(&bytes[end]) {
+        end += 1;
+    }
+
+    start..end
+}
+
+/// Where `offset` sits in the top-level object: a key, or the value of a key.
+/// Quiet (`None`) inside comments, nested values and unreadable text.
+pub fn context_at(text: &str, offset: usize) -> Option<Context> {
+    let bytes = text.as_bytes();
+    if offset > bytes.len() {
+        return None;
+    }
+
+    let bom = if bytes.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 };
+    let open = trivia_outside_comment(bytes, bom, offset)?;
+    if bytes.get(open) != Some(&b'{') || offset <= open {
+        return None;
+    }
+
+    let mut i = open + 1;
+    loop {
+        let j = trivia_outside_comment(bytes, i, offset)?;
+        let quoted = bytes.get(j) == Some(&b'"');
+
+        if offset < j || (offset == j && !quoted) {
+            return Some(Context::Key);
+        }
+        if !quoted {
+            return None;
+        }
+
+        let key_end = string_end(bytes, j);
+        if offset <= key_end && (offset < key_end || bytes.get(key_end - 1) != Some(&b'"') || key_end - j < 2) {
+            return Some(Context::Key);
+        }
+
+        let key = String::from_utf8_lossy(&bytes[j + 1..key_end.saturating_sub(1).max(j + 1)]).into_owned();
+        let colon = trivia_outside_comment(bytes, key_end, offset)?;
+        if offset <= colon || bytes.get(colon) != Some(&b':') {
+            return None;
+        }
+
+        let value = trivia_outside_comment(bytes, colon + 1, offset)?;
+        if offset <= value {
+            return Some(Context::Value { key });
+        }
+
+        let value_stop = match bytes.get(value) {
+            None | Some(b',' | b'}' | b']') => value,
+            Some(_) => value_end(bytes, value),
+        };
+        if offset <= value_stop {
+            return match bytes[value] {
+                b'{' | b'[' => None,
+                _ => Some(Context::Value { key }),
+            };
+        }
+
+        let after = trivia_outside_comment(bytes, value_stop, offset)?;
+        if offset <= after {
+            return None;
+        }
+
+        i = after + usize::from(bytes.get(after) == Some(&b','));
+    }
+}
+
+/// Like `skip_trivia`, but `None` when `offset` lies inside one of the comments skipped.
+fn trivia_outside_comment(bytes: &[u8], mut at: usize, offset: usize) -> Option<usize> {
+    loop {
+        let next = skip_one_trivia(bytes, at);
+        if next == at {
+            return Some(at);
+        }
+
+        let is_comment = bytes[at] == b'/';
+        let inside = match (is_comment, bytes[at + 1]) {
+            (true, b'/') => at < offset && offset <= next,
+            (true, _) => at < offset && (offset < next || !bytes[..next].ends_with(b"*/")),
+            _ => false,
+        };
+        if inside {
+            return None;
+        }
+
+        at = next;
+    }
+}
+
+fn skip_one_trivia(bytes: &[u8], at: usize) -> usize {
+    match bytes.get(at) {
+        Some(b' ' | b'\t' | b'\r' | b'\n') => at + 1,
+        Some(b'/') if matches!(bytes.get(at + 1), Some(b'/' | b'*')) => skip_trivia_comment(bytes, at),
+        _ => at,
+    }
+}
+
+fn skip_trivia_comment(bytes: &[u8], at: usize) -> usize {
+    let mut i = at;
+    if bytes[at + 1] == b'/' {
+        while i < bytes.len() && bytes[i] != b'\n' {
+            i += 1;
+        }
+        return i;
+    }
+
+    i += 2;
+    while i < bytes.len() && !bytes[i..].starts_with(b"*/") {
+        i += 1;
+    }
+
+    (i + 2).min(bytes.len())
 }
 
 pub fn check(text: &str) -> Vec<Finding> {
