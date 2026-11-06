@@ -429,7 +429,8 @@ impl Main {
     }
 
     fn update_status_item(&self, root: &str) {
-        let Some(index) = self.indexes.get(root) else {
+        let remaining = self.indexes.iter().next();
+        let Some((root, index)) = self.indexes.get_key_value(root).or(remaining) else {
             host::remove_status_item(STATUS_ITEM);
             return;
         };
@@ -1434,7 +1435,12 @@ mod tests {
             let text = std::fs::read_to_string(format!("{root}{file}")).unwrap();
             assert!(text.contains("autowire"), "{file}");
             assert!(text.contains("autoconfigure"), "{file}");
-            assert!(text.contains("App\\"), "{file}");
+            let namespace = match file {
+                "ServicesYaml.yaml" => "App\\:",
+                "ServicesPhp.php" => "'App\\\\'",
+                _ => "namespace=\"App\\\"",
+            };
+            assert!(text.contains(namespace), "{file}");
             assert!(text.contains("$END$"), "{file}");
         }
 
@@ -1456,7 +1462,8 @@ mod tests {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/icons/");
         let light = std::fs::read_to_string(format!("{root}symfony.svg")).unwrap();
         assert!(light.contains("#6C707E"));
-        assert!(std::fs::read_to_string(format!("{root}symfony_dark.svg")).is_ok());
+        let dark = std::fs::read_to_string(format!("{root}symfony_dark.svg")).unwrap();
+        assert!(!dark.contains("#6C707E"));
     }
 
     #[test]
@@ -1484,6 +1491,19 @@ mod tests {
 
         host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0"}}"#);
         plugin.run_command("reindex", &host.invocation(), None).unwrap();
+        assert!(!host.status_items().contains_key("symfony"));
+    }
+
+    #[test]
+    fn status_item_stays_while_another_symfony_project_is_indexed() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+
+        plugin.update_status_item("/not-symfony");
+        assert!(host.status_items().contains_key("symfony"));
+
+        plugin.indexes.clear();
+        plugin.update_status_item("/not-symfony");
         assert!(!host.status_items().contains_key("symfony"));
     }
 }
