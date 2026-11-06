@@ -7,10 +7,10 @@ requires.
 
 | # | Plan | WIT change | API bump | Unblocks |
 |---|---|---|---|---|
-| A | [`when` tests project files](2026-11-05-upstream-workspace-contains.md) | no | no | devcontainer |
-| B | [right-click menu on plugin view items](2026-11-05-upstream-view-item-menu.md) | no | decision (see plan) | kube-explorer, JPA Assist |
-| C | [`invocation.selected-paths`](2026-11-05-upstream-selected-paths.md) | yes | **1.2.0** | gitlab |
-| D | [`ui.set-context`](2026-11-05-upstream-set-context.md) | yes | 1.2.0 (shares C's bump) | JPA Assist |
+| A | [`when` tests project files](2026-11-05-upstream-workspace-contains.md) — issue [#1612](https://github.com/l0ng-ai/openidea/issues/1612), PR [#1620](https://github.com/l0ng-ai/openidea/pull/1620); merged in fork `main` | no | no | devcontainer |
+| B | [right-click menu on plugin view items](2026-11-05-upstream-view-item-menu.md) — issue [#1618](https://github.com/l0ng-ai/openidea/issues/1618), PR [#1746](https://github.com/l0ng-ai/openidea/pull/1746) | no | decision (see plan) | kube-explorer, JPA Assist |
+| C | [`invocation.selected-paths`](2026-11-05-upstream-selected-paths.md) — issue [#1621](https://github.com/l0ng-ai/openidea/issues/1621), PR [#1744](https://github.com/l0ng-ai/openidea/pull/1744) | yes | **1.2.0** | gitlab |
+| D | [`ui.set-context`](2026-11-05-upstream-set-context.md) — issue [#1622](https://github.com/l0ng-ai/openidea/issues/1622), PR [#1762](https://github.com/l0ng-ai/openidea/pull/1762) | yes | 1.2.0 (shares C's bump) | JPA Assist |
 
 Order: A, B, C, D. A and B touch no WIT; C carries the 1.2.0 bump; D rebases on C
 (or carries the bump itself if it lands first; see C, Task 1).

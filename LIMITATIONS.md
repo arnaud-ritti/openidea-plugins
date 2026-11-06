@@ -398,7 +398,7 @@ inside the container, needs work in OpenIDEA itself: see _Upstream work_.
 
 | Feature of the original | Workaround | Limitation |
 |---|---|---|
-| Container management (list, start, stop, remove, logs, shell) | The IDE's built-in Docker support in the Services view lists dev containers like any other. The plugin only adds **Stop Container** (`docker ps` by the `devcontainer.local_folder` label, then `docker stop`) | Nothing groups containers by dev container in the Services view |
+| Container management (list, start, stop, remove, logs, shell) | The IDE's built-in Docker support in the Services view lists dev containers like any other. The plugin only adds **Stop Container** (`docker ps` by the `devcontainer.local_folder` label, then `docker stop`) | Nothing groups containers by dev container in the Services view. Might close when merged: `l0ng-ai/openidea` #1760 (plugin `services` views with tabs, text and process bodies), if the plugin moves to one |
 | Picking the configuration | A `configFile` setting; empty probes `.devcontainer/devcontainer.json`, then `.devcontainer.json`, with `read_file` | Configurations in subfolders must be typed in by hand |
 | Building and starting the container | `devcontainer up` (with `--remove-existing-container` for Rebuild) in an IDE terminal | No progress, result or "ready" notification in the IDE, see above |
 
@@ -549,6 +549,7 @@ The plugin API is the same in both.
   - There are no context-menu items; the commands report when the open file doesn't fit.
   - In JPA Structure, double-clicking an item opens its declaration.
 - **Would need:** `ui.set-context(key, value)` for keys prefixed with the plugin id, and context actions on tree items.
+- **Closes when merged:** `l0ng-ai/openidea` #1762 (`set-context`, keys `plugin.<id>.<key>` for `when` clauses) and #1746 (`view.item.context` menu on tree and list items).
 
 ### Generated sources and library entities are invisible
 
@@ -575,7 +576,7 @@ Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plug
 
 | Feature of the original | Why | API that would unlock it |
 |---|---|---|
-| Right-click actions on cluster resources | `view-event` has no menu event; the IDE opens a context menu only on editable `Table` bodies (insert/delete row, `PluginView.tsx`) | `tree-item.actions: list<button>` shown as a context menu, with `view-event::item-action(key, id)` |
+| Right-click actions on cluster resources | `view-event` has no menu event; the IDE opens a context menu only on editable `Table` bodies (insert/delete row, `PluginView.tsx`) | `tree-item.actions: list<button>` shown as a context menu, with `view-event::item-action(key, id)`. Closes when merged: `l0ng-ai/openidea` #1746 (`view.item.context` menu, declared in `plugin.toml`) |
 | Path to `kubectl` (and `helm`) as a setting | A `process:<program>` grant pins the program named in the manifest, resolved on `PATH` when granted | A program path taken from a setting and approved when it is set |
 | Clusters using exec credential plugins (`gke-gcloud-auth-plugin`, `aws`, `kubelogin`) from a GUI-started IDE | `process.run` has no environment parameter; the child gets the IDE's environment, often without the shell's `PATH` | `env: list<tuple<string, string>>` on `process.run` / `open-terminal` |
 | Quick documentation, find usages and rename of labels, selectors and ConfigMap/Secret keys | Providers are `completion`, `inline-completion`, `code-actions`, `definition`, `line-markers` only | `hover`, `references` and `rename` provider kinds |
@@ -611,7 +612,7 @@ since v0.1.37) on 2026-11-05.
 |---|---|---|
 | Switch Task (⌥⇧T) and Go to Task (⌥⇧N) popups, searching tasks and tracker issues | No popup, quick pick or input API (`wit/host.wit`, `ui`: notifications, status items, clipboard, `open-url` only), and a command can't open or focus a view | `ui.show-quick-pick(items, placeholder) -> option<string>` and `ui.show-input(prompt, value) -> option<string>`; or `views.reveal(view)` so a command can open the Tasks view |
 | Self-hosted trackers: Jira Server/Data Center, YouTrack Standalone, self-managed GitLab, Forgejo/Gitea, Redmine, Mantis, Bugzilla, Trac, FogBugz, the generic tracker | `net:<host>` is fixed in the manifest and `net:*` is rejected (`crates/ide-extension/src/capability.rs`, `FromStr`: only exact hosts or `*.domain`), so a server URL from settings can't be reached | A capability for hosts the user enters, e.g. `net:user` approved per host at first use, or hosts taken from a `string` setting and approved when it is set |
-| Clearing the context on task switch (closing the editors of the task being left) | No API to list or close open editors, and no `file-closed` event (`EVENT_KINDS` in `crates/ide-extension/src/manifest.rs`: file-opened, file-saved, editor-focused, action-performed, vcs-changed) | `workspace.open-editors() -> list<string>`, `workspace.close-editor(path)` and a `file-closed` event |
+| Clearing the context on task switch (closing the editors of the task being left) | No API to list or close open editors, and no `file-closed` event (`EVENT_KINDS` in `crates/ide-extension/src/manifest.rs`: file-opened, file-saved, editor-focused, action-performed, vcs-changed) | `workspace.open-editors() -> list<string>`, `workspace.close-editor(path)` and a `file-closed` event. Closes when merged: `workspace.open-editors` only, in `l0ng-ai/openidea` #1754 (needs #1752 first); `close-editor` and `file-closed` stay open |
 | Bookmarks and breakpoints in the task context (`WorkingContextManager`) | No bookmark or breakpoint API | `bookmarks.list/set`, `debug.breakpoints/set-breakpoints` |
 | Changelists per task (`TaskChangelistSupport`, `createChangelist`) | Plugins see git only (`wit/workspace.wit`, `vcs`: `status`, `remotes`, `fetch`); there are no changelists | A changelist API, if the IDE gets changelists |
 | Commit message in the commit dialog (`TaskCheckinHandlerFactory`, `CommitPlaceholderProvider`) and "commit changes" on close | No commit-message or commit-dialog extension point; `vcs` has no commit call | A `commit-message` provider export, or `vcs.set-commit-message(text)` and `vcs.commit` |
@@ -754,6 +755,7 @@ Port of `org.jetbrains.plugins.gitlab` 263.7307.200 (intellij-community tag
   - Snippets come from the editor only.
   - Worktrees aren't ported.
 - **Would need:** `workspace.open-project(path, new-window)`, `ui.pick-directory(title, initial)` and `invocation.selected-paths()`.
+- **Closes when merged:** only `invocation.selected-paths()`, in `l0ng-ai/openidea` #1744. `open-project` and `pick-directory` stay open.
 
 ### View toolbars hold plain buttons only
 
@@ -874,6 +876,7 @@ v0.1.37 and `main` (`f665beb`) on 2026-11-05.
 - **Why:** same as the dotenv section's keys index: only `find_files` (a fresh walk, up to 200,000 entries) and `read_file`.
 - **Workaround:** Jump to Source reads up to 5,000 source files inside a 60 s task and keeps the file with the longest substring shared with the message. Stack frames use `find_files("**/<file name>")`, which can take longer than 50 ms on large projects, and then a Cmd+click does nothing; F7 still works.
 - **Would need:** `workspace.search(text | regex, glob, limit)` and an indexed file name lookup.
+- **Closes when merged:** `l0ng-ai/openidea` #1754 adds `workspace.search-text` (needs #1752 first). It has no indexed file name lookup, so that part stays open.
 
 ### Pattern tables in a multiline string
 

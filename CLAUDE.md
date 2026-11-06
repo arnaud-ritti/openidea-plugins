@@ -8,6 +8,7 @@ A monorepo of plugins for [OpenIDEA](https://github.com/l0ng-ai/openidea): sandb
 
 Project skills (in `.claude/skills/`) hold the platform knowledge. Load them instead of guessing APIs:
 - `writing-openidea-plugins`: manifest, capabilities, Rust SDK, host API, limits, packaging. `reference.md` is the full upstream doc.
+- `publishing-openidea-plugins`: release flow and pull request to the community registry `l0ng-ai/openidea-plugins`.
 - `porting-intellij-plugins-to-openidea`: Marketplace lookup, licence gate, `plugin.xml` → OpenIDEA mapping.
 
 ## Layout
