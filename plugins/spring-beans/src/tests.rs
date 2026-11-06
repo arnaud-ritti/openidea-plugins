@@ -1013,8 +1013,111 @@ fn aop_structure_is_quiet_for_library_or_dynamic_name() {
     assert!(aop_found(lookalike).is_empty());
     let outside_config = "<aop:pointcut id=\"p\"/>";
     assert!(aop_found(outside_config).is_empty());
+    let dynamic_pair = "<aop:config><aop:aspect ref=\"a\"><aop:before method=\"m\" pointcut=\"x\" pointcut-ref=\"#{b}\"/></aop:aspect></aop:config>";
+    assert!(aop_found(dynamic_pair).is_empty());
     let not_beans = "<project xmlns:aop=\"http://www.springframework.org/schema/aop\"><aop:config><aop:aspect/></aop:config></project>";
     assert!(xml_findings(&MockHost::install(), not_beans).is_empty());
+}
+
+#[test]
+fn bean_with_class_and_factory_bean_is_reported() {
+    let found = aop_found("<bean id=\"a\" class=\"x.Y\" factory-bean=\"f\" factory-method=\"make\"/>");
+    assert_eq!(found, [pair("xml-bean-attributes", "factory-bean")]);
+}
+
+#[test]
+fn factory_bean_without_factory_method_is_reported() {
+    let found = aop_found("<bean id=\"a\" factory-bean=\"f\"/>");
+    assert_eq!(found, [pair("xml-bean-attributes", "factory-bean")]);
+}
+
+#[test]
+fn bean_without_class_parent_or_factory_bean_is_reported() {
+    let found = aop_found("<bean id=\"a\"/>");
+    assert_eq!(found, [pair("xml-bean-attributes", "bean")]);
+    assert!(aop_found("<bean id=\"a\" parent=\"b\"/>").is_empty());
+}
+
+#[test]
+fn abstract_bean_without_class_is_quiet() {
+    assert!(aop_found("<bean id=\"a\" abstract=\"true\"/>").is_empty());
+}
+
+#[test]
+fn property_with_ref_and_value_is_reported() {
+    let found = aop_found("<bean class=\"x.Y\"><property name=\"p\" ref=\"a\" value=\"b\"/></bean>");
+    assert_eq!(found, [pair("xml-injection-value", "property")]);
+    let arg = aop_found("<bean class=\"x.Y\"><constructor-arg ref=\"a\" value=\"b\"/></bean>");
+    assert_eq!(arg, [pair("xml-injection-value", "constructor-arg")]);
+}
+
+#[test]
+fn property_with_attribute_and_child_element_is_reported() {
+    let found = aop_found("<bean class=\"x.Y\"><property name=\"p\" value=\"b\"><list/></property></bean>");
+    assert_eq!(found, [pair("xml-injection-value", "property")]);
+    let described = aop_found("<bean class=\"x.Y\"><property name=\"p\" value=\"b\"><description>d</description></property></bean>");
+    assert!(described.is_empty());
+}
+
+#[test]
+fn property_with_nothing_is_reported() {
+    let found = aop_found("<bean class=\"x.Y\"><property name=\"p\"/></bean>");
+    assert_eq!(found, [pair("xml-injection-value", "property")]);
+    assert!(aop_found("<bean class=\"x.Y\"><property name=\"p\"><null/></property></bean>").is_empty());
+}
+
+#[test]
+fn constructor_arg_without_value_is_quiet() {
+    assert!(aop_found("<bean class=\"x.Y\"><constructor-arg index=\"0\"/></bean>").is_empty());
+}
+
+#[test]
+fn misspelled_scope_is_reported() {
+    let found = aop_found("<bean class=\"x.Y\" scope=\"Singleton\"/>");
+    assert_eq!(found, [pair("xml-scope", "Singleton")]);
+    let typo = aop_found("<bean class=\"x.Y\" scope=\"protoype\"/>");
+    assert_eq!(typo, [pair("xml-scope", "protoype")]);
+}
+
+#[test]
+fn bundle_scope_is_accepted() {
+    assert!(aop_found("<bean class=\"x.Y\" scope=\"bundle\"/>").is_empty());
+}
+
+#[test]
+fn custom_scope_is_quiet() {
+    assert!(aop_found("<bean class=\"x.Y\" scope=\"thread\"/>").is_empty());
+    assert!(aop_found("<bean class=\"x.Y\" scope=\"custom\"/>").is_empty());
+}
+
+#[test]
+fn xml_attribute_checks_are_quiet_for_library_or_dynamic_name() {
+    let dynamic = "<bean id=\"a\" class=\"${c}\" factory-bean=\"#{f}\" scope=\"${Singleton}\"><property name=\"p\" ref=\"${r}\" value=\"v\"/></bean>";
+    assert!(aop_found(dynamic).is_empty());
+    let other_ns = "<x:bean xmlns:x=\"urn:other\" id=\"a\" scope=\"Singleton\"><x:property name=\"p\"/></x:bean>";
+    assert!(aop_found(other_ns).is_empty());
+    let other_file = "<project xmlns=\"urn:other\"><bean id=\"a\" scope=\"Singleton\"><property name=\"p\"/></bean></project>";
+    assert!(xml_findings(&MockHost::install(), other_file).is_empty());
+}
+
+#[test]
+fn xml_attribute_checks_use_utf16_columns_and_crlf_lines() {
+    let host = MockHost::install();
+    let text = beans_xml("<!-- caf\u{e9}\u{1F600} --><bean id=\"a\"/>");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (2, 16, 20));
+    let text = beans_xml("<bean class=\"x.Y\"\n scope=\"Singleton\"/>").replace('\n', "\r\n");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (3, 8, 17));
+}
+
+#[test]
+fn switched_off_xml_group_is_quiet() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkXml", "false");
+    assert!(xml_findings(&host, &beans_xml("<bean id=\"a\"/>")).is_empty());
 }
 
 #[test]
