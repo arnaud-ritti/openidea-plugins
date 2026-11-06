@@ -86,7 +86,7 @@ pub fn unclosed_tags(text: &str) -> Vec<(Range<usize>, &str)> {
         i = at + 1;
 
         if text[at..].starts_with("{#") {
-            i = text[at..].find("#}").map_or(text.len(), |e| at + e + 2);
+            i = text[at + 2..].find("#}").map_or(text.len(), |e| at + 2 + e + 2);
             continue;
         }
 
@@ -142,7 +142,7 @@ pub fn code_regions(text: &str) -> Vec<Range<usize>> {
 
         if text[at..].starts_with("{#") {
             regions.push(region_start..at);
-            region_start = text[at..].find("#}").map_or(text.len(), |e| at + e + 2);
+            region_start = text[at + 2..].find("#}").map_or(text.len(), |e| at + 2 + e + 2);
             i = region_start;
             continue;
         }
@@ -151,7 +151,7 @@ pub fn code_regions(text: &str) -> Vec<Range<usize>> {
             continue;
         }
 
-        let Some(close) = text[at..].find("%}").map(|e| at + e + 2) else { break };
+        let Some(close) = text[at + 2..].find("%}").map(|e| at + 2 + e + 2) else { break };
         let inside = text[at + 2..close - 2].trim_matches(['-', '~', ' ', '\t', '\r', '\n']);
         i = close;
 
@@ -179,6 +179,9 @@ mod tests {
         let text = "a{# x #}b{% verbatim %}{{ c }}{% endverbatim %}d";
         let parts: Vec<_> = code_regions(text).into_iter().map(|r| &text[r]).collect();
         assert_eq!(parts, ["a", "b{% verbatim %}", "{% endverbatim %}d"]);
+
+        let text = "a{%}b{#}c";
+        assert_eq!(code_regions(text), [0..text.len()]);
 
         let text = "a{# open";
         assert_eq!(code_regions(text), [0..1]);

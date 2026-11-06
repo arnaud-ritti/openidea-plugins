@@ -589,6 +589,49 @@ mod tests {
     }
 
     #[test]
+    fn twig_checks_survive_degenerate_tags() {
+        for text in ["{%}", "{#}", "{% for", "{%- -%}", "<twig:", "<twig:A", "{{ 'k'|trans(", "{% verbatim %}"] {
+            run(text);
+        }
+    }
+
+    const NAMES: &str = "{# é😀 #}{% if app.current_route == 'nope' %}{{ 'k'|trans({}, 'ghost') }}{% endif %}";
+
+    #[test]
+    fn twig_names_ranges_use_utf16_columns_with_multibyte_text() {
+        let found = run(NAMES);
+        assert_eq!(codes(&found), ["twig-route-compare", "twig-missing-translation-domain"]);
+        assert_eq!(found[0].range.start, Position::new(0, 9 + 28));
+        assert_eq!(found[0].range.end.character, 9 + 32);
+        assert_eq!(found[1].range.start.character, 9 + 54);
+    }
+
+    #[test]
+    fn twig_names_crlf_files_report_correct_lines() {
+        let found = run("<p>\r\n{% if app.current_route == 'nope' %}\r\n{{ 'k'|trans({}, 'ghost') }}");
+        assert_eq!(found[0].range, TextRange::new(Position::new(1, 28), Position::new(1, 32)));
+        assert_eq!(found[1].range, TextRange::new(Position::new(2, 18), Position::new(2, 23)));
+    }
+
+    #[test]
+    fn twig_names_fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        host.add_file("composer.json", r#"{"require": {"symfony/framework-bundle": "^7.0"}}"#);
+        host.add_file("var/cache/dev/url_generating_routes.php", "<?php\n\nreturn [\n    'app_home' => [[], ['_controller' => 'x'], [], []],\n];\n");
+        host.add_file("translations/messages.en.yaml", "a: b\n");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        host.add_file("templates/a.html.twig", "{% if app.current_route == 'nope' %}{{ 'k'|trans({}, 'ghost') }}{% endif %}");
+        plugin.handle_events(&[Event::FileOpened(TEMPLATE.into())], &host.invocation());
+        assert_eq!(codes(&host.diagnostics()[TEMPLATE]), ["twig-route-compare", "twig-missing-translation-domain"]);
+
+        host.add_file("templates/a.html.twig", "{% if app.current_route == 'app_home' %}{{ 'a'|trans({}, 'messages') }}{% endif %}");
+        plugin.handle_events(&[Event::FileSaved(TEMPLATE.into())], &host.invocation());
+        assert!(host.diagnostics().get(TEMPLATE).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
     fn twig_checks_ignore_comments_and_verbatim() {
         let text = "{# path('x') {% for a in b if c %} app.current_route == 'nope' 'k'|trans({}, 'ghost') #}\
             {% verbatim %}{% for a in b if c %}{{ app.current_route == 'nope' }}<twig:A>{% block x %}</twig:A>{% endverbatim %}\
