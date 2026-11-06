@@ -440,12 +440,12 @@ impl Views for ModulithTools {
             };
             return Ok(View::message(text).button(refresh));
         }
-        let dependencies = dependencies(&model, index);
         if view == DIAGRAM_VIEW {
             let (nodes, edges) = diagram_of(&model, index);
             let status = format!("{} modules · {} dependencies", nodes.len(), edges.len());
             return Ok(View::new(Body::Html(diagram::html(&nodes, &edges, "No application modules."))).button(refresh).status(&status));
         }
+        let dependencies = dependencies(&model, index);
         let mut items = Vec::new();
         for m in model.modules.values() {
             let mut detail = if m.open { "open".to_owned() } else { "closed".to_owned() };
