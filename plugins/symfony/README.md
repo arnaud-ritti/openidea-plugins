@@ -73,11 +73,23 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     A parent named `Controller` / `AbstractController` counts only when it
     resolves to the framework's. Services with `constructor`, `parent` or a
     factory are not checked for named arguments.
+  - _Twig_ (`twigChecks`): `twig-missing-route`, `path('x')` / `url('x')` of a
+    route absent from the compiled routes (silent without them, for
+    `_`-prefixed routes and dynamic names; replaces `missing-route` in Twig
+    files); `twig-missing-asset`, `asset('x')` of a file absent from the public
+    directory, with the same exceptions as in PHP. Both run on `.twig` files
+    from their extension, so they work without the `aritti.twig` plugin.
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
   YAML files; on an unquoted `@` / `%` YAML value, quote it.
 - Gutter: controller `render()` → template; template → controllers rendering
   it; `{% block %}` → the parent block it overrides; PHP class → its service
   definition; YAML service → its class file.
+
+## New file templates
+
+New menu entries for a PHP class with a fixed `App\…` namespace: Command,
+Controller, Form Type, Twig Extension, Compiler Pass, Kernel Test, Web Test,
+Event Subscriber and Voter.
 
 ## Tool window and commands
 
@@ -108,7 +120,7 @@ which the OpenIDEA plugin API has no equivalent for:
 - container `get()` return types, Twig variable types (`{{ post.| }}`),
   form types and options, Doctrine (QueryBuilder, repositories, DQL),
   serializer, event dispatcher, constraint validators;
-- the remaining inspections (deprecated Twig, Twig route and asset checks, …) and intentions (they need resolved PHP types);
+- the remaining inspections (deprecated Twig, …) and intentions (they need resolved PHP types);
 - refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing
   files.

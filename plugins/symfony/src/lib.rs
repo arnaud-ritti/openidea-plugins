@@ -1208,4 +1208,48 @@ mod tests {
         assert!(plugin.code_actions(&other, at).is_empty());
         assert!(problems(plugin.index_for("/project/x").unwrap(), &other.path, "yaml", &other.text).is_empty());
     }
+
+    #[test]
+    fn every_template_is_registered_and_exists() {
+        let manifest = include_str!("../plugin.toml");
+        let value = |line: &str, key: &str| line.strip_prefix(key).and_then(|rest| rest.trim_start().strip_prefix("= \"")).map(|rest| rest.trim_end_matches('"').to_owned());
+        let (mut ids, mut names, mut paths) = (Vec::new(), Vec::new(), Vec::new());
+        let mut in_template = false;
+        for line in manifest.lines() {
+            if line.starts_with('[') {
+                in_template = line == "[[contributes.fileTemplates]]";
+            }
+            if !in_template {
+                continue;
+            }
+            ids.extend(value(line, "id"));
+            names.extend(value(line, "name"));
+            paths.extend(value(line, "path"));
+        }
+
+        assert_eq!(ids.len(), 9);
+        assert_eq!((names.len(), paths.len()), (9, 9));
+        for list in [&ids, &names, &paths] {
+            let unique: BTreeSet<_> = list.iter().collect();
+            assert_eq!(unique.len(), list.len(), "{list:?}");
+        }
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/");
+        for path in &paths {
+            let text = std::fs::read_to_string(format!("{root}{path}")).unwrap_or_else(|_| panic!("{path} is missing"));
+            assert!(text.contains("namespace App\\"), "{path}");
+            assert!(text.contains("$NAME$"), "{path}");
+
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find('$') {
+                rest = &rest[at + 1..];
+                let Some(close) = rest.find('$') else { break };
+                let word = &rest[..close];
+                if !word.is_empty() && word.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') {
+                    assert!(matches!(word, "NAME" | "END"), "{path}: undefined placeholder ${word}$");
+                    rest = &rest[close + 1..];
+                }
+            }
+        }
+    }
 }
