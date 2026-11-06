@@ -125,7 +125,9 @@ pub fn inspect_entity(text: &str, kotlin: bool) -> Vec<Finding> {
             );
         }
 
-        if let Some(at) = words(modifiers, "data").next().filter(|_| kotlin).map(|i| i + entity.end()) {
+        let own_equality = ["equals", "hashCode", "toString"].iter().all(|n| overrides(&masked[class_at..], n));
+
+        if let Some(at) = words(modifiers, "data").next().filter(|_| kotlin && !own_equality).map(|i| i + entity.end()) {
             findings.push(Finding::new(
                 at,
                 at + "data".len(),
@@ -165,6 +167,92 @@ pub fn inspect_entity(text: &str, kotlin: bool) -> Vec<Finding> {
     }
 
     findings
+}
+
+fn overrides(masked: &str, name: &str) -> bool {
+    words(masked, name).any(|i| masked[..i].trim_end().ends_with("fun") && masked[i + name.len()..].trim_start().starts_with('('))
+}
+
+const IMMUTABLE_COLLECTIONS: &[&str] = &["List", "Set", "Map", "Collection", "Iterable"];
+
+/// Kotlin entity attributes JPA cannot populate: `val` properties and read-only collection types on associations.
+pub fn inspect_kotlin_entity(text: &str) -> Vec<Finding> {
+    let masked = mask(text);
+    let all = annotations(&masked);
+    let mut findings = Vec::new();
+
+    let Some(class_at) = words(&masked, "class").next() else { return findings };
+    let class_level = |name: &str| all.iter().any(|a| a.start < class_at && a.name == name);
+
+    if !class_level("Entity") {
+        return findings;
+    }
+
+    let read_only_class = class_level("Immutable") || class_level("Embeddable") || class_level("MappedSuperclass");
+
+    for (start, end) in class_members(&masked, true) {
+        let decl = without_annotations(&masked, start, end);
+        let left = decl.split('=').next().unwrap_or(&decl);
+
+        if ["fun", "class", "object", "interface", "by"].iter().any(|w| has_word(&decl, w)) {
+            continue;
+        }
+
+        let Some(keyword) = words(left, "val").chain(words(left, "var")).min() else { continue };
+        let before = &left[..keyword];
+        let modifiers = ["private", "protected", "public", "internal", "override", "open", "final"];
+        if !before.split_whitespace().all(|m| modifiers.contains(&m)) {
+            continue;
+        }
+
+        let named: Vec<&str> =
+            all.iter().filter(|a| a.start >= start && a.start < end).map(|a| a.name).collect();
+
+        let following = masked[end..].trim_start();
+        let computed = ["get", "set"]
+            .iter()
+            .any(|w| following.strip_prefix(w).is_some_and(|rest| rest.trim_start().starts_with('(') && !rest.starts_with(is_ident_char)));
+        let delegated = following.strip_prefix("by").is_some_and(|rest| rest.starts_with(char::is_whitespace));
+
+        let computed = computed || has_word(left, "get") || has_word(left, "set");
+        let is_val = left[keyword..].starts_with("val");
+        let is_attribute = !named.contains(&"Transient") && !computed && !delegated;
+
+        if is_val && is_attribute && !read_only_class && !named.iter().any(|n| matches!(*n, "Id" | "EmbeddedId")) {
+            findings.push(Finding::new(
+                start + keyword,
+                start + keyword + 3,
+                Severity::Warning,
+                "jpa-val-attribute",
+                "A val compiles to a final field, which JPA cannot set when it loads the entity. Declare the attribute with var.",
+            ));
+        }
+
+        if !is_attribute || !named.iter().any(|n| matches!(*n, "OneToMany" | "ManyToMany" | "ElementCollection")) {
+            continue;
+        }
+
+        let Some(colon) = left[keyword..].find(':').map(|p| p + keyword + 1) else { continue };
+        let ty_start = colon + (left[colon..].len() - left[colon..].trim_start().len());
+        let ty_len = left[ty_start..].find(['<', '?']).unwrap_or(left.len() - ty_start);
+        let ty = left[ty_start..ty_start + ty_len].trim_end();
+
+        if IMMUTABLE_COLLECTIONS.contains(&last_name(ty)) {
+            findings.push(Finding::new(
+                start + ty_start,
+                start + ty_start + ty.len(),
+                Severity::Warning,
+                "jpa-immutable-collection",
+                format!("{} is read-only in Kotlin, so the persistence provider cannot fill it. Use a Mutable collection type.", last_name(ty)),
+            ));
+        }
+    }
+
+    findings
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// The entity annotation of `text` when the class has neither `@Id`, `@EmbeddedId` nor `@IdClass`.

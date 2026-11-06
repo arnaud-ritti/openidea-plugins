@@ -27,7 +27,7 @@ use openidea_plugin::{
     Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Location, Position, Project, Range, register_plugin,
 };
 
-use checks::{Finding, inspect_attribute_types, inspect_callbacks, inspect_entity, inspect_repository, missing_id};
+use checks::{Finding, inspect_attribute_types, inspect_callbacks, inspect_entity, inspect_kotlin_entity, inspect_repository, missing_id};
 use generate::{Dialect, Known, ddl, dto, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
 use model::{Class, Edit, Kind, Relation, has_word, language_of, mask, parse_class};
 use queries::{ItemKind, Prop, complete, parse_repository};
@@ -295,6 +295,12 @@ impl JpaAssist {
                 host::refresh_view("structure");
             }
             let mut findings = inspect_entity(text, kotlin);
+            if kotlin {
+                findings.extend(inspect_kotlin_entity(text));
+            }
+            if !setting("checkKotlinEntities") {
+                findings.retain(|f| !matches!(f.code, "jpa-data-class" | "jpa-val-attribute" | "jpa-immutable-collection"));
+            }
             findings.extend(self.entity_rule_findings(project, path, text, kotlin));
             return findings;
         }
@@ -689,6 +695,154 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         assert_eq!(problems(&host, "src/shop/L.java", listener), ["entity-listener-signature"]);
         let fixed = "import jakarta.persistence.*;\nclass L {\n  @PrePersist void p(Object o) {}\n}\n";
         assert!(problems(&host, "src/shop/L.java", fixed).is_empty());
+    }
+
+    fn kotlin_codes(text: &str) -> Vec<String> {
+        problems(&host(), "src/shop/K.kt", text)
+    }
+
+    #[test]
+    fn val_attribute_in_an_entity_warns_on_the_name() {
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n  val name: String = \"\"\n}\n";
+        let found = checks::inspect_kotlin_entity(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "jpa-val-attribute");
+        assert_eq!(&text[found[0].start..found[0].end], "val");
+    }
+
+    #[test]
+    fn val_in_constructor_and_in_body_both_warn() {
+        let text = "@Entity\nclass K(@Id var id: Long?, val a: String) {\n  val b: String = \"\"\n}\n";
+        assert_eq!(kotlin_codes(text), ["jpa-val-attribute", "jpa-val-attribute"]);
+    }
+
+    #[test]
+    fn val_id_is_quiet() {
+        assert!(kotlin_codes("@Entity\nclass K(@Id val id: Long, @EmbeddedId val key: Key)\n").is_empty());
+        assert!(kotlin_codes("@Entity\nclass K {\n  @Id\n  val id: Long = 0\n}\n").is_empty());
+    }
+
+    #[test]
+    fn val_transient_is_quiet() {
+        assert!(kotlin_codes("@Entity\nclass K(@Id var id: Long?, @Transient val t: String)\n").is_empty());
+    }
+
+    #[test]
+    fn immutable_hibernate_entity_is_quiet() {
+        assert!(kotlin_codes("@Entity\n@Immutable\nclass K(@Id val id: Long, val a: String)\n").is_empty());
+    }
+
+    #[test]
+    fn val_in_embeddable_is_quiet() {
+        assert!(kotlin_codes("@Embeddable\nclass K(val a: String)\n").is_empty());
+        assert!(kotlin_codes("@MappedSuperclass\nclass K(val a: String)\n").is_empty());
+    }
+
+    #[test]
+    fn var_attribute_is_quiet() {
+        assert!(kotlin_codes("@Entity\nclass K(@Id var id: Long?, var a: String)\n").is_empty());
+    }
+
+    #[test]
+    fn java_entity_is_ignored() {
+        let host = host();
+        assert!(problems(&host, "src/shop/J.java", "@Entity\nclass J {\n  @Id Long id;\n  val a = 1;\n}\n").is_empty());
+    }
+
+    #[test]
+    fn val_attribute_is_quiet_for_library_or_dynamic_name() {
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n  val a: Int\n    get() = 1\n  val b by lazy { 1 }\n  val c: Int get() = 2\n  fun f() { val x = 1 }\n  companion object { val Y = 1 }\n}\n";
+        assert!(kotlin_codes(text).is_empty(), "{:?}", kotlin_codes(text));
+        assert!(kotlin_codes("class Plain(val a: String)\n").is_empty(), "not an entity");
+        assert!(checks::inspect_kotlin_entity("@Entity\nclass K(val").is_empty(), "unfinished");
+        assert!(checks::inspect_kotlin_entity("@Entity\nclass K(@Id var i: Long) {\n  val").is_empty(), "unfinished body");
+    }
+
+    #[test]
+    fn immutable_list_on_one_to_many_warns() {
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n  @OneToMany(mappedBy = \"k\")\n  var items: List<Item> = listOf()\n}\n";
+        let found = checks::inspect_kotlin_entity(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "jpa-immutable-collection");
+        assert_eq!(&text[found[0].start..found[0].end], "List");
+    }
+
+    #[test]
+    fn mutable_list_on_one_to_many_is_quiet() {
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n  @OneToMany var a: MutableList<Item> = mutableListOf()\n  @OneToMany var b: MutableSet<Item>? = null\n}\n";
+        assert!(kotlin_codes(text).is_empty());
+    }
+
+    #[test]
+    fn arraylist_on_many_to_many_is_quiet() {
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n  @ManyToMany var a: ArrayList<Item> = ArrayList()\n  @ManyToMany var b: HashSet<Item> = HashSet()\n  @ManyToMany var c: LinkedHashSet<Item> = LinkedHashSet()\n}\n";
+        assert!(kotlin_codes(text).is_empty());
+    }
+
+    #[test]
+    fn immutable_list_without_a_relation_annotation_is_quiet() {
+        assert!(kotlin_codes("@Entity\nclass K(@Id var id: Long?) {\n  var tags: List<String> = listOf()\n}\n").is_empty());
+    }
+
+    #[test]
+    fn element_collection_set_warns() {
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n  @ElementCollection var tags: Set<String> = setOf()\n}\n";
+        assert_eq!(kotlin_codes(text), ["jpa-immutable-collection"]);
+    }
+
+    const DATA: &str = "@Entity\ndata class K(@Id var id: Long?) {\n}\n";
+
+    #[test]
+    fn data_class_entity_warns_without_the_three_overrides() {
+        assert_eq!(kotlin_codes(DATA), ["jpa-data-class"]);
+    }
+
+    #[test]
+    fn data_class_entity_with_equals_hashcode_and_tostring_is_quiet() {
+        let text = "@Entity\ndata class K(@Id var id: Long?) {\n  override fun equals(other: Any?) = other is K\n  override fun hashCode() = 1\n  override fun toString() = \"K\"\n}\n";
+        assert!(kotlin_codes(text).is_empty());
+    }
+
+    #[test]
+    fn data_class_with_only_equals_still_warns() {
+        let text = "@Entity\ndata class K(@Id var id: Long?) {\n  override fun equals(other: Any?) = other is K\n}\n";
+        assert_eq!(kotlin_codes(text), ["jpa-data-class"]);
+    }
+
+    #[test]
+    fn kotlin_checks_can_be_switched_off() {
+        let host = host();
+        host.set_setting("jpaAssist.checkKotlinEntities", "false");
+        let text = "@Entity\ndata class K(@Id var id: Long?, val a: String) {\n  @OneToMany var l: List<X> = listOf()\n}\n";
+        assert!(problems(&host, "src/shop/K.kt", text).is_empty());
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = host();
+        assert_eq!(problems(&host, "src/shop/K.kt", "@Entity\nclass K(@Id var id: Long?, val a: String)\n"), ["jpa-val-attribute"]);
+        assert!(problems(&host, "src/shop/K.kt", "@Entity\nclass K(@Id var id: Long?, var a: String)\n").is_empty());
+    }
+
+    fn first_range(host: &MockHost, path: &str) -> (u32, u32) {
+        let d = &host.diagnostics()[&format!("/project/{path}")][0];
+        (d.range.start.line, d.range.start.character)
+    }
+
+    #[test]
+    fn ranges_use_utf16_columns_with_multibyte_text() {
+        let host = host();
+        let text = "@Entity\nclass K(@Id var id: Long?, /* \u{1F600} */ val a: String)\n";
+        assert_eq!(problems(&host, "src/shop/K.kt", text), ["jpa-val-attribute"]);
+        assert_eq!(first_range(&host, "src/shop/K.kt"), (1, 36));
+    }
+
+    #[test]
+    fn crlf_files_report_correct_lines() {
+        let host = host();
+        let text = "@Entity\r\nclass K(\r\n  @Id var id: Long?,\r\n  val a: String\r\n)\r\n";
+        assert_eq!(problems(&host, "src/shop/K.kt", text), ["jpa-val-attribute"]);
+        assert_eq!(first_range(&host, "src/shop/K.kt"), (3, 2));
     }
 
     #[test]

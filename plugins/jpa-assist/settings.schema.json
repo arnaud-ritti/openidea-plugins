@@ -22,6 +22,11 @@
       "title": "Warn about @Temporal, @Enumerated and @Version on types the JPA specification does not allow",
       "default": true
     },
+    "jpaAssist.checkKotlinEntities": {
+      "type": "boolean",
+      "title": "Warn about val attributes, read-only collections and data classes in Kotlin entities",
+      "default": true
+    },
     "jpaAssist.checkListenerSignatures": {
       "type": "boolean",
       "title": "Warn about lifecycle callbacks with the wrong parameters or return type",
