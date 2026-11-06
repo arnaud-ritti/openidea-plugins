@@ -37,6 +37,7 @@ fn property_at(masked: &str, attribute: &AttributeUse) -> Option<usize> {
 fn php(text: &str) -> Vec<Finding> {
     let mut found = mapping_php(text);
     found.extend(query_api(text));
+    found.extend(crate::query_builder_checks::check(text));
     found
 }
 
@@ -57,6 +58,8 @@ fn mapping_php(text: &str) -> Vec<Finding> {
             Some("OneToOne") => inverse_side_join_column(&masked, &attributes, attribute, &mut found),
             Some("JoinColumn") => nullable_attribute(&masked, attribute, &mut found),
             Some("Column") => deprecated_column_type(&masked, text, attribute, &mut found),
+            Some("DiscriminatorMap") => discriminator_map(&masked, text, attribute, &mut found),
+            Some(name) if LIFECYCLE_ATTRIBUTES.contains(&name) => callback_visibility(attribute, &mut found),
             _ => {}
         }
     }
@@ -263,6 +266,50 @@ fn nullable_attribute(masked: &str, attribute: &AttributeUse, found: &mut Vec<Fi
     }
 }
 
+fn callback_visibility(attribute: &AttributeUse, found: &mut Vec<Finding>) {
+    let Target::Method { visibility, name_range, .. } = &attribute.target else { return };
+    if *visibility != crate::php_text::Visibility::Public {
+        found.push(Finding::warn(name_range.clone(), "orm-lifecycle-method-visibility", "Doctrine calls lifecycle callbacks from outside the entity: make this method public.".into()));
+    }
+}
+
+fn discriminator_map(masked: &str, text: &str, attribute: &AttributeUse, found: &mut Vec<Finding>) {
+    if !masked[attribute.range.clone()].contains('(') {
+        return;
+    }
+
+    let Some(first) = arguments(masked, attribute.arguments.start - 1).into_iter().next() else { return };
+    let first = trimmed(masked, first);
+    let map = match named(masked, first.clone()) {
+        Some((name, value)) if &masked[name.clone()] == "value" => value,
+        Some(_) => return,
+        None => first,
+    };
+    if !masked[map.clone()].starts_with('[') {
+        return;
+    }
+
+    let mut keys: Vec<&str> = Vec::new();
+    let mut classes: Vec<&str> = Vec::new();
+    for item in arguments(masked, map.start) {
+        let item = trimmed(masked, item);
+        let Some(arrow) = masked[item.clone()].find("=>") else { continue };
+        let key = text[item.start..item.start + arrow].trim().trim_matches(['\'', '"']);
+        let class = text[item.start + arrow + 2..item.end].trim();
+        let key_range = item.start..item.start + arrow;
+        let class_range = item.start + arrow + 2..item.end;
+
+        if keys.contains(&key) {
+            found.push(Finding::warn(key_range, "orm-discriminator-map-duplicate", format!("The discriminator value \"{key}\" is mapped twice.")));
+        }
+        if classes.contains(&class) {
+            found.push(Finding::warn(class_range, "orm-discriminator-map-duplicate", format!("{class} is mapped to two discriminator values.")));
+        }
+        keys.push(key);
+        classes.push(class);
+    }
+}
+
 fn lifecycle_callbacks(masked: &str, attributes: &[AttributeUse], found: &mut Vec<Finding>) {
     for entity in attributes.iter().filter(|a| mapping_name(a) == Some("Entity")) {
         let Target::Class { name } = &entity.target else { continue };
@@ -298,6 +345,19 @@ fn xml(text: &str) -> Vec<Finding> {
         if value == "true" {
             let start = at + offset - "nullable=\"".len();
             found.push(Finding::hint(start..at + offset + value.len() + 1, "orm-join-column-nullable", NULLABLE_MESSAGE.into()));
+        }
+    }
+
+    let mappings: Vec<(&str, usize)> = xml_tags(&masked, "discriminator-mapping");
+    let mut values: Vec<&str> = Vec::new();
+    let mut classes: Vec<&str> = Vec::new();
+    for (tag, at) in mappings {
+        for (attribute, seen) in [("value", &mut values), ("class", &mut classes)] {
+            let Some((value, offset)) = xml_attribute(tag, attribute) else { continue };
+            if seen.contains(&value) {
+                found.push(Finding::warn(at + offset..at + offset + value.len(), "orm-discriminator-map-duplicate", format!("\"{value}\" appears twice in the discriminator map.")));
+            }
+            seen.push(value);
         }
     }
 
@@ -675,5 +735,32 @@ mod tests {
     fn deprecated_column_types_are_warned() {
         let text = entity("    #[ORM\\Column(type: 'array')]\n    private $a;\n\n    #[ORM\\Column(type: Types::OBJECT, nullable: true)]\n    private $b;\n\n    #[ORM\\Column(type: 'json')]\n    private $c;\n\n    #[ORM\\Column]\n    private $d;\n\n    #[ORM\\Column(type: $dynamic)]\n    private $e;");
         assert_eq!(slices(&text), [("orm-column-deprecated-type", "'array'".to_owned()), ("orm-column-deprecated-type", "Types::OBJECT".to_owned())]);
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_callbacks_must_be_public() {
+        let text = "<?php\nuse Doctrine\\ORM\\Mapping as ORM;\n\n#[ORM\\Entity]\n#[ORM\\HasLifecycleCallbacks]\nclass U\n{\n    #[ORM\\PrePersist]\n    private function a(): void {}\n\n    #[ORM\\PostLoad]\n    public function b(): void {}\n}\n";
+        let found: Vec<_> = check("/p/U.php", "php", text).into_iter().map(|f| (f.code, text[f.start..f.end].to_owned())).collect();
+        assert_eq!(found, [("orm-lifecycle-method-visibility", "a".to_owned())]);
+    }
+
+    #[test]
+    fn discriminator_map_duplicates_in_php_and_xml() {
+        let text = "<?php\nuse Doctrine\\ORM\\Mapping as ORM;\n\n#[ORM\\DiscriminatorMap(['a' => A::class, 'b' => B::class, 'a' => C::class, 'd' => B::class])]\nclass U {}\n";
+        let found: Vec<_> = check("/p/U.php", "php", text).into_iter().map(|f| (f.code, text[f.start..f.end].trim().to_owned())).collect();
+        assert_eq!(found, [("orm-discriminator-map-duplicate", "'a'".to_owned()), ("orm-discriminator-map-duplicate", "B::class".to_owned())]);
+
+        let clean = text.replace("'a' => C::class, 'd' => B::class", "'c' => C::class");
+        assert!(check("/p/U.php", "php", &clean).is_empty());
+
+        let xml = "<doctrine-mapping><entity><discriminator-map><discriminator-mapping value=\"a\" class=\"A\"/><discriminator-mapping value=\"a\" class=\"B\"/></discriminator-map></entity></doctrine-mapping>";
+        let found = check("/p/U.orm.xml", "xml", xml);
+        assert_eq!(found.len(), 1);
+        assert_eq!(&xml[found[0].start..found[0].end], "a");
     }
 }

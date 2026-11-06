@@ -9,7 +9,8 @@ use std::ops::Range;
 
 use crate::checks::{self, is_service_file, Context, Finding};
 use crate::index::{self, scalar_slot, split_flow, without_comment};
-use crate::php_text::{class_model, ClassModel};
+use crate::php_checks::{arguments, trimmed};
+use crate::php_text::{class_model, mask, matching_close, resolver, ClassModel};
 
 const TAG_INTERFACES: [(&str, &str); 7] = [
     ("kernel.event_subscriber", "Symfony\\Component\\EventDispatcher\\EventSubscriberInterface"),
@@ -268,6 +269,127 @@ pub(crate) fn xml_services(text: &str) -> Vec<Service> {
     services
 }
 
+const PHP_SERVICE_BREAKERS: [&str; 6] = ["->factory(", "->parent(", "->alias(", "->decorate(", "->configurator(", "->synthetic("];
+
+fn literal_inside(text: &str, range: Range<usize>) -> Option<(String, Range<usize>)> {
+    let quoted = text[range.clone()].starts_with(['\'', '"']) && range.len() >= 2;
+    quoted.then(|| (text[range.start + 1..range.end - 1].to_owned(), range.start + 1..range.end - 1))
+}
+
+fn php_class_reference(text: &str, resolve: &dyn Fn(&str) -> String, range: Range<usize>) -> Option<String> {
+    let name = text[range].trim().strip_suffix("::class")?;
+    (!name.contains(['(', '$'])).then(|| resolve(name))
+}
+
+/// Services of a PHP container configurator: `$services->set(Foo::class)->args([service(Bar::class)])->tag('x')`.
+pub(crate) fn php_services(text: &str) -> Vec<Service> {
+    let masked = mask(text);
+    let resolve = resolver(text);
+    let mut services = Vec::new();
+
+    for (at, _) in masked.match_indices("->set(") {
+        let open = at + "->set".len();
+        let Some(close) = matching_close(&masked, open) else { continue };
+        let set_arguments = arguments(&masked, open);
+        let ranges: Vec<Range<usize>> = set_arguments.iter().map(|range| trimmed(&masked, range.clone())).collect();
+        let class = ranges.iter().rev().find_map(|range| php_class_reference(text, &resolve, range.clone()));
+        let id = ranges.first().and_then(|range| literal_inside(text, range.clone()).map(|(id, _)| id)).or_else(|| class.clone());
+        let Some(id) = id else { continue };
+
+        let end = masked[close..].find(';').map_or(masked.len(), |found| close + found);
+        let chain = &masked[close + 1..end];
+        let custom = PHP_SERVICE_BREAKERS.iter().any(|breaker| chain.contains(breaker));
+
+        let mut service_arguments = None;
+        if let Some(found) = chain.find("->args(") {
+            let args_open = close + 1 + found + "->args".len();
+            let list = arguments(&masked, args_open).into_iter().next().map(|range| trimmed(&masked, range)).filter(|range| masked[range.clone()].starts_with('['));
+            if let Some(list) = list {
+                let items: Vec<Range<usize>> = arguments(&masked, list.start).into_iter().map(|range| trimmed(&masked, range)).collect();
+                let keyed = items.iter().any(|item| masked[item.clone()].contains("=>"));
+                if !keyed {
+                    service_arguments = Some(
+                        items
+                            .into_iter()
+                            .map(|item| {
+                                let reference = masked[item.clone()].strip_prefix("service(").or_else(|| masked[item.clone()].strip_prefix("ref(")).and_then(|_| {
+                                    let open = item.start + masked[item.clone()].find('(')?;
+                                    let inner = trimmed(&masked, arguments(&masked, open).into_iter().next()?);
+                                    literal_inside(text, inner.clone()).map(|(id, _)| id).or_else(|| php_class_reference(text, &resolve, inner))
+                                });
+                                Argument { service: reference, range: item }
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+
+        let tags = chain
+            .match_indices("->tag(")
+            .filter_map(|(found, _)| {
+                let tag_open = close + 1 + found + "->tag".len();
+                let name = trimmed(&masked, arguments(&masked, tag_open).into_iter().next()?);
+                let (name_text, name_range) = literal_inside(text, name)?;
+                Some(TagUse { name: name_text, name_range, method: None })
+            })
+            .collect();
+
+        services.push(Service { id, class, arguments: service_arguments, inherits: false, custom_construction: custom, tags });
+    }
+
+    services
+}
+
+/// `#[Autowire(service: 'id')]` and `#[Autowire('@id')]` on a constructor parameter whose type is not what the service is.
+pub fn autowire_service(ctx: &Context, language: &str, text: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if language != "php" || ctx.index.partial || ctx.index.classes.is_empty() || !text.contains("Autowire") {
+        return out;
+    }
+
+    let Some(model) = class_model(text) else { return out };
+    let masked = mask(text);
+    let resolve = resolver(text);
+    let Some(constructor) = model.method("__construct") else { return out };
+
+    for param in constructor.params.iter().filter(|param| param.has_attribute) {
+        let Some(expected) = param.type_name.as_deref().filter(|expected| ctx.index.classes.contains_key(*expected)) else { continue };
+        let Some(found) = masked[param.range.clone()].find("Autowire(") else { continue };
+        if resolve("Autowire") != "Symfony\\Component\\DependencyInjection\\Attribute\\Autowire" {
+            continue;
+        }
+
+        let open = param.range.start + found + "Autowire".len();
+        for (position, argument) in arguments(&masked, open).into_iter().enumerate() {
+            let argument = trimmed(&masked, argument);
+            let (value, named_service) = match crate::php_checks::named(&masked, argument.clone()) {
+                Some((name, value)) => ((&masked[name] == "service").then_some(value), true),
+                None => ((position == 0).then_some(argument), false),
+            };
+            let Some((raw, range)) = value.and_then(|value| literal_inside(text, value)) else { continue };
+            let id = raw.strip_prefix('@').unwrap_or(&raw);
+            let is_reference = named_service || raw.starts_with('@');
+            if !is_reference || id.is_empty() || id.starts_with(['$', '%']) {
+                continue;
+            }
+
+            let Some(actual) = class_of_reference(ctx, &[], id) else { continue };
+            if actual == expected || !ctx.index.classes.contains_key(&actual) {
+                continue;
+            }
+
+            let Some(lineage) = lineage(ctx, &actual) else { continue };
+            if !lineage.ancestors.contains(expected) {
+                let message = format!("Parameter ${} is typed \"{expected}\", but service \"{id}\" is a \"{actual}\".", param.name);
+                out.push(Finding::warn(range, "autowire-wrong-class", message));
+            }
+        }
+    }
+
+    out
+}
+
 fn blank_comments(text: &str) -> String {
     let mut visible = text.to_owned();
     let mut from = 0;
@@ -431,6 +553,7 @@ pub fn check(ctx: &Context, path: &str, language: &str, text: &str) -> Vec<Findi
     let services = match language {
         "yaml" => yaml_services(text),
         "xml" if text.contains("<container") => xml_services(text),
+        "php" if text.contains("ContainerConfigurator") => php_services(text),
         _ => return out,
     };
 
@@ -443,18 +566,41 @@ pub fn check(ctx: &Context, path: &str, language: &str, text: &str) -> Vec<Findi
     out
 }
 
-/// `!php/const App\Enum\Suit::Hearts`: a project class without that constant or case.
+/// `!php/const App\Enum\Suit::Hearts` and `type="constant"` XML values: a project class without that constant or case.
 pub fn php_constants(ctx: &Context, path: &str, language: &str, text: &str) -> Vec<Finding> {
     let mut out = Vec::new();
-    if language != "yaml" || ctx.index.partial || !path.contains("/config/") || path.contains("/var/cache/") {
+    if ctx.index.partial || !path.contains("/config/") || path.contains("/var/cache/") {
         return out;
     }
 
-    for (at, _) in text.match_indices("!php/const") {
-        let rest = &text[at + "!php/const".len()..];
-        let skipped = rest.len() - rest.trim_start_matches([' ', '\t']).len();
-        let start = at + "!php/const".len() + skipped;
-        let token: String = text[start..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\\' | ':')).collect();
+    let mut tokens: Vec<(usize, String)> = Vec::new();
+    match language {
+        "yaml" => {
+            for (at, _) in text.match_indices("!php/const") {
+                let rest = &text[at + "!php/const".len()..];
+                let start = at + "!php/const".len() + rest.len() - rest.trim_start_matches([' ', '\t']).len();
+                tokens.push((start, text[start..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\\' | ':')).collect()));
+            }
+        }
+        "xml" => {
+            let visible = blank_comments(text);
+            for (at, _) in visible.match_indices("type=\"constant\"") {
+                let Some(tag_end) = visible[at..].find('>').map(|found| at + found) else { continue };
+                if visible[at..tag_end].ends_with('/') || !visible[..at].rfind('<').is_some_and(|open| !visible[open..at].contains('>')) {
+                    continue;
+                }
+
+                let content = &visible[tag_end + 1..];
+                let length = content.find('<').unwrap_or(content.len());
+                let token = content[..length].trim();
+                let start = tag_end + 1 + content[..length].len() - content[..length].trim_start().len();
+                tokens.push((start, token.to_owned()));
+            }
+        }
+        _ => {}
+    }
+
+    for (start, token) in tokens {
         let Some((class, constant)) = token.split_once("::") else { continue };
         let class = class.trim_start_matches('\\');
         if constant.is_empty() || constant == "class" || !ctx.index.classes.contains_key(class) {
@@ -634,6 +780,38 @@ mod tests {
         let found = only(&found, "yaml-php-const-missing");
         assert_eq!(found.len(), 1);
         assert_eq!(word(text, &found[0]), "Spades");
+    }
+
+    #[test]
+    fn xml_constant_values_must_exist_on_closed_project_classes() {
+        let mut idx = index();
+        idx.classes.insert("App\\Suit".into(), Entry { detail: None, path: "/project/src/Suit.php".into(), at: Position::new(0, 0) });
+        let files: BTreeMap<String, String> = [("/project/src/Suit.php".to_owned(), "<?php\nnamespace App;\n\nenum Suit\n{\n    case Hearts;\n}\n".to_owned())].into();
+        let read = |file: &str| files.get(file).cloned();
+        let text = "<container>\n    <parameters>\n        <parameter key=\"a\" type=\"constant\">App\\Suit::Hearts</parameter>\n        <parameter key=\"b\" type=\"constant\">App\\Suit::Spades</parameter>\n        <parameter key=\"c\" type=\"constant\">PHP_INT_MAX</parameter>\n        <parameter key=\"d\" type=\"string\">App\\Suit::Nope</parameter>\n    </parameters>\n</container>\n";
+        let found = crate::extra_problems(&idx, crate::Groups::all_on(), &read, "/project/config/services.xml", "xml", text);
+        let found = only(&found, "yaml-php-const-missing");
+        assert_eq!(found.len(), 1);
+        assert_eq!(word(text, &found[0]), "Spades");
+    }
+
+    #[test]
+    fn php_service_configuration_is_checked_like_yaml() {
+        let text = "<?php\nuse App\\Logger;\nuse App\\Mailer;\nuse Symfony\\Component\\DependencyInjection\\Loader\\Configurator\\ContainerConfigurator;\n\nreturn static function (ContainerConfigurator $c) {\n    $s = $c->services();\n    $s->set(Mailer::class)->args([service(Logger::class), 'x'])->tag('kernel.event_subscriber');\n    $s->set('m2', Mailer::class)->args([service('App\\SmtpTransport')]);\n    $s->set('m3', Mailer::class)->factory([Mailer::class, 'make'])->args([service(Logger::class)]);\n};\n";
+        let found = run("/project/config/services.php", "php", text);
+        let types = only(&found, "service-argument-type");
+        assert_eq!(types.len(), 1);
+        assert_eq!(word(text, &types[0]), "service(Logger::class)");
+        assert_eq!(only(&found, "service-tag-interface").len(), 1);
+    }
+
+    #[test]
+    fn autowire_service_must_match_the_parameter_type() {
+        let text = "<?php\nnamespace App;\n\nuse Symfony\\Component\\DependencyInjection\\Attribute\\Autowire;\n\nclass Consumer\n{\n    public function __construct(\n        #[Autowire(service: 'App\\Logger')] Transport $a,\n        #[Autowire('@App\\SmtpTransport')] Transport $b,\n        #[Autowire('%kernel.project_dir%')] string $dir,\n    ) {}\n}\n";
+        let found = run("/project/src/Consumer.php", "php", text);
+        let found = only(&found, "autowire-wrong-class");
+        assert_eq!(found.len(), 1);
+        assert_eq!(word(text, &found[0]), "App\\Logger");
     }
 
     #[test]

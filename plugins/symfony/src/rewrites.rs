@@ -34,7 +34,69 @@ pub fn php_rewrites(text: &str, at: usize, known_class: &dyn Fn(&str) -> bool) -
     let methods = methods_of(text, &masked, &class);
     actions.extend(invokable_command(text, &masked, at, &model, &methods));
     actions.extend(twig_attributes(text, &masked, at, &model, &methods));
+    actions.extend(property_to_constructor(text, &masked, at, &model));
     actions
+}
+
+/// A typed, uninitialised class-typed property moved into the constructor as a promoted parameter.
+fn property_to_constructor(text: &str, masked: &str, at: usize, model: &ClassModel) -> Option<Action> {
+    let line = line_start(text, at);
+    let end = masked[line..].find('\n').map_or(masked.len(), |found| line + found + 1);
+    let declaration = masked[line..end].trim();
+    let inside_methods = model.methods.iter().any(|method| method.body.as_ref().is_some_and(|body| body.contains(&at)) || method.parameters.contains(&at));
+    if inside_methods || !model.body.contains(&at) || !declaration.ends_with(';') || declaration.contains(['=', '(', '|', '?']) {
+        return None;
+    }
+
+    let words: Vec<&str> = declaration.trim_end_matches(';').split_whitespace().collect();
+    let (visibility, rest) = words.split_first()?;
+    let rest: Vec<&str> = rest.iter().copied().filter(|word| *word != "readonly").collect();
+    let [type_name, variable] = rest[..] else { return None };
+    let readonly = words.contains(&"readonly");
+    let name = variable.strip_prefix('$')?;
+    let is_class_type = type_name.starts_with(|c: char| c.is_ascii_uppercase() || c == '\\') && !php_text::BUILT_IN_TYPES.contains(&type_name.to_ascii_lowercase().as_str());
+    if !matches!(*visibility, "private" | "protected" | "public") || !is_class_type {
+        return None;
+    }
+
+    let previous_line = text[..line].trim_end().lines().last().unwrap_or_default().trim();
+    if previous_line.starts_with("#[") || previous_line.ends_with("*/") || previous_line.ends_with(']') {
+        return None;
+    }
+
+    let promoted = format!("{visibility} {}{type_name} ${name}", if readonly { "readonly " } else { "" });
+    let eol = eol_of(text);
+    let indent = indent_at(text, at);
+
+    match model.method("__construct") {
+        Some(constructor) => {
+            let body = constructor.body.clone()?;
+            if masked[body].contains(&format!("$this->{name}")) {
+                return None;
+            }
+
+            let close = constructor.parameters.end - 1;
+            let before_close = masked[constructor.parameters.start + 1..close].trim_end();
+            let last = constructor.parameters.start + 1 + before_close.len();
+            let edit = match (before_close.is_empty(), masked[constructor.parameters.clone()].contains('\n')) {
+                (true, _) => (close..close, promoted),
+                (false, false) => (last..last, format!(", {promoted}")),
+                (false, true) => {
+                    let parameter_indent = indent_at(text, constructor.parameters.start + 1 + before_close.rfind('\n').map_or(0, |found| found + 1) + 1).to_owned();
+                    let trailing_comma = before_close.ends_with(',');
+                    match trailing_comma {
+                        true => (last..last, format!("{eol}{parameter_indent}{promoted},")),
+                        false => (last..last, format!(",{eol}{parameter_indent}{promoted}")),
+                    }
+                }
+            };
+            Some(Action { title: format!("Move ${name} to the constructor"), kind: "refactor.rewrite", edits: vec![(line..end, String::new()), edit] })
+        }
+        None => {
+            let constructor = format!("{indent}public function __construct({promoted})\n{indent}{{\n{indent}}}\n").replace('\n', eol);
+            Some(Action { title: format!("Move ${name} to a new constructor"), kind: "refactor.rewrite", edits: vec![(line..end, constructor)] })
+        }
+    }
 }
 
 fn literal_text(text: &str, range: Range<usize>) -> Option<&str> {
@@ -585,6 +647,33 @@ mod tests {
         for text in ["<?php\nclass A extends Command { function execute(", "<?php\n->getRepository('a:", "<?php\nclass X extends AbstractExtension { function getFilters() { return [new", ""] {
             php_rewrites(text, text.len(), &known);
             php_rewrites(text, 0, &known);
+        }
+    }
+
+    #[test]
+    fn property_moves_into_an_existing_or_new_constructor() {
+        let with = "<?php\nclass A\n{\n    private Logger $logger;\n\n    public function __construct(private Mailer $mailer)\n    {\n    }\n}\n";
+        let at = with.find("$logger").unwrap();
+        let actions = php_rewrites(with, at, &|_| false);
+        let action = actions.iter().find(|action| action.title == "Move $logger to the constructor").unwrap();
+        assert_eq!(apply(with, action), "<?php\nclass A\n{\n\n    public function __construct(private Mailer $mailer, private Logger $logger)\n    {\n    }\n}\n");
+
+        let without = "<?php\nclass A\n{\n    protected readonly Logger $logger;\n}\n";
+        let at = without.find("$logger").unwrap();
+        let action = php_rewrites(without, at, &|_| false).into_iter().find(|action| action.title.starts_with("Move $logger")).unwrap();
+        assert_eq!(apply(without, &action), "<?php\nclass A\n{\n    public function __construct(protected readonly Logger $logger)\n    {\n    }\n}\n");
+    }
+
+    #[test]
+    fn property_with_default_attribute_or_assignment_stays() {
+        for text in [
+            "<?php\nclass A\n{\n    private Logger $l = null;\n}\n",
+            "<?php\nclass A\n{\n    #[Required]\n    private Logger $l;\n}\n",
+            "<?php\nclass A\n{\n    private string $l;\n}\n",
+            "<?php\nclass A\n{\n    private Logger $l;\n    public function __construct() { $this->l = new Logger(); }\n}\n",
+        ] {
+            let at = text.find("$l").unwrap();
+            assert!(php_rewrites(text, at, &|_| false).iter().all(|action| !action.title.starts_with("Move $l")), "{text}");
         }
     }
 }

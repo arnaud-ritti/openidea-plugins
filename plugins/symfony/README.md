@@ -33,8 +33,11 @@ validator constraint to its `…Validator` class.
 In `.twig` files of a Symfony project: completion of tag names (`if`, `for`,
 `block`, `extends`, … and their `end…` forms) after `{%`, filters after `|`,
 functions in expressions and tests after `is` / `is not`, from static lists
-taken from Twig's public documentation (not read from the project's Twig
-extensions). Template paths after `extends`, `include`, `embed`, `import`,
+taken from Twig's public documentation plus the filters, functions and tests of
+the project's own Twig extensions (`getFilters()` and friends, `#[AsTwigFilter]`,
+`#[AsTwigFunction]`, `#[AsTwigTest]`, read from the document index; extensions in
+`vendor/` are not read). After `alias.` of `{% import 'tpl' as alias %}` (or
+`_self`) the macros of that template are offered. Template paths after `extends`, `include`, `embed`, `import`,
 `from` and `use` come from the cached `templates/` index.
 
 ## Problems, quick fixes and gutter
@@ -187,6 +190,42 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     `use`, `macro` and tags in general stay legal) and `twig-path-replacement`
     (hint with a quick fix, `href="/blog"` / `action="/blog"` equal to the path
     of one YAML or XML route without placeholders).
+  - _More practice checks_ (`practiceChecks`, hints unless noted; roles come from
+    the parent class, interfaces or class attributes, `src/practice_checks.rs`):
+    `constructor-request-injection`, `constructor-session-injection`,
+    `constructor-token-injection`, `constructor-user-injection` (request-scoped
+    values in the constructor of a controller, command, subscriber, voter, form
+    type, Twig extension or attribute-registered service);
+    `deprecated-injection` (warning: removed Symfony and Doctrine Persistence
+    types such as `UserPasswordEncoderInterface`, `EngineInterface`);
+    `kernel-project-dir` (a `KernelInterface` used only for `getProjectDir()`);
+    `twig-extension-heavy-constructor` and `command-heavy-constructor`;
+    `request-stack-in-action`, `controller-shortcut` (`new RedirectResponse`,
+    `JsonResponse`, `BinaryFileResponse`), `controller-missing-exit` (warning,
+    `$this->createNotFoundException()` or `render()` as a statement without
+    `throw` / `return`); `bundle-register-commands`; `command-return-value`
+    (warning, bare `return;`, `null`, booleans or strings from `execute()` /
+    `__invoke()` of a `Command`); `request-bag-write` (`$request->attributes = …`
+    on a parameter typed `Request`); `violations-find-by-codes` (literal code);
+    `form-type-instance` (warning, `->add('f', new TextType())`).
+  - More _Deprecations_ with version gates: `route-attribute-namespace` (6.4,
+    `Routing\Annotation\Route`, with a quick fix to `Routing\Attribute\Route`),
+    `first-class-callable` (6.2, `[$this, 'method']` of an own method),
+    `render-form` and `form-create-view` (6.2), `constraint-array-options` (7.4,
+    `new NotBlank(['message' => …])` and the attribute form).
+  - More _Doctrine_ checks: `orm-lifecycle-method-visibility` (a lifecycle callback
+    that is not public), `orm-discriminator-map-duplicate` (PHP attribute and XML);
+    `src/query_builder_checks.rs` (files that import a Doctrine query builder or
+    call `createQueryBuilder(`, receiver a `createQueryBuilder()` chain or `$qb` /
+    `$queryBuilder` / `$builder`): `query-builder-add`, `query-builder-array`,
+    `query-builder-set-parameters` (hints), `query-builder-alias` (`from()` without
+    alias), `query-builder-sort-direction`, `query-builder-time-parameter`
+    (`'CURRENT_DATE'` bound as a parameter) and, with a DBAL import,
+    `query-builder-parts` / `query-builder-execute` (deprecated in DBAL 3.1).
+  - More _Service wiring_: PHP service files (`$services->set(Foo::class)->args([service(Bar::class)])->tag('x')`)
+    get the argument and tag checks, `type="constant"` XML values get the constant
+    check, and `autowire-wrong-class` compares `#[Autowire(service: 'id')]` with the
+    parameter type.
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
   YAML files; on an unquoted `@` / `%` YAML value, quote it; on an unescaped backslash in a
   double-quoted YAML string, double it; on a missing route, template, translation key or domain, change it to the one known name that differs by a typo (a unique candidate within one or two edits). Quick fixes follow the check settings.
@@ -244,6 +283,12 @@ with another class of the same short name.
   `$arg` entries only; keeps existing values, adds new parameters, drops
   removed ones) and _Add tags …_ for a service whose class implies tags and has
   none.
+- In an XML service file: _Add arguments from the constructor_ (a service with no
+  `<argument>`) and _Add tags …_. Argument service ids are the type itself, or
+  the only service whose class is the type.
+- _Move $logger to the constructor_: caret on a typed, uninitialised class-typed
+  property without attributes; becomes a promoted parameter of the existing
+  constructor (not offered when it assigns the property) or of a new one.
 - _Extract translation_: with plain text selected in a Twig template, replaces
   it with `{{ 'blog.index.read_more'|trans }}` and appends the key to the
   domain's YAML translation file (`{% trans_default_domain %}`, else
@@ -259,7 +304,11 @@ Completion inside `#[Route(`, `#[Template(`, `#[IsGranted(`, `#[AsCommand(`,
 `#[AsEventListener(` and the Doctrine mapping attributes (`#[ORM\Column(` …,
 aliases followed) offers the argument names, and the values of `methods:`,
 `schemes:`, `type:`, `fetch:`, `cascade:`, `strategy:` and `onDelete:`. Invoke it
-by hand; the IDE does not pop it up by itself there.
+by hand; the IDE does not pop it up by itself there. `IsGranted(attribute:)`
+offers the common role names and `AsEventListener(event:)` the core kernel and
+console event names. A constraint argument such as `message: 'post.title.blank'`
+whose text looks like a key (a dot, no spaces) is a `validators` translation
+reference: completion, go to definition and the missing-key problem.
 
 ## Twig variables
 
@@ -305,6 +354,14 @@ latest 100 requests, newest first, from `var/cache/dev/profiler/index.csv`
 (time in UTC, method, status, URL, IP, token); sub-requests are left out, rows
 cannot be opened.
 
+_Symfony: Make..._ lists `make:*` commands (from `bin/console list make`, or a
+built-in list), asks for the name and options, and runs `php bin/console make:…` in a
+terminal (optional `process:php`). _Symfony: Create Twig Template..._ writes
+`templates/<name>` (extending `base.html.twig` when it exists) with the optional
+`process:tee` capability, or copies the path when it is denied. _Symfony: Insert
+Form Rows from a Form Type..._ picks a form type of the project and inserts
+`form_start`, a `form_row` per literal `->add('name')` and `form_end` at the caret.
+
 A project counts as Symfony when it has `symfony.lock` or requires
 `symfony/framework-bundle` or `symfony/symfony` in `composer.json`. Twig files
 need the `aritti.twig` plugin (the IDE has no Twig language). Settings: the
@@ -325,7 +382,10 @@ which the OpenIDEA plugin API has no equivalent for:
 - the remaining inspections and intentions (they need resolved PHP types);
 - refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing
-  files.
+  files (the _Create Twig Template_ command does it);
+- Doctrine `JOIN ... WITH` to `ON` and QueryBuilder `clearParameter`: no public
+  deprecation notice to build a rule from; `@Template` docblock completion
+  (legacy annotations); Vite entry completion; run configurations.
 
 Matching is textual: a call is recognised by its method name, not its class,
 and templates are looked up in `templates/` and the `twig: paths:` directories of

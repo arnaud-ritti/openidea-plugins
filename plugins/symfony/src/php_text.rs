@@ -322,6 +322,7 @@ pub struct Method {
     pub params: Vec<Param>,
     pub parameters: Range<usize>,
     pub return_type: Option<String>,
+    pub body: Option<Range<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,6 +472,7 @@ fn method_at(text: &str, masked: &str, header: &Header, boundary: usize, at: usi
         params,
         parameters: open..close + 1,
         return_type,
+        body: (masked.as_bytes().get(end) == Some(&b'{')).then(|| end..next),
     };
     Some((method, next))
 }

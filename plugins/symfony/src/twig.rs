@@ -269,9 +269,66 @@ pub fn code_regions(text: &str) -> Vec<Range<usize>> {
     regions
 }
 
+/// `alias.` before the caret where `{% import 'tpl' as alias %}` binds the alias:
+/// the imported template's name (`_self` for the current one) and the range of the typed macro name.
+pub fn macro_import_at(text: &str, offset: usize) -> Option<(String, std::ops::Range<usize>)> {
+    let before = &text[..offset];
+    let typed = before.bytes().rev().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').count();
+    let name_start = offset - typed;
+    let alias_end = name_start.checked_sub(1).filter(|&dot| before.as_bytes()[dot] == b'.')?;
+    let alias_len = before[..alias_end].bytes().rev().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').count();
+    let alias = &before[alias_end - alias_len..alias_end];
+    if alias.is_empty() {
+        return None;
+    }
+
+    for (at, _) in text.match_indices("import") {
+        let tag_start = text[..at].rfind("{%")?;
+        let tag_end = text[at..].find("%}").map_or(text.len(), |found| at + found);
+        if text[tag_start + 2..at].trim_matches(['-', '~', ' ']).len() != 0 || tag_end <= at {
+            continue;
+        }
+
+        let body = text[at + "import".len()..tag_end].trim().trim_end_matches(['-', '~']).trim();
+        let (source, bound) = body.rsplit_once(" as ")?;
+        if bound.trim() != alias {
+            continue;
+        }
+
+        let source = source.trim();
+        let template = match source {
+            "_self" => "_self".to_owned(),
+            quoted if quoted.len() > 2 && (quoted.starts_with('\'') || quoted.starts_with('"')) => quoted[1..quoted.len() - 1].to_owned(),
+            _ => continue,
+        };
+        return Some((template, name_start..offset));
+    }
+
+    None
+}
+
+/// Names and argument lists of the `{% macro name(args) %}` tags of a template.
+pub fn macro_definitions(source: &str) -> Vec<(String, String)> {
+    source
+        .match_indices("macro ")
+        .filter_map(|(at, _)| {
+            let tag_start = source[..at].rfind("{%")?;
+            if !source[tag_start + 2..at].trim_matches(['-', '~', ' ']).is_empty() {
+                return None;
+            }
+
+            let rest = &source[at + "macro ".len()..];
+            let name: String = rest.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let open = rest.find('(')?;
+            let close = rest[open..].find(')')? + open;
+            (!name.is_empty()).then(|| (name, rest[open + 1..close].trim().to_owned()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::code_regions;
+    use super::{code_regions, macro_definitions, macro_import_at};
 
     #[test]
     fn code_regions_skip_comments_and_verbatim_bodies() {
@@ -341,5 +398,17 @@ mod tests {
                 ("c.twig".to_owned(), vec!["k".to_owned()]),
             ]
         );
+    }
+
+    #[test]
+    fn imported_macros_are_found_by_alias() {
+        let text = "{% import 'forms.html.twig' as f %}{% import _self as me %}{{ f.in }}";
+        let offset = text.find("in }}").unwrap() + 2;
+        assert_eq!(macro_import_at(text, offset), Some(("forms.html.twig".to_owned(), offset - 2..offset)));
+
+        let own = "{% import _self as me %}{{ me. }}";
+        assert_eq!(macro_import_at(own, own.len() - 3).map(|(template, _)| template), Some("_self".to_owned()));
+        assert_eq!(macro_import_at("{{ g.x }}", 6), None);
+        assert_eq!(macro_definitions("{% macro input(name, type = 'text') %}x{% endmacro %}{%- macro row() -%}"), [("input".to_owned(), "name, type = 'text'".to_owned()), ("row".to_owned(), String::new())]);
     }
 }

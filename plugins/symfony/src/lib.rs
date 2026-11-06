@@ -13,9 +13,12 @@ mod generators;
 mod index;
 mod indexer;
 mod intentions;
+mod make_commands;
 mod php_checks;
 mod php_text;
+mod practice_checks;
 mod profiler;
+mod query_builder_checks;
 mod refs;
 mod rewrites;
 mod service_gen;
@@ -289,6 +292,10 @@ fn twig_names(index: &Index, doc: &Document, offset: usize) -> Vec<CompletionIte
         return Vec::new();
     }
 
+    if let Some((template, typed)) = twig::macro_import_at(&doc.text, offset) {
+        return imported_macros(index, doc, &template, typed);
+    }
+
     let Some((slot, start, end)) = twig::slot_at(&doc.text, offset) else { return Vec::new() };
     let kind = match slot {
         twig::Slot::Tag => CompletionKind::Keyword,
@@ -309,6 +316,24 @@ fn twig_names(index: &Index, doc: &Document, offset: usize) -> Vec<CompletionIte
     }
 
     items
+}
+
+fn imported_macros(index: &Index, doc: &Document, template: &str, typed: std::ops::Range<usize>) -> Vec<CompletionItem> {
+    let source = match template {
+        "_self" => Some(doc.text.clone()),
+        name => index.templates.get(name).and_then(|entry| project_for(&doc.path)?.read_file(&entry.path).ok()),
+    };
+    let replace = range_of(&doc.text, typed.start, typed.end);
+
+    twig::macro_definitions(&source.unwrap_or_default())
+        .into_iter()
+        .map(|(name, arguments)| {
+            let mut item = CompletionItem::new(&name, CompletionKind::Function);
+            item.detail = Some(format!("macro {name}({arguments})"));
+            item.replace = Some(replace);
+            item
+        })
+        .collect()
 }
 
 /// A name that is built at run time (`'blog/' ~ name`, `"{$x}"`): not checked.
@@ -478,6 +503,7 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
         findings.extend(config_checks::unknown_parameters(&ctx, path, language, text));
         findings.extend(wiring::check(&ctx, path, language, text));
         findings.extend(wiring::php_constants(&ctx, path, language, text));
+        findings.extend(wiring::autowire_service(&ctx, language, text));
     }
 
     if groups.yaml_syntax {
@@ -519,6 +545,11 @@ fn fixes(index: &Index, path: &str, language: &str, text: &str) -> Vec<checks::F
     if groups.twig && language == "twig" {
         let read = |_: &str| None;
         found.extend(twig_checks::names(&checks::Context::new(index, &read), text));
+    }
+
+    if groups.deprecations && language == "php" {
+        let read = |_: &str| None;
+        found.extend(php_checks::deprecations(&checks::Context::new(index, &read), text));
     }
 
     found.into_iter().filter(|finding| finding.replacement.is_some()).collect()
@@ -789,6 +820,9 @@ impl Plugin for Main {
             "go-to-command" => self.go_to(ctx, "console command", |i| &i.commands),
             "go-to-template" => self.go_to(ctx, "template", |i| &i.templates),
             "twig-extends" => self.twig_extends(ctx),
+            "make" => self.make(ctx),
+            "create-template" => self.create_template(ctx),
+            "twig-form-fields" => self.twig_form_fields(ctx),
             _ => Err(Error::NotFound(format!("command {id}"))),
         }
     }
@@ -1097,6 +1131,18 @@ fn service_actions(index: &Index, doc: &Document, offset: usize) -> Vec<CodeActi
         }
 
         if let Some((tags, (range, text))) = service_gen::add_implied_tags(&ctx, &doc.text, offset) {
+            actions.push(CodeAction { title: format!("Add tags {}", tags.join(", ")), kind: Some("refactor.rewrite".into()), preferred: false, edits: edit(range, text), data: None });
+        }
+    }
+
+    if doc.language == "xml" && checks::is_service_file(&doc.path) && doc.text.contains("<container") {
+        let edit = |range: std::ops::Range<usize>, text: String| vec![(doc.path.clone(), vec![TextEdit { range: range_of(&doc.text, range.start, range.end), text }])];
+
+        if let Some((range, text)) = service_gen::add_arguments_xml(&ctx, &doc.text, offset) {
+            actions.push(CodeAction { title: "Add arguments from the constructor".into(), kind: Some("refactor.rewrite".into()), preferred: false, edits: edit(range, text), data: None });
+        }
+
+        if let Some((tags, (range, text))) = service_gen::add_implied_tags_xml(&ctx, &doc.text, offset) {
             actions.push(CodeAction { title: format!("Add tags {}", tags.join(", ")), kind: Some("refactor.rewrite".into()), preferred: false, edits: edit(range, text), data: None });
         }
     }
@@ -1575,6 +1621,73 @@ mod tests {
         assert_eq!(terminal.args, ["bin/console", "app:sync", "--env=dev", "-v"]);
     }
 
+    fn generator_host(capabilities: &[&str]) -> (MockHost, Main) {
+        let host = MockHost::install().with_capabilities(capabilities);
+        let mut plugin = activated(&host);
+        host.add_file("templates/base.html.twig", "{% block body %}{% endblock %}");
+        host.add_file("src/Form/PostType.php", "<?php\nnamespace App\\Form;\n\nclass PostType\n{\n    function f($builder) { $builder->add('title')->add('body', TextareaType::class); }\n}\n");
+        plugin.index_all();
+        (host, plugin)
+    }
+
+    #[test]
+    fn make_runs_the_picked_maker_in_a_terminal() {
+        let (host, mut plugin) = generator_host(&["project.read", "process:php"]);
+        host.on_process("php", |args, _| {
+            assert_eq!(args, ["bin/console", "list", "make", "--raw"]);
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "make:controller  Create a controller\nmake:entity  Create an entity\ncache:clear  x\n".into(), stderr: String::new() })
+        });
+        host.answer_next_prompt(Some(&["controller"]));
+        host.answer_next_prompt(Some(&["Blog --no-template"]));
+        plugin.run_command("make", &host.invocation(), None).unwrap();
+        let terminal = &host.terminals()[0];
+        assert_eq!((terminal.title.as_str(), terminal.program.as_str()), ("make:controller", "php"));
+        assert_eq!(terminal.args, ["bin/console", "make:controller", "Blog", "--no-template"]);
+    }
+
+    #[test]
+    fn make_falls_back_to_the_built_in_makers_and_stops_when_dismissed() {
+        let (host, mut plugin) = generator_host(&["project.read", "process:php"]);
+        host.on_process("php", |_, _| Err(Error::Invalid("no console".into())));
+        host.answer_next_prompt(Some(&["form"]));
+        plugin.run_command("make", &host.invocation(), None).unwrap();
+        assert!(host.terminals().is_empty());
+
+        host.answer_next_prompt(Some(&["form"]));
+        host.answer_next_prompt(Some(&[""]));
+        plugin.run_command("make", &host.invocation(), None).unwrap();
+        assert_eq!(host.terminals()[0].args, ["bin/console", "make:form"]);
+    }
+
+    #[test]
+    fn create_template_writes_with_tee_and_falls_back_to_the_clipboard() {
+        let (host, mut plugin) = generator_host(&["project.read", "process:tee", "clipboard"]);
+        host.on_process("tee", |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() }));
+        host.answer_next_prompt(Some(&["blog/show.html.twig"]));
+        plugin.run_command("create-template", &host.invocation(), None).unwrap();
+        let run = host.process_runs().into_iter().find(|run| run.program == "tee").unwrap();
+        assert_eq!(run.args, ["/project/templates/blog/show.html.twig"]);
+
+        host.answer_next_prompt(Some(&["../escape.html.twig"]));
+        assert!(plugin.run_command("create-template", &host.invocation(), None).is_err());
+        host.answer_next_prompt(Some(&["base.html.twig"]));
+        assert!(plugin.run_command("create-template", &host.invocation(), None).is_err());
+
+        let (denied, mut plugin) = generator_host(&["project.read", "clipboard"]);
+        denied.answer_next_prompt(Some(&["blog/show.html.twig"]));
+        plugin.run_command("create-template", &denied.invocation(), None).unwrap();
+        assert_eq!(denied.clipboard().as_deref(), Some("templates/blog/show.html.twig"));
+    }
+
+    #[test]
+    fn twig_form_rows_are_inserted_from_a_form_type() {
+        let (host, mut plugin) = generator_host(&["project.read", "editor.read", "editor.write"]);
+        host.open_editor("/project/templates/post.html.twig", "twig", "<h1>x</h1>\n", &[(1, 0, 1, 0)]);
+        host.answer_next_prompt(Some(&["App\\Form\\PostType"]));
+        plugin.run_command("twig-form-fields", &host.invocation(), None).unwrap();
+        assert_eq!(host.editor_text(), "<h1>x</h1>\n{{ form_start(form) }}\n{{ form_row(form.title) }}\n{{ form_row(form.body) }}\n{{ form_end(form) }}\n");
+    }
+
     #[test]
     fn dismissed_console_prompts_run_nothing() {
         let (host, mut plugin) = console_host();
@@ -1861,6 +1974,19 @@ mod tests {
         let index = plugin.index_for(SERVICES_FILE).unwrap();
         let names = candidates(index, SERVICES_FILE, "yaml", &yaml.text, &reference);
         assert_eq!(names["kernel.reset"].detail.as_deref(), Some("Symfony core tag"));
+    }
+
+    #[test]
+    fn imported_macros_are_completed_after_the_alias() {
+        let host = MockHost::install();
+        host.add_file("templates/forms.html.twig", "{% macro input(name, type = 'text') %}x{% endmacro %}{% macro row() %}{% endmacro %}");
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% import 'forms.html.twig' as f %}{{ f.in| }}");
+        assert_eq!(offered, ["input", "row"]);
+
+        let own = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% import _self as me %}{% macro mine() %}{% endmacro %}{{ me.| }}");
+        assert_eq!(own, ["mine"]);
     }
 
     #[test]
@@ -2406,6 +2532,36 @@ mod tests {
 
         let auto = format!("services:\n    _defaults:\n        autoconfigure: true\n{}", &text["services:\n".len()..]);
         assert!(yaml_actions(&mut plugin, &auto, "public").iter().all(|action| !action.title.starts_with("Add tags")));
+    }
+
+    fn xml_actions(plugin: &mut Main, text: &str, marker: &str) -> Vec<CodeAction> {
+        let document = doc("/project/config/services.xml", "xml", text);
+        let before = &text[..text.find(marker).unwrap()];
+        let at = Position::new(before.matches('\n').count() as u32, before.rsplit('\n').next().unwrap().len() as u32);
+        plugin.code_actions(&document, Range::new(at, at))
+    }
+
+    #[test]
+    fn xml_services_get_tags_and_constructor_arguments() {
+        let host = MockHost::install();
+        generator_project(&host, "");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        let text = "<container>\n    <services>\n        <service id=\"App\\Security\\PostVoter\"/>\n        <service id=\"App\\Service\\Mailer\">\n        </service>\n    </services>\n</container>\n";
+        let actions = xml_actions(&mut plugin, text, "PostVoter");
+        let action = actions.iter().find(|action| action.title == "Add tags security.voter").unwrap();
+        assert_eq!(
+            yaml_applied(text, action),
+            "<container>\n    <services>\n        <service id=\"App\\Security\\PostVoter\">\n            <tag name=\"security.voter\"/>\n        </service>\n        <service id=\"App\\Service\\Mailer\">\n        </service>\n    </services>\n</container>\n"
+        );
+
+        let actions = xml_actions(&mut plugin, text, "Mailer");
+        let action = actions.iter().find(|action| action.title == "Add arguments from the constructor").unwrap();
+        assert!(yaml_applied(text, action).contains("            <argument key=\"$logger\" type=\"service\" id=\"App\\Logger\"/>\n            <argument key=\"$dsn\" type=\"string\"></argument>\n        </service>"));
+
+        let tagged = text.replace("PostVoter\"/>", "PostVoter\"><tag name=\"x\"/></service>");
+        assert!(xml_actions(&mut plugin, &tagged, "PostVoter").iter().all(|action| !action.title.starts_with("Add tags")));
     }
 
     #[test]

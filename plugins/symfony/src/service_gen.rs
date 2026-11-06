@@ -82,6 +82,19 @@ pub(crate) fn implied_tags(ctx: &Context, model: &ClassModel) -> Vec<&'static st
     tags
 }
 
+/// The type's own id when it is a service; else the id of the only service whose class is the type.
+fn suggested_service(ctx: &Context, type_name: &str) -> String {
+    if ctx.index.services.contains_key(type_name) {
+        return type_name.to_owned();
+    }
+
+    let mut candidates = ctx.index.services.iter().filter(|(_, entry)| entry.detail.as_deref() == Some(type_name)).map(|(id, _)| id);
+    match (candidates.next(), candidates.next()) {
+        (Some(only), None) => only.clone(),
+        _ => type_name.to_owned(),
+    }
+}
+
 pub(crate) fn plan(ctx: &Context, model: &ClassModel, existing: &[String], with_tags: bool) -> Plan {
     let constructor = model.method("__construct");
     let arguments = constructor
@@ -90,6 +103,10 @@ pub(crate) fn plan(ctx: &Context, model: &ClassModel, existing: &[String], with_
         .flatten()
         .filter(|param| !param.has_default || existing.contains(&param.name))
         .filter_map(|param| Some(Argument { name: param.name.clone(), value: value_of(param)? }))
+        .map(|argument| match argument.value {
+            Value::Service(type_name) => Argument { value: Value::Service(suggested_service(ctx, &type_name)), ..argument },
+            _ => argument,
+        })
         .collect();
 
     Plan { fqcn: model.fqcn.clone(), arguments, tags: if with_tags { implied_tags(ctx, model) } else { Vec::new() } }
@@ -190,26 +207,121 @@ pub(crate) fn xml_insertion(text: &str, plan: &Plan) -> Option<Edit> {
     });
     let inner = format!("{service_indent}{unit}");
 
-    let mut block = String::new();
     let childless = plan.arguments.is_empty() && plan.tags.is_empty();
-    if childless {
-        block.push_str(&format!("{service_indent}<service id=\"{}\"/>{eol}", plan.fqcn));
-    } else {
-        block.push_str(&format!("{service_indent}<service id=\"{}\">{eol}", plan.fqcn));
-        for argument in &plan.arguments {
-            block.push_str(&match &argument.value {
-                Value::Service(id) => format!("{inner}<argument key=\"${}\" type=\"service\" id=\"{id}\"/>{eol}", argument.name),
-                Value::Scalar { xml_type: "collection", .. } => format!("{inner}<argument key=\"${}\" type=\"collection\"/>{eol}", argument.name),
-                Value::Scalar { xml_type, xml_text, .. } => format!("{inner}<argument key=\"${}\" type=\"{xml_type}\">{xml_text}</argument>{eol}", argument.name),
-            });
-        }
-        for tag in &plan.tags {
-            block.push_str(&format!("{inner}<tag name=\"{tag}\"/>{eol}"));
-        }
-        block.push_str(&format!("{service_indent}</service>{eol}"));
-    }
+    let block = match childless {
+        true => format!("{service_indent}<service id=\"{}\"/>{eol}", plan.fqcn),
+        false => format!("{service_indent}<service id=\"{}\">{eol}{}{service_indent}</service>{eol}", plan.fqcn, xml_children(plan, &inner, eol)),
+    };
 
     Some((at..at, block))
+}
+
+fn xml_children(plan: &Plan, inner: &str, eol: &str) -> String {
+    let mut block = String::new();
+    for argument in &plan.arguments {
+        block.push_str(&match &argument.value {
+            Value::Service(id) => format!("{inner}<argument key=\"${}\" type=\"service\" id=\"{id}\"/>{eol}", argument.name),
+            Value::Scalar { xml_type: "collection", .. } => format!("{inner}<argument key=\"${}\" type=\"collection\"/>{eol}", argument.name),
+            Value::Scalar { xml_type, xml_text, .. } => format!("{inner}<argument key=\"${}\" type=\"{xml_type}\">{xml_text}</argument>{eol}", argument.name),
+        });
+    }
+    for tag in &plan.tags {
+        block.push_str(&format!("{inner}<tag name=\"{tag}\"/>{eol}"));
+    }
+    block
+}
+
+struct XmlService {
+    class: Option<String>,
+    own_indent: String,
+    inner_indent: String,
+    has_tags: bool,
+    has_arguments: bool,
+    self_closing: Option<Range<usize>>,
+    close_line: usize,
+}
+
+fn xml_service_at(text: &str, caret: usize) -> Option<XmlService> {
+    for (tag, at) in index::xml_tags(text, "service") {
+        let self_closing = tag.ends_with('/');
+        let end = match self_closing {
+            true => at + tag.len() + 1,
+            false => text[at..].find("</service>").map(|found| at + found + "</service>".len())?,
+        };
+        if !(at..end).contains(&caret) {
+            continue;
+        }
+
+        let class = index::xml_attribute(tag, "class").map(|(class, _)| class.to_owned()).or_else(|| index::xml_attribute(tag, "id").map(|(id, _)| id.to_owned()));
+        let body = &text[at + tag.len()..end];
+        let unit = if text[..at].contains("\n\t") { "\t" } else { "    " };
+        let own = crate::intentions::indent_at(text, at).to_owned();
+        let close_at = end - "</service>".len().min(end);
+        if !self_closing && !text[line_start(text, close_at)..close_at].trim().is_empty() {
+            return None;
+        }
+
+        return Some(XmlService {
+            class,
+            inner_indent: format!("{own}{unit}"),
+            own_indent: own,
+            has_tags: body.contains("<tag"),
+            has_arguments: body.contains("<argument"),
+            self_closing: self_closing.then(|| at + tag.len() - 1..at + tag.len() + 1),
+            close_line: line_start(text, close_at),
+        });
+    }
+
+    None
+}
+
+fn xml_children_edit(text: &str, service: &XmlService, children: &str) -> Edit {
+    let eol = eol_of(text);
+    match &service.self_closing {
+        Some(range) => {
+            (range.clone(), format!(">{eol}{children}{}</service>", service.own_indent))
+        }
+        None => (service.close_line..service.close_line, children.to_owned()),
+    }
+}
+
+/// `<tag name="…"/>` children for an XML service whose class implies tags and that has none.
+pub(crate) fn add_implied_tags_xml(ctx: &Context, text: &str, caret: usize) -> Option<(Vec<&'static str>, Edit)> {
+    if has_autoconfigure(text) {
+        return None;
+    }
+
+    let service = xml_service_at(text, caret)?;
+    let class = service.class.clone().filter(|class| ctx.index.classes.contains_key(class))?;
+    if service.has_tags {
+        return None;
+    }
+
+    let tags = implied_tags(ctx, &model_of(ctx, &class)?);
+    if tags.is_empty() {
+        return None;
+    }
+
+    let plan = Plan { fqcn: class, arguments: Vec::new(), tags: tags.clone() };
+    let children = xml_children(&plan, &service.inner_indent, eol_of(text));
+    Some((tags, xml_children_edit(text, &service, &children)))
+}
+
+/// Named `<argument>` children for an XML service that has none, from the constructor.
+pub(crate) fn add_arguments_xml(ctx: &Context, text: &str, caret: usize) -> Option<Edit> {
+    let service = xml_service_at(text, caret)?;
+    let class = service.class.clone().filter(|class| ctx.index.classes.contains_key(class))?;
+    if service.has_arguments {
+        return None;
+    }
+
+    let plan = plan(ctx, &model_of(ctx, &class)?, &[], false);
+    if plan.arguments.is_empty() {
+        return None;
+    }
+
+    let children = xml_children(&plan, &service.inner_indent, eol_of(text));
+    Some(xml_children_edit(text, &service, &children))
 }
 
 struct YamlService {

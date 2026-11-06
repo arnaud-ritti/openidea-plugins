@@ -12,6 +12,11 @@ const ROUTE: &[&str] = &["Symfony\\Component\\Routing\\Attribute\\Route", "Symfo
 const TEMPLATE: &[&str] = &["Symfony\\Bridge\\Twig\\Attribute\\Template", "Sensio\\Bundle\\FrameworkExtraBundle\\Configuration\\Template"];
 
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+const SECURITY_ATTRIBUTES: &[&str] = &["ROLE_USER", "ROLE_ADMIN", "IS_AUTHENTICATED", "IS_AUTHENTICATED_FULLY", "IS_AUTHENTICATED_REMEMBERED", "IS_REMEMBERED", "IS_IMPERSONATOR", "PUBLIC_ACCESS"];
+const CORE_EVENTS: &[&str] = &[
+    "kernel.request", "kernel.controller", "kernel.controller_arguments", "kernel.view", "kernel.response", "kernel.finish_request", "kernel.terminate", "kernel.exception",
+    "console.command", "console.error", "console.terminate", "console.signal", "security.interactive_login", "security.switch_user",
+];
 const FETCH: &[&str] = &["LAZY", "EAGER", "EXTRA_LAZY"];
 const CASCADE: &[&str] = &["persist", "remove", "merge", "detach", "refresh", "all"];
 const STRATEGIES: &[&str] = &["AUTO", "SEQUENCE", "IDENTITY", "NONE", "UUID", "CUSTOM"];
@@ -72,9 +77,9 @@ fn specs() -> Vec<Spec> {
         Spec { classes: orm("GeneratedValue"), arguments: &["strategy"], values: &[("strategy", STRATEGIES)] },
         Spec { classes: orm("Index"), arguments: &["name", "columns", "fields", "options", "flags"], values: &[] },
         Spec { classes: orm("UniqueConstraint"), arguments: &["name", "columns", "fields", "options"], values: &[] },
-        Spec { classes: &["Symfony\\Component\\Security\\Http\\Attribute\\IsGranted"], arguments: &["attribute", "subject", "message", "statusCode", "exceptionCode", "methods"], values: &[("methods", HTTP_METHODS)] },
+        Spec { classes: &["Symfony\\Component\\Security\\Http\\Attribute\\IsGranted"], arguments: &["attribute", "subject", "message", "statusCode", "exceptionCode", "methods"], values: &[("attribute", SECURITY_ATTRIBUTES), ("methods", HTTP_METHODS)] },
         Spec { classes: &["Symfony\\Component\\Console\\Attribute\\AsCommand"], arguments: &["name", "description", "aliases", "hidden"], values: &[] },
-        Spec { classes: &["Symfony\\Component\\EventDispatcher\\Attribute\\AsEventListener"], arguments: &["event", "method", "priority", "dispatcher"], values: &[] },
+        Spec { classes: &["Symfony\\Component\\EventDispatcher\\Attribute\\AsEventListener"], arguments: &["event", "method", "priority", "dispatcher"], values: &[("event", CORE_EVENTS)] },
     ]
 }
 
@@ -276,5 +281,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn security_attributes_and_core_events_are_offered() {
+        let granted = inserts("<?php\nuse Symfony\\Component\\Security\\Http\\Attribute\\IsGranted;\n\n#[IsGranted(attribute: 'ROLE_|')]\nclass A {}");
+        assert!(granted.contains(&"ROLE_ADMIN".to_owned()), "{granted:?}");
+
+        let events = inserts("<?php\nuse Symfony\\Component\\EventDispatcher\\Attribute\\AsEventListener;\n\n#[AsEventListener(event: |)]\nclass A {}");
+        assert!(events.contains(&"'kernel.request'".to_owned()), "{events:?}");
     }
 }

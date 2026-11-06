@@ -294,12 +294,13 @@ pub fn deprecations(ctx: &Context, text: &str) -> Vec<Finding> {
     add(SECURITY_CLASS_SINCE, &|| moved_security_class(&masked));
     add(CONTENT_TYPE_SINCE, &|| request_get_content_type(&masked, text));
 
+    found.extend(crate::practice_checks::deprecations(&masked, text, model.as_ref(), &|gate| reached(ctx.index, gate)));
     found.sort_by_key(|finding| finding.start);
     found
 }
 
 /// Offsets in `range` where `needle` starts a token: not the tail of a longer name or member access.
-fn occurrences<'a>(masked: &'a str, range: Range<usize>, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+pub(crate) fn occurrences<'a>(masked: &'a str, range: Range<usize>, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
     masked[range.clone()].match_indices(needle).filter_map(move |(at, _)| {
         let at = range.start + at;
         let before = masked[..at].bytes().last();
@@ -400,6 +401,7 @@ pub fn practices(text: &str) -> Vec<Finding> {
     found.extend(constructor_container(&model));
     found.extend(twig_extension_name(&model));
     found.extend(form_type_removals(text, &masked, &model));
+    found.extend(crate::practice_checks::practices(text, &masked, &model));
     found.sort_by_key(|finding| finding.start);
     found
 }
@@ -1064,5 +1066,17 @@ mod tests {
 
         host.set_setting("practiceChecks", "false");
         assert!(published(&host, &mut plugin, Event::FileSaved(PATH.into())).is_empty());
+    }
+
+    #[test]
+    fn practice_package_codes_are_published() {
+        let host = MockHost::install();
+        let mut plugin = project(&host);
+        let text = "<?php\nnamespace App\\Command;\n\nuse Symfony\\Component\\Routing\\Annotation\\Route;\nuse Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController;\n\nclass XCommand extends AbstractController\n{\n    public function a()\n    {\n        $this->createNotFoundException('x');\n    }\n}\n";
+        host.add_file("src/Command/XCommand.php", text);
+
+        let codes = published(&host, &mut plugin, Event::FileOpened(PATH.into()));
+        assert!(codes.contains(&"controller-missing-exit".to_owned()));
+        assert!(codes.contains(&"route-attribute-namespace".to_owned()));
     }
 }
