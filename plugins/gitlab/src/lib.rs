@@ -8,6 +8,7 @@
 
 mod api;
 mod branch;
+mod ci;
 mod repo;
 mod review;
 
@@ -18,7 +19,9 @@ use branch::BranchReview;
 use openidea_plugin::host::{self, storage};
 use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Error, Event, Invocation, LogLevel, NotificationLevel, Plugin, Range, RepositoryStatus, register_plugin};
+use openidea_plugin::{
+    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Range, RepositoryStatus, register_plugin, text,
+};
 
 const LIST: &str = "merge-requests";
 const DETAILS: &str = "merge-request";
@@ -250,6 +253,8 @@ pub struct GitLab {
     default_branches: BTreeMap<String, String>,
     /// Files this plugin published review threads for.
     published: BTreeSet<String>,
+    /// The `.gitlab-ci.yml` problems found on the last open or save of each file.
+    ci_problems: BTreeMap<String, Vec<Diagnostic>>,
     projects: Option<Vec<ProjectInfo>>,
     /// The `CONFIRMED` button clicked once, waiting for its second click.
     confirm: Option<String>,
@@ -903,6 +908,7 @@ impl Plugin for GitLab {
 
     fn handle_events(&mut self, events: &[Event], ctx: &Invocation) {
         api::begin_budget();
+        self.check_ci_files(events, ctx);
         if !host::secret_is_set(api::TOKEN) {
             return;
         }
@@ -920,7 +926,59 @@ impl Plugin for GitLab {
     }
 }
 
+impl GitLab {
+    fn check_ci_files(&mut self, events: &[Event], ctx: &Invocation) {
+        let Some(project) = ctx.project() else { return };
+
+        for event in events {
+            let (Event::FileOpened(path) | Event::FileSaved(path)) = event else { continue };
+            if !ci::is_ci_path(path) {
+                continue;
+            }
+
+            let Ok(source) = project.read_file(path) else { continue };
+            let problems = ci::check(&ci::parse(&source))
+                .into_iter()
+                .filter(|f| ci_group_enabled(f.code))
+                .map(|f| {
+                    let range = Range::new(text::position(&source, f.start), text::position(&source, f.end));
+                    let mut diagnostic = Diagnostic::new(range, f.severity, f.message);
+                    diagnostic.code = Some(f.code.into());
+                    diagnostic.source = Some("GitLab CI".into());
+                    diagnostic
+                })
+                .collect();
+
+            self.ci_problems.insert(path.clone(), problems);
+            self.publish_review(path);
+        }
+    }
+}
+
+fn ci_group_enabled(code: &str) -> bool {
+    let key = match code {
+        "undefined-job" => "ciJobReferences",
+        "undefined-stage" => "ciStages",
+        "duplicate-job-usage" => "ciDuplicateJobUsage",
+        _ => "ciSingleQuotedVariables",
+    };
+
+    host::setting_bool(key).unwrap_or(true)
+}
+
 impl Providers for GitLab {
+    fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        if !ci::is_ci_path(&doc.path) {
+            return Vec::new();
+        }
+
+        let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
+        let Some(target) = ci::target_at(&ci::parse(&doc.text), offset) else { return Vec::new() };
+
+        let range = Range::new(text::position(&doc.text, target.start), text::position(&doc.text, target.end));
+        vec![Location { path: doc.path.clone(), range }]
+    }
+
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         self.branch_line_markers(doc)
     }

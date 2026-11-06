@@ -279,6 +279,7 @@ impl GitLab {
                 diagnostic.source = Some("GitLab".into());
                 diagnostic
             })
+            .chain(self.ci_problems.get(path).cloned().unwrap_or_default())
             .collect();
 
         if diagnostics.is_empty() && !self.published.contains(path) {

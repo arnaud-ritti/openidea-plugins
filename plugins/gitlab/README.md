@@ -130,8 +130,21 @@ Settings › Plugins › GitLab:
 | Key | Default | Effect |
 |---|---|---|
 | `editorReview` | `true` | show the current branch's unresolved threads in the editor |
+| `ciJobReferences` | `true` | `.gitlab-ci.yml`: report `needs`, `dependencies` and `extends` naming a job that is not in the file |
+| `ciStages` | `true` | `.gitlab-ci.yml`: report a job `stage` that is not in `stages` (or the default stages) |
+| `ciDuplicateJobUsage` | `true` | `.gitlab-ci.yml`: report a job listed twice in one `needs`, `dependencies` or `extends` |
+| `ciSingleQuotedVariables` | `true` | `.gitlab-ci.yml`: report `$VAR` in `echo '…'` / `printf '…'` script lines, which the shell does not expand |
 | `cloneUsingSsh` | `false` | clone and share with the SSH URL instead of HTTPS |
 | `cloneDirectory` | empty | where clones go; empty means next to the current project |
+
+## CI files
+
+In the CI files below, problems appear on open and save, and Cmd+click on a job
+name in `needs`, `dependencies` or `extends` opens the job, and on a `stage`
+value opens its entry in `stages`. Checks stay quiet when the file has
+`include:` (the included jobs and stages are not read), and for `needs` entries
+with `project:` or `pipeline:`, and for names built from variables. The reader
+is a line scanner, not a YAML parser: unusual shapes are skipped.
 
 ## File icons
 
@@ -160,7 +173,7 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 - Share Project doesn't run `git init` or commit files.
 - A file counts as viewed until a later merge request commit touches it; that
   needs the commits in the local checkout, else the head commit is used.
-- Not ported: worktrees, usage statistics. Applying a suggestion doesn't mark it as applied on GitLab.
+- Not ported: worktrees, usage statistics, `.gitlab-ci.yml` schema validation, completion and inspections beyond the four listed under CI files; included files are not followed. Applying a suggestion doesn't mark it as applied on GitLab.
 
 See the `aritti.gitlab` section of `LIMITATIONS.md` at the repository root
 for the missing APIs behind each limit.

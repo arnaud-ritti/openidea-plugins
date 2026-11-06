@@ -935,3 +935,236 @@ fn second_list_in_the_same_task_respects_the_shared_deadline() {
     assert_eq!((first.len(), second.len()), (100, 0));
     assert_eq!(host.requests().len(), 1);
 }
+
+mod ci_tests {
+    use super::*;
+    use crate::ci;
+    use openidea_plugin::{Position, text};
+
+    fn findings(yaml: &str) -> Vec<ci::Finding> {
+        ci::check(&ci::parse(yaml))
+    }
+
+    fn codes(yaml: &str) -> Vec<&'static str> {
+        findings(yaml).iter().map(|f| f.code).collect()
+    }
+
+    fn open(host: &MockHost, plugin: &mut GitLab, yaml: &str) -> Vec<openidea_plugin::Diagnostic> {
+        host.add_file("/project/.gitlab-ci.yml", yaml);
+        plugin.handle_events(&[Event::FileSaved("/project/.gitlab-ci.yml".into())], &host.invocation());
+        host.diagnostics().get("/project/.gitlab-ci.yml").cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn needs_unknown_job_warns() {
+        let yaml = "build:\n  script: [make]\ntest:\n  needs:\n    - build\n    - biuld\n  script: [make test]\n";
+        let found = findings(yaml);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "undefined-job");
+        assert_eq!(&yaml[found[0].start..found[0].end], "biuld");
+    }
+
+    #[test]
+    fn needs_inline_and_mapping_forms_are_read() {
+        let yaml = "a:\n  script: [x]\nb:\n  needs: [a, nope, {job: nada}]\n  script: [x]\nc:\n  needs:\n    - job: gone\n      artifacts: false\n  script: [x]\n";
+
+        assert_eq!(codes(yaml), vec!["undefined-job"; 3]);
+    }
+
+    #[test]
+    fn undefined_job_is_quiet_for_library_or_dynamic_name() {
+        let yaml = "a:\n  needs:\n    - project: g/p\n      job: other\n      ref: main\n    - pipeline: $PARENT\n      job: x\n    - $DYNAMIC\n    - job: \"${NAME}\"\n    - *alias\n  extends: !reference [.x]\n  script: [x]\n";
+
+        assert!(codes(yaml).is_empty(), "{:?}", findings(yaml));
+    }
+
+    #[test]
+    fn extends_hidden_job_is_defined() {
+        let yaml = ".tpl: &t\n  script: [x]\njob:\n  extends: .tpl\n";
+
+        assert!(codes(yaml).is_empty());
+        assert_eq!(codes("job:\n  extends: .missing\n"), vec!["undefined-job"]);
+        assert_eq!(codes("job:\n  extends:\n    - .a\n  script: [x]\n"), vec!["undefined-job"]);
+    }
+
+    #[test]
+    fn dependencies_unknown_job_warns() {
+        assert_eq!(codes("a:\n  dependencies: [ghost]\n  script: [x]\n"), vec!["undefined-job"]);
+    }
+
+    #[test]
+    fn stage_not_in_stages_warns() {
+        let yaml = "stages:\n  - build\n  - test\njob:\n  stage: deploy\n  script: [x]\n";
+        let found = findings(yaml);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, "undefined-stage");
+        assert_eq!(&yaml[found[0].start..found[0].end], "deploy");
+    }
+
+    #[test]
+    fn default_stages_are_known_when_stages_absent() {
+        let known = "a:\n  stage: .pre\nb:\n  stage: build\nc:\n  stage: test\nd:\n  stage: deploy\ne:\n  stage: .post\n";
+
+        assert!(codes(known).is_empty());
+        assert_eq!(codes("a:\n  stage: package\n"), vec!["undefined-stage"]);
+        assert_eq!(codes("stages: [lint, ship]\na:\n  stage: ship\nb:\n  stage: build\n"), vec!["undefined-stage"]);
+    }
+
+    #[test]
+    fn undefined_stage_is_quiet_for_library_or_dynamic_name() {
+        assert!(codes("a:\n  stage: $STAGE\nb:\n  stage: \"${S}\"\n").is_empty());
+        assert!(codes("include: other.yml\na:\n  stage: custom\n").is_empty());
+    }
+
+    #[test]
+    fn duplicate_needs_entry_warns() {
+        let yaml = "a:\n  script: [x]\nb:\n  needs: [a, a]\n  script: [x]\nc:\n  extends:\n    - .t\n    - .t\n";
+        let dup: Vec<_> = findings(yaml).into_iter().filter(|f| f.code == "duplicate-job-usage").collect();
+
+        assert_eq!(dup.len(), 2);
+        assert_eq!(dup[0].start, yaml.rfind("a]").unwrap());
+    }
+
+    #[test]
+    fn single_quoted_dollar_variable_in_script_warns() {
+        let yaml = "job:\n  script:\n    - echo 'deploying $CI_COMMIT_SHA'\n    - printf '${HOME}\\n'\n  after_script:\n    - echo -n '$X'\n";
+        let found = findings(yaml);
+
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.iter().all(|f| f.code == "single-quoted-shell-variable"));
+        assert_eq!(&yaml[found[0].start..found[0].end], "$CI_COMMIT_SHA");
+    }
+
+    #[test]
+    fn double_quoted_variable_is_quiet() {
+        let yaml = "job:\n  script:\n    - echo \"deploying $CI_COMMIT_SHA\"\n    - echo 'plain'\n    - sh -c 'echo $HOME'\n    - echo '$A' \"$B\"\n    - 'echo $C'\n    - echo $D\n";
+
+        assert!(codes(yaml).is_empty(), "{:?}", findings(yaml));
+    }
+
+    #[test]
+    fn include_present_makes_unknown_jobs_quiet() {
+        let yaml = "include:\n  - local: other.yml\njob:\n  extends: .from-include\n  needs: [elsewhere]\n";
+
+        assert!(codes(yaml).is_empty());
+    }
+
+    #[test]
+    fn comments_anchors_merges_and_reserved_keys_are_quiet() {
+        let yaml = "# top\nvariables:\n  A: b\nimage: ruby\ndefault:\n  before_script: [x]\nworkflow:\n  rules: []\n.base: &base\n  script: [x]\njob:\n  <<: *base\n  needs: [pages] # trailing\npages:\n  script: [x]\n";
+
+        assert!(codes(yaml).is_empty(), "{:?}", findings(yaml));
+    }
+
+    #[test]
+    fn tabs_and_odd_shapes_yield_no_findings() {
+        assert!(codes("job:\n\tneeds: [x]\n").is_empty());
+        assert!(codes("not yaml at all [").is_empty());
+        assert!(codes("").is_empty());
+        assert!(codes("- a\n- b\n").is_empty());
+    }
+
+    #[test]
+    fn ranges_use_utf16_columns_with_multibyte_text() {
+        let yaml = "bü🦀ild:\n  script: [x]\ntest:\n  needs: [\"é🦀\", nope]\n";
+        let found = findings(yaml);
+        let range = text::position(yaml, found[1].start);
+
+        assert_eq!(found.len(), 2);
+        assert_eq!(range, Position::new(3, 17));
+    }
+
+    #[test]
+    fn crlf_files_report_correct_lines() {
+        let yaml = "a:\r\n  script: [x]\r\nb:\r\n  needs:\r\n    - ghost\r\n";
+        let found = findings(yaml);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(&yaml[found[0].start..found[0].end], "ghost");
+        assert_eq!(text::position(yaml, found[0].start), Position::new(4, 6));
+    }
+
+    #[test]
+    fn is_ci_path_matches_the_icon_patterns() {
+        for path in [".gitlab-ci.yml", "/p/.gitlab-ci.yaml", "/p/team.gitlab-ci.yml", "x.gitlab-ci.yaml", "/p/a.gitlab-ci.deploy.yml", "a.gitlab-ci.b.yaml"] {
+            assert!(ci::is_ci_path(path), "{path}");
+        }
+        for path in ["/p/gitlab-ci.yml", "/p/ci.yml", "/p/.gitlab-ci.json", "/p/docker-compose.yml"] {
+            assert!(!ci::is_ci_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn yaml_provider_ignores_unrelated_files() {
+        let mut plugin = GitLab::default();
+        let doc = Document {
+            path: "/project/docker-compose.yml".into(),
+            language: "yaml".into(),
+            text: "a:\n  extends: b\nb:\n  x: 1\n".into(),
+            ..Document::default()
+        };
+
+        assert!(plugin.definition(&doc, Position::new(1, 12)).is_empty());
+        let host = setup();
+        host.add_file("/project/docker-compose.yml", "a:\n  needs: [ghost]\n");
+        GitLab::default().handle_events(&[Event::FileSaved("/project/docker-compose.yml".into())], &host.invocation());
+        assert!(host.diagnostics().get("/project/docker-compose.yml").is_none());
+    }
+
+    #[test]
+    fn definition_on_extends_opens_job() {
+        let yaml = ".tpl:\n  script: [x]\njob:\n  extends: .tpl\n  needs: [job2]\njob2:\n  script: [x]\n";
+        let mut plugin = GitLab::default();
+        let doc = Document { path: "/project/.gitlab-ci.yml".into(), language: "yaml".into(), text: yaml.into(), ..Document::default() };
+
+        let extends = plugin.definition(&doc, Position::new(3, 14));
+        let needs = plugin.definition(&doc, Position::new(4, 12));
+
+        assert_eq!(extends.len(), 1);
+        assert_eq!(extends[0].range.start, Position::new(0, 0));
+        assert_eq!(needs[0].range.start, Position::new(5, 0));
+        assert!(plugin.definition(&doc, Position::new(1, 3)).is_empty());
+    }
+
+    #[test]
+    fn definition_on_stage_opens_stages_entry() {
+        let yaml = "stages:\n  - build\n  - test\njob:\n  stage: test\n";
+        let mut plugin = GitLab::default();
+        let doc = Document { path: "/project/.gitlab-ci.yml".into(), language: "yaml".into(), text: yaml.into(), ..Document::default() };
+
+        let found = plugin.definition(&doc, Position::new(4, 10));
+
+        assert_eq!(found[0].range.start, Position::new(2, 4));
+    }
+
+    #[test]
+    fn saved_file_publishes_findings_with_codes() {
+        let host = setup();
+        let mut plugin = GitLab::default();
+        let problems = open(&host, &mut plugin, "job:\n  needs: [ghost]\n");
+
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].code.as_deref(), Some("undefined-job"));
+        assert_eq!(problems[0].range.start, Position::new(1, 10));
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = setup();
+        let mut plugin = GitLab::default();
+        assert_eq!(open(&host, &mut plugin, "job:\n  needs: [ghost]\n").len(), 1);
+
+        assert!(open(&host, &mut plugin, "ghost:\n  script: [x]\njob:\n  needs: [ghost]\n").is_empty());
+    }
+
+    #[test]
+    fn disabled_group_is_not_reported() {
+        let host = setup();
+        let mut plugin = GitLab::default();
+        host.set_setting("ciJobReferences", "false");
+
+        assert!(open(&host, &mut plugin, "job:\n  needs: [ghost]\n").is_empty());
+    }
+}
