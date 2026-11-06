@@ -1106,3 +1106,25 @@ fn unsupported_designator_is_quiet_for_library_or_dynamic_name() {
     assert!(xml_findings(&xml_host, &beans_xml(body)).is_empty());
     assert!(aop_found("<aop:config><aop:pointcut id=\"p\" expression=\"${expr}\"/></aop:config>").is_empty());
 }
+
+#[test]
+fn crlf_files_report_correct_lines() {
+    let text = "@Aspect\r\nclass T {\r\n    @Pointcut(\"within(a..*) && cflow(x())\")\r\n    void p() {}\r\n}\r\n";
+    let document = java("Subject.java", text);
+    let host = MockHost::install();
+    Navigator::default().line_markers(&document);
+    let range = host.diagnostics()[&document.path][0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.line, range.end.character), (2, 31, 2, 36));
+
+    let xml = beans_xml("<aop:config>\r\n<aop:pointcut id=\"p\" expression=\"within(a..*) &amp;&amp; call(* *(..))\"/>\r\n</aop:config>").replace('\n', "\r\n");
+    let host = MockHost::install();
+    Navigator::default().line_markers(&doc(XML_PATH, &xml));
+    let range = host.diagnostics()[XML_PATH][0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.line, range.end.character), (3, 57, 3, 61));
+}
+
+#[test]
+fn escaped_literal_is_quiet() {
+    let escaped = WEAVING_ASPECT.replace("within(a..*) &&", "within(a..*) \\t&&");
+    assert!(found(&escaped).is_empty());
+}

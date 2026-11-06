@@ -280,7 +280,7 @@ fn pointcut_designators(path: &str, file: &JavaFile, ty: &TypeDecl, out: &mut Ve
             let Some(annotation) = aspectj(file, &method.annotations, name) else { continue };
             let Some(arg) = ["value", "pointcut"].iter().find_map(|k| annotation.arg(k)) else { continue };
             let [literal] = arg.strings.as_slice() else { continue };
-            if arg.text.matches('"').count() != 2 || !arg.text.starts_with('"') || !arg.text.ends_with('"') {
+            if arg.text.contains('\\') || arg.text.matches('"').count() != 2 || !arg.text.starts_with('"') || !arg.text.ends_with('"') {
                 continue;
             }
             found.extend(aop::findings(&literal.value, literal.at));
