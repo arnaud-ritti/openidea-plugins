@@ -460,6 +460,7 @@ impl Views for IgnorePlugin {
                     "confirm-delete" => {
                         let Some(name) = self.deleting.take() else { return Ok(()) };
                         host::storage::delete(&format!("{USER_TEMPLATE}{name}"))?;
+                        host::storage::delete(&format!("{STARRED_PREFIX}u:{name}"))?;
                         self.selected = None;
                         host::notify(NotificationLevel::Info, "User template deleted", &format!("Deleted user template {name}."));
                     }

@@ -177,6 +177,23 @@ fn user_templates_are_created_listed_used_and_deleted() {
 }
 
 #[test]
+fn deleting_a_user_template_drops_its_star() {
+    let host = MockHost::install();
+    host::storage::set("template:PHP", "/vendor/\n").unwrap();
+    host::storage::set("starred:u:PHP", "1").unwrap();
+    host::storage::set("starred:t:Rust", "1").unwrap();
+    let mut plugin = IgnorePlugin::default();
+    let ctx = host.invocation();
+    plugin.handle("templates", ViewEvent::Select("u:PHP".into()), &ctx).unwrap();
+
+    plugin.handle("templates", ViewEvent::Button("delete".into()), &ctx).unwrap();
+    plugin.handle("templates", ViewEvent::Button("confirm-delete".into()), &ctx).unwrap();
+
+    assert!(host.storage().get("starred:u:PHP").is_none());
+    assert_eq!(host.storage().get("starred:t:Rust").map(String::as_str), Some("1"));
+}
+
+#[test]
 fn cancelling_a_deletion_keeps_the_template() {
     let host = MockHost::install();
     host::storage::set("template:PHP", "/vendor/\n").unwrap();
