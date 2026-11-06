@@ -323,6 +323,54 @@ java.lang.IllegalStateException: boom
         assert!(config.detect("just some text\n").is_none());
     }
 
+    fn classify(line: &str) -> (Option<Severity>, Option<String>) {
+        let text = format!("{line}\n");
+        let config = Config::default();
+        let format = config.detect(&text);
+        assert!(format.is_some(), "no format detected for {line}");
+        let parsed = Parsed::new(format, line);
+        (parsed.severity(format), parsed.time(format).map(str::to_owned))
+    }
+
+    #[test]
+    fn more_default_formats_are_classified_by_level_and_time() {
+        let error = Some(Severity::Error);
+        let warning = Some(Severity::Warning);
+        let samples = [
+            ("2026-11-06T12:00:00Z ERROR msg", error, Some("2026-11-06T12:00:00Z")),
+            ("2026-11-06T12:00:00.123456789Z WARN msg", warning, Some("2026-11-06T12:00:00.123456789Z")),
+            ("2026-11-06T12:00:00+01:00 ERROR msg", error, Some("2026-11-06T12:00:00+01:00")),
+            ("ERROR:root:msg", error, None),
+            ("WARNING:app.db:slow", warning, None),
+            ("2026-11-06 12:00:00,123 - name - ERROR - msg", error, Some("2026-11-06 12:00:00,123")),
+            ("2026/11/06 12:00:00 [error] 29#29: msg", error, Some("2026/11/06 12:00:00")),
+            ("2026/11/06 12:00:00 [warn] 29#29: msg", warning, Some("2026/11/06 12:00:00")),
+            ("Nov  6 12:00:00 host proc[123]: connection failed", error, Some("Nov  6 12:00:00")),
+            ("Nov  6 12:00:00 host proc[123]: warning: low disk", warning, Some("Nov  6 12:00:00")),
+            ("Nov  6 12:00:00 host proc[123]: all fine", None, Some("Nov  6 12:00:00")),
+        ];
+        for (line, severity, time) in samples {
+            assert_eq!(classify(line), (severity, time.map(str::to_owned)), "{line}");
+        }
+    }
+
+    #[test]
+    fn more_default_formats_colour_the_event() {
+        assert!(kinds_on_line("2026-11-06T12:00:00Z ERROR msg\n", 0).contains(&("ERROR".to_owned(), Highlight::Keyword)));
+        assert!(kinds_on_line("Nov  6 12:00:00 host proc[1]: boom failed\n", 0).contains(&("boom failed".to_owned(), Highlight::Keyword)));
+    }
+
+    #[test]
+    fn existing_formats_keep_their_detection() {
+        let config = Config::default();
+        let uuid = |text: &str| config.detect(text).map(|f| f.uuid.clone());
+        assert_eq!(uuid("10:00:00.000|INFO|main|started\n").as_deref(), Some("b5772998-bf1e-4d9d-ab41-da0b86451163"));
+        assert_eq!(uuid("05-01 10:00:00.000  1234  5678 E MyTag: failed\n").as_deref(), Some("b8fcb4d4-b1b8-4681-90f1-42f7c02aaf67"));
+        assert_eq!(uuid("[10:00:00]W: [Step 1/2] odd\n").as_deref(), Some("e9fa2755-8390-42f5-a41e-a909c58c8cf9"));
+        assert_eq!(uuid(IDEA).as_deref(), Some("8a0e8992-94cb-4f4c-8be2-42b03609626b"));
+        assert!(uuid("Nov is a month\nplain text 12:00\n").is_none());
+    }
+
     #[test]
     fn lines_are_coloured_by_level() {
         assert!(kinds_on_line(IDEA, 0).contains(&("INFO".to_owned(), Highlight::String)));

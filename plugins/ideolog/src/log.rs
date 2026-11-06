@@ -11,6 +11,15 @@ use std::ops::Range;
 const DETECTION_LINES: usize = 25;
 const MAX_PARSING_LENGTH: usize = 10_000;
 
+const SYSLOG_UUID: &str = "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0005";
+const DOCKER: &str = r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?)\s+((?i:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|ERR|FATAL|CRIT(?:ICAL)?|SEVERE))\s+(.*)$";
+const PYTHON_BASIC: &str = r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL):([^:\s]+):(.*)$";
+const PYTHON_DASH: &str = r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) - (\S+) - ((?i:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|ERR|FATAL|CRIT(?:ICAL)?|SEVERE)) - (.*)$";
+const NGINX: &str = r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) \[(\w+)] (\d+#\d+): (.*)$";
+const SYSLOG: &str = r"^([A-Z][a-z]{2}\s+\d{1,2}\s\d\d:\d\d:\d\d)\s(\S+)\s([^:\s]+(?:\[\d+])?):\s(.*)$";
+const ERROR_WORDS: &str = r"\b(error|fatal|fail(ed|ure)?|critical|panic)\b";
+const WARN_WORDS: &str = r"\bwarn(ing)?\b";
+
 pub struct Format {
     pub uuid: String,
     pattern: Regex,
@@ -18,6 +27,8 @@ pub struct Format {
     pub time_column: Option<usize>,
     pub severity_column: Option<usize>,
     pub category_column: Option<usize>,
+    /// Formats without a level column (syslog): the level comes from keywords in the message.
+    pub level_from_message: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,20 +110,31 @@ impl Default for Config {
                 r"^\d",
                 [0, 1, 2],
             ),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0001", DOCKER, r"^\d{4}-\d\d-\d\dT", [0, 1, -1]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0002", PYTHON_BASIC, r"^[A-Z]+:", [-1, 0, 1]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0003", PYTHON_DASH, r"^\d{4}-\d\d-\d\d ", [0, 2, 1]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0004", NGINX, r"^\d{4}/\d\d/\d\d ", [0, 1, 2]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0005", SYSLOG, r"^[A-Z][a-z]{2}\s+\d", [0, -1, 2]),
         ]
         .into_iter()
         .map(|(uuid, pattern, line_start, [time, severity, category])| {
-            Format::new(uuid, pattern, line_start, time, severity, category).unwrap()
+            let mut format = Format::new(uuid, pattern, line_start, time, severity, category).unwrap();
+            format.level_from_message = pattern == SYSLOG;
+            format
         })
         .collect();
 
         let rules = [
-            (r"^\s*(e(rror)?|severe)\s*$", Highlight::Keyword),
-            (r"^\s*w(arn(ing)?)?\s*$", Highlight::Tag),
-            (r"^\s*i(nfo)?\s*$", Highlight::String),
+            (r"^\s*(e(rr(or)?)?|severe|fatal|crit(ical)?|alert|emerg(ency)?)\s*$", Highlight::Keyword, None, None),
+            (r"^\s*w(arn(ing)?|rn)?\s*$", Highlight::Tag, None, None),
+            (r"^\s*i(nfo|nf)?\s*$", Highlight::String, None, None),
+            (ERROR_WORDS, Highlight::Keyword, Some(SYSLOG_UUID), Some(3)),
+            (WARN_WORDS, Highlight::Tag, Some(SYSLOG_UUID), Some(3)),
         ]
         .into_iter()
-        .map(|(pattern, kind)| Rule::new(pattern, None, None, Action::Line, kind).unwrap())
+        .map(|(pattern, kind, format, column)| {
+            Rule::new(pattern, format.map(str::to_owned), column, Action::Line, kind).unwrap()
+        })
         .collect();
 
         Self { formats, rules, errors: Vec::new() }
@@ -130,6 +152,7 @@ impl Format {
             time_column: column(time),
             severity_column: column(severity),
             category_column: column(category),
+            level_from_message: false,
         })
     }
 }
@@ -314,6 +337,10 @@ impl<'a> Parsed<'a> {
     /// From the severity column (the first column of plain logs), normalized
     /// like Ideolog's `LogEvent.level`.
     pub fn severity(&self, format: Option<&Format>) -> Option<Severity> {
+        if format.is_some_and(|f| f.level_from_message) {
+            return message_severity(self.message());
+        }
+
         let column = format.map_or(Some(0), |f| f.severity_column);
         let level = self.value(column)?.to_ascii_uppercase();
         match level.trim_matches(|c: char| !c.is_ascii_alphabetic()) {
@@ -324,6 +351,14 @@ impl<'a> Parsed<'a> {
             _ => None,
         }
     }
+}
+
+fn message_severity(message: &str) -> Option<Severity> {
+    let words = || message.split(|c: char| !c.is_alphanumeric()).map(str::to_ascii_lowercase);
+    if words().any(|w| matches!(w.as_str(), "error" | "fatal" | "fail" | "failed" | "failure" | "critical" | "panic")) {
+        return Some(Severity::Error);
+    }
+    words().any(|w| matches!(w.as_str(), "warn" | "warning")).then_some(Severity::Warning)
 }
 
 /// Lines without their terminator, with their byte offset.
