@@ -14,13 +14,21 @@ Entities and repositories are checked when they open and when they are saved.
 | `@Temporal`, `@Enumerated`, `@Version` on a type JPA doesn't allow (`attribute-type`) | warning | |
 | Lifecycle callback with the wrong parameters or return type (`entity-listener-signature`) | error | |
 | `final` entity class (Java) | warning | Remove final |
-| Kotlin `data class` entity | warning | |
+| Kotlin `data class` entity (quiet when `equals`, `hashCode` and `toString` are all overridden) | warning | |
+| Kotlin entity with a `val` attribute (`jpa-val-attribute`) or a read-only collection on an association (`jpa-immutable-collection`); `@Version val` still warns | warning | |
+| Entity that is an inner class, an interface or an enum, or is also `@Embeddable` or `@MappedSuperclass` (`jpa-entity-nested`, `jpa-entity-not-a-class`, `jpa-entity-multiple-roles`) | warning | |
+| `@EntityListeners` class with no lifecycle callback (`jpa-listener-without-callbacks`) | warning | |
 | Lombok `@Data` on an entity | warning | Replace with `@Getter` and `@Setter` |
 | Lombok `@EqualsAndHashCode` on an entity | warning | |
 | `FetchType.EAGER` on any association | warning | Fetch lazily |
 | `@ManyToOne` / `@OneToOne` relying on the eager default | info | Fetch lazily (adds the `FetchType` import) |
 | Derived query naming a property the entity doesn't have | error | |
 | Repository id type differing from the entity's `@Id` | error | |
+
+The Kotlin checks look at the first class in a file and judge collection types by simple name, so a
+user-defined `List` is flagged. Settings: `jpaAssist.checkKotlinEntities`, `jpaAssist.checkClassSignature`
+and `jpaAssist.checkListenerUsage`. A listener is found by its file name and only when one file
+matches; callbacks it inherits are not followed.
 
 Inverse `@OneToOne(mappedBy = …)` sides aren't flagged, because `LAZY` has no
 effect there without bytecode enhancement. Methods with `@Query` aren't parsed.
@@ -50,6 +58,9 @@ Only repositories naming the entity directly as the `…Repository<Entity, Id>` 
 - **JPA: Copy DDL of Current Entity / of All Entities**: `CREATE TABLE`,
   sequences, join tables and foreign keys, in PostgreSQL or MySQL (setting),
   with Spring Boot's naming (snake case), ready to paste into a Flyway migration.
+- On an entity's class line, seven **Add @PrePersist callback** style actions (one per
+  lifecycle annotation) add the method and its import. An action is skipped when the class already has
+  a method of that name.
 - **JPA: Copy DTO of Current Entity**: a Java record or Kotlin data class
   with the basic attributes and the ids of to-one associations.
 - **JPA: Copy Entity from CREATE TABLE at Caret** (in any SQL file): the
@@ -80,6 +91,8 @@ the caret on the repository's entity type.
 - Classes sharing a simple name in different packages are told apart only by
   being next to the file that uses them.
 - Plugins can't create files, so generated code goes to the clipboard.
+- Only classes are read as entities: one on an interface or enum is missing from JPA Structure
+  and the generators.
 
 ```sh
 cargo test                       # logic, against the SDK's mock host

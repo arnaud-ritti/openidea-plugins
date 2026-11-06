@@ -70,6 +70,22 @@ Reading the totals:
 
 Largest volume at the lowest risk first: Spring XML diagnostics (the index already holds XML beans, the checks only run on Java), the Symfony inspections that are in the public source, the GitLab actions (7), the Kubernetes feasible rows (9), JPA (7), the OpenAPI rows (5) and the Laravel Idea rows (8). The full list of F rows follows. Each is a candidate task; none has been scheduled.
 
+## Done
+
+### Plan 3: infra and data
+
+Branch `gap-f-infra-data` ([plan](superpowers/plans/2026-11-06-gap-f-infra-data.md)). Built with unit tests against the mock host; nothing was run in the IDE.
+
+**kube-explorer.** Done: deprecated resources (13 more table entries, checked against the Kubernetes deprecation guide), Chart.yaml unknown keys and unknown values, excessive whitespace trim, Helm update repository, How to install kubectl, CertificateSigningRequest, All Namespaces. Narrowed: the trim check is text based and a `}}` inside a string literal can confuse it; in All Namespaces, Create Secret, Apply Manifest, Apply Kustomization and Delete Manifest Resources are refused, and cluster-scoped or non-DNS-named custom resources are listed but take no action; the install hint never shows once a context is stored. Ruled out: Refresh (the button already existed); `requirements.yaml` (Helm 2) is not covered.
+
+**openapi.** Done: possible specification candidate (an Info hint, `missing-openapi-root`, files over 1 MiB skipped), Swagger 2.0 templates (YAML and JSON), the Endpoints panel for JSON (the file is read in full before the 1 MiB cap applies), Reload specification (a Reload button in the preview, unverified because cargo cannot run page scripts). Narrowed: the live templates are three plain completion items (`openapi-path`, `openapi-operation`, `swagger2-root`), not abbreviation-based live templates; `swagger2-root` is also offered in OpenAPI 3 files, and the tab stops are unverified.
+
+**devcontainer.** Done: folder structure, as a path-only hint, and completion, narrowed to top-level properties and enum or boolean values. Files over 256 KB publish nothing. The `jsonc` language id and whether completion `Document.path` equals the file-opened path are unverified.
+
+**flyway.** Done: run configuration producer and info providers, narrowed to three detectors (`info`, `validate`, `migrate`) on a root `flyway.toml` or `flyway.conf`. They ignore the `runner` and `arguments` settings, a config in `conf/` is not detected, and `migrate` writes to the database in one click. Whether the host matches `files` at the project root only is unverified.
+
+**jpa-assist.** Done: the three Kotlin rows (val attributes, immutable collections, data class without `equals`, `hashCode` and `toString`), persistent object class signature, entity listener warnings, and seven Add @X callback actions. Narrowed: the Kotlin checks cover the first class in a file and judge collection types by simple name (a user-defined `List` is flagged, `@Version val` still warns); listeners are found by simple file name; `parse_class` accepts classes only, so entities on an interface or enum drop out of the structure view and the generators. Ruled out: immutable not-nullable property (Kotlin), not implemented.
+
 ## Appendix: gap rows classed F (feasible with the current API)
 
 Row text is shortened; the detail files hold the evidence and the exact basis.

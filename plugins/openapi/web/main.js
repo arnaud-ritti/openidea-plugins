@@ -42,3 +42,7 @@ window.openidea.document.onChange((state) => {
   timer = setTimeout(() => render(state.text), 300);
 });
 window.openidea.document.get().then((doc) => render(doc.text));
+document.getElementById("reload").addEventListener("click", () => {
+  known = "";
+  window.openidea.document.get().then((doc) => render(doc.text));
+});

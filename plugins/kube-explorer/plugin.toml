@@ -68,6 +68,16 @@ id = "helm-dependency-update"
 title = "Kube Explorer: Update Helm Dependencies"
 category = "Kube Explorer"
 
+[[contributes.commands]]
+id = "helm-repo-update"
+title = "Kube Explorer: Update Helm Repositories"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "how-to-install-kubectl"
+title = "Kube Explorer: How to Install kubectl"
+category = "Kube Explorer"
+
 # ⌥⏎ on a manifest: add the Kubernetes schema for the YAML language server.
 [[contributes.providers]]
 kinds = ["code-actions"]
@@ -251,3 +261,9 @@ id = "k8s-clusterrolebinding"
 name = "Kubernetes ClusterRoleBinding"
 extension = "yaml"
 path = "templates/clusterrolebinding.yaml"
+
+[[contributes.fileTemplates]]
+id = "k8s-csr"
+name = "Kubernetes CertificateSigningRequest"
+extension = "yaml"
+path = "templates/csr.yaml"

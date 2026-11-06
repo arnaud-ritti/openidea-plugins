@@ -40,6 +40,16 @@
       "title": "Report Helm whitespace trim markers written without a space ({{-foo, foo-}})",
       "default": true
     },
+    "checkChartSchema": {
+      "type": "boolean",
+      "title": "Report unknown Chart.yaml keys and invalid apiVersion, type, deprecated or version values",
+      "default": true
+    },
+    "checkHelmExcessiveTrim": {
+      "type": "boolean",
+      "title": "Report a Helm trim marker on an output that joins it to a neighbouring YAML line",
+      "default": true
+    },
     "checkChartKeys": {
       "type": "boolean",
       "title": "Report a Chart.yaml without apiVersion, name or version",

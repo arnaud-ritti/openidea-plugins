@@ -55,6 +55,29 @@ id = "clean"
 title = "Flyway: Clean (Drops All Objects)…"
 category = "Flyway"
 
+# Root-level flyway.toml / flyway.conf only; the config file holds url and credentials.
+# clean and repair stay commands with their own guard, never one-click run configurations.
+[[contributes.runDetectors]]
+id = "info"
+name = "Flyway: info"
+files = ["flyway.toml", "flyway.conf"]
+command = "flyway"
+args = ["info"]
+
+[[contributes.runDetectors]]
+id = "validate"
+name = "Flyway: validate"
+files = ["flyway.toml", "flyway.conf"]
+command = "flyway"
+args = ["validate"]
+
+[[contributes.runDetectors]]
+id = "migrate"
+name = "Flyway: migrate (writes to the database)"
+files = ["flyway.toml", "flyway.conf"]
+command = "flyway"
+args = ["migrate"]
+
 [[contributes.views]]
 id = "migrations"
 title = "Flyway Migrations"

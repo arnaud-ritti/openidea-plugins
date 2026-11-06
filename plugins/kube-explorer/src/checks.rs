@@ -14,6 +14,9 @@ pub const MISSING_NAME: &str = "missing-name";
 pub const MISSING_SELECTOR: &str = "missing-selector";
 pub const HELM_WHITESPACE_TRIM: &str = "helm-whitespace-trim";
 pub const CHART_MISSING_KEY: &str = "chart-missing-key";
+pub const CHART_UNKNOWN_KEY: &str = "chart-unknown-key";
+pub const CHART_INVALID_VALUE: &str = "chart-invalid-value";
+pub const HELM_EXCESSIVE_TRIM: &str = "helm-excessive-trim";
 
 /// Setting (a boolean, default on) that switches each code off.
 pub const SETTINGS: &[(&str, &str)] = &[
@@ -23,6 +26,9 @@ pub const SETTINGS: &[(&str, &str)] = &[
     (MISSING_SELECTOR, "checkMissingSelector"),
     (HELM_WHITESPACE_TRIM, "checkHelmWhitespaceTrim"),
     (CHART_MISSING_KEY, "checkChartKeys"),
+    (CHART_UNKNOWN_KEY, "checkChartSchema"),
+    (CHART_INVALID_VALUE, "checkChartSchema"),
+    (HELM_EXCESSIVE_TRIM, "checkHelmExcessiveTrim"),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,10 +64,16 @@ pub fn is_helm_template(text: &str) -> bool {
 /// Everything that applies to the file at `path`; `in_chart` says it sits in a chart's `templates/`.
 pub fn for_file(path: &str, text: &str, in_chart: bool, patch_context: bool) -> Vec<Finding> {
     if path.rsplit('/').next() == Some("Chart.yaml") {
-        return chart_keys(text);
+        let mut found = chart_keys(text);
+        found.extend(chart_schema(text));
+        return found;
     }
     let patch_context = patch_context || path.rsplit('/').next().is_some_and(|name| name.contains("patch"));
-    let mut found = if in_chart { helm_whitespace_trim(text) } else { Vec::new() };
+    let mut found = Vec::new();
+    if in_chart {
+        found.extend(helm_whitespace_trim(text));
+        found.extend(helm_excessive_trim(text));
+    }
     if (path.ends_with(".yaml") || path.ends_with(".yml")) && text.contains("apiVersion") {
         found.extend(check_in(&documents(text), text, patch_context));
     }
@@ -94,6 +106,24 @@ fn check_in(docs: &[Doc], text: &str, patch_context: bool) -> Vec<Finding> {
 
 /// Removed or deprecated versions: api version, kinds, replacement, release that removed it.
 const DEPRECATED: &[(&str, &[&str], &str, &str)] = &[
+    ("autoscaling/v2beta1", &["HorizontalPodAutoscaler"], "autoscaling/v2", "v1.25"),
+    ("autoscaling/v2beta2", &["HorizontalPodAutoscaler"], "autoscaling/v2", "v1.26"),
+    ("discovery.k8s.io/v1beta1", &["EndpointSlice"], "discovery.k8s.io/v1", "v1.25"),
+    ("events.k8s.io/v1beta1", &["Event"], "events.k8s.io/v1", "v1.25"),
+    ("node.k8s.io/v1beta1", &["RuntimeClass"], "node.k8s.io/v1", "v1.25"),
+    ("storage.k8s.io/v1beta1", &["CSIStorageCapacity"], "storage.k8s.io/v1", "v1.27"),
+    ("storage.k8s.io/v1beta1", &["CSIDriver", "CSINode", "StorageClass", "VolumeAttachment"], "storage.k8s.io/v1", "v1.22"),
+    ("certificates.k8s.io/v1beta1", &["CertificateSigningRequest"], "certificates.k8s.io/v1", "v1.22"),
+    ("coordination.k8s.io/v1beta1", &["Lease"], "coordination.k8s.io/v1", "v1.22"),
+    ("scheduling.k8s.io/v1beta1", &["PriorityClass"], "scheduling.k8s.io/v1", "v1.22"),
+    ("apiregistration.k8s.io/v1beta1", &["APIService"], "apiregistration.k8s.io/v1", "v1.22"),
+    ("authentication.k8s.io/v1beta1", &["TokenReview"], "authentication.k8s.io/v1", "v1.22"),
+    (
+        "authorization.k8s.io/v1beta1",
+        &["SubjectAccessReview", "LocalSubjectAccessReview", "SelfSubjectAccessReview"],
+        "authorization.k8s.io/v1",
+        "v1.22",
+    ),
     ("extensions/v1beta1", &["Deployment", "DaemonSet", "ReplicaSet"], "apps/v1", "v1.16"),
     ("extensions/v1beta1", &["Ingress"], "networking.k8s.io/v1", "v1.22"),
     ("extensions/v1beta1", &["NetworkPolicy"], "networking.k8s.io/v1", "v1.16"),
@@ -209,6 +239,99 @@ pub fn helm_whitespace_trim(text: &str) -> Vec<Finding> {
             action_start = close.map_or(line.len(), |close| close + 2);
         }
         line_start += line.len();
+    }
+    found
+}
+
+const CHART_KEYS: &[&str] = &[
+    "apiVersion", "name", "version", "kubeVersion", "description", "type", "keywords", "home", "sources",
+    "dependencies", "maintainers", "icon", "appVersion", "deprecated", "annotations",
+];
+
+/// Unknown top-level keys and invalid scalar values of a `Chart.yaml` without Helm actions.
+pub fn chart_schema(text: &str) -> Vec<Finding> {
+    if is_helm_template(text) {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    for doc in documents(text) {
+        let is_v1 = doc.top_entries.iter().any(|(key, _, value)| key == "apiVersion" && value.as_ref().is_some_and(|v| v.text == "v1"));
+        for (key, range, value) in &doc.top_entries {
+            let known = CHART_KEYS.contains(&key.as_str())
+                || key.starts_with("x-")
+                || (is_v1 && ["engine", "tillerVersion"].contains(&key.as_str()));
+            if !known {
+                let message = format!("`{key}` is not a Chart.yaml key.");
+                found.push(Finding::new(range.start, range.end, CHART_UNKNOWN_KEY, message));
+                continue;
+            }
+            let Some(value) = value.as_ref().filter(|value| !is_null(&value.text)) else { continue };
+            let message = match key.as_str() {
+                "apiVersion" if !["v1", "v2"].contains(&value.text.as_str()) => "Chart `apiVersion` must be `v1` or `v2`.",
+                "type" if !["application", "library"].contains(&value.text.as_str()) => "Chart `type` must be `application` or `library`.",
+                "deprecated" if !is_yaml_bool(&value.text) => "Chart `deprecated` must be `true` or `false`.",
+                "version" if !value.text.strip_prefix('v').unwrap_or(&value.text).starts_with(|c: char| c.is_ascii_digit()) => {
+                    "Chart `version` must be a semantic version such as `1.2.3`."
+                }
+                _ => continue,
+            };
+            found.push(Finding::new(value.start, value.end, CHART_INVALID_VALUE, message));
+        }
+    }
+    found
+}
+
+fn is_null(text: &str) -> bool {
+    text.is_empty() || text == "~" || text.eq_ignore_ascii_case("null")
+}
+
+/// YAML 1.1 booleans, which Helm's parser accepts.
+fn is_yaml_bool(text: &str) -> bool {
+    ["true", "false", "yes", "no", "on", "off"].iter().any(|word| text.eq_ignore_ascii_case(word))
+}
+
+fn is_output_action(body: &str) -> bool {
+    let body = body.trim_start_matches('-').trim_end_matches('-').trim();
+    let words: Vec<&str> = body.split_whitespace().collect();
+    let Some(first) = words.first() else { return false };
+    if body.starts_with("/*") || body.contains(":=") || (first.starts_with('$') && words.get(1) == Some(&"=")) {
+        return false;
+    }
+    if ["if", "else", "end", "range", "with", "define", "template", "block", "break", "continue"].contains(first) {
+        return false;
+    }
+    !body.split(|c: char| !c.is_alphanumeric()).any(|word| word == "indent" || word == "nindent")
+}
+
+/// `{{-` or `-}}` on an output action whose trim swallows a line break between it and YAML text.
+pub fn helm_excessive_trim(text: &str) -> Vec<Finding> {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(open) = text[from..].find("{{").map(|i| i + from) {
+        let Some(close) = text[open..].find("}}").map(|i| i + open) else { break };
+        from = close + 2;
+        let body = &text[open + 2..close];
+        if !is_output_action(body) {
+            continue;
+        }
+        let before = &text[..open];
+        let trimmed_before = before.trim_end();
+        let left = body.starts_with("- ")
+            && before[trimmed_before.len()..].contains('\n')
+            && !trimmed_before.is_empty()
+            && !trimmed_before.ends_with("}}");
+        if left {
+            found.push(Finding::new(open, open + 3, HELM_EXCESSIVE_TRIM, "This `{{-` removes the line break before the output, joining it to the previous line; drop the dash or use `nindent`."));
+        }
+        let after = &text[close + 2..];
+        let trimmed_after = after.trim_start();
+        let right = body.ends_with(" -")
+            && after[..after.len() - trimmed_after.len()].contains('\n')
+            && !trimmed_after.is_empty()
+            && !trimmed_after.starts_with("{{");
+        if right {
+            found.push(Finding::new(close - 1, close + 2, HELM_EXCESSIVE_TRIM, "This `-}}` removes the line break after the output, joining the next line to it; drop the dash."));
+        }
     }
     found
 }
@@ -459,6 +582,269 @@ mod tests {
         let missing = found.iter().find(|f| f.code == MISSING_NAME).unwrap();
         let range = missing.diagnostic(text).range;
         assert_eq!((range.start.line, range.start.character, range.end.character), (8, 6, 15));
+    }
+
+    fn chart_codes(text: &str) -> Vec<&'static str> {
+        chart_schema(text).iter().map(|f| f.code).collect()
+    }
+
+    fn chart_highlighted<'a>(text: &'a str, code: &str) -> Vec<&'a str> {
+        chart_schema(text).iter().filter(|f| f.code == code).map(|f| &text[f.start..f.end]).collect()
+    }
+
+    const CHART: &str = "apiVersion: v2\nname: web\nversion: 0.1.0\n";
+
+    #[test]
+    fn autoscaling_v2beta2_hpa_warns_with_replacement() {
+        let text = "apiVersion: autoscaling/v2beta2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: a\n";
+        assert_eq!(codes(text), [DEPRECATED_API_VERSION]);
+        let message = &check(&documents(text), text)[0].message;
+        assert!(message.contains("autoscaling/v2") && message.contains("v1.26"), "{message}");
+    }
+
+    #[test]
+    fn csi_driver_v1beta1_warns() {
+        let text = "apiVersion: storage.k8s.io/v1beta1\nkind: CSIDriver\nmetadata:\n  name: a\n";
+        assert_eq!(codes(text), [DEPRECATED_API_VERSION]);
+        assert!(check(&documents(text), text)[0].message.contains("v1.22"));
+    }
+
+    #[test]
+    fn each_new_deprecated_row_warns() {
+        for (version, kind) in [
+            ("autoscaling/v2beta1", "HorizontalPodAutoscaler"),
+            ("discovery.k8s.io/v1beta1", "EndpointSlice"),
+            ("events.k8s.io/v1beta1", "Event"),
+            ("node.k8s.io/v1beta1", "RuntimeClass"),
+            ("storage.k8s.io/v1beta1", "CSIStorageCapacity"),
+            ("storage.k8s.io/v1beta1", "CSINode"),
+            ("storage.k8s.io/v1beta1", "StorageClass"),
+            ("storage.k8s.io/v1beta1", "VolumeAttachment"),
+            ("certificates.k8s.io/v1beta1", "CertificateSigningRequest"),
+            ("coordination.k8s.io/v1beta1", "Lease"),
+            ("scheduling.k8s.io/v1beta1", "PriorityClass"),
+            ("apiregistration.k8s.io/v1beta1", "APIService"),
+            ("authentication.k8s.io/v1beta1", "TokenReview"),
+            ("authorization.k8s.io/v1beta1", "SubjectAccessReview"),
+            ("authorization.k8s.io/v1beta1", "LocalSubjectAccessReview"),
+            ("authorization.k8s.io/v1beta1", "SelfSubjectAccessReview"),
+        ] {
+            let text = format!("apiVersion: {version}\nkind: {kind}\nmetadata:\n  name: a\n");
+            assert_eq!(codes(&text), [DEPRECATED_API_VERSION], "{version} {kind}");
+        }
+    }
+
+    #[test]
+    fn deprecated_api_version_is_quiet_for_other_kinds_of_a_group() {
+        for text in [
+            "apiVersion: autoscaling/v2beta2\nkind: Widget\nmetadata:\n  name: a\n",
+            "apiVersion: coordination.k8s.io/v1beta1\nkind: Foo\nmetadata:\n  name: a\n",
+            "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: a\n",
+        ] {
+            assert!(codes(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn chart_unknown_top_level_key_warns() {
+        let text = format!("{CHART}colour: red\n");
+        assert_eq!(chart_codes(&text), [CHART_UNKNOWN_KEY]);
+        assert_eq!(chart_highlighted(&text, CHART_UNKNOWN_KEY), ["colour"]);
+        assert_eq!(for_file("/p/Chart.yaml", &text, false, false).len(), 1);
+    }
+
+    #[test]
+    fn chart_v1_allows_engine_key() {
+        let v1 = "apiVersion: v1\nname: a\nversion: 1\nengine: gotpl\ntillerVersion: \">=2.0\"\n";
+        assert!(chart_codes(v1).is_empty());
+        let v2 = v1.replace("apiVersion: v1", "apiVersion: v2");
+        assert_eq!(chart_highlighted(&v2, CHART_UNKNOWN_KEY), ["engine", "tillerVersion"]);
+    }
+
+    #[test]
+    fn chart_x_prefixed_key_is_quiet() {
+        assert!(chart_codes(&format!("{CHART}x-owner: me\n")).is_empty());
+    }
+
+    #[test]
+    fn chart_type_must_be_application_or_library() {
+        assert_eq!(chart_highlighted(&format!("{CHART}type: app\n"), CHART_INVALID_VALUE), ["app"]);
+        assert!(chart_codes(&format!("{CHART}type: library\n")).is_empty());
+        assert!(chart_codes(&format!("{CHART}type: \"application\"\n")).is_empty());
+    }
+
+    #[test]
+    fn chart_api_version_must_be_v1_or_v2() {
+        let text = "apiVersion: v3\nname: a\nversion: 1\n";
+        assert_eq!(chart_highlighted(text, CHART_INVALID_VALUE), ["v3"]);
+        assert!(chart_codes("apiVersion: \"v2\"\nname: a\nversion: 1\n").is_empty());
+    }
+
+    #[test]
+    fn chart_deprecated_must_be_boolean() {
+        assert_eq!(chart_highlighted(&format!("{CHART}deprecated: maybe\n"), CHART_INVALID_VALUE), ["maybe"]);
+        for ok in ["true", "false", "yes", "no", "on", "off", "True", "FALSE", "Yes", "NO", "On", "oFF"] {
+            assert!(chart_codes(&format!("{CHART}deprecated: {ok}\n")).is_empty(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn chart_null_version_is_treated_as_empty() {
+        for empty in ["~", "null"] {
+            assert!(chart_codes(&format!("apiVersion: v2\nname: a\nversion: {empty}\n")).is_empty(), "{empty}");
+        }
+    }
+
+    #[test]
+    fn chart_lines_with_tabs_or_spaced_quoted_keys_keep_utf16_columns() {
+        for (line, code, columns) in [
+            ("\té😀: red", CHART_UNKNOWN_KEY, (1, 4)),
+            ("\" é😀\": red", CHART_UNKNOWN_KEY, (2, 5)),
+            ("\tversion: é😀", CHART_INVALID_VALUE, (10, 13)),
+        ] {
+            let text = format!("apiVersion: v2\nname: web\n{line}\n");
+            let found: Vec<_> = for_file("/p/Chart.yaml", &text, false, false).into_iter().filter(|f| f.code == code).collect();
+            assert_eq!(found.len(), 1, "{line:?}");
+            let range = found[0].diagnostic(&text).range;
+            assert_eq!((range.start.line, range.start.character, range.end.character), (2, columns.0, columns.1), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn chart_version_without_digit_warns() {
+        let text = "apiVersion: v2\nname: a\nversion: latest\n";
+        assert_eq!(chart_highlighted(text, CHART_INVALID_VALUE), ["latest"]);
+        for ok in ["1.2.3", "v1.2.3", "\"0.1.0-rc.1\""] {
+            assert!(chart_codes(&format!("apiVersion: v2\nname: a\nversion: {ok}\n")).is_empty(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn chart_values_are_quiet_when_templated_or_empty() {
+        let text = "apiVersion: v2\nname: a\nversion:\ntype: {{ .Values.t }}\ndeprecated:\n";
+        assert!(chart_codes(text).is_empty());
+    }
+
+    #[test]
+    fn chart_schema_is_quiet_for_library_or_dynamic_name() {
+        let library = "apiVersion: v2\nname: lib\nversion: 1.0.0\ntype: library\nmaintainers:\n  - name: me\n    colour: red\nannotations:\n  anything: goes\ndependencies:\n  - name: redis\n    repository: x\nkeywords:\n  - a\n";
+        assert!(chart_codes(library).is_empty());
+        assert!(chart_codes("apiVersion: v2\nname: {{ .Values.n }}\ncolour: red\nversion: nope\n").is_empty());
+    }
+
+    #[test]
+    fn chart_schema_ignores_unrelated_yaml() {
+        let text = format!("{CHART}colour: red\n");
+        assert!(for_file("/p/values.yaml", &text, false, false).is_empty());
+        assert!(for_file("/p/MyChart.yaml", &text, false, false).is_empty());
+    }
+
+    #[test]
+    fn left_trim_joining_an_output_to_the_previous_line_warns() {
+        let text = "a: 1\n  {{- .Values.x }}\n";
+        let found = helm_excessive_trim(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code, HELM_EXCESSIVE_TRIM);
+        assert_eq!(&text[found[0].start..found[0].end], "{{-");
+    }
+
+    #[test]
+    fn right_trim_joining_an_output_to_the_next_line_warns() {
+        let text = "a: {{ .Values.x -}}\nb: 2\n";
+        let found = helm_excessive_trim(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(&text[found[0].start..found[0].end], "-}}");
+        let include = "a: 1\n{{- include \"c.name\" . }}\n";
+        assert_eq!(helm_excessive_trim(include).len(), 1);
+    }
+
+    #[test]
+    fn trim_on_control_actions_is_quiet() {
+        let text = "a: 1\n{{- if .Values.x }}\nb: 2\n{{- else if .Values.y }}\nc: 3\n{{- else }}\nd: 4\n{{- end }}\n{{- range .Values.l -}}\n- {{ . }}\n{{- end -}}\n{{- with .Values.w }}\ne: 5\n{{- end }}\n{{- define \"x\" -}}\nz\n{{- end }}\n{{- template \"x\" . -}}\nf: 1\n{{- block \"y\" . -}}\ng: 1\n{{- end }}\n";
+        assert!(helm_excessive_trim(text).is_empty());
+    }
+
+    #[test]
+    fn nindent_pipeline_is_quiet() {
+        let text = "a:\n  {{- toYaml .Values.x | nindent 4 }}\nb:\n  {{- include \"c\" . | indent 2 }}\nc: 1\n";
+        assert!(helm_excessive_trim(text).is_empty());
+    }
+
+    #[test]
+    fn trim_between_two_actions_is_quiet() {
+        let text = "{{ .Values.a }}\n{{- .Values.b }}\n{{ .Values.c -}}\n{{ .Values.d }}\n";
+        assert!(helm_excessive_trim(text).is_empty());
+    }
+
+    #[test]
+    fn trim_on_comments_and_assignments_is_quiet() {
+        let text = "a: 1\n{{- /* note */ -}}\nb: 2\n{{- $x := .Values.x }}\nc: 3\n{{- $x = 4 -}}\nd: 5\n";
+        assert!(helm_excessive_trim(text).is_empty());
+    }
+
+    #[test]
+    fn trim_without_a_line_break_is_quiet() {
+        assert!(helm_excessive_trim("a: 1 {{- .Values.x -}} b\n").is_empty());
+    }
+
+    #[test]
+    fn excessive_trim_is_only_read_by_the_helm_group() {
+        let text = "a: 1\n  {{- .Values.x }}\n";
+        assert!(for_file("/p/chart/templates/a.yaml", text, false, false).is_empty());
+        let found = for_file("/p/chart/templates/a.yaml", text, true, false);
+        assert_eq!(found.iter().map(|f| f.code).collect::<Vec<_>>(), [HELM_EXCESSIVE_TRIM]);
+    }
+
+    #[test]
+    fn utf16_columns_in_chart_and_trim_findings() {
+        let chart = "# 😀é\napiVersion: v2\nname: é\nversion: 1\ncolour😀: red\n".replace("colour😀", "é😀colour");
+        let range = chart_schema(&chart)[0].diagnostic(&chart).range;
+        assert_eq!((range.start.line, range.start.character, range.end.character), (4, 0, 9));
+
+        let trim = "a: \"é😀\"\n  {{- .Values.x }}\n";
+        let range = helm_excessive_trim(trim)[0].diagnostic(trim).range;
+        assert_eq!((range.start.line, range.start.character, range.end.character), (1, 2, 5));
+    }
+
+    #[test]
+    fn crlf_chart_and_template_report_correct_lines() {
+        let chart = "apiVersion: v2\r\nname: a\r\nversion: 1\r\ncolour: red\r\n";
+        let found = &chart_schema(chart)[0];
+        let range = found.diagnostic(chart).range;
+        assert_eq!((range.start.line, range.start.character, range.end.character), (3, 0, 6));
+
+        let bad_value = "apiVersion: v2\r\nname: a\r\nversion: 1\r\ntype: app\r\n";
+        assert_eq!(chart_highlighted(bad_value, CHART_INVALID_VALUE), ["app"]);
+
+        let trim = "a: 1\r\n  {{- .Values.x }}\r\nb: {{ .Values.y -}}\r\nc: 2\r\n";
+        let found = helm_excessive_trim(trim);
+        assert_eq!(found.len(), 2);
+        let range = found[1].diagnostic(trim).range;
+        assert_eq!((range.start.line, range.start.character, range.end.character), (2, 16, 19));
+    }
+
+    #[test]
+    fn fixed_chart_and_template_publish_empty_list() {
+        let host = project(&[("chart/Chart.yaml", "apiVersion: v2\nname: c\nversion: 1\ncolour: red\n"), ("chart/templates/a.yaml", "a: 1\n  {{- .Values.x }}\n")]);
+        publish(&host, Event::FileOpened("/p/chart/Chart.yaml".into()));
+        publish(&host, Event::FileOpened("/p/chart/templates/a.yaml".into()));
+        assert_eq!(host.diagnostics().len(), 2);
+
+        host.add_file("chart/Chart.yaml", "apiVersion: v2\nname: c\nversion: 1\n");
+        host.add_file("chart/templates/a.yaml", "a: 1\n{{ .Values.x }}\n");
+        publish(&host, Event::FileSaved("/p/chart/Chart.yaml".into()));
+        publish(&host, Event::FileSaved("/p/chart/templates/a.yaml".into()));
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn chart_and_trim_groups_can_be_switched_off() {
+        let host = project(&[("chart/Chart.yaml", "apiVersion: v2\nname: c\nversion: nope\ncolour: red\n"), ("chart/templates/a.yaml", "a: 1\n  {{- .Values.x }}\n")]);
+        host.set_setting("checkChartSchema", "false");
+        host.set_setting("checkHelmExcessiveTrim", "false");
+        publish(&host, Event::FileOpened("/p/chart/Chart.yaml".into()));
+        publish(&host, Event::FileOpened("/p/chart/templates/a.yaml".into()));
+        assert!(host.diagnostics().is_empty());
     }
 
     const PROJECT: &str = "/p";

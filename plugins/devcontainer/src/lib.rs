@@ -5,12 +5,13 @@ mod checks;
 
 use std::path::Path;
 
-use openidea_plugin::text::position;
+use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, Providers};
+use openidea_plugin::text::{offset, position};
 use openidea_plugin::{
-    Context, Diagnostic, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Project, Range, host, register_plugin,
+    Context as PluginContext, Diagnostic, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Position, Project, Range, host, register_plugin,
 };
 
-use checks::{FEATURES_MALFORMED, UNKNOWN_PROPERTY};
+use checks::{Context, FEATURES_MALFORMED, UNKNOWN_PROPERTY};
 
 const MAX_BYTES: usize = 256 * 1024;
 
@@ -25,7 +26,7 @@ const LOGIN_SHELL: &str = "command -v bash >/dev/null && exec bash -l; exec sh -
 pub struct Main;
 
 impl Plugin for Main {
-    fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
+    fn activate(&mut self, _ctx: &PluginContext) -> Result<(), Error> {
         for kind in [EventKind::FileOpened, EventKind::FileSaved] {
             if let Err(error) = host::subscribe(kind) {
                 host::log(LogLevel::Warn, &format!("Dev Container inspections need the {} event: {error}", kind.name()));
@@ -76,7 +77,7 @@ impl Plugin for Main {
 fn is_devcontainer_file(path: &str) -> bool {
     let path = path.replace('\\', "/");
 
-    path.ends_with("/.devcontainer.json") || (path.ends_with("/devcontainer.json") && path.contains("/.devcontainer/"))
+    matches!(path.rsplit('/').next(), Some("devcontainer.json" | ".devcontainer.json"))
 }
 
 fn inspect(path: &str) {
@@ -94,7 +95,7 @@ fn inspect(path: &str) {
     let Ok(text) = project.read_file(path) else { return };
     let findings = match text.len() > MAX_BYTES {
         true => vec![],
-        false => enabled_findings(&text),
+        false => enabled_findings(path, &text),
     };
     let diagnostics: Vec<Diagnostic> = findings
         .iter()
@@ -107,9 +108,17 @@ fn inspect(path: &str) {
     let _ = host::publish_diagnostics(path, &diagnostics);
 }
 
-fn enabled_findings(text: &str) -> Vec<checks::Finding> {
+fn enabled_findings(path: &str, text: &str) -> Vec<checks::Finding> {
     let properties = host::setting_bool("checkProperties").unwrap_or(true);
     let features = host::setting_bool("checkFeatures").unwrap_or(true);
+
+    if !checks::in_valid_location(path) {
+        let hint = checks::folder_structure(path).filter(|_| host::setting_bool("checkFolderStructure").unwrap_or(true));
+
+        let token = checks::first_token(text);
+
+        return hint.map(|hint| checks::Finding { start: token.start, end: token.end, ..hint }).into_iter().collect();
+    }
 
     checks::check(text)
         .into_iter()
@@ -229,7 +238,48 @@ fn stop(project: &Project, root: &str) -> Result<Option<String>, Error> {
     Ok(None)
 }
 
-register_plugin!(Main);
+impl Providers for Main {
+    fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        if !is_devcontainer_file(&doc.path) || doc.text.len() > MAX_BYTES || !host::setting_bool("completeProperties").unwrap_or(true) {
+            return vec![];
+        }
+
+        let Some(offset) = offset(&doc.text, at) else { return vec![] };
+        let Some(context) = checks::context_at(&doc.text, offset) else { return vec![] };
+        let replace = checks::word_range(&doc.text, offset);
+        let replace = Range::new(position(&doc.text, replace.start), position(&doc.text, replace.end));
+
+        let mut items = match context {
+            Context::Key => checks::missing_properties(&doc.text, offset)
+                .into_iter()
+                .map(|name| {
+                    let mut item = CompletionItem::new(name, CompletionKind::Property);
+                    item.insert_text = format!("\"{name}\": $0");
+                    item.snippet = true;
+                    item
+                })
+                .collect(),
+            Context::Value { key } => checks::value_choices(&key)
+                .iter()
+                .map(|(value, quoted)| {
+                    let mut item = CompletionItem::new(value, CompletionKind::EnumMember);
+                    if *quoted {
+                        item.insert_text = format!("\"{value}\"");
+                    }
+                    item
+                })
+                .collect::<Vec<_>>(),
+        };
+
+        for item in &mut items {
+            item.replace = Some(replace);
+        }
+
+        items
+    }
+}
+
+register_plugin!(Main, providers);
 
 #[cfg(test)]
 mod tests {
@@ -416,6 +466,9 @@ mod tests {
 
         assert_eq!(found[0].range.start.line, 2);
         assert_eq!(found[0].range.start.character, 2);
+
+        open(&host, "devcontainer.json", "\r\n// x\r\n{}");
+        assert_eq!(published(&host, "devcontainer.json")[0].range.start.line, 2);
     }
 
     #[test]
@@ -455,9 +508,93 @@ mod tests {
     fn non_devcontainer_json_is_ignored() {
         let host = host();
         open(&host, "package.json", "{\"imge\": 1}");
-        open(&host, "other/devcontainer.json", "{\"imge\": 1}");
 
         assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn misplaced_config_gets_only_the_structure_hint() {
+        let host = host();
+        open(&host, "other/devcontainer.json", "{\"imge\": 1}");
+
+        assert_eq!(codes(&published(&host, "other/devcontainer.json")), ["folder-structure"]);
+    }
+
+    #[test]
+    fn devcontainer_json_outside_a_devcontainer_folder_gets_a_hint() {
+        let host = host();
+        open(&host, "devcontainer.json", "// c\n{}");
+
+        let found = published(&host, "devcontainer.json");
+
+        assert_eq!(codes(&found), ["folder-structure"]);
+        assert_eq!(found[0].severity, openidea_plugin::Severity::Info);
+        assert_eq!(found[0].range, Range::new(openidea_plugin::Position::new(1, 0), openidea_plugin::Position::new(1, 1)));
+    }
+
+    #[test]
+    fn config_two_levels_below_devcontainer_gets_a_hint() {
+        let host = host();
+        open(&host, ".devcontainer/a/b/devcontainer.json", "{}");
+
+        assert_eq!(codes(&published(&host, ".devcontainer/a/b/devcontainer.json")), ["folder-structure"]);
+    }
+
+    #[test]
+    fn config_one_folder_below_devcontainer_is_quiet() {
+        let host = host();
+        open(&host, ".devcontainer/python/devcontainer.json", "{}");
+
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn root_config_files_are_quiet() {
+        let host = host();
+        open(&host, ".devcontainer.json", "{}");
+        open(&host, "sub/.devcontainer.json", "{}");
+
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn windows_separators_are_normalised() {
+        assert!(checks::folder_structure("C:\\work\\.devcontainer\\devcontainer.json").is_none());
+        assert!(checks::folder_structure("C:\\work\\devcontainer.json").is_some());
+    }
+
+    #[test]
+    fn folder_structure_is_quiet_for_library_or_dynamic_name() {
+        assert!(checks::folder_structure("/work/app/devcontainer.json.bak").is_none());
+        assert!(checks::folder_structure("/work/app/my-devcontainer.json").is_none());
+        assert!(!is_devcontainer_file("/work/app/my-devcontainer.json"));
+    }
+
+    #[test]
+    fn moving_the_file_clears_the_hint() {
+        let host = host();
+        open(&host, "devcontainer.json", "{}");
+        assert_eq!(host.diagnostics().len(), 1);
+
+        open(&host, ".devcontainer/devcontainer.json", "{}");
+        assert!(published(&host, ".devcontainer/devcontainer.json").is_empty());
+    }
+
+    #[test]
+    fn folder_structure_can_be_switched_off() {
+        let host = host();
+        host.set_setting("checkFolderStructure", "false");
+        open(&host, "devcontainer.json", "{}");
+
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn structure_hint_ignores_the_bom() {
+        let host = host();
+        open(&host, "devcontainer.json", "\u{feff}{}");
+
+        assert_eq!(published(&host, "devcontainer.json")[0].range.start.line, 0);
     }
 
     #[test]
@@ -573,5 +710,179 @@ mod tests {
         let error = Main.run_command("info", &host.invocation(), None).unwrap_err();
 
         assert!(matches!(error, Error::Denied(cap) if cap == "process:devcontainer"));
+    }
+
+    fn complete_in(path: &str, marked: &str) -> Vec<openidea_plugin::providers::CompletionItem> {
+        let text = marked.replacen('|', "", 1);
+        let caret = marked.find('|').unwrap();
+        let doc = openidea_plugin::providers::Document { path: path.into(), language: "jsonc".into(), version: 1, text: text.clone() };
+
+        Main.completion(&doc, position(&text, caret), None)
+    }
+
+    fn complete(marked: &str) -> Vec<openidea_plugin::providers::CompletionItem> {
+        complete_in("/work/app/.devcontainer/devcontainer.json", marked)
+    }
+
+    fn labels(items: &[openidea_plugin::providers::CompletionItem]) -> Vec<&str> {
+        items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    #[test]
+    fn suggests_missing_top_level_properties() {
+        let _host = host();
+
+        let items = complete("{\n  \"image\": \"x\",\n  |\n}");
+
+        assert!(labels(&items).contains(&"remoteUser"));
+        assert!(!labels(&items).contains(&"image"));
+        let item = items.iter().find(|i| i.label == "remoteUser").unwrap();
+        assert_eq!(item.insert_text, "\"remoteUser\": $0");
+        assert!(item.snippet);
+    }
+
+    #[test]
+    fn suggests_enum_values_for_shutdown_action() {
+        let _host = host();
+
+        let items = complete("{\"shutdownAction\": \"|\"}");
+
+        assert_eq!(labels(&items), ["none", "stopContainer", "stopCompose"]);
+        assert_eq!(items[0].insert_text, "\"none\"");
+        assert!(!items[0].snippet);
+    }
+
+    #[test]
+    fn suggests_booleans_for_privileged() {
+        let _host = host();
+
+        assert_eq!(labels(&complete("{\"privileged\": |}")), ["true", "false"]);
+        assert_eq!(labels(&complete("{\"privileged\": tr|,\n\"image\": 1}")), ["true", "false"]);
+    }
+
+    #[test]
+    fn completion_is_quiet_inside_nested_objects_and_arrays() {
+        let _host = host();
+
+        for marked in [
+            "{\"features\": {|}}",
+            "{\"customizations\": {\"vscode\": {\"x\": |}}}",
+            "{\"forwardPorts\": [|]}",
+            "{\"forwardPorts\": [3000, \"|\"]}",
+            "{\"image\": \"x\"}|",
+            "|{\"image\": \"x\"}",
+        ] {
+            assert!(complete(marked).is_empty(), "{marked}");
+        }
+    }
+
+    #[test]
+    fn completion_is_quiet_inside_comments_and_for_other_files() {
+        let _host = host();
+
+        assert!(complete("{\n  // rem|\n}").is_empty());
+        assert!(complete("{\n  /* rem| */\n}").is_empty());
+        assert!(complete("{\"privileged\": true, // x|\n}").is_empty());
+        assert!(!complete("{\n  // c\n  |\n}").is_empty());
+
+        for path in ["/work/app/package.json", "/work/app/tsconfig.json", "/work/app/.vscode/settings.json"] {
+            assert!(complete_in(path, "{|}").is_empty(), "{path}");
+        }
+    }
+
+    #[test]
+    fn completion_works_in_misplaced_files() {
+        let _host = host();
+
+        assert!(!complete_in("/work/app/devcontainer.json", "{|}").is_empty());
+        assert!(!complete_in("/work/app/.devcontainer.json", "{|}").is_empty());
+    }
+
+    #[test]
+    fn completion_survives_an_unterminated_string_at_the_caret() {
+        let _host = host();
+
+        let items = complete("{\"image\": \"x\",\n  \"remo|");
+        assert!(labels(&items).contains(&"remoteUser"));
+        let replace = items[0].replace.clone().unwrap();
+        assert_eq!((replace.start.line, replace.start.character, replace.end.character), (1, 2, 7));
+
+        assert_eq!(labels(&complete("{\"waitFor\": \"|")).len(), 6);
+    }
+
+    #[test]
+    fn completion_reads_jsonc_comments_and_trailing_commas() {
+        let _host = host();
+
+        let items = complete("{\n  // \"name\": 1,\n  /* \"init\": */ \"image\": \"x\", // end\n  |\n}");
+
+        assert!(labels(&items).contains(&"name"));
+        assert!(labels(&items).contains(&"init"));
+        assert!(!labels(&items).contains(&"image"));
+        assert_eq!(labels(&complete("{\"init\": |, }")), ["true", "false"]);
+    }
+
+    #[test]
+    fn completion_ranges_use_utf16_columns_with_multibyte_text() {
+        let _host = host();
+
+        let items = complete("{\"name\": \"é😀\", \"pri|\": 1}");
+
+        let replace = items.iter().find(|i| i.label == "privileged").unwrap().replace.clone().unwrap();
+        assert_eq!((replace.start.character, replace.end.character), (16, 21));
+    }
+
+    #[test]
+    fn completion_can_be_switched_off() {
+        let host = host();
+        host.set_setting("completeProperties", "false");
+
+        assert!(complete("{|}").is_empty());
+    }
+
+    #[test]
+    fn completion_is_fast_on_a_256_kib_file() {
+        let _host = host();
+
+        let oversized = format!("{{\"name\": \"{}\", |}}", "x".repeat(MAX_BYTES));
+        assert!(complete(&oversized).is_empty());
+
+        let near_limit = format!("{{\"name\": \"{}\", |}}", "x".repeat(MAX_BYTES - 100));
+        assert!(!complete(&near_limit).is_empty());
+    }
+
+    #[test]
+    fn completion_at_the_end_of_unfinished_text_does_not_panic() {
+        let _host = host();
+
+        for marked in ["{\n|", "{ |", "{\"a\": 1,\n|", "{\"a\": |", "{\"a\":\n|"] {
+            let _ = complete(marked);
+        }
+
+        assert!(!complete("{\n|").is_empty());
+        assert!(!complete("{ |").is_empty());
+        assert!(!complete("{\"image\": 1,\n|").is_empty());
+    }
+
+    #[test]
+    fn structure_hint_ranges_use_utf16_columns_with_multibyte_first_character() {
+        let host = host();
+        open(&host, "devcontainer.json", "/* é😀 */ 日{}");
+
+        let found = published(&host, "devcontainer.json");
+
+        assert_eq!(found[0].range.start.character, 10);
+        assert_eq!(found[0].range.end.character, 11);
+
+        open(&host, "other/devcontainer.json", "é{}");
+        assert_eq!(published(&host, "other/devcontainer.json")[0].range.end.character, 1);
+    }
+
+    #[test]
+    fn manifest_registers_the_completion_provider() {
+        let manifest = include_str!("../plugin.toml");
+
+        assert!(manifest.contains("kinds = [\"completion\"]"));
+        assert!(manifest.contains("languages = [\"json\", \"jsonc\"]"));
     }
 }

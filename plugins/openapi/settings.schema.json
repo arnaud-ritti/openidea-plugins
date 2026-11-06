@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "checkSpecCandidates": {
+      "type": "boolean",
+      "title": "Hint at a YAML or JSON file with an OpenAPI paths object but no openapi or swagger key",
+      "default": true
+    }
+  }
+}

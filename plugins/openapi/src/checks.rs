@@ -37,6 +37,30 @@ pub fn check(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Fetched) -> Vec<Dia
     found
 }
 
+/// A file that looks like a spec without its root key: a `paths` object of `/…` items holding HTTP methods.
+pub fn spec_candidate(text: &str) -> Vec<Diagnostic> {
+    if !text.contains("paths") {
+        return Vec::new();
+    }
+
+    let keys = scan(text);
+    if keys.iter().any(|k| k.key == "openapi" || k.key == "swagger") {
+        return Vec::new();
+    }
+
+    let Some(paths) = keys.iter().find(|k| k.key == "paths") else {
+        return Vec::new();
+    };
+
+    if operations(text, &keys).is_empty() {
+        return Vec::new();
+    }
+
+    let message = "This file has a `paths` object but no `openapi` or `swagger` key, so it is not treated as an API description".to_owned();
+
+    vec![problem(text, (paths.at, paths.end), Severity::Info, "missing-openapi-root", message)]
+}
+
 fn problem(text: &str, (at, end): (usize, usize), severity: Severity, code: &str, message: String) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(range(text, at, end), severity, message);
     diagnostic.code = Some(code.into());
@@ -302,6 +326,33 @@ mod tests {
     }
 
     #[test]
+    fn swagger_templates_are_registered_and_exist() {
+        let manifest = std::fs::read_to_string(format!("{}/plugin.toml", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let ids: Vec<&str> = manifest.lines().filter_map(|l| l.strip_prefix("id = \"")?.strip_suffix('"')).collect();
+        for id in ["openapi-yaml", "openapi-json", "asyncapi-yaml", "swagger-yaml", "swagger-json"] {
+            assert!(ids.contains(&id), "{id}");
+        }
+        assert_eq!(manifest.matches("[[contributes.fileTemplates]]").count(), 5);
+        for name in ["swagger.yaml", "swagger.json"] {
+            assert!(manifest.contains(&format!("path = \"templates/{name}\"")), "{name}");
+            let text = template(name);
+            assert!(text.contains("$NAME$"), "{name}");
+            assert!(!text.replace("$NAME$", "").replace("$END$", "").contains('$'), "{name}");
+        }
+    }
+
+    #[test]
+    fn swagger_templates_are_detected_as_specs() {
+        for name in ["swagger.yaml", "swagger.json"] {
+            let text = template(name).replace("$NAME$", "Demo");
+            let spec = parse(&text).unwrap_or_else(|| panic!("{name} is not detected as a spec"));
+            assert_eq!(spec.version, "2.0", "{name}");
+            assert!(found(&text).is_empty(), "{name}");
+            assert_eq!(operations(&text, &spec.keys).len(), 1, "{name}");
+        }
+    }
+
+    #[test]
     fn asyncapi_template_is_not_checked_as_openapi() {
         assert!(parse(&template("asyncapi.yaml")).is_none());
     }
@@ -316,7 +367,7 @@ mod tests {
             .collect();
         registered.sort();
         files.sort();
-        assert_eq!(registered, ["asyncapi.yaml", "openapi.json", "openapi.yaml"]);
+        assert_eq!(registered, ["asyncapi.yaml", "openapi.json", "openapi.yaml", "swagger.json", "swagger.yaml"]);
         assert_eq!(files, registered);
         for name in registered {
             let text = template(name);

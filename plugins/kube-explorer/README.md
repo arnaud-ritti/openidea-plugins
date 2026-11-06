@@ -13,6 +13,13 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   **Custom Resources** lists the cluster's CRD kinds (`kubectl api-resources`,
   without core and built-in groups) by API group; expanding a kind lists its
   instances, which take Describe, YAML and Delete like any resource.
+  **All namespaces**, the first entry of the Namespace list, shows every
+  namespaced kind as `namespace/name` rows; an action on a row runs in that
+  row's namespace. In that mode Create Secret, Apply Manifest, Apply
+  Kustomization and Delete Manifest Resources are refused (pick a namespace
+  first), and custom resources that are cluster-scoped or have a name that is not
+  a DNS name are listed but take no action. If kubectl cannot be started and no
+  context is stored, the tree offers a How to Install kubectl button.
 - **Secrets**: Show Secret (a selected secret) decodes its values in the plugin and
   shows them only in the panel. It is off until you turn on `allowRevealSecrets` in
   the settings; while it is off, YAML on a secret is refused too (that YAML holds the
@@ -30,7 +37,8 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   submit or click Back.
 - **New file templates** (File › New): Pod, Deployment, StatefulSet, DaemonSet, Job,
   CronJob, Service, Ingress, ConfigMap, Secret (`stringData` placeholder), Namespace,
-  Role, RoleBinding, ClusterRole and ClusterRoleBinding, on current stable apiVersions.
+  Role, RoleBinding, ClusterRole, ClusterRoleBinding and CertificateSigningRequest, on current stable
+  apiVersions.
 - **YAML** opens in a regular editor on `/tmp/kube-explorer-<kind>-<name>-<random>.yaml`,
   with a `yaml-language-server` schema modeline (completion, validation and
   docs from the Kubernetes JSON schemas). Every save runs `kubectl replace -f`
@@ -48,23 +56,31 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
 - **Manifest problems** on open and save (optional `events` and `project.read`;
   a file is a manifest when a document has both `apiVersion:` and `kind:`; files
   with Helm `{{ }}` actions only get the Helm checks): `deprecated-api-version`
-  (versions removed in v1.16, v1.22 or v1.25, with the replacement),
+  (versions removed in v1.16 through v1.27, with the replacement),
   `duplicate-env-name`, `missing-name`, `missing-selector` (apps/v1 workloads),
-  `chart-missing-key` (`Chart.yaml` without `apiVersion`, `name` or `version`)
-  and `helm-whitespace-trim` (`{{-foo` and `foo-}}` in a chart's `templates/`;
-  a trim marker needs a space beside the dash). Each has a switch in the settings.
+  `chart-missing-key` (`Chart.yaml` without `apiVersion`, `name` or `version`),
+  `chart-unknown-key` and `chart-invalid-value` (a key outside the Chart.yaml
+  schema; a bad `apiVersion`, `type`, `deprecated` or `version`; one switch,
+  `checkChartSchema`), `helm-whitespace-trim` (`{{-foo` and `foo-}}` in a chart's
+  `templates/`; a trim marker needs a space beside the dash) and
+  `helm-excessive-trim` (`{{-` or `-}}` on an output action that joins a line
+  to the one before or after it; it works on the text, so a `}}` inside a string
+  literal can confuse it). Each has a switch in the settings.
 - **Commands** on the open file: Apply, Validate (server dry run), Diff,
   Delete Manifest Resources (lists them with a server dry run, then waits for
   Confirm Delete), Render / Apply Kustomization (the file's directory), Preview
   Helm Template, Lint Helm Chart and Update Helm Dependencies (the chart
-  around the file; optional `process:helm`).
+  around the file; optional `process:helm`). Update Helm Repositories runs
+  `helm repo update` (also optional `process:helm`; if denied, a notification
+  says so). How to Install kubectl shows the install instructions in a
+  notification; it cannot install anything.
 
 The chosen context and namespace are passed as `--context` / `--namespace`,
 so your kubeconfig is never modified. To use another kubeconfig file, set it in
 Settings › Plugins › Kube Explorer; otherwise kubectl uses its default.
 
 Not ported: cluster-backed checks (unknown resources or fields against the
-live API), CRD-aware validation, and Helm values checks.
+live API), CRD-aware validation, Helm values checks and `requirements.yaml` (Helm 2).
 
 Requires `process:kubectl`. Exec-based auth plugins (`gke-gcloud-auth-plugin`,
 `aws`, …) must be on the PATH the IDE was started with.
