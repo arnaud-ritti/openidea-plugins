@@ -618,6 +618,29 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
     }
 
     #[test]
+    fn menu_entries_have_when_clauses() {
+        let value = |block: &str, key: &str| {
+            block.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(" = \"")?.strip_suffix('"')).unwrap_or_default().to_owned()
+        };
+        let editor_menus: Vec<(String, String)> = include_str!("../plugin.toml")
+            .split("[[contributes.menus]]")
+            .skip(1)
+            .map(|block| block.split("\n[").next().unwrap_or(block))
+            .filter(|block| value(block, "menu") == "editor.context")
+            .map(|block| (value(block, "command"), value(block, "when")))
+            .collect();
+
+        assert_eq!(
+            editor_menus,
+            [
+                ("copy-ddl".to_owned(), "editorLangId == java || editorLangId == kotlin".to_owned()),
+                ("copy-dto".to_owned(), "editorLangId == java || editorLangId == kotlin".to_owned()),
+                ("copy-entity".to_owned(), "editorLangId == sql".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn structure_view_lists_entities_and_navigates() {
         let host = host();
         let mut plugin = JpaAssist::default();

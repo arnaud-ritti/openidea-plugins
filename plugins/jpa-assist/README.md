@@ -54,6 +54,9 @@ reverse arrow, from a repository to its entity, comes from Spring Data.
   entity for that table, with `@Id`, `@Column`, `@ManyToOne` for foreign
   keys and, in Java, getters and setters. A setting picks Java or Kotlin.
 
+The context-menu entries show only where they apply: Copy DDL and Copy DTO in
+Java and Kotlin files, Copy Entity in SQL files.
+
 Without the `clipboard` permission, a notification asks you to allow it in
 Settings › Plugins.
 

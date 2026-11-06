@@ -48,6 +48,21 @@ category = "JPA Assist"
 menu = "tools"
 command = "copy-ddl-all"
 
+[[contributes.menus]]
+menu = "editor.context"
+command = "copy-ddl"
+when = "editorLangId == java || editorLangId == kotlin"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "copy-dto"
+when = "editorLangId == java || editorLangId == kotlin"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "copy-entity"
+when = "editorLangId == sql"
+
 [contributes.settings]
 title = "JPA Assist"
 schema = "settings.schema.json"
