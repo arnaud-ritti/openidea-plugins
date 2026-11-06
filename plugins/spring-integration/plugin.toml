@@ -16,3 +16,9 @@ required = ["project.read"]
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
 languages = ["java", "xml"]
+
+[[contributes.views]]
+id = "diagram"
+title = "Integration Channels"
+icon = "hierarchy"
+location = "bottom"

@@ -3,12 +3,14 @@
 //! annotations, the Java DSL and integration XML), then links producers,
 //! channels and consumers. Text-based: channels match by name as written.
 
+use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
-use spring_text::index::{Index, Indexes, PROVIDER_BUDGET};
+use spring_text::diagram::{self, Edge, Node};
+use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::java::{Annotation, Str};
 use spring_text::{beans, contains, range, xml};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const NAMESPACE: &str = "http://www.springframework.org/schema/integration";
 const ENDPOINTS: [&str; 12] = [
@@ -51,6 +53,8 @@ pub struct Ref {
     pub range: Range,
     /// Reported when nothing declares or consumes the channel.
     pub checked: bool,
+    /// The endpoint (annotation or XML element) it belongs to within its file; 0 for none.
+    pub owner: usize,
 }
 
 /// The channel and bean names of a Java, Kotlin or XML source.
@@ -63,7 +67,7 @@ fn index_file(path: &str, text: &str) -> Option<Vec<Ref>> {
 }
 
 fn str_ref(text: &str, s: &Str, role: Role, what: String, checked: bool) -> Ref {
-    Ref { name: s.value.clone(), role, what, range: range(text, s.at, s.end), checked }
+    Ref { name: s.value.clone(), role, what, range: range(text, s.at, s.end), checked, owner: 0 }
 }
 
 fn annotation_refs(text: &str, a: &Annotation, what: &str, out: &mut Vec<Ref>) {
@@ -76,7 +80,7 @@ fn annotation_refs(text: &str, a: &Annotation, what: &str, out: &mut Vec<Ref>) {
             _ => continue,
         };
         for s in &arg.strings {
-            out.push(str_ref(text, s, role, format!("@{} {what}", a.name), role == Role::Produces));
+            out.push(Ref { owner: a.at + 1, ..str_ref(text, s, role, format!("@{} {what}", a.name), role == Role::Produces) });
         }
     }
 }
@@ -88,9 +92,9 @@ fn parse_source(path: &str, text: &str) -> Vec<Ref> {
         let r = range(text, b.at, b.at + b.len);
         let what = format!("{} bean", b.ty);
         if b.ty.ends_with("Channel") {
-            out.push(Ref { name: b.name.clone(), role: Role::Declares, what: what.clone(), range: r, checked: false });
+            out.push(Ref { name: b.name.clone(), role: Role::Declares, what: what.clone(), range: r, checked: false, owner: 0 });
         }
-        out.push(Ref { name: b.name, role: Role::Bean, what, range: r, checked: false });
+        out.push(Ref { name: b.name, role: Role::Bean, what, range: r, checked: false, owner: 0 });
     }
     if !text.contains("integration") {
         return out;
@@ -140,7 +144,7 @@ fn parse_xml(text: &str) -> Vec<Ref> {
     let attr_range = |a: &xml::Attr| range(text, a.value_at, a.value_end);
     let mut out: Vec<Ref> = xml::bean_ids(&els)
         .into_iter()
-        .map(|a| Ref { name: a.value.clone(), role: Role::Bean, what: "XML bean".into(), range: attr_range(a), checked: false })
+        .map(|a| Ref { name: a.value.clone(), role: Role::Bean, what: "XML bean".into(), range: attr_range(a), checked: false, owner: 0 })
         .collect();
     if !text.contains(NAMESPACE) {
         return out;
@@ -162,7 +166,7 @@ fn parse_xml(text: &str) -> Vec<Ref> {
                 _ => continue,
             };
             let checked = matches!(role, Role::Produces | Role::BeanRef);
-            out.push(Ref { name: a.value.clone(), role, what: format!("<{}>", e.name), range: attr_range(a), checked });
+            out.push(Ref { name: a.value.clone(), role, what: format!("<{}>", e.name), range: attr_range(a), checked, owner: i + 1 });
         }
     }
     out
@@ -312,13 +316,84 @@ impl Providers for Integration {
     }
 }
 
+const VIEW: &str = "diagram";
+
+fn location_key(path: &str, range: Range) -> String {
+    format!("b:{}:{}:{path}", range.start.line, range.start.character)
+}
+
+/// Channels as nodes and endpoints as small nodes: input channel -> endpoint -> output channel.
+fn diagram_of(index: &Index<Vec<Ref>>) -> (Vec<Node>, Vec<Edge>) {
+    let channel_roles = [Role::Declares, Role::Consumes, Role::Produces];
+    let mut channels: BTreeMap<&str, (&str, &Ref)> = BTreeMap::new();
+    for (path, r) in all(index).filter(|(_, r)| channel_roles.contains(&r.role) && !r.name.is_empty() && !beans::is_expression(&r.name)) {
+        let entry = channels.entry(r.name.as_str()).or_insert((path, r));
+        if r.role == Role::Declares && entry.1.role != Role::Declares {
+            *entry = (path, r);
+        }
+    }
+    let mut endpoints: BTreeMap<(&str, usize), Vec<&Ref>> = BTreeMap::new();
+    for (path, r) in all(index).filter(|(_, r)| r.owner != 0 && matches!(r.role, Role::Consumes | Role::Produces)) {
+        if channels.contains_key(r.name.as_str()) {
+            endpoints.entry((path, r.owner)).or_default().push(r);
+        }
+    }
+    let channel_id = |name: &str| location_key(channels[name].0, channels[name].1.range);
+    let mut nodes: Vec<Node> = channels
+        .iter()
+        .map(|(name, (path, r))| Node::new(&location_key(path, r.range), name).detail("channel").accent(r.role == Role::Declares))
+        .collect();
+    let mut edges = BTreeSet::new();
+    for ((path, _), refs) in &endpoints {
+        let id = location_key(path, refs[0].range).replacen('b', "e", 1);
+        nodes.push(Node::new(&id, &refs[0].what).detail(file_name(path)));
+        for r in refs {
+            edges.insert(match r.role {
+                Role::Consumes => (channel_id(&r.name), id.clone()),
+                _ => (id.clone(), channel_id(&r.name)),
+            });
+        }
+    }
+    (nodes, edges.into_iter().map(|(a, b)| Edge::new(&a, &b)).collect())
+}
+
+impl Views for Integration {
+    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its message channels.").button(refresh)) };
+        let index = self.indexes.get(&project, COMMAND_BUDGET);
+        let (nodes, edges) = diagram_of(index);
+        let status = format!("{} nodes · {} links{}", nodes.len(), edges.len(), if index.complete() { "" } else { " · scanning…" });
+        Ok(View::new(Body::Html(diagram::html(&nodes, &edges, "No message channels found."))).button(refresh).status(&status))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        let key = match event {
+            ViewEvent::Button(b) if b == "refresh" => {
+                if let Some(project) = ctx.project() {
+                    self.indexes.get(&project, std::time::Duration::ZERO).reset();
+                }
+                host::refresh_view(view);
+                return Ok(());
+            }
+            ViewEvent::Activate(key) | ViewEvent::Message(key) => key,
+            _ => return Ok(()),
+        };
+        let mut parts = key.splitn(4, ':');
+        if let (Some("b" | "e"), Some(line), Some(col), Some(path)) = (parts.next(), parts.next(), parts.next(), parts.next()) {
+            host::open_location(path, line.parse().unwrap_or(0), col.parse().unwrap_or(0))?;
+        }
+        Ok(())
+    }
+}
+
 impl Plugin for Integration {
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         Err(Error::NotFound(format!("command {id}")))
     }
 }
 
-register_plugin!(Integration, providers);
+register_plugin!(Integration, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -380,6 +455,23 @@ interface OrderGateway {
     <bean id="pricing" class="com.acme.Pricing"/>
 </beans>
 "#;
+    const EXPECTED_LABELS: &[&str] = &["<int-http:outbound-gateway>", "<int:outbound-channel-adapter>", "<int:service-activator>", "@Filter accept()", "@Gateway place()", "@MessagingGateway OrderGateway", "@ServiceActivator bill()", "@Transformer audit()", "audit", "confirmations", "errorChannel", "invoices", "late", "lost", "nowhere", "orders", "quoted", "quotes", "shipping"];
+    const EXPECTED_PAIRS: &[(&str, &str)] = &[
+        ("shipping", "@ServiceActivator bill()"),
+        ("audit", "@Transformer audit()"),
+        ("@MessagingGateway OrderGateway", "errorChannel"),
+        ("@MessagingGateway OrderGateway", "orders"),
+        ("@Gateway place()", "orders"),
+        ("confirmations", "@Gateway place()"),
+        ("late", "@Filter accept()"),
+        ("invoices", "<int:service-activator>"),
+        ("invoices", "<int:outbound-channel-adapter>"),
+        ("<int:service-activator>", "lost"),
+        ("@ServiceActivator bill()", "invoices"),
+        ("quotes", "<int-http:outbound-gateway>"),
+        ("<int-http:outbound-gateway>", "quoted"),
+        ("@Transformer audit()", "nowhere"),
+    ];
     const CONFIG_PATH: &str = "/project/src/main/java/com/acme/FlowConfig.java";
     const BILLING_PATH: &str = "/project/src/main/java/com/acme/Billing.java";
     const XML_PATH: &str = "/project/src/main/resources/integration.xml";
@@ -488,6 +580,36 @@ interface OrderGateway {
         let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"billing") && labels.contains(&"pricing") && labels.contains(&"flowConfig"));
         assert!(!labels.contains(&"ignored"));
+    }
+
+    #[test]
+    fn integration_diagram_has_expected_nodes_and_edges() {
+        let host = setup();
+        let (nodes, edges) = diagram_of(Integration::default().indexes.get(&host.invocation().project().unwrap(), COMMAND_BUDGET));
+        let label_of = |id: &str| nodes.iter().find(|n| n.id == id).map(|n| n.label.as_str()).unwrap_or("?");
+        let mut pairs: Vec<(&str, &str)> = edges.iter().map(|e| (label_of(&e.from), label_of(&e.to))).collect();
+        let mut labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
+        labels.sort();
+        pairs.sort();
+        let mut expected = EXPECTED_PAIRS.to_vec();
+        expected.sort();
+        assert_eq!(labels, EXPECTED_LABELS);
+        assert_eq!(pairs, expected);
+
+        let mut p = Integration::default();
+        let view = p.render(VIEW, None, &host.invocation()).unwrap();
+        let Body::Html(page) = view.body else { panic!("html expected") };
+        assert!(page.contains(&format!("data-id=\"e:6:38:{BILLING_PATH}\"")), "{page}");
+        p.handle(VIEW, ViewEvent::Message(format!("e:6:38:{BILLING_PATH}")), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations(), [(BILLING_PATH.to_string(), 6, 38)]);
+    }
+
+    #[test]
+    fn integration_diagram_is_empty_without_channels() {
+        let host = MockHost::install();
+        let view = Integration::default().render(VIEW, None, &host.invocation()).unwrap();
+        let Body::Html(page) = view.body else { panic!("html expected") };
+        assert!(page.contains("No message channels found."));
     }
 
     #[test]
