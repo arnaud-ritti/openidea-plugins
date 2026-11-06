@@ -1,0 +1,3 @@
+[deployment]
+defaultServer = "server-mw3ro7ue-1"
+servers = [{ excludedPaths = [], id = "server-mw3ro7ue-1", kind = "sftp", mappings = [{ deployment = "", local = "", web = "" }], name = "Server 1", rootPath = "", sshConfig = "", webUrl = "" }]
