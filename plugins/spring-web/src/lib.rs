@@ -6,7 +6,7 @@
 use endpoints::{FileInfo, Handler};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
-use openidea_plugin::views::{Body, Button, ListItem, View, ViewEvent, Viewport, Views};
+use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
     Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range, Severity, TextEdit, host, register_plugin,
 };
@@ -910,6 +910,7 @@ register_plugin!(WebTools, providers, views);
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
+    use openidea_plugin::views::ListItem;
 
     const JAVA_ROUTES: &str = r#"package com.acme;
 
