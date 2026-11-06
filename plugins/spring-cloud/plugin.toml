@@ -1,7 +1,7 @@
 id = "aritti.spring-cloud"
 name = "Spring Cloud Tools"
 version = "0.1.0"
-description = "Spring Cloud in Java projects. Links OpenFeign client methods to the controller endpoints they call and back, links Spring Cloud Stream function beans to their bindings in application.yml/.properties (navigation, completion, and checks for bindings and function definitions that name no function), and completes and checks Spring Cloud Gateway route predicates and filters. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "Spring Cloud in Java and Kotlin projects. Links OpenFeign client methods to the controller endpoints they call and back, links Spring Cloud Stream function beans to their bindings in application.yml/.properties (navigation, completion, and checks for bindings and function definitions that name no function), and completes and checks Spring Cloud Gateway route predicates and filters. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0 (first release): Feign client ↔ endpoint navigation, Stream function binding navigation, completion and checks, Gateway predicate and filter completion and checks."

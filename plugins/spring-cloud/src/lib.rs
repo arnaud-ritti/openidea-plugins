@@ -11,7 +11,6 @@ use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java;
 use spring_text::{SOURCE_GLOBS, contains, parse_source, range, source_calls};
 
-const JAVA_GLOBS: &[&str] = SOURCE_GLOBS;
 const CONFIG_GLOBS: &[&str] = &[
     "**/application*.yml",
     "**/application*.yaml",
@@ -429,7 +428,7 @@ pub struct CloudTools {
 
 impl Default for CloudTools {
     fn default() -> Self {
-        Self { java: Indexes::new(JAVA_GLOBS, java_file), config: Indexes::new(CONFIG_GLOBS, config_file) }
+        Self { java: Indexes::new(SOURCE_GLOBS, java_file), config: Indexes::new(CONFIG_GLOBS, config_file) }
     }
 }
 
