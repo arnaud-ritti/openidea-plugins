@@ -32,6 +32,8 @@ pub struct Doc {
     /// The `name:` values of each block-style `env:` list.
     pub env_lists: Vec<Vec<Value>>,
     pub top_keys: Vec<String>,
+    /// Each indent-0 key with the byte range of its name and its scalar value.
+    pub top_entries: Vec<(String, Range<usize>, Option<Value>)>,
     /// Bytes of the document, after its `---` line.
     pub range: Range<usize>,
     pub start_line: usize,
@@ -197,6 +199,9 @@ fn scan(lines: &[Line]) -> Doc {
         let has_value = value.is_some();
         if line.indent() == 0 {
             doc.top_keys.push(key.clone());
+            let quoted = usize::from(line.content().starts_with(['"', '\'']));
+            let key_start = line.start + line.indent() + quoted;
+            doc.top_entries.push((key.clone(), key_start..key_start + key.len(), value.clone()));
             match key.as_str() {
                 "apiVersion" => doc.api_version = value,
                 "kind" => doc.kind = value,
