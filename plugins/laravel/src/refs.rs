@@ -114,12 +114,28 @@ impl Site {
     }
 
     /// The string is the value of a key in the rules array itself, not in a nested list or the messages array.
-    fn is_rule_value(&self) -> bool {
-        let on_controller = self.callee.starts_with("$this->");
-        let rules_argument = match () {
-            _ if self.is_method(&["validateWithBag"]) => if on_controller { 2 } else { 1 },
-            _ if self.is_method(&["validate"]) && on_controller => 1,
-            _ if self.is_static(&["Validator"], &["make"]) || self.is_function(&["validator"]) => 1,
+    fn is_rule_value(&self, text: &str) -> bool {
+        let is_array = |range: Option<&Range<usize>>| {
+            range.is_some_and(|r| {
+                let argument = text[php::trimmed(text, r.clone())].trim_start();
+                argument.starts_with('[') || argument.starts_with("array(")
+            })
+        };
+        let arguments = || {
+            let open = text[self.callee_start + self.callee.len()..].find('(')? + self.callee_start + self.callee.len();
+            Some(php::arguments(text, open))
+        };
+
+        let rules_argument = match self.callee.as_str() {
+            "$this->validate" => {
+                let arguments = arguments().unwrap_or_default();
+                usize::from(!is_array(arguments.first()))
+            }
+            "$this->validateWithBag" => {
+                let arguments = arguments().unwrap_or_default();
+                if is_array(arguments.get(1)) { 1 } else { 2 }
+            }
+            _ if self.is_method(&["validateWithBag"]) || self.is_static(&["Validator"], &["make"]) || self.is_function(&["validator"]) => 1,
             _ => 0,
         };
         self.depth == 1 && self.key.is_some() && self.arg == rules_argument
@@ -599,7 +615,7 @@ pub fn literal_at(language: &str, text: &str, at: usize) -> Option<(Kind, Range<
         if at <= literal.end {
             if literal.closed {
                 found = classify(text, language, literal, site)
-                    .filter(|(kind, _)| *kind != Kind::Rule || site.is_rule_value())
+                    .filter(|(kind, _)| *kind != Kind::Rule || site.is_rule_value(text))
                     .map(|(kind, _)| (kind, literal.start..literal.end));
             }
             return false;

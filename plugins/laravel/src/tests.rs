@@ -663,3 +663,17 @@ fn bag_and_form_request_rules_are_offered() {
     let form = "<?php\nclass R {\n    public function rules(): array\n    {\n        return ['n' => 'required|string'];\n    }\n}\n";
     assert_eq!(rewrite_titles(&mut plugin, path, "php", form, "required|string").len(), 1);
 }
+
+#[test]
+fn chained_and_livewire_validate_rules_are_offered() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let text = "<?php\n$this->request->validate(['a' => 'required|email']);\n$this->request->validateWithBag('b', ['c' => 'required|max:9']);\n$this->validate(['x' => 'required|url']);\n$this->validate($request, ['y' => 'required|ip'], ['y.ip' => 'p|q']);\n$this->validateWithBag('b', ['z' => 'required|uuid'], ['z.uuid' => 'm|n']);\n";
+    for marker in ["required|email", "required|max:9", "required|url", "required|ip", "required|uuid"] {
+        assert_eq!(rewrite_titles(&mut plugin, path, "php", text, marker).len(), 1, "{marker}");
+    }
+    for marker in ["p|q", "m|n"] {
+        assert!(rewrite_titles(&mut plugin, path, "php", text, marker).is_empty(), "{marker}");
+    }
+}
