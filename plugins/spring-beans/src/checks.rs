@@ -2,6 +2,7 @@
 //! check stays quiet when an annotation comes from a library other than
 //! Spring or a name is not a plain string literal.
 
+use crate::aop;
 use crate::model::{Bean, class_bean, method_bean, short_name};
 use crate::{World, file_name};
 use openidea_plugin::{Severity, host};
@@ -22,6 +23,9 @@ const PROXY_ANNOTATIONS: [&str; 11] = [
     "Retryable",
 ];
 const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const ASPECTJ_WEAVING: [&str; 4] = ["aspectj-maven-plugin", "aspectj-gradle-plugin", "freefair.aspectj", "aspectjtools"];
+const ASPECTJ_PACKAGE: &str = "org.aspectj.";
+const POINTCUT_ANNOTATIONS: [&str; 6] = ["Pointcut", "Before", "After", "AfterReturning", "AfterThrowing", "Around"];
 const SPRING_PACKAGES: [&str; 3] = ["org.springframework.", "jakarta.transaction.", "javax.transaction."];
 
 /// Which groups of checks run.
@@ -92,6 +96,9 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         }
         if groups.self_invocation {
             self_invocation(file, ty, text, &mut out);
+        }
+        if groups.aop {
+            pointcut_designators(path, file, ty, &mut out);
         }
         if groups.unresolved_references && world.complete {
             depends_on(file, ty, world, &mut out);
@@ -243,6 +250,45 @@ fn build_module(path: &str) -> Option<String> {
         dir = parent;
     }
     None
+}
+
+/// Whether the module's build file names an AspectJ weaving plugin, which makes every designator valid.
+pub fn weaving_plugin_in_build(path: &str) -> bool {
+    let Some(module) = build_module(path) else { return false };
+    let Some(project) = spring_text::index::project_of(path) else { return false };
+    BUILD_FILES
+        .iter()
+        .filter_map(|f| project.read_file(&format!("{module}/{f}")).ok())
+        .any(|build| ASPECTJ_WEAVING.iter().any(|marker| build.contains(marker)))
+}
+
+/// The AspectJ annotation `name` unless the file imports another one of that name.
+fn aspectj<'a>(file: &JavaFile, annotations: &'a [Annotation], name: &str) -> Option<&'a Annotation> {
+    let annotation = annotations.iter().find(|a| a.name == name)?;
+    let suffix = format!(".{name}");
+    let foreign = file.imports.iter().filter(|i| !i.is_static && i.path.ends_with(&suffix)).any(|i| !i.path.starts_with(ASPECTJ_PACKAGE));
+    (!foreign).then_some(annotation)
+}
+
+fn pointcut_designators(path: &str, file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
+    if aspectj(file, &ty.annotations, "Aspect").is_none() {
+        return;
+    }
+    let mut found = Vec::new();
+    for method in ty.methods() {
+        for name in POINTCUT_ANNOTATIONS {
+            let Some(annotation) = aspectj(file, &method.annotations, name) else { continue };
+            let Some(arg) = ["value", "pointcut"].iter().find_map(|k| annotation.arg(k)) else { continue };
+            let [literal] = arg.strings.as_slice() else { continue };
+            if arg.text.matches('"').count() != 2 || !arg.text.starts_with('"') || !arg.text.ends_with('"') {
+                continue;
+            }
+            found.extend(aop::findings(&literal.value, literal.at));
+        }
+    }
+    if !found.is_empty() && !weaving_plugin_in_build(path) {
+        out.extend(found);
+    }
 }
 
 /// Beans only clash inside one build module and one source set (main or test).

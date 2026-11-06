@@ -1064,3 +1064,45 @@ fn saved_xml_is_checked_and_pom_is_not() {
     n.handle_events(&[Event::FileSaved("/project/pom.xml".into())], &host.invocation());
     assert!(host.diagnostics().get("/project/pom.xml").is_none_or(Vec::is_empty));
 }
+
+const WEAVING_ASPECT: &str = "import org.aspectj.lang.annotation.*;\n\n@Aspect\nclass Tracing {\n    @Before(\"within(a..*) && call(* *(..))\")\n    void trace() {}\n}\n";
+
+#[test]
+fn unsupported_designator_in_java_advice_is_reported() {
+    assert_eq!(found(WEAVING_ASPECT), [pair("unsupported-pointcut-designator", "call")]);
+    let utf16 = "@Aspect\nclass T {\n    @Pointcut(\"within(é..*) && cflow(x())\")\n    void p() {}\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", utf16);
+    Navigator::default().line_markers(&document);
+    let diagnostic = &host.diagnostics()[&document.path][0];
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 31));
+    assert_eq!(diagnostic.range.end.character, 36);
+}
+
+#[test]
+fn unsupported_designator_in_xml_expression_is_reported() {
+    let body = "<aop:config><aop:pointcut id=\"p\" expression=\"call(* *(..))\"/>\
+        <aop:aspect ref=\"a\"><aop:before method=\"m\" pointcut=\"within(a..*) &amp;&amp; get(* x)\"/></aop:aspect></aop:config>";
+    assert_eq!(aop_found(body), [pair("unsupported-pointcut-designator", "call"), pair("unsupported-pointcut-designator", "get")]);
+    assert!(aop_found("<aop:config><aop:pointcut id=\"p\" expression=\"execution(* get(..))\"/></aop:config>").is_empty());
+}
+
+#[test]
+fn unsupported_designator_is_quiet_for_library_or_dynamic_name() {
+    let concatenated = WEAVING_ASPECT.replace("\"within(a..*) && call(* *(..))\"", "\"within(a..*) && \" + \"call(* *(..))\"");
+    assert!(found(&concatenated).is_empty());
+    let placeholder = WEAVING_ASPECT.replace("call(* *(..))", "${expr}");
+    assert!(found(&placeholder).is_empty());
+    let foreign = "import org.junit.Before;\n\n@Aspect\nclass T {\n    @Before(\"call(* *(..))\")\n    void p() {}\n}\n";
+    assert!(found(foreign).is_empty());
+    let not_an_aspect = "class T {\n    @Before(\"call(* *(..))\")\n    void p() {}\n}\n";
+    assert!(found(not_an_aspect).is_empty());
+    let host = MockHost::install();
+    host.add_file("pom.xml", "<project><build><plugin>aspectj-maven-plugin</plugin></build></project>");
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", WEAVING_ASPECT).is_empty());
+    let xml_host = MockHost::install();
+    xml_host.add_file("pom.xml", "<project>aspectjtools</project>");
+    let body = "<aop:config><aop:pointcut id=\"p\" expression=\"call(* *(..))\"/></aop:config>";
+    assert!(xml_findings(&xml_host, &beans_xml(body)).is_empty());
+    assert!(aop_found("<aop:config><aop:pointcut id=\"p\" expression=\"${expr}\"/></aop:config>").is_empty());
+}

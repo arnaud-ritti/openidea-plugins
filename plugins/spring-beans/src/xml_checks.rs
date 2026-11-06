@@ -2,7 +2,8 @@
 //! beans file, on other namespaces and on `${...}` placeholders.
 
 use crate::World;
-use crate::checks::Groups;
+use crate::aop;
+use crate::checks::{Groups, weaving_plugin_in_build};
 use openidea_plugin::Severity;
 use spring_text::finding::Finding;
 use spring_text::xml;
@@ -12,7 +13,7 @@ const BEANS_NS: &str = "http://www.springframework.org/schema/beans";
 const AOP_NS: &str = "http://www.springframework.org/schema/aop";
 const ADVICE: [&str; 5] = ["before", "after", "after-returning", "after-throwing", "around"];
 
-pub fn check_xml(_path: &str, text: &str, _world: &World, groups: Groups) -> Vec<Finding> {
+pub fn check_xml(path: &str, text: &str, _world: &World, groups: Groups) -> Vec<Finding> {
     let els = xml::elements(text);
     if !is_beans_file(&els) {
         return Vec::new();
@@ -20,6 +21,7 @@ pub fn check_xml(_path: &str, text: &str, _world: &World, groups: Groups) -> Vec
     let mut out = Vec::new();
     if groups.aop {
         aop_structure(&els, &mut out);
+        pointcut_designators(path, &els, &mut out);
     }
     out
 }
@@ -72,5 +74,24 @@ fn advice_problem(e: &xml::Element) -> &'static str {
         (None, None) => "An advice element needs a pointcut expression or a pointcut-ref.",
         (Some(a), Some(b)) if !a.value.contains("${") && !b.value.contains("${") => "An advice element takes either pointcut or pointcut-ref, not both.",
         _ => "",
+    }
+}
+
+fn pointcut_designators(path: &str, els: &[xml::Element], out: &mut Vec<Finding>) {
+    let mut found = Vec::new();
+    for (i, e) in els.iter().enumerate() {
+        if !in_namespace(els, i, AOP_NS) || !inside_aop_config(els, i) {
+            continue;
+        }
+        let attr = match e.local() {
+            "pointcut" => e.attr("expression"),
+            name if ADVICE.contains(&name) => e.attr("pointcut"),
+            _ => None,
+        };
+        let Some(attr) = attr.filter(|a| !a.value.contains("${")) else { continue };
+        found.extend(aop::findings(&attr.value, attr.value_at));
+    }
+    if !found.is_empty() && !weaving_plugin_in_build(path) {
+        out.extend(found);
     }
 }

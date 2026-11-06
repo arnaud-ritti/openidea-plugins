@@ -4,6 +4,7 @@
 //! Text-based: types match by simple name through the project's own type
 //! hierarchy; beans from libraries and auto-configuration aren't seen.
 
+mod aop;
 mod checks;
 mod kotlin;
 mod model;
@@ -339,7 +340,7 @@ impl Navigator {
         f(&world, model)
     }
 
-    /// Publishes the problems of a Java or Kotlin source; a fixed file gets an empty list.
+    /// Publishes the problems of a Java, Kotlin or Spring XML source; a fixed file gets an empty list.
     fn diagnose(&mut self, path: &str, language: &str, text: &str) {
         if language == "xml" {
             let mut problems = Vec::new();
