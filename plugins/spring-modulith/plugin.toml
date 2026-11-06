@@ -6,7 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0 (first release): application module detection, checks for internal types and for dependencies missing from allowedDependencies, allowedDependencies completion and check, quick fix to make a module open, Modules tool window."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:java", "on-view:modules", "on-view:diagram"]
 
@@ -27,7 +27,7 @@ location = "left"
 [[contributes.views]]
 id = "diagram"
 title = "Module Diagram"
-icon = "hierarchy"
+icon = "icons/spring.svg"
 location = "bottom"
 
 [[contributes.commands]]
