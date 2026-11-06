@@ -95,17 +95,30 @@ fn scopes(calls: &[Call], text: &str, kotlin: bool) -> Vec<Scope> {
         out.push(Scope { from: c.at, header_end: first.end, to, prefix });
     }
     for (i, t) in toks.iter().enumerate() {
-        let (Some(s), Some(dot), Some(nest), Some(open)) =
-            (t.string(), toks.get(i + 1), toks.get(i + 2), toks.get(i + 3))
-        else {
+        let Some(open) = toks.get(i + 1).filter(|o| o.s == "{") else { continue };
+        if t.s != "nest" {
             continue;
-        };
-        if dot.s == "." && nest.s == "nest" && open.s == "{" {
-            let to = toks[java::closing(&toks, i + 3)].end();
-            out.push(Scope { from: open.at, header_end: open.at, to, prefix: Some(s.value) });
         }
+        let to = toks[java::closing(&toks, i + 1)].end();
+        out.push(Scope { from: open.at, header_end: open.at, to, prefix: kotlin_nest_prefix(&toks, i) });
     }
     out
+}
+
+/// The prefix of a Kotlin `… nest { }` at token `i`: `"/a".nest`, `"/a" nest` or `path("/a").nest`; none for any other predicate.
+fn kotlin_nest_prefix(toks: &[java::Tok], i: usize) -> Option<String> {
+    let before = i.checked_sub(1).map(|k| toks[k])?;
+    let before = if before.s == "." { toks.get(i.checked_sub(2)?).copied()? } else { before };
+    if let Some(s) = before.string() {
+        return Some(s.value);
+    }
+    let close = i.checked_sub(if toks[i - 1].s == "." { 2 } else { 1 })?;
+    if toks[close].s != ")" {
+        return None;
+    }
+    let open = (0..close).rev().find(|&k| toks[k].s == "(" && java::closing(toks, k) == close)?;
+    let [name, _, arg, _] = [toks.get(open.checked_sub(1)?)?, &toks[open], toks.get(open + 1)?, toks.get(open + 2)?];
+    (name.s == "path" && open + 2 == close).then(|| arg.string().map(|s| s.value)).flatten()
 }
 
 /// The path prefix at `at`; none when a predicate is not a plain path or `at` is part of one.
@@ -209,6 +222,10 @@ pub fn requests(path: &str, text: &str) -> Vec<Request> {
     let mut out = Vec::new();
     for c in calls.iter().filter(|c| !c.is_new || is_kotlin(path)) {
         let Some(url) = c.args.first().and_then(|a| a.string.as_ref()) else { continue };
+        let templated = c.receiver.as_ref().is_some_and(|r| {
+            let r = r.to_lowercase();
+            r.contains("template") || r.contains("rest")
+        });
         let lower = c.name.to_uppercase();
         let verb = if mock
             && !c.chained
@@ -226,6 +243,8 @@ pub fn requests(path: &str, text: &str) -> Vec<Request> {
             });
             let Some(before) = before else { continue };
             before.name.to_uppercase()
+        } else if template && !templated {
+            continue;
         } else if template && c.name == "exchange" {
             let Some(method) = c.args.get(1) else { continue };
             let verb = method.text.rsplit('.').next().unwrap_or("").to_owned();
@@ -363,6 +382,18 @@ class Routes(private val h: UserHandler) {
             [list(None), None, list(Some("Handler")), None, list(None), list(None), list(None)]
         );
         assert_eq!(handlers("A.kt", KOTLIN_ROUTES), [list(None), None, None, None]);
+    }
+
+    #[test]
+    fn kotlin_dot_nest_routes_are_not_registered_without_prefix() {
+        let src = r#"fun routes() = router {
+    "/ok".nest { GET("/a") }
+    path("/p").nest { GET("/b") }
+    "/i" nest { GET("/c") }
+    ("/x" and accept(APPLICATION_JSON)).nest { GET("/d") }
+    accept(APPLICATION_JSON).nest { GET("/e") }
+}"#;
+        assert_eq!(found("R.kt", src), pairs(&[("GET", "/ok/a"), ("GET", "/p/b"), ("GET", "/i/c")]));
     }
 
     #[test]
