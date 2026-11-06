@@ -135,8 +135,10 @@ resolved by `resolvePageComponent` and glob imports).
 Declaring a provider for these languages makes the host load the plugin for
 them, so activation is limited to `on-file:resources/js/**`. The language ids
 `vue`, `javascriptreact` and `typescriptreact` are declared but unverified in
-the IDE; files are also recognised by extension. Comments and strings are
-tracked with a simple scan (no regex literals, no Vue text awareness; a stray quote can pair with a later one on the same line).
+the IDE; files are also recognised by extension. Scanning is line-bounded for quotes and backticks; block comments carry across
+lines, so a `/*` in the text of a multi-line template literal hides later route
+calls in the file, and a stray quote hides route calls to the end of its line.
+Comments and strings are tracked with a simple scan (no regex literals, no Vue text awareness; a stray quote can pair with a later one on the same line).
 
 ## Not ported
 

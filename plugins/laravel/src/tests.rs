@@ -1246,3 +1246,14 @@ fn stray_backtick_does_not_poison_later_lines() {
 fn backtick_glob_does_not_open_a_block_comment_after_a_stray_backtick() {
     assert_eq!(route_names("const r = /`/;\nconst g = import.meta.glob(`./Pages/**/*.vue`);\nroute('|')"), ROUTES);
 }
+
+#[test]
+fn slash_star_inside_a_multiline_template_literal_silences_later_lines() {
+    let marked = "const t = `\n  ./Pages/*.vue\n`;\nroute('|')";
+    assert!(route_names(marked).is_empty(), "accepted silence (safe direction), not a requirement");
+}
+
+#[test]
+fn multiline_template_plain_text_after_interpolation_is_quiet() {
+    assert!(route_names("const t = `a ${x}\nplain |text`;\nroute('home')").is_empty());
+}
