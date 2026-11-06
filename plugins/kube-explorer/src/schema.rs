@@ -10,7 +10,7 @@ const MODELINE: &str = "# yaml-language-server: $schema=";
 
 /// API groups of the built-in kinds the published schemas cover (custom
 /// resources have none there).
-const GROUPS: &[&str] = &[
+pub const GROUPS: &[&str] = &[
     "",
     "admissionregistration.k8s.io",
     "apiextensions.k8s.io",

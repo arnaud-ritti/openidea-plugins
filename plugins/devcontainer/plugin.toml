@@ -8,10 +8,12 @@ change-notes = "0.1.0: first release. Start, Rebuild, Open Shell and Stop comman
 categories = ["tools"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
+activation = ["on-event:file-opened", "on-event:file-saved"]
 
 [capabilities]
 required = ["project.read", "process:devcontainer"]
-optional = ["process:docker"]
+# events: the inspections run when a devcontainer.json is opened or saved.
+optional = ["process:docker", "events"]
 
 [[contributes.commands]]
 id = "up"

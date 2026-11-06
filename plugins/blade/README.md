@@ -11,6 +11,18 @@ The structure view lists `@section`, `@push`, `@prepend` and `@fragment`
 blocks. `@if … @endif` style pairs (about 35 of Laravel's and Livewire's block
 directives) and multi-line comments fold.
 
+Two inspections run when a Blade file is opened or saved (each can be switched
+off in Settings): `unpaired-directive` (an `@endif`, `@endforeach`, ... without
+its opener, or an opener without its closer, including `@php`, `@verbatim` and
+the block form of `@section`) and `unpaired-parenthesis-in-string` (a directive
+whose `(` has no matching `)` once strings are skipped). Verbatim blocks,
+comments, `@@escaped` directives, inline `@section('a', 'b')` and `@php(...)`,
+and custom directives are never reported. The checks need the `events`
+capability; without it nothing is published.
+
+Directive completion is not part of this plugin (see below); it ships inspections
+only.
+
 Only the directives Laravel and Livewire ship are known to the highlighter;
 directives registered with `Blade::directive()` stay plain text, since a plugin
 can't see the PHP that registers them.

@@ -5,6 +5,26 @@
       "title": "Show the current branch's unresolved merge request threads in the editor",
       "default": true
     },
+    "ciJobReferences": {
+      "type": "boolean",
+      "title": "Report needs, dependencies and extends that name a job missing from .gitlab-ci.yml",
+      "default": true
+    },
+    "ciStages": {
+      "type": "boolean",
+      "title": "Report a job stage that is not in stages",
+      "default": true
+    },
+    "ciDuplicateJobUsage": {
+      "type": "boolean",
+      "title": "Report a job listed twice in needs, dependencies or extends",
+      "default": true
+    },
+    "ciSingleQuotedVariables": {
+      "type": "boolean",
+      "title": "Report $VARIABLE inside single quotes in script lines",
+      "default": true
+    },
     "cloneUsingSsh": {
       "type": "boolean",
       "title": "Clone and share using SSH",

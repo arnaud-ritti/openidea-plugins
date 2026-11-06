@@ -51,6 +51,8 @@ pub struct Bean {
     pub profiles: Vec<String>,
     /// `@Qualifier`/`@Named` values on the declaration.
     pub qualifiers: Vec<String>,
+    /// Carries a `@Conditional*` annotation: it may not exist at run time.
+    pub conditional: bool,
     pub range: Range,
 }
 
@@ -97,6 +99,8 @@ pub struct FileModel {
     pub injections: Vec<Injection>,
     pub types: Vec<TypeInfo>,
     pub pointcuts: Vec<Pointcut>,
+    /// Declares `@SpringBootApplication` or `@EnableAutoConfiguration`.
+    pub auto_configuration: bool,
 }
 
 /// The model of a Java, Kotlin or Spring XML file (`None`: nothing to keep).
@@ -163,21 +167,39 @@ pub fn push_injection(
     });
 }
 
+pub fn is_conditional(annotations: &[Annotation]) -> bool {
+    annotations.iter().any(|a| a.name.starts_with("Conditional"))
+}
+
+/// `Outer.Inner` for a nested type: Spring's default bean name derives from it.
+pub fn short_name(file: &java::JavaFile, ty: &java::TypeDecl) -> String {
+    let mut parts = vec![ty.name.as_str()];
+    let mut outer = ty.outer;
+    while let Some(i) = outer {
+        let Some(t) = file.types.get(i) else { break };
+        parts.push(t.name.as_str());
+        outer = t.outer;
+    }
+    parts.reverse();
+    parts.join(".")
+}
+
 /// A class bean's declaration from its annotations; `None` when it isn't one.
-pub fn class_bean(text: &str, name: &str, at: usize, annotations: &[Annotation], repository: bool) -> Option<Bean> {
+pub fn class_bean(text: &str, name: &str, short_name: &str, at: usize, annotations: &[Annotation], repository: bool) -> Option<Bean> {
     let stereotype = annotations.iter().find(|a| java::STEREOTYPES.contains(&a.name.as_str()));
     if stereotype.is_none() && !repository {
         return None;
     }
     let explicit = stereotype.and_then(|a| strings_of(a, &["value"]).pop());
     Some(Bean {
-        name: explicit.unwrap_or_else(|| decapitalize(name)),
+        name: explicit.unwrap_or_else(|| decapitalize(short_name)),
         aliases: Vec::new(),
         kind: stereotype.map_or("Spring Data repository".into(), |a| format!("@{}", a.name)),
         ty: name.to_owned(),
         primary: annotations.iter().any(|a| a.name == "Primary"),
         profiles: values(annotations, &["Profile"]),
         qualifiers: values(annotations, &["Qualifier", "Named"]),
+        conditional: is_conditional(annotations),
         range: range(text, at, at + name.len()),
     })
 }
@@ -195,6 +217,7 @@ pub fn method_bean(text: &str, name: &str, at: usize, ty: &str, annotations: &[A
         primary: annotations.iter().any(|a| a.name == "Primary"),
         profiles: if profiles.is_empty() { class.to_vec() } else { profiles },
         qualifiers: values(annotations, &["Qualifier", "Named"]),
+        conditional: is_conditional(annotations),
         range: range(text, at, at + name.len()),
     }
 }
@@ -207,6 +230,7 @@ pub fn is_repository<'a>(kind: &str, mut supers: impl Iterator<Item = &'a str>) 
 fn java_model(text: &str) -> FileModel {
     let file = java::parse(text);
     let mut out = FileModel::default();
+    out.auto_configuration = file.types.iter().any(|t| t.has(&["SpringBootApplication", "EnableAutoConfiguration"]));
     for (index, t) in file.types.iter().enumerate() {
         let supers: Vec<String> = t.supers().map(|s| s.name.clone()).collect();
         out.types.push(TypeInfo {
@@ -216,8 +240,9 @@ fn java_model(text: &str) -> FileModel {
             range: range(text, t.at, t.at + t.name.len()),
         });
         let repository = is_repository(&t.kind, supers.iter().map(String::as_str));
-        let bean = if t.kind == "@interface" { None } else { class_bean(text, &t.name, t.at, &t.annotations, repository) };
+        let bean = if t.kind == "@interface" { None } else { class_bean(text, &t.name, &short_name(&file, t), t.at, &t.annotations, repository) };
         let class_profiles = bean.as_ref().map(|b| b.profiles.clone()).unwrap_or_default();
+        let class_conditional = bean.as_ref().is_some_and(|b| b.conditional);
         let owner = bean.map(|b| {
             out.beans.push(b);
             out.beans.len() - 1
@@ -237,7 +262,9 @@ fn java_model(text: &str) -> FileModel {
                 }
                 MemberKind::Method if m.has(&["Bean"]) => {
                     let ty = m.ty.as_ref().map(|t| t.name.as_str()).unwrap_or_default();
-                    out.beans.push(method_bean(text, &m.name, m.at, ty, &m.annotations, &class_profiles));
+                    let mut bean = method_bean(text, &m.name, m.at, ty, &m.annotations, &class_profiles);
+                    bean.conditional |= class_conditional;
+                    out.beans.push(bean);
                     let bean = Some(out.beans.len() - 1);
                     for p in &m.params {
                         push_injection(text, &mut out, &p.ty, &p.name, &p.annotations, bean, None);
@@ -321,6 +348,7 @@ fn xml_model(text: &str) -> FileModel {
                 primary: e.value("primary") == Some("true"),
                 profiles,
                 qualifiers: Vec::new(),
+                conditional: false,
                 range: at,
             });
             owners[i] = Some(out.beans.len() - 1);

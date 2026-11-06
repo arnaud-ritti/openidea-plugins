@@ -5,6 +5,7 @@
 //! Partial port of the Symfony Plugin for IntelliJ (Daniel Espendiller, Adrien
 //! Brault; MIT), see README.md for what was and wasn't ported.
 
+mod checks;
 mod index;
 mod profiler;
 mod refs;
@@ -220,7 +221,7 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
         }
 
         match reference.kind {
-            Kind::Route if index.compiled_routes && !index.routes.contains_key(name) => {
+            Kind::Route if language != "twig" && index.compiled_routes && !index.routes.contains_key(name) => {
                 problem(reference.start, reference.end, "missing-route", format!("Route \"{name}\" is not defined."));
             }
             Kind::Template if !name.starts_with('@') && !index.templates.contains_key(name) => {
@@ -281,6 +282,58 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
     problems
 }
 
+/// Which groups of the text inspections in `checks.rs` are switched on.
+#[derive(Clone, Copy)]
+struct Groups {
+    controllers: bool,
+    services: bool,
+    php_calls: bool,
+    twig: bool,
+}
+
+impl Groups {
+    fn from_settings() -> Groups {
+        let on = |key: &str| host::setting_bool(key).unwrap_or(true);
+        Groups { controllers: on("controllerChecks"), services: on("serviceChecks"), php_calls: on("phpCallChecks"), twig: on("twigChecks") }
+    }
+}
+
+/// Problems of the text inspections, converted to diagnostics.
+fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+    let ctx = checks::Context::new(index, read);
+    let mut findings = Vec::new();
+
+    if groups.controllers {
+        findings.extend(checks::check_routes(&ctx, path, language, text));
+    }
+
+    if groups.services {
+        findings.extend(checks::check_services(&ctx, path, language, text));
+    }
+
+    if groups.php_calls {
+        findings.extend(checks::check_php(&ctx, language, text));
+    }
+
+    if groups.twig {
+        findings.extend(checks::check_twig(&ctx, language, text));
+    }
+
+    findings
+        .into_iter()
+        .map(|finding| Diagnostic {
+            range: range_of(text, finding.start, finding.end),
+            severity: finding.severity,
+            message: finding.message,
+            code: Some(finding.code.into()),
+            source: Some(SOURCE.into()),
+            unnecessary: false,
+            deprecated: false,
+            related: Vec::new(),
+        })
+        .collect()
+}
+
 #[derive(Default)]
 pub struct Main {
     /// By project root.
@@ -330,7 +383,12 @@ impl Main {
 
         let enabled = host::setting_bool("diagnostics").unwrap_or(true);
         let found = match project.read_file(path) {
-            Ok(text) if enabled && !index.partial => problems(index, path, language, &text),
+            Ok(text) if enabled && !index.partial => {
+                let read = |file: &str| project.read_file(file).ok();
+                let mut found = problems(index, path, language, &text);
+                found.extend(extra_problems(index, Groups::from_settings(), &read, path, language, &text));
+                found
+            }
             _ => Vec::new(),
         };
 
@@ -1149,5 +1207,49 @@ mod tests {
         let other = doc("/project/docker/compose.yaml", "yaml", "a: @x\n");
         assert!(plugin.code_actions(&other, at).is_empty());
         assert!(problems(plugin.index_for("/project/x").unwrap(), &other.path, "yaml", &other.text).is_empty());
+    }
+
+    #[test]
+    fn every_template_is_registered_and_exists() {
+        let manifest = include_str!("../plugin.toml");
+        let value = |line: &str, key: &str| line.strip_prefix(key).and_then(|rest| rest.trim_start().strip_prefix("= \"")).map(|rest| rest.trim_end_matches('"').to_owned());
+        let (mut ids, mut names, mut paths) = (Vec::new(), Vec::new(), Vec::new());
+        let mut in_template = false;
+        for line in manifest.lines() {
+            if line.starts_with('[') {
+                in_template = line == "[[contributes.fileTemplates]]";
+            }
+            if !in_template {
+                continue;
+            }
+            ids.extend(value(line, "id"));
+            names.extend(value(line, "name"));
+            paths.extend(value(line, "path"));
+        }
+
+        assert_eq!(ids.len(), 9);
+        assert_eq!((names.len(), paths.len()), (9, 9));
+        for list in [&ids, &names, &paths] {
+            let unique: BTreeSet<_> = list.iter().collect();
+            assert_eq!(unique.len(), list.len(), "{list:?}");
+        }
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/");
+        for path in &paths {
+            let text = std::fs::read_to_string(format!("{root}{path}")).unwrap_or_else(|_| panic!("{path} is missing"));
+            assert!(text.contains("namespace App\\"), "{path}");
+            assert!(text.contains("$NAME$"), "{path}");
+
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find('$') {
+                rest = &rest[at + 1..];
+                let Some(close) = rest.find('$') else { break };
+                let word = &rest[..close];
+                if !word.is_empty() && word.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') {
+                    assert!(matches!(word, "NAME" | "END"), "{path}: undefined placeholder ${word}$");
+                    rest = &rest[close + 1..];
+                }
+            }
+        }
     }
 }

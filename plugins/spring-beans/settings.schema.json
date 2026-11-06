@@ -1,0 +1,39 @@
+{
+  "properties": {
+    "springBeans.checkProxyMethods": {
+      "type": "boolean",
+      "title": "Warn when @Transactional, @Async, @Cacheable and similar annotations sit on private, final or static methods",
+      "default": true
+    },
+    "springBeans.checkScheduled": {
+      "type": "boolean",
+      "title": "Warn when a @Scheduled method declares parameters",
+      "default": true
+    },
+    "springBeans.checkDuplicateNames": {
+      "type": "boolean",
+      "title": "Warn when two beans of the project share a name",
+      "default": true
+    },
+    "springBeans.checkConfiguration": {
+      "type": "boolean",
+      "title": "Warn about private or final @Bean methods in proxied @Configuration classes",
+      "default": true
+    },
+    "springBeans.checkNaming": {
+      "type": "boolean",
+      "title": "Hint when an explicit bean name starts with a capital letter",
+      "default": true
+    },
+    "springBeans.checkSelfInvocation": {
+      "type": "boolean",
+      "title": "Warn when a method calls a @Transactional, @Async or @Cacheable method of its own class (text-based, may miss or over-report)",
+      "default": false
+    },
+    "springBeans.checkUnresolvedReferences": {
+      "type": "boolean",
+      "title": "Warn about @DependsOn names no project bean defines and @ComponentScan packages without sources (beans from libraries and auto-configuration are invisible, so this may over-report)",
+      "default": false
+    }
+  }
+}

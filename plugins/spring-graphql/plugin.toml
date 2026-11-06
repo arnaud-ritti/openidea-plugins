@@ -20,3 +20,7 @@ languages = ["java", "kotlin"]
 [[contributes.providers]]
 kinds = ["definition", "line-markers"]
 languages = ["graphql"]
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Spring for GraphQL"

@@ -84,6 +84,13 @@ operation of the focused file, ready for a `.http` file. The base URL comes from
 defaults to `http://localhost`. Path parameters become `{{name}}` variables.
 Without the clipboard permission the plugin shows a warning instead.
 
+## Templates
+
+New › OpenAPI 3.1 (YAML), OpenAPI 3.1 (JSON) and AsyncAPI 3.0 (YAML) create a minimal valid document:
+`info` with title (`$NAME$`) and version, and for OpenAPI a `GET /health` with a 200 response; for AsyncAPI
+one channel, one operation and one message. AsyncAPI files are not OpenAPI documents, so the plugin's checks and
+preview leave them alone.
+
 ## Licences
 
 The plugin code is MIT. It bundles Swagger UI (Apache-2.0), whose licence and

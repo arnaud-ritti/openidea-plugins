@@ -1,0 +1,19 @@
+{
+  "properties": {
+    "quarkus.checkSyntax": {
+      "type": "boolean",
+      "title": "Warn about duplicate keys, lines without a separator and empty values",
+      "default": true
+    },
+    "quarkus.checkValues": {
+      "type": "boolean",
+      "title": "Warn about values that do not fit the property's type (number, boolean, enum, duration, memory size)",
+      "default": true
+    },
+    "quarkus.checkExpressions": {
+      "type": "boolean",
+      "title": "Warn about ${...} expressions naming nothing defined in the file, the environment or the system properties",
+      "default": true
+    }
+  }
+}

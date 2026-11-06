@@ -17,6 +17,19 @@ Dev Container CLI › Configuration file. New › Dev Container Configuration ad
 starter `devcontainer.json`; New › Dev Container (Node, Python, Java, PHP, Rust, Docker Compose)
 adds one based on the matching containers.dev reference image.
 
+## Inspections
+
+Run when `.devcontainer/devcontainer.json`, `.devcontainer/<folder>/devcontainer.json`
+or `.devcontainer.json` is opened or saved (comments and trailing commas are
+read as JSONC; files above 256 KB are skipped). Each group has a setting.
+
+- `unknown-property` (Check properties): a top-level key that is not in the
+  [specification](https://containers.dev/implementors/json_reference) but is within edit distance 2 of
+  one, as a likely typo (`postCreateCommnad`). Other unknown keys, `x-*`, `$`-prefixed keys and
+  everything under `customizations` stay quiet, since the property list may be incomplete.
+- `features-malformed` (Check features): `features` that is not an object, a feature id that is empty or
+  contains whitespace, or a feature value that is not an options object, a version string or a boolean.
+
 Requires the devcontainer CLI (`npm i -g @devcontainers/cli`) and Docker. The IDE
 keeps running on the host: OpenIDEA's remote development connects over SSH or
 WSL, not into a container.

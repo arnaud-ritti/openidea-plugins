@@ -10,7 +10,9 @@ Entities and repositories are checked when they open and when they are saved.
 
 | Check | Severity | Quick fix |
 |---|---|---|
-| `@Entity` without `@Id` / `@EmbeddedId` (and no superclass) | error | |
+| `@Entity` without `@Id` / `@EmbeddedId` / `@IdClass`, own or inherited (`entity-missing-id`; quiet when a superclass is a library class or not in the project) | error | |
+| `@Temporal`, `@Enumerated`, `@Version` on a type JPA doesn't allow (`attribute-type`) | warning | |
+| Lifecycle callback with the wrong parameters or return type (`entity-listener-signature`) | error | |
 | `final` entity class (Java) | warning | Remove final |
 | Kotlin `data class` entity | warning | |
 | Lombok `@Data` on an entity | warning | Replace with `@Getter` and `@Setter` |

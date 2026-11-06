@@ -3,7 +3,10 @@
 use openidea_plugin::text::position;
 use openidea_plugin::{Diagnostic, Range, Severity};
 
-use crate::model::{Annotation, Edit, annotations, has_word, import_edit, kotlin_supertype, mask, words};
+use crate::model::{
+    Annotation, Edit, annotations, closing, declared_type, has_word, import_edit, is_ident, mask, members, split_top_level,
+    without_annotations, words,
+};
 use crate::queries::{Props, Repository, boxed, problem};
 
 #[derive(Debug)]
@@ -132,19 +135,6 @@ pub fn inspect_entity(text: &str, kotlin: bool) -> Vec<Finding> {
             ));
         }
 
-        let header_end = masked[class_at..].find('{').map_or(masked.len(), |p| p + class_at);
-        let header = &masked[class_at..header_end];
-        let inherits = if kotlin { kotlin_supertype(header).is_some() } else { has_word(header, "extends") };
-
-        if !inherits && !annotations.iter().any(|a| a.name == "Id" || a.name == "EmbeddedId") {
-            findings.push(Finding::new(
-                entity.start,
-                entity.end(),
-                Severity::Error,
-                "jpa-missing-id",
-                "Entity has no @Id or @EmbeddedId attribute.",
-            ));
-        }
     }
 
     for a in &annotations {
@@ -175,6 +165,179 @@ pub fn inspect_entity(text: &str, kotlin: bool) -> Vec<Finding> {
     }
 
     findings
+}
+
+/// The entity annotation of `text` when the class has neither `@Id`, `@EmbeddedId` nor `@IdClass`.
+pub fn missing_id(text: &str) -> Option<Finding> {
+    let masked = mask(text);
+    let annotations = annotations(&masked);
+    let entity = annotations.iter().find(|a| a.name == "Entity")?;
+    words(&masked[entity.end()..], "class").next()?;
+
+    if annotations.iter().any(|a| matches!(a.name, "Id" | "EmbeddedId" | "IdClass")) {
+        return None;
+    }
+
+    Some(Finding::new(
+        entity.start,
+        entity.end(),
+        Severity::Error,
+        "entity-missing-id",
+        "This entity declares no identifier: add an @Id or @EmbeddedId attribute, an @IdClass, or inherit one from a mapped superclass.",
+    ))
+}
+
+/// Offset ranges of the declarations in the first class of `masked`: Kotlin constructor properties, then the body.
+fn class_members(masked: &str, kotlin: bool) -> Vec<(usize, usize)> {
+    let Some(class_at) = words(masked, "class").next() else { return Vec::new() };
+    let header_end = masked[class_at..].find('{').map_or(masked.len(), |p| p + class_at);
+    let mut found = Vec::new();
+
+    if kotlin
+        && let Some(paren) = masked[class_at..header_end].find('(').map(|p| p + class_at)
+        && let Some(paren_close) = closing(masked.as_bytes(), paren)
+    {
+        found.extend(members(masked, paren + 1, paren_close, true, true));
+    }
+
+    if header_end < masked.len()
+        && let Some(close) = closing(masked.as_bytes(), header_end)
+    {
+        found.extend(members(masked, header_end + 1, close, kotlin, false));
+    }
+
+    found
+}
+
+const NOT_A_DATE: &[&str] = &[
+    "String", "Long", "long", "Integer", "int", "Short", "short", "Byte", "byte", "Boolean", "boolean", "Double", "double",
+    "Float", "float", "Character", "char", "Int", "Char", "LocalDate", "LocalDateTime", "LocalTime", "Instant",
+    "OffsetDateTime", "ZonedDateTime", "BigDecimal", "BigInteger", "UUID",
+];
+
+const NOT_A_VERSION: &[&str] = &[
+    "String", "boolean", "Boolean", "double", "Double", "float", "Float", "byte", "Byte", "char", "Character", "Char",
+    "BigDecimal", "BigInteger", "UUID",
+];
+
+fn last_name(ty: &str) -> &str {
+    ty.rsplit('.').next().unwrap_or(ty).trim()
+}
+
+/// `@Temporal`, `@Enumerated` and `@Version` on a type the JPA specification does not allow them on.
+/// Only well-known types are judged; library or unresolved types are left alone.
+pub fn inspect_attribute_types(text: &str, kotlin: bool, is_model: &dyn Fn(&str) -> bool) -> Vec<Finding> {
+    let masked = mask(text);
+    let all = annotations(&masked);
+    let mut findings = Vec::new();
+
+    if !all.iter().any(|a| a.name == "Entity" || a.name == "MappedSuperclass" || a.name == "Embeddable") {
+        return findings;
+    }
+
+    for (start, end) in class_members(&masked, kotlin) {
+        let Some(ty) = declared_type(&without_annotations(&masked, start, end), kotlin) else { continue };
+        let ty = last_name(&ty);
+
+        for a in all.iter().filter(|a| a.start >= start && a.start < end) {
+            let message = match a.name {
+                "Temporal" if NOT_A_DATE.contains(&ty) => {
+                    format!("@Temporal only applies to java.util.Date and java.util.Calendar, not {ty}.")
+                }
+                "Enumerated" if NOT_A_DATE.contains(&ty) || is_model(ty) => {
+                    format!("@Enumerated only applies to enum types, and {ty} is not one.")
+                }
+                "Version" if NOT_A_VERSION.contains(&ty) => {
+                    format!("{ty} can't hold a @Version: use an int, short, long or timestamp type.")
+                }
+                _ => continue,
+            };
+
+            findings.push(Finding::new(a.start, a.end(), Severity::Warning, "attribute-type", message));
+        }
+    }
+
+    findings
+}
+
+const CALLBACKS: &[&str] =
+    &["PrePersist", "PostPersist", "PreUpdate", "PostUpdate", "PreRemove", "PostRemove", "PostLoad"];
+
+/// Lifecycle callbacks with a signature JPA rejects: on an entity none take arguments, on a listener exactly one.
+pub fn inspect_callbacks(text: &str, kotlin: bool) -> Vec<Finding> {
+    let masked = mask(text);
+    let all = annotations(&masked);
+
+    let on_entity = all.iter().any(|a| a.name == "Entity" || a.name == "MappedSuperclass");
+    if all.iter().any(|a| a.name == "Embeddable") || !(on_entity || masked.contains("persistence")) {
+        return Vec::new();
+    }
+
+    let expected = usize::from(!on_entity);
+    let mut findings = Vec::new();
+
+    for (start, end) in class_members(&masked, kotlin) {
+        if !all.iter().any(|a| a.start >= start && a.start < end && CALLBACKS.contains(&a.name)) {
+            continue;
+        }
+
+        let decl = without_annotations(&masked, start, end);
+        let Some(method) = method_signature(&decl, kotlin) else { continue };
+        let role = if on_entity { "An entity callback takes no parameters" } else { "A listener callback takes exactly one parameter" };
+
+        let problem = match method.returns_void {
+            Some(false) => Some(format!("{role} and returns void, but {} returns a value.", method.name)),
+            _ if method.parameters != expected => Some(format!("{role} and returns void, but {} has {} parameters.", method.name, method.parameters)),
+            _ => None,
+        };
+
+        if let Some(message) = problem {
+            let at = start + method.name_at;
+            findings.push(Finding::new(at, at + method.name.len(), Severity::Error, "entity-listener-signature", message));
+        }
+    }
+
+    findings
+}
+
+struct Method<'a> {
+    name: &'a str,
+    name_at: usize,
+    parameters: usize,
+    /// `None` when the return type is inferred and can't be read.
+    returns_void: Option<bool>,
+}
+
+fn method_signature(decl: &str, kotlin: bool) -> Option<Method<'_>> {
+    let open = decl.find('(')?;
+    let close = closing(decl.as_bytes(), open)?;
+    let before = decl[..open].trim_end();
+    let name_len = before.bytes().rev().take_while(|&c| is_ident(c)).count();
+    let name_at = before.len() - name_len;
+    let name = &before[name_at..];
+    let head = before[..name_at].trim_end();
+
+    if name.is_empty() || (kotlin && !has_word(head, "fun")) {
+        return None;
+    }
+
+    let parameters = split_top_level(&decl[open + 1..close]).iter().filter(|(_, p)| !p.trim().is_empty()).count();
+    let tail = decl[close + 1..].trim_start();
+
+    let returns_void = if kotlin {
+        match tail.strip_prefix(':') {
+            Some(ty) => Some(ty.split(['{', '=']).next().unwrap_or("").trim() == "Unit"),
+            None => (!tail.starts_with('=')).then_some(true),
+        }
+    } else {
+        let is_void = head.ends_with("void") && !head[..head.len() - 4].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+        if head.is_empty() || head.ends_with(['.', ',']) {
+            return None;
+        }
+        Some(is_void)
+    };
+
+    Some(Method { name, name_at, parameters, returns_void })
 }
 
 /// Derived queries naming unknown properties, and an id type that isn't the entity's.
@@ -268,12 +431,75 @@ public final class Order {
     }
 
     #[test]
-    fn missing_id_unless_inherited() {
-        assert_eq!(codes("@Entity\nclass A {\n  String name;\n}\n", false), ["jpa-missing-id"]);
-        assert!(codes("@Entity\nclass A extends Base {}\n", false).is_empty());
-        assert!(codes("@Entity\nclass A(@EmbeddedId val id: Key)\n", true).is_empty());
-        assert!(codes("@Entity\nclass A(name: String) : Base()\n", true).is_empty());
-        assert_eq!(codes("@Entity\ndata class A(val name: String)\n", true), ["jpa-data-class", "jpa-missing-id"]);
+    fn entity_without_id_warns() {
+        let found = missing_id("@Entity\nclass A {\n  String name;\n}\n").unwrap();
+        assert_eq!(found.code, "entity-missing-id");
+        assert_eq!(&"@Entity\nclass A {\n  String name;\n}\n"[found.start..found.end], "@Entity");
+        assert!(missing_id("@Entity\ndata class A(val name: String)\n").is_some());
+    }
+
+    #[test]
+    fn entity_with_embedded_id_is_quiet() {
+        assert!(missing_id("@Entity\nclass A {\n  @EmbeddedId Key id;\n}\n").is_none());
+        assert!(missing_id("@Entity\nclass A(@EmbeddedId val id: Key)\n").is_none());
+        assert!(missing_id("@Entity\n@IdClass(Key.class)\nclass A {}\n").is_none());
+        assert!(missing_id("@Entity\nclass A {\n  @Id\n  public Long getId() { return 1L; }\n}\n").is_none());
+        assert!(missing_id("@Embeddable\nclass A {}\n").is_none());
+    }
+
+    fn types(text: &str) -> Vec<String> {
+        inspect_attribute_types(text, false, &|n| n == "Customer").iter().map(|f| f.message.clone()).collect()
+    }
+
+    #[test]
+    fn attribute_type_flags_documented_mismatches() {
+        let text = "@Entity\nclass A {\n  @Temporal(TemporalType.DATE) LocalDate day;\n  @Enumerated String kind;\n  @Enumerated(EnumType.STRING) private Customer who;\n  @Version String stamp;\n}\n";
+        let found = inspect_attribute_types(text, false, &|n| n == "Customer");
+        assert_eq!(found.len(), 4);
+        assert!(found.iter().all(|f| f.code == "attribute-type"));
+        assert_eq!(&text[found[0].start..found[0].end], "@Temporal(TemporalType.DATE)");
+    }
+
+    #[test]
+    fn attribute_type_is_quiet_for_library_or_dynamic_name() {
+        let text = "@Entity\nclass A {\n  @Temporal(TemporalType.DATE) Date a;\n  @Temporal(TemporalType.DATE) Calendar b;\n  @Temporal(TemporalType.DATE) Vendor.Stamp c;\n  @Enumerated Status d;\n  @Enumerated(EnumType.STRING) com.acme.Kind e;\n  @Version long f;\n  @Version Integer g;\n  @Version java.sql.Timestamp h;\n  @Version Stamp i;\n}\n";
+        assert!(types(text).is_empty(), "{:?}", types(text));
+        assert!(inspect_attribute_types("@Entity\nclass A(@Version val v: Long, @Enumerated val e: Mode)\n", true, &|_| false).is_empty());
+        assert_eq!(inspect_attribute_types("@Entity\nclass A(@Version val v: Boolean)\n", true, &|_| false).len(), 1);
+    }
+
+    #[test]
+    fn attribute_type_range_counts_utf16_columns() {
+        let text = "@Entity\nclass A {\n  /* \u{1F600} */ @Version String v;\n}\n";
+        let d = inspect_attribute_types(text, false, &|_| false)[0].diagnostic(text);
+        assert_eq!(d.range.start.character, 11);
+    }
+
+    fn callbacks(text: &str) -> Vec<String> {
+        inspect_callbacks(text, false).iter().map(|f| f.message.clone()).collect()
+    }
+
+    #[test]
+    fn listener_method_with_wrong_parameters_warns() {
+        let entity = "@Entity\nclass A {\n  @Id Long id;\n  @PrePersist void ok() {}\n  @PostLoad void bad(String s) {}\n  @PreUpdate public int worse() { return 1; }\n}\n";
+        let found = inspect_callbacks(entity, false);
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|f| f.code == "entity-listener-signature"));
+        assert_eq!(&entity[found[0].start..found[0].end], "bad");
+
+        let listener = "import jakarta.persistence.*;\nclass Audit {\n  @PrePersist void none() {}\n  @PostPersist void one(Object o) {}\n  @PreRemove void two(Object o, int x) {}\n  @PostRemove int ret(Object o) { return 1; }\n}\n";
+        assert_eq!(callbacks(listener).len(), 3);
+
+        let kotlin = "@Entity\nclass A {\n  @PrePersist fun a(x: Int) {}\n  @PostLoad fun b(): String = \"\"\n  @PostUpdate fun c(): Unit {}\n  @PreRemove fun d() = Unit\n}\n";
+        assert_eq!(inspect_callbacks(kotlin, true).len(), 2);
+    }
+
+    #[test]
+    fn entity_listener_signature_is_quiet_for_library_or_dynamic_name() {
+        assert!(callbacks("@Entity\nclass A {\n  @PrePersist void a() {}\n  void other(String s) {}\n}\n").is_empty());
+        assert!(callbacks("import jakarta.persistence.*;\nclass L {\n  @PrePersist void a(Object o) {}\n  @Autowired void b(String s) {}\n}\n").is_empty());
+        assert!(callbacks("class Other {\n  @PrePersist void a(Object o, Object p) {}\n}\n").is_empty(), "no persistence import");
+        assert!(callbacks("@Embeddable\nclass E {\n  @PrePersist void a(Object o) {}\n}\n").is_empty());
     }
 
     #[test]

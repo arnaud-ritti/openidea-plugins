@@ -23,7 +23,8 @@ engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
 activation = [
     "on-view:merge-requests", "on-view:merge-request", "on-view:merge-request-changes", "on-view:gitlab-projects",
-    "on-event:vcs-changed", "on-event:file-opened",
+    "on-event:vcs-changed", "on-event:file-opened", "on-event:file-saved",
+    "on-file:**/.gitlab-ci.yml", "on-file:**/*.gitlab-ci.yml",
 ]
 
 [capabilities]
@@ -39,6 +40,10 @@ title = "GitLab"
 [[contributes.providers]]
 kinds = ["line-markers", "code-actions"]
 languages = ["*"]
+
+[[contributes.providers]]
+kinds = ["definition"]
+languages = ["yaml"]
 
 [[contributes.secrets]]
 name = "token"
@@ -97,6 +102,16 @@ category = "GitLab"
 [[contributes.commands]]
 id = "show-branch-merge-request"
 title = "GitLab: Show Current Branch's Merge Request"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "open-merge-request-in-worktree"
+title = "GitLab: Open Merge Request in Worktree"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "update-merge-request-branch"
+title = "GitLab: Update Merge Request Branch"
 category = "GitLab"
 
 [[contributes.commands]]

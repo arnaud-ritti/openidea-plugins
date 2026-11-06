@@ -2,18 +2,86 @@
 //! folding (directive pairs, comments) from a hand-written lexer, exported as
 //! the plugin's `syntax-provider`. Detection comes from `languages/blade.toml`.
 
+mod checks;
+
 use std::ops::Range;
 
+use std::path::Path;
+
 use openidea_plugin::syntax::{Fold, FoldKind, Highlight, Symbol, SymbolKind, SyntaxProvider, Token};
-use openidea_plugin::{Error, Invocation, Plugin, register_plugin};
+use openidea_plugin::text::position;
+use openidea_plugin::{
+    Context, Diagnostic, Error, Event, EventKind, Invocation, LogLevel, Plugin, Range as EditorRange, host, register_plugin,
+};
+
+use checks::{Finding, UNPAIRED_DIRECTIVE, UNPAIRED_PARENTHESIS};
 
 #[derive(Default)]
 pub struct Blade;
 
 impl Plugin for Blade {
+    fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
+        for kind in [EventKind::FileOpened, EventKind::FileSaved] {
+            if let Err(error) = host::subscribe(kind) {
+                host::log(LogLevel::Warn, &format!("Blade inspections need the {} event: {error}", kind.name()));
+            }
+        }
+
+        Ok(())
+    }
+
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         Err(Error::NotFound(format!("command {id}")))
     }
+
+    fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
+        for event in events {
+            let (Event::FileOpened(path) | Event::FileSaved(path)) = event else { continue };
+            if !path.ends_with(".blade.php") {
+                continue;
+            }
+
+            inspect(path);
+        }
+    }
+}
+
+fn inspect(path: &str) {
+    let Some(project) = host::projects()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| Some((p.root().ok()?, p)))
+        .filter(|(root, _)| Path::new(path).starts_with(root))
+        .max_by_key(|(root, _)| root.len())
+        .map(|(_, project)| project)
+    else {
+        return;
+    };
+
+    let Ok(text) = project.read_file(path) else { return };
+    let diagnostics: Vec<Diagnostic> = enabled_findings(&text)
+        .iter()
+        .map(|f| Diagnostic {
+            code: Some(f.code.into()),
+            ..Diagnostic::new(EditorRange::new(position(&text, f.start), position(&text, f.end)), f.severity, &f.message)
+        })
+        .collect();
+
+    let _ = host::publish_diagnostics(path, &diagnostics);
+}
+
+fn enabled_findings(text: &str) -> Vec<Finding> {
+    let pairs = host::setting_bool("checkDirectivePairs").unwrap_or(true);
+    let parentheses = host::setting_bool("checkParentheses").unwrap_or(true);
+
+    checks::check(text)
+        .into_iter()
+        .filter(|f| match f.code {
+            UNPAIRED_DIRECTIVE => pairs,
+            UNPAIRED_PARENTHESIS => parentheses,
+            _ => true,
+        })
+        .collect()
 }
 
 impl SyntaxProvider for Blade {
@@ -593,7 +661,69 @@ fn structure(text: &str) -> (Vec<Symbol>, Vec<Fold>) {
 
 #[cfg(test)]
 mod tests {
+    use openidea_plugin::mock::MockHost;
+
     use super::*;
+
+    fn project(path: &str, text: &str) -> MockHost {
+        let host = MockHost::install();
+        host.set_project_root(Some("/p"));
+        host.add_file(path, text);
+        host
+    }
+
+    fn publish(host: &MockHost, event: Event) {
+        Blade.handle_events(&[event], &host.invocation());
+    }
+
+    #[test]
+    fn publishes_findings_for_a_blade_file() {
+        let host = project("v.blade.php", "<p>é</p>\n@endif\n");
+        publish(&host, Event::FileOpened("/p/v.blade.php".into()));
+
+        let published = &host.diagnostics()["/p/v.blade.php"];
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].code.as_deref(), Some("unpaired-directive"));
+        assert_eq!(published[0].range.start.line, 1);
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = project("v.blade.php", "@endif\n");
+        publish(&host, Event::FileOpened("/p/v.blade.php".into()));
+        assert_eq!(host.diagnostics().len(), 1);
+
+        host.add_file("v.blade.php", "@if($a)\n@endif\n");
+        publish(&host, Event::FileSaved("/p/v.blade.php".into()));
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn non_blade_files_are_ignored() {
+        let host = project("v.php", "@endif\n");
+        publish(&host, Event::FileOpened("/p/v.php".into()));
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn each_group_can_be_switched_off() {
+        let host = project("v.blade.php", "@endif\n@if(\n");
+        host.set_setting("checkDirectivePairs", "false");
+        publish(&host, Event::FileOpened("/p/v.blade.php".into()));
+        let codes: Vec<_> = host.diagnostics()["/p/v.blade.php"].iter().map(|d| d.code.clone().unwrap()).collect();
+        assert_eq!(codes, ["unpaired-parenthesis-in-string"]);
+
+        host.set_setting("checkParentheses", "false");
+        publish(&host, Event::FileOpened("/p/v.blade.php".into()));
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn denied_events_log_a_warning_and_still_activate() {
+        let host = MockHost::install().with_capabilities(&["project.read"]);
+        assert!(Blade.activate(&host.context("aritti.blade")).is_ok());
+        assert!(host.logs().iter().any(|(level, _)| *level == LogLevel::Warn));
+    }
 
     fn kinds(text: &str) -> Vec<(&str, &'static str)> {
         lex(text).tokens.iter().map(|t| (&text[t.range.clone()], t.kind.name())).collect()

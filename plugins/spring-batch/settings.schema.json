@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "springBatch.checkChunk": {
+      "type": "boolean",
+      "title": "Warn when an XML chunk has neither a commit-interval nor a chunk-completion-policy",
+      "default": true
+    }
+  }
+}

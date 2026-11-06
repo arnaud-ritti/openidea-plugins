@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use crate::php::is_identifier;
+use crate::php::{self, is_identifier};
 use crate::refs::{self, Kind};
 
 pub struct Rewrite {
@@ -28,7 +28,35 @@ pub fn rewrites(path: &str, language: &str, text: &str, at: usize) -> Vec<Rewrit
         }
     }
 
+    if let Some(open) = refs::rule_list_at(language, text, at) {
+        found.extend(rules_string(text, open));
+    }
+
     found
+}
+
+fn rules_string(text: &str, open: usize) -> Option<Rewrite> {
+    let close = php::closing(text, open)?;
+    if text.as_bytes()[open] != b'[' || text[open..close].contains("//") || text[open..close].contains("/*") {
+        return None;
+    }
+
+    let mut rules = Vec::new();
+    for item in php::items(text, open) {
+        let (rule, _) = php::literal(text, item.value).filter(|_| item.key.is_none())?;
+        let is_regex = rule.starts_with("regex:") || rule.starts_with("not_regex:");
+        if rule.is_empty() || rule.contains(['|', '\'', '"', '\\', '$']) || is_regex && rule.contains(',') {
+            return None;
+        }
+        rules.push(rule);
+    }
+
+    let quote = text[open + 1..close].trim_start().chars().next()?;
+    Some(Rewrite {
+        title: "Convert validation rules to a string".into(),
+        kind: "refactor.rewrite",
+        edits: vec![(open..close + 1, format!("{quote}{}{quote}", rules.join("|")))],
+    })
 }
 
 fn rules_array(text: &str, literal: Range<usize>) -> Option<Rewrite> {

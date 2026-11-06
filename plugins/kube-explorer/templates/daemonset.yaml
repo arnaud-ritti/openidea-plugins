@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: $NAME$
+spec:
+  selector:
+    matchLabels:
+      app: $NAME$
+  template:
+    metadata:
+      labels:
+        app: $NAME$
+    spec:
+      containers:
+        - name: $NAME$
+          image: $END$

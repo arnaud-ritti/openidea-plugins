@@ -346,6 +346,8 @@ pub struct Class {
     pub imports: Vec<String>,
     pub table: Option<String>,
     pub superclass: Option<String>,
+    /// `@Id`, `@EmbeddedId` or `@IdClass` appears in the class's file.
+    pub has_id: bool,
     pub attributes: Vec<Attribute>,
     /// Offset of the `}` closing the class body.
     pub body_end: Option<usize>,
@@ -494,6 +496,11 @@ pub fn without_annotations(masked: &str, start: usize, end: usize) -> String {
     }
 
     out
+}
+
+/// The declared type of a field or Kotlin property.
+pub fn declared_type(decl: &str, kotlin: bool) -> Option<String> {
+    declaration(decl, kotlin).map(|(_, _, ty)| ty)
 }
 
 /// `(name offset, name, declared type)` of a field or property declaration.
@@ -655,6 +662,7 @@ pub fn parse_class(text: &str, path: &str) -> Option<Class> {
         imports: statements("import "),
         table: anns.iter().find(|a| a.name == "Table").and_then(|t| string_arg(text, &masked, t, "name")),
         superclass: superclass.filter(|s| !s.is_empty()).map(|s| last_segment(s).to_owned()),
+        has_id: anns.iter().any(|a| matches!(a.name, "Id" | "EmbeddedId" | "IdClass")),
         attributes,
         body_end: body.and_then(|(_, close)| close),
     })

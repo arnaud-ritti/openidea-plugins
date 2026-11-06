@@ -64,3 +64,57 @@ location = "bottom"
 [contributes.settings]
 schema = "settings.schema.json"
 title = "Symfony"
+
+[[contributes.fileTemplates]]
+id = "command"
+name = "Symfony Command"
+extension = "php"
+path = "templates/Command.php"
+
+[[contributes.fileTemplates]]
+id = "controller"
+name = "Symfony Controller"
+extension = "php"
+path = "templates/Controller.php"
+
+[[contributes.fileTemplates]]
+id = "form-type"
+name = "Symfony Form Type"
+extension = "php"
+path = "templates/FormType.php"
+
+[[contributes.fileTemplates]]
+id = "twig-extension"
+name = "Symfony Twig Extension"
+extension = "php"
+path = "templates/TwigExtension.php"
+
+[[contributes.fileTemplates]]
+id = "compiler-pass"
+name = "Symfony Compiler Pass"
+extension = "php"
+path = "templates/CompilerPass.php"
+
+[[contributes.fileTemplates]]
+id = "kernel-test"
+name = "Symfony Kernel Test"
+extension = "php"
+path = "templates/KernelTest.php"
+
+[[contributes.fileTemplates]]
+id = "web-test"
+name = "Symfony Web Test"
+extension = "php"
+path = "templates/WebTest.php"
+
+[[contributes.fileTemplates]]
+id = "event-subscriber"
+name = "Symfony Event Subscriber"
+extension = "php"
+path = "templates/EventSubscriber.php"
+
+[[contributes.fileTemplates]]
+id = "voter"
+name = "Symfony Voter"
+extension = "php"
+path = "templates/Voter.php"

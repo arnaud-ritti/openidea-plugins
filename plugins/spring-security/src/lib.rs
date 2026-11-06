@@ -280,6 +280,10 @@ fn xml_problems(text: &str) -> Vec<Problem> {
             found.diagnostic.deprecated = true;
             out.push(found);
         }
+        if e.local() == "debug" && host::setting_bool("springSecurity.checkDebug").unwrap_or(true) {
+            let message = "Security debug logging is on: it logs request details and headers. Turn it off in production.".to_owned();
+            out.push(diagnostic(e.at, e.at + e.name.len(), Severity::Warning, "debug-enabled", message));
+        }
         if e.local() != "http" {
             continue;
         }
@@ -317,6 +321,231 @@ fn xml_problems(text: &str) -> Vec<Problem> {
             if catch_all && urls[n + 1..].iter().any(|later| later.value("pattern").is_some_and(|p| p != pattern.value)) {
                 let message = "This catch-all pattern comes before more specific ones, which can never match: move it last.".to_owned();
                 out.push(diagnostic(pattern.value_at, pattern.value_end, Severity::Warning, "unreachable-patterns", message));
+            }
+        }
+    }
+    out
+}
+
+const MATCHER_CALLS: [&str; 4] = ["requestMatchers", "antMatchers", "mvcMatchers", "regexMatchers"];
+const RULE_BLOCKS: [&str; 2] = ["authorizeHttpRequests", "authorizeRequests"];
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// The index of the bracket closing the one at `open`, in comment- and string-free code.
+fn closing(code: &str, open: usize) -> usize {
+    let mut depth = 0;
+    for (i, b) in code.bytes().enumerate().skip(open) {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+    }
+    code.len()
+}
+
+/// Where a legacy `authorizeRequests().a().b();` chain ends.
+fn statement_end(code: &str, from: usize) -> usize {
+    let mut depth = 0;
+    for (i, b) in code.bytes().enumerate().skip(from) {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth == 0 => return i,
+            b')' | b']' | b'}' => depth -= 1,
+            b';' if depth == 0 => return i,
+            _ => {}
+        }
+    }
+    code.len()
+}
+
+/// Byte ranges of the top-level arguments between the brackets `open..close`.
+fn argument_ranges(code: &str, open: usize, close: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let (mut depth, mut from) = (0, open + 1);
+    for (i, b) in code.bytes().enumerate().take(close).skip(open + 1) {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push((from, i));
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if from < close {
+        out.push((from, close));
+    }
+    out
+}
+
+fn trimmed(text: &str, (from, to): (usize, usize)) -> (usize, usize) {
+    let slice = &text[from..to];
+    let start = from + (slice.len() - slice.trim_start().len());
+    (start, start + slice.trim().len())
+}
+
+struct Rule {
+    at: usize,
+    name_end: usize,
+    any_request: bool,
+    method: Option<String>,
+    /// Ant-style literal patterns: start, end (inside the quotes), value.
+    patterns: Vec<(usize, usize, String)>,
+}
+
+/// The `HttpMethod` and the literal patterns that start an argument list; stops at the first dynamic argument.
+fn leading_patterns(text: &str, args: &[(usize, usize)]) -> (Option<String>, Vec<(usize, usize, String)>) {
+    let mut method = None;
+    let mut patterns = Vec::new();
+    for (n, range) in args.iter().enumerate() {
+        let (from, to) = trimmed(text, *range);
+        let raw = &text[from..to];
+        if n == 0
+            && let Some(name) = raw.strip_prefix("HttpMethod.")
+        {
+            method = Some(name.to_owned());
+            continue;
+        }
+        let Some(inner) = raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) else { break };
+        if inner.contains(['"', '\\', '$']) {
+            break;
+        }
+        patterns.push((from + 1, to - 1, inner.to_owned()));
+    }
+    (method, patterns)
+}
+
+fn pattern_covers(broad: &str, narrow: &str) -> bool {
+    if broad == narrow || broad == "/**" || broad == "**" {
+        return true;
+    }
+    let Some(prefix) = broad.strip_suffix("**") else { return false };
+    prefix.ends_with('/') && !prefix.contains(['*', '?', '{']) && (narrow.starts_with(prefix) || narrow == prefix.trim_end_matches('/'))
+}
+
+/// The rules of one `authorizeHttpRequests`/`authorizeRequests` configuration, in source order.
+fn rules_in(text: &str, code: &str, kotlin: bool, scope: (usize, usize)) -> Vec<Rule> {
+    let mut out = Vec::new();
+    let bytes = code.as_bytes();
+    let mut i = scope.0;
+    while i < scope.1 {
+        if !is_ident_byte(bytes[i]) || (i > 0 && is_ident_byte(bytes[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let end = (i..scope.1).find(|&j| !is_ident_byte(bytes[j])).unwrap_or(scope.1);
+        let name = &code[i..end];
+        let open = end + code[end..].len() - code[end..].trim_start().len();
+        let has_args = bytes.get(open) == Some(&b'(');
+        let args = || {
+            let close = closing(code, open);
+            (close, argument_ranges(code, open, close))
+        };
+        let rule = |any_request: bool, method, patterns| Rule { at: i, name_end: end, any_request, method, patterns };
+        if name == "anyRequest" {
+            out.push(rule(true, None, Vec::new()));
+        } else if has_args && MATCHER_CALLS.contains(&name) {
+            let (_, ranges) = args();
+            let (method, patterns) = if name == "regexMatchers" { (None, Vec::new()) } else { leading_patterns(text, &ranges) };
+            out.push(rule(false, method, patterns));
+        } else if kotlin && has_args && name == "authorize" {
+            let (close, ranges) = args();
+            if ranges.first().is_some_and(|r| text[trimmed(text, *r).0..trimmed(text, *r).1] == *"anyRequest") {
+                out.push(rule(true, None, Vec::new()));
+            } else {
+                let (method, patterns) = leading_patterns(text, &ranges);
+                out.push(rule(false, method, patterns));
+            }
+            i = close;
+            continue;
+        }
+        i = end;
+    }
+    out
+}
+
+fn matcher_problems(text: &str, code: &str, kotlin: bool) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let mut warn = |from: usize, to: usize, code: &str, message: String| {
+        out.push(Problem { diagnostic: problem(text, from, to, Severity::Warning, code, message), fix: None });
+    };
+    for block in RULE_BLOCKS {
+        for (at, _) in code.match_indices(block) {
+            let after = at + block.len();
+            if at > 0 && is_ident_byte(code.as_bytes()[at - 1]) || code.as_bytes().get(after).is_some_and(|b| is_ident_byte(*b)) {
+                continue;
+            }
+            let open = after + code[after..].len() - code[after..].trim_start().len();
+            let scope = match code.as_bytes().get(open) {
+                Some(b'{') => (open + 1, closing(code, open)),
+                Some(b'(') => {
+                    let close = closing(code, open);
+                    if code[open + 1..close].trim().is_empty() { (close + 1, statement_end(code, close + 1)) } else { (open + 1, close) }
+                }
+                _ => continue,
+            };
+            let mut any_request = false;
+            let mut earlier: Vec<&Rule> = Vec::new();
+            let rules = rules_in(text, code, kotlin, scope);
+            for rule in &rules {
+                if any_request {
+                    let message = "Spring Security rejects this at startup: `anyRequest()` must be the last rule, nothing can follow it.";
+                    warn(rule.at, rule.name_end, "matchers-after-any-request", message.to_owned());
+                    continue;
+                }
+                any_request = rule.any_request;
+                for (from, to, pattern) in &rule.patterns {
+                    let covering = earlier.iter().find(|e| {
+                        (e.method.is_none() || e.method == rule.method) && e.patterns.iter().any(|(_, _, broad)| pattern_covers(broad, pattern))
+                    });
+                    if let Some(first) = covering.and_then(|e| e.patterns.iter().find(|(_, _, broad)| pattern_covers(broad, pattern))) {
+                        let message = format!("`{pattern}` is never reached: the earlier rule for `{}` already matches it. Put the narrower pattern first.", first.2);
+                        warn(*from, *to, "matcher-order", message);
+                    }
+                }
+                earlier.push(rule);
+            }
+        }
+    }
+    out
+}
+
+fn debug_problems(text: &str, code: &str) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let mut warn = |from: usize, to: usize| {
+        let message = "Security debug logging is on: it logs request details and headers. Turn it off in production.";
+        out.push(Problem { diagnostic: problem(text, from, to, Severity::Warning, "debug-enabled", message.into()), fix: None });
+    };
+    for (at, _) in code.match_indices("@EnableWebSecurity") {
+        let after = at + "@EnableWebSecurity".len();
+        let open = after + code[after..].len() - code[after..].trim_start().len();
+        if code.as_bytes().get(open) != Some(&b'(') {
+            continue;
+        }
+        let close = closing(code, open);
+        let debug_on = argument_ranges(code, open, close).into_iter().any(|(from, to)| {
+            code[from..to].trim().strip_prefix("debug").and_then(|r| r.trim_start().strip_prefix('=')).is_some_and(|v| v.trim() == "true")
+        });
+        if debug_on {
+            warn(at, (close + 1).min(text.len()));
+        }
+    }
+    if code.contains("WebSecurityCustomizer") {
+        for (at, _) in code.match_indices(".debug(") {
+            let open = at + ".debug".len();
+            let close = closing(code, open);
+            if code[open + 1..close].trim() == "true" {
+                warn(at + 1, close + 1);
             }
         }
     }
@@ -412,7 +641,17 @@ fn problems(path: &str, text: &str) -> Vec<Problem> {
             out.push(Problem { diagnostic: problem(text, s.at, s.end, Severity::Info, "plain-text-password", message), fix: None });
         }
     }
-    if security && spring_text::is_kotlin(path) {
+    let kotlin = spring_text::is_kotlin(path);
+    if security {
+        let code = kotlin_code_only(text);
+        if host::setting_bool("springSecurity.checkMatchers").unwrap_or(true) {
+            out.extend(matcher_problems(text, &code, kotlin));
+        }
+        if host::setting_bool("springSecurity.checkDebug").unwrap_or(true) {
+            out.extend(debug_problems(text, &code));
+        }
+    }
+    if security && kotlin {
         let code = kotlin_code_only(text);
         for (at, _) in code.match_indices("authorizeRequests") {
             let after = at + "authorizeRequests".len();
@@ -809,5 +1048,132 @@ class SecurityConfig : WebSecurityConfigurerAdapter() {
         assert_eq!(codes("C", "val a = '\\n'; val b = '\\''; val c = '\\\\'; http.authorizeRequests { }\n"), 1);
         assert_eq!(codes("D", "val s = \"it's\"; don't; http.authorizeRequests { }\n"), 1);
         assert_eq!(codes("E", "x = '\n"), 0);
+    }
+
+    const SECURITY_IMPORT: &str = "import org.springframework.security.config.annotation.web.builders.HttpSecurity;\n";
+
+    fn spans(path: &str, text: &str, code: &str) -> Vec<String> {
+        let _host = MockHost::install();
+        problems(path, text)
+            .into_iter()
+            .filter(|p| p.diagnostic.code.as_deref() == Some(code))
+            .map(|p| {
+                let r = p.diagnostic.range;
+                text[offset(text, r.start).unwrap()..offset(text, r.end).unwrap()].to_owned()
+            })
+            .collect()
+    }
+
+    fn java_spans(body: &str, code: &str) -> Vec<String> {
+        spans("/project/C.java", &format!("{SECURITY_IMPORT}class C {{ void f(HttpSecurity http) throws Exception {{\n{body}\n}} }}"), code)
+    }
+
+    #[test]
+    fn request_matchers_after_any_request_warn() {
+        let lambda = "http.authorizeHttpRequests(a -> a.requestMatchers(\"/a\").permitAll().anyRequest().authenticated().requestMatchers(\"/b\").denyAll().anyRequest().denyAll());";
+        assert_eq!(java_spans(lambda, "matchers-after-any-request"), ["requestMatchers", "anyRequest"]);
+        let chained = "http.authorizeHttpRequests().anyRequest().authenticated().antMatchers(\"/b\").denyAll();\nhttp.authorizeHttpRequests().requestMatchers(\"/ok\").permitAll();";
+        assert_eq!(java_spans(chained, "matchers-after-any-request"), ["antMatchers"]);
+    }
+
+    #[test]
+    fn narrow_matcher_after_broader_matcher_warns() {
+        let body = "http.authorizeHttpRequests(a -> a.requestMatchers(\"/**\").permitAll().requestMatchers(\"/admin/**\").hasRole(\"ADMIN\"));";
+        assert_eq!(java_spans(body, "matcher-order"), ["/admin/**"]);
+        let nested = "http.authorizeHttpRequests(a -> a.requestMatchers(\"/api/**\").authenticated().requestMatchers(\"/api/v1/users\", \"/other\").permitAll().requestMatchers(\"/api\").denyAll());";
+        assert_eq!(java_spans(nested, "matcher-order"), ["/api/v1/users", "/api"]);
+        let method = "http.authorizeHttpRequests(a -> a.requestMatchers(HttpMethod.GET, \"/api/**\").permitAll().requestMatchers(\"/api/x\").denyAll().requestMatchers(HttpMethod.POST, \"/api/y\").denyAll());";
+        assert!(java_spans(method, "matcher-order").is_empty());
+    }
+
+    #[test]
+    fn ordered_matchers_are_quiet() {
+        let body = "http.authorizeHttpRequests(a -> a.requestMatchers(\"/admin/**\").hasRole(\"ADMIN\").requestMatchers(\"/api/**\").authenticated().requestMatchers(\"/**\").permitAll().anyRequest().denyAll());";
+        assert!(java_spans(body, "matcher-order").is_empty());
+        assert!(java_spans(body, "matchers-after-any-request").is_empty());
+    }
+
+    #[test]
+    fn matcher_checks_are_quiet_for_library_or_dynamic_name() {
+        let wrong_order = "http.authorizeHttpRequests(a -> a.anyRequest().authenticated().requestMatchers(\"/a\").denyAll().requestMatchers(\"/**\").permitAll().requestMatchers(\"/b\").denyAll());";
+        let library = format!("class C {{ void f(Lib http) {{\n{wrong_order}\n}} }}");
+        assert!(spans("/project/C.java", &library, "matchers-after-any-request").is_empty());
+        assert!(spans("/project/C.java", &library, "matcher-order").is_empty());
+        let dynamic = "http.authorizeHttpRequests(a -> a.requestMatchers(PUBLIC).permitAll().requestMatchers(\"/x\").denyAll().requestMatchers(regexMatcher(\"/.*\")).denyAll().regexMatchers(\"/.*\").denyAll().requestMatchers(\"/y\").denyAll());";
+        assert!(java_spans(dynamic, "matcher-order").is_empty());
+        let masked = "// http.authorizeHttpRequests(a -> a.anyRequest().denyAll().requestMatchers(\"/a\"))\nString s = \"authorizeHttpRequests(a -> a.anyRequest().requestMatchers(1))\";\nhttp.authorizeHttpRequests(a -> a.requestMatchers(\"/a\").permitAll()/* .anyRequest() */.requestMatchers(\"/b\").denyAll().anyRequest().authenticated());";
+        assert!(java_spans(masked, "matchers-after-any-request").is_empty());
+        assert!(java_spans(masked, "matcher-order").is_empty());
+    }
+
+    #[test]
+    fn enable_web_security_debug_true_warns() {
+        let on = format!("{SECURITY_IMPORT}@EnableWebSecurity(debug = true)\nclass C {{}}");
+        assert_eq!(spans("/project/C.java", &on, "debug-enabled"), ["@EnableWebSecurity(debug = true)"]);
+        let customizer = format!("{SECURITY_IMPORT}class C {{ WebSecurityCustomizer c() {{ return web -> web.debug(true); }} }}");
+        assert_eq!(spans("/project/C.java", &customizer, "debug-enabled"), ["debug(true)"]);
+        let xml = "<beans xmlns:sec=\"http://www.springframework.org/schema/security\"><sec:debug/></beans>";
+        assert_eq!(xml_codes(xml), ["debug-enabled"]);
+    }
+
+    #[test]
+    fn debug_enabled_is_quiet_for_library_or_dynamic_name() {
+        for text in [
+            "@EnableWebSecurity(debug = false)\nclass C {}",
+            "@EnableWebSecurity(debug = DEBUG)\nclass C {}",
+            "@EnableWebSecurity\nclass C {}",
+            "// @EnableWebSecurity(debug = true)\nString s = \"@EnableWebSecurity(debug = true)\";\nclass C { void f() { logger.debug(true); } }",
+        ] {
+            assert!(spans("/project/C.java", &format!("{SECURITY_IMPORT}{text}"), "debug-enabled").is_empty(), "{text}");
+        }
+        assert!(spans("/project/C.java", "@EnableWebSecurity(debug = true)\nclass C {}", "debug-enabled").is_empty());
+        let other_namespace = "<beans xmlns:x=\"urn:other\"><x:debug/></beans>";
+        assert!(xml_codes(other_namespace).is_empty());
+    }
+
+    #[test]
+    fn lambda_dsl_and_kotlin_dsl_are_both_read() {
+        let kotlin = "import org.springframework.security.config.annotation.web.invoke\n@EnableWebSecurity(debug = true)\nclass C {\n    fun f(http: HttpSecurity) {\n        http {\n            authorizeHttpRequests {\n                authorize(\"/**\", permitAll)\n                authorize(\"/admin/**\", hasRole(\"ADMIN\"))\n                authorize(anyRequest, authenticated)\n                authorize(\"/late\", denyAll)\n            }\n        }\n    }\n}\n";
+        assert_eq!(spans("/project/C.kt", kotlin, "matcher-order"), ["/admin/**"]);
+        assert_eq!(spans("/project/C.kt", kotlin, "matchers-after-any-request"), ["authorize"]);
+        assert_eq!(spans("/project/C.kt", kotlin, "debug-enabled"), ["@EnableWebSecurity(debug = true)"]);
+        let java = "http.authorizeHttpRequests(a -> a.anyRequest().authenticated().requestMatchers(\"/late\").denyAll());";
+        assert_eq!(java_spans(java, "matchers-after-any-request"), ["requestMatchers"]);
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        let mut tools = SecurityTools::default();
+        let bad = format!("{SECURITY_IMPORT}@EnableWebSecurity(debug = true)\nclass C {{ void f(HttpSecurity http) {{ http.authorizeHttpRequests(a -> a.anyRequest().denyAll().requestMatchers(\"/a\").denyAll()); }} }}");
+        let d = Document { path: "/project/C.java".into(), language: "java".into(), version: 1, text: bad };
+        tools.line_markers(&d);
+        assert_eq!(host.diagnostics()[&d.path].len(), 2);
+        let fixed = Document { text: format!("{SECURITY_IMPORT}class C {{ void f(HttpSecurity http) {{ http.authorizeHttpRequests(a -> a.requestMatchers(\"/a\").denyAll().anyRequest().denyAll()); }} }}"), ..d };
+        tools.line_markers(&fixed);
+        assert!(host.diagnostics().get(&fixed.path).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn matcher_and_debug_groups_can_be_switched_off() {
+        let host = MockHost::install();
+        let mut tools = SecurityTools::default();
+        host.set_setting("springSecurity.checkMatchers", "false");
+        host.set_setting("springSecurity.checkDebug", "false");
+        let text = format!("{SECURITY_IMPORT}@EnableWebSecurity(debug = true)\nclass C {{ void f(HttpSecurity http) {{ http.authorizeHttpRequests(a -> a.anyRequest().denyAll().requestMatchers(\"/a\").denyAll()); }} }}");
+        let d = Document { path: "/project/C.java".into(), language: "java".into(), version: 1, text };
+        tools.line_markers(&d);
+        assert!(host.diagnostics().get(&d.path).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn matcher_ranges_are_utf16_columns() {
+        let text = format!("{SECURITY_IMPORT}class C {{ void f(HttpSecurity http) {{ /* \u{e9}\u{1F600} */ http.authorizeHttpRequests(a -> a.anyRequest().denyAll().requestMatchers(\"/a\").denyAll()); }} }}");
+        let _host = MockHost::install();
+        let found = problems("/project/C.java", &text);
+        let d = &found[0].diagnostic;
+        let line = text.lines().nth(1).unwrap();
+        let expected = line.encode_utf16().count() - line[line.find("requestMatchers").unwrap()..].encode_utf16().count();
+        assert_eq!(d.range.start.character as usize, expected);
     }
 }

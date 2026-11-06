@@ -845,3 +845,440 @@ fn directive_list_matches_the_blade_plugin() {
     let here: std::collections::BTreeSet<&str> = crate::directives::CORE.iter().copied().collect();
     assert_eq!(here, in_blade);
 }
+
+fn project_files(files: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+    move |path| files.iter().find(|(name, _)| *name == path).map(|(_, text)| (*text).to_owned())
+}
+
+const UNGUARDED_POST: (&str, &str) = ("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $guarded = [];\n}\n");
+const FILLABLE_POST: (&str, &str) = ("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $fillable = ['title', 'body'];\n}\n");
+const PRUNABLE_POST: (&str, &str) = ("app/Models/Post.php", "<?php\nuse Illuminate\\Database\\Eloquent\\Prunable;\nclass Post extends Model\n{\n    use HasFactory, Prunable;\n}\n");
+
+fn eloquent_snippets(text: &str, files: &'static [(&'static str, &'static str)]) -> Vec<(&'static str, String)> {
+    eloquent_checks::findings(text, &project_files(files)).into_iter().map(|f| (f.code, text[f.start..f.end].to_owned())).collect()
+}
+
+#[test]
+fn guarded_attribute_assigned_through_fill_warns() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let found = eloquent_snippets("<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\n(new Post)->fill($request->all());\nPost::create($request->all());\nPost::create($request->validated());\n", &FILES);
+    assert_eq!(found, [("guarded-attribute-assignment", "$request->all()".into()), ("guarded-attribute-assignment", "$request->all()".into())]);
+
+    static FILLABLE: [(&str, &str); 1] = [FILLABLE_POST];
+    let found = eloquent_snippets("<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create(['title' => 'a', 'role' => 'admin', 'body' => 'b']);\nPost::create($request->all());\n", &FILLABLE);
+    assert_eq!(found, [("guarded-attribute-assignment", "role".into())]);
+}
+
+#[test]
+fn guarded_attribute_assignment_is_quiet_for_library_or_dynamic_name() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nCollection::create($request->all());\n$model::create($request->all());\nstatic::create($request->all());\nPost::create($request->only('a'));\n$post->fill($request->all());\n";
+    assert!(eloquent_snippets(text, &FILES).is_empty());
+
+    static FILLABLE: [(&str, &str); 1] = [FILLABLE_POST];
+    assert!(eloquent_snippets("<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create(['title' => 1, $key => 2, ...$rest]);\nPost::create(['title' => 1, 'body' => 2]);\n", &FILLABLE).is_empty());
+
+    static CUSTOM: [(&str, &str); 1] = [("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $fillable = ['a'];\n    public function getFillable() {}\n}\n")];
+    assert!(eloquent_snippets("<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create(['zzz' => 1]);\n", &CUSTOM).is_empty());
+}
+
+#[test]
+fn prunable_model_without_schedule_warns() {
+    static NO_SCHEDULE: [(&str, &str); 1] = [("routes/console.php", "<?php\nSchedule::command('inspire')->hourly();\n")];
+    let found = eloquent_snippets(PRUNABLE_POST.1, &NO_SCHEDULE);
+    assert_eq!(found, [("unscheduled-prunable", "Prunable".into())]);
+
+    let mass = PRUNABLE_POST.1.replace("Prunable;\n}", "MassPrunable;\n}").replace("HasFactory, Prunable", "HasFactory, MassPrunable");
+    assert_eq!(eloquent_snippets(&mass, &NO_SCHEDULE).len(), 1);
+}
+
+#[test]
+fn unscheduled_prunable_is_quiet_for_library_or_dynamic_name() {
+    static SCHEDULED: [(&str, &str); 2] = [("routes/console.php", "<?php\nSchedule::command('inspire');\n"), ("bootstrap/app.php", "<?php\n->withSchedule(fn ($s) => $s->command('model:prune')->daily())")];
+    assert!(eloquent_snippets(PRUNABLE_POST.1, &SCHEDULED).is_empty());
+
+    static NOTHING_READABLE: [(&str, &str); 0] = [];
+    assert!(eloquent_snippets(PRUNABLE_POST.1, &NOTHING_READABLE).is_empty());
+
+    static NO_SCHEDULE: [(&str, &str); 1] = [("routes/console.php", "<?php\n")];
+    let text = "<?php\nuse Illuminate\\Database\\Eloquent\\Prunable;\nclass Post extends Model\n{\n    use HasFactory;\n    // use Prunable;\n}\n";
+    assert!(eloquent_snippets(text, &NO_SCHEDULE).is_empty());
+}
+
+#[test]
+fn order_by_created_at_desc_becomes_latest() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/PostController.php";
+
+    let text = "<?php\n$a = Post::orderBy('created_at', 'desc')->get();\n$b = Post::query()->orderBy(\"created_at\")->get();\n$c = Post::orderBy('created_at', 'ASC')->get();\n";
+    assert_eq!(apply_rewrite(&mut plugin, path, "php", text, "orderBy('created_at', 'desc')"), text.replace("orderBy('created_at', 'desc')", "latest()"));
+    assert_eq!(apply_rewrite(&mut plugin, path, "php", text, "orderBy(\"created_at\")"), text.replace("orderBy(\"created_at\")", "oldest()"));
+    assert_eq!(apply_rewrite(&mut plugin, path, "php", text, "orderBy('created_at', 'ASC')"), text.replace("orderBy('created_at', 'ASC')", "oldest()"));
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", text, "orderBy('created_at', 'desc')").len(), 1);
+}
+
+#[test]
+fn simplify_order_by_is_quiet_for_library_or_dynamic_name() {
+    static NOTHING: [(&str, &str); 0] = [];
+    let text = "<?php\n$a = Post::orderBy('title', 'desc');\n$b = Post::orderBy($column, 'desc');\n$c = Post::orderBy('created_at', $direction);\n$d = Post::orderBy('created_at', 'desc', 1);\n$e = Post::orderByDesc('created_at');\n// Post::orderBy('created_at');\n$f = orderBy('created_at');\n";
+    assert!(eloquent_snippets(text, &NOTHING).is_empty());
+}
+
+#[test]
+fn eloquent_checks_publish_and_clear_when_the_file_is_fixed() {
+    let host = MockHost::install();
+    let mut plugin = activated_with(&host, &[("app/Models/Post.php", UNGUARDED_POST.1), ("app/Http/Controllers/C.php", "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create($request->all());\n")]);
+    let path = "/project/app/Http/Controllers/C.php";
+
+    plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+    let found = &host.diagnostics()[path];
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].code.as_deref(), Some("guarded-attribute-assignment"));
+
+    host.add_file("app/Http/Controllers/C.php", "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create($request->validated());\n");
+    plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+    assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
+
+    host.add_file("app/Http/Controllers/C.php", "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create($request->all());\n");
+    host.set_setting("checkEloquent", "false");
+    plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+    assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
+}
+
+fn guarded_mass_assignment_in(relative: &str) -> Vec<Diagnostic> {
+    let host = MockHost::install();
+    let body = "<?php\nnamespace Database;\nuse App\\Models\\Post;\nPost::create($request->all());\n";
+    let mut plugin = activated_with(&host, &[("app/Models/Post.php", UNGUARDED_POST.1), (relative, body)]);
+    let path = format!("/project/{relative}");
+
+    plugin.handle_events(&[Event::FileOpened(path.clone())], &host.invocation());
+    host.diagnostics().get(&path).cloned().unwrap_or_default()
+}
+
+#[test]
+fn seeder_mass_assignment_is_quiet() {
+    assert!(guarded_mass_assignment_in("database/seeders/PostSeeder.php").is_empty());
+}
+
+#[test]
+fn factory_mass_assignment_is_quiet() {
+    assert!(guarded_mass_assignment_in("database/factories/PostFactory.php").is_empty());
+}
+
+#[test]
+fn app_file_mass_assignment_still_warns() {
+    assert_eq!(guarded_mass_assignment_in("app/Http/Controllers/PostController.php").len(), 1);
+}
+
+#[test]
+fn eloquent_findings_use_utf16_columns_and_crlf() {
+    let host = MockHost::install();
+    let body = "<?php\r\n// é日本😀\r\n$x = 'é日'; Post::orderBy('created_at', 'desc');\r\n";
+    let mut plugin = activated_with(&host, &[("app/Http/Controllers/C.php", body)]);
+    let path = "/project/app/Http/Controllers/C.php";
+
+    plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+    let range = host.diagnostics()[path][0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.character), (2, 17, 46));
+    assert_eq!(host.diagnostics()[path][0].severity, Severity::Hint);
+
+    let result = apply_rewrite(&mut plugin, path, "php", body, "orderBy('created");
+    assert_eq!(result, "<?php\r\n// é日本😀\r\n$x = 'é日'; Post::latest();\r\n");
+}
+
+#[test]
+fn rule_array_becomes_string() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/PostController.php";
+    let text = "<?php\n$request->validate([\n    'email' => ['required', 'email', 'max:255'],\n    'a' => [\"x\", \"y\"],\n]);\n";
+
+    let result = apply_rewrite(&mut plugin, path, "php", text, "'required'");
+    assert!(result.contains("'email' => 'required|email|max:255',"));
+    let result = apply_rewrite(&mut plugin, path, "php", text, "\"x\"");
+    assert!(result.contains("'a' => \"x|y\","));
+}
+
+#[test]
+fn rule_array_with_objects_or_regex_is_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let titles = |plugin: &mut Main, text: &str, marker: &str| rewrite_titles(plugin, path, "php", text, marker);
+
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', new Uppercase]]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', fn ($v) => true]]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', 'regex:/a|b/']]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', 'not_regex:/a{1,2}/']]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', Rule::in(['x'])]]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$x = ['a' => ['required', 'email']];\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => 'required'], ['a.required' => ['x', 'y']]);\n", "'x'").is_empty());
+}
+
+#[test]
+fn intentions_are_offered_only_at_the_caret() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/PostController.php";
+    let text = "<?php\n$request->validate(['email' => ['required', 'email']]);\n$y = Post::orderBy('created_at');\n";
+
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", text, "required").len(), 1);
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", text, "orderBy").len(), 1);
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "validate(").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "$y").is_empty());
+}
+
+#[test]
+fn vendor_class_sharing_a_project_model_name_is_quiet() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    for text in [
+        "<?php\nVendor\\Pkg\\Post::create($request->all());\n",
+        "<?php\n\\Vendor\\Post::create($request->all());\n",
+        "<?php\nnamespace App\\Http;\nuse Vendor\\Post;\nPost::create($request->all());\n",
+        "<?php\nnamespace App\\Http;\nuse Vendor\\Thing as Post;\nPost::create($request->all());\n",
+        "<?php\nnamespace Vendor\\Pkg;\nPost::create($request->all());\n",
+    ] {
+        assert!(eloquent_snippets(text, &FILES).is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn imported_project_model_still_warns() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    for text in [
+        "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create($request->all());\n",
+        "<?php\n\\App\\Models\\Post::create($request->all());\n",
+        "<?php\nnamespace App\\Http;\nuse App\\Models\\Post as Article;\nArticle::create($request->all());\n",
+    ] {
+        assert_eq!(eloquent_snippets(text, &FILES).len(), 1, "{text}");
+    }
+}
+
+#[test]
+fn app_internal_non_model_class_sharing_a_model_name_is_quiet() {
+    static FILES: [(&str, &str); 2] = [UNGUARDED_POST, ("app/Services/Post.php", "<?php\nnamespace App\\Services;\nclass Post\n{\n    public static function create($data) {}\n}\n")];
+    let text = "<?php\nnamespace App\\Http;\nuse App\\Services\\Post;\nPost::create($request->all());\n";
+    assert!(eloquent_snippets(text, &FILES).is_empty());
+}
+
+#[test]
+fn unimported_name_in_controller_namespace_is_quiet() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http\\Controllers;\nPost::create($request->all());\n";
+    assert!(eloquent_snippets(text, &FILES).is_empty());
+}
+
+#[test]
+fn namespaceless_file_with_unimported_name_is_quiet() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    assert!(eloquent_snippets("<?php\nPost::create($request->all());\n", &FILES).is_empty());
+}
+
+#[test]
+fn group_import_of_vendor_class_is_quiet() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http;\nuse Vendor\\{Post, Comment};\nuse function Foo\\bar;\nPost::create($request->all());\n";
+    assert!(eloquent_snippets(text, &FILES).is_empty());
+}
+
+#[test]
+fn group_import_of_project_model_still_warns() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http;\nuse App\\Models\\{\n    Post,\n    Comment,\n};\nPost::create($request->all());\n";
+    assert_eq!(eloquent_snippets(text, &FILES).len(), 1);
+}
+
+#[test]
+fn group_import_alias_resolves() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http;\nuse App\\Models\\{Post as Article};\nArticle::create($request->all());\n";
+    assert_eq!(eloquent_snippets(text, &FILES).len(), 1);
+
+    let nested = "<?php\nnamespace App\\Http;\nuse App\\{Models\\Post};\nPost::create($request->all());\n";
+    assert_eq!(eloquent_snippets(nested, &FILES).len(), 1);
+}
+
+fn js_complete(plugin: &mut Main, path: &str, language: &str, marked: &str) -> Vec<String> {
+    let (text, at) = cursor(marked);
+    labels(plugin.completion(&doc(path, language, &text), at, None))
+}
+
+const ROUTES: [&str; 4] = ["admin.dashboard", "home", "posts.index", "posts.show"];
+
+#[test]
+fn ziggy_route_completes_route_names() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/app.js", "javascript", "route('|')"), ROUTES);
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/app.ts", "typescript", "router.visit(route(\"po|\"), {})"), ROUTES);
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/app.tsx", "typescriptreact", "route(`|`)"), ROUTES);
+
+    let (text, at) = cursor("route('|home')");
+    let items = plugin.completion(&doc("/project/resources/js/app.js", "javascript", &text), at, None);
+    let home = items.iter().find(|item| item.label == "home").unwrap();
+    assert_eq!(home.detail.as_deref(), Some("GET|HEAD / → Closure"));
+}
+
+#[test]
+fn ziggy_current_completes_route_names() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/a.js", "javascript", "route().current('|')"), ROUTES);
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/a.js", "javascript", "route( ).current( 'po|' )"), ROUTES);
+}
+
+#[test]
+fn vue_template_href_route_completes() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let vue = "<template>\n  <Link :href=\"route('|')\">Home</Link>\n</template>\n";
+
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/Pages/Home.vue", "vue", vue), ROUTES);
+}
+
+#[test]
+fn ziggy_route_definition_opens_the_route() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let routes = host_text(&host, "routes/web.php");
+    let name_at = text::position(&routes, routes.find("'home'").unwrap() + 1);
+
+    let script = doc("/project/resources/js/a.js", "javascript", "route('home');\nroute().current('posts.show');\n");
+    let found = plugin.definition(&script, Position::new(0, 9));
+    assert_eq!(found[0].path, "/project/routes/web.php");
+    assert_eq!(found[0].range, Range::new(name_at, Position::new(name_at.line, name_at.character + 4)));
+    assert_eq!(plugin.definition(&script, Position::new(1, 20)).len(), 1);
+    assert!(plugin.definition(&doc("/project/resources/js/a.js", "javascript", "route('nope');"), Position::new(0, 9)).is_empty());
+}
+
+#[test]
+fn js_provider_ignores_non_inertia_calls() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/resources/js/a.js";
+
+    for marked in [
+        "myroute('|')",
+        "$route('|')",
+        "app.route('|')",
+        "this.route('|')",
+        "router.get('|x')",
+        "router.visit('|')",
+        "// route('|')",
+        "/* route('|') */",
+        "const a = 1; // route('|')",
+        "route(name, '|')",
+        "route(foo('|'))",
+        "other.current('|')",
+        "route('home')|",
+    ] {
+        assert!(js_complete(&mut plugin, path, "javascript", marked).is_empty(), "{marked}");
+    }
+}
+
+#[test]
+fn completion_does_not_scan_project() {
+    let host = MockHost::install();
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+
+    assert!(js_complete(&mut plugin, "/project/resources/js/a.js", "javascript", "route('|')").is_empty());
+    assert!(plugin.definition(&doc("/project/resources/js/a.js", "javascript", "route('home')"), Position::new(0, 8)).is_empty());
+}
+
+#[test]
+fn js_route_replace_range_is_utf16_and_covers_the_whole_name() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let (text, at) = cursor("const é = '😀'; route('ho|me.x')");
+    let items = plugin.completion(&doc("/project/resources/js/a.js", "javascript", &text), at, None);
+
+    let start = text.find("home").unwrap();
+    let expected = Range::new(text::position(&text, start), text::position(&text, start + 6));
+    assert_eq!(items[0].replace, Some(expected));
+    assert_eq!(expected.start.character, 23);
+}
+
+#[test]
+fn inertia_render_completes_page_names_from_resources_js_pages() {
+    let host = MockHost::install();
+    laravel_project(&host);
+    host.add_file("resources/js/Pages/Posts/Index.vue", "");
+    host.add_file("resources/js/pages/Home.tsx", "");
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+
+    let names = js_complete(&mut plugin, "/project/app/Http/Controllers/X.php", "php", "<?php Inertia::render('|');");
+    assert_eq!(names, ["Home", "Posts/Index"]);
+}
+
+#[test]
+fn inertia_page_extensions_vue_jsx_tsx_svelte() {
+    let host = MockHost::install();
+    laravel_project(&host);
+    for file in ["A.vue", "B.jsx", "C.tsx", "D.svelte", "E.js"] {
+        host.add_file(&format!("resources/js/Pages/{file}"), "");
+    }
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+
+    let names = js_complete(&mut plugin, "/project/app/Http/Controllers/X.php", "php", "<?php inertia('|');");
+    assert_eq!(names, ["A", "B", "C", "D"]);
+}
+
+fn route_names(marked: &str) -> Vec<String> {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    js_complete(&mut plugin, "/project/resources/js/a.js", "javascript", marked)
+}
+
+#[test]
+fn glob_line_above_a_route_call_does_not_disable_completion() {
+    let marked = "const pages = import.meta.glob('./Pages/**/*.vue');\nroute('|')";
+    assert_eq!(route_names(marked), ROUTES);
+}
+
+#[test]
+fn url_with_double_slash_in_a_string_does_not_make_a_comment() {
+    assert_eq!(route_names("const u = 'https://example.test'; route('|')"), ROUTES);
+}
+
+#[test]
+fn real_block_comment_still_silences() {
+    assert!(route_names("/* note\n route('|') */").is_empty());
+}
+
+#[test]
+fn real_line_comment_still_silences() {
+    assert!(route_names("// route('|')").is_empty());
+}
+
+#[test]
+fn template_literal_interpolation_is_quiet() {
+    assert!(route_names("route(`a${x}|`)").is_empty());
+}
+
+#[test]
+fn stray_backtick_does_not_poison_later_lines() {
+    assert_eq!(route_names("const r = /`/;\nroute('|')"), ROUTES);
+    assert_eq!(route_names("const r = /`/;\nroute(`|`)"), ROUTES);
+}
+
+#[test]
+fn backtick_glob_does_not_open_a_block_comment_after_a_stray_backtick() {
+    assert_eq!(route_names("const r = /`/;\nconst g = import.meta.glob(`./Pages/**/*.vue`);\nroute('|')"), ROUTES);
+}
+
+#[test]
+fn slash_star_inside_a_multiline_template_literal_silences_later_lines() {
+    let marked = "const t = `\n  ./Pages/*.vue\n`;\nroute('|')";
+    assert!(route_names(marked).is_empty(), "accepted silence (safe direction), not a requirement");
+}
+
+#[test]
+fn multiline_template_plain_text_after_interpolation_is_quiet() {
+    assert!(route_names("const t = `a ${x}\nplain |text`;\nroute('home')").is_empty());
+}

@@ -1,0 +1,14 @@
+{
+  "properties": {
+    "springBoot.checkTestConstructors": {
+      "type": "boolean",
+      "title": "Warn when a Spring test class has a constructor with parameters that Spring will not autowire",
+      "default": true
+    },
+    "springBoot.checkEventListeners": {
+      "type": "boolean",
+      "title": "Check the parameters and return type of @EventListener methods",
+      "default": true
+    }
+  }
+}

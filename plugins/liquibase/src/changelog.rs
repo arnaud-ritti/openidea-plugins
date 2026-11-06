@@ -48,6 +48,10 @@ pub struct Changelog {
     pub change_sets: Vec<ChangeSet>,
     pub includes: Vec<Include>,
     pub changes: Vec<Change>,
+    /// Names declared by `property` elements, keys or `--property` lines.
+    pub properties: Vec<String>,
+    /// A `property` loads its values from a `file`, so the declared names cannot be listed.
+    pub opaque_properties: bool,
 }
 
 /// Where an include points, as far as the host can tell.
@@ -59,7 +63,7 @@ pub enum Target {
 }
 
 fn empty(format: Format, header: bool) -> Changelog {
-    Changelog { format, header, change_sets: Vec::new(), includes: Vec::new(), changes: Vec::new() }
+    Changelog { format, header, change_sets: Vec::new(), includes: Vec::new(), changes: Vec::new(), properties: Vec::new(), opaque_properties: false }
 }
 
 /// `None` when `text` isn't a Liquibase changelog (format by `path`'s extension).
@@ -94,6 +98,12 @@ fn parse_xml(text: &str) -> Option<Changelog> {
                 at: e.at,
                 end: e.at + e.name.len(),
             }),
+            "property" => {
+                if let Some(name) = e.value("name").and_then(non_empty) {
+                    log.properties.push(name);
+                }
+                log.opaque_properties |= e.attr("file").is_some();
+            }
             name @ ("include" | "includeAll") => {
                 let dir = name == "includeAll";
                 let Some(attr) = e.attr(if dir { "path" } else { "file" }) else {
@@ -139,6 +149,7 @@ fn parse_yaml(text: &str) -> Option<Changelog> {
                 include_of.push((n, dir));
                 log.includes.push(Include { path: key.value.clone(), relative: false, dir, optional: false, at: key.value_at, end: key.value_end });
             }
+            "property.file" => log.opaque_properties = true,
             _ => {}
         }
     }
@@ -150,6 +161,7 @@ fn parse_yaml(text: &str) -> Option<Changelog> {
         match (rest, set) {
             ("changeSet.id", Some(i)) => log.change_sets[i].id = non_empty(&key.value),
             ("changeSet.author", Some(i)) => log.change_sets[i].author = non_empty(&key.value),
+            ("property.name", _) => log.properties.extend(non_empty(&key.value)),
             (
                 "include.relativeToChangelogFile"
                 | "includeAll.relativeToChangelogFile"
@@ -199,6 +211,13 @@ fn parse_sql(text: &str) -> Option<Changelog> {
         if std::mem::take(&mut first) && body.eq_ignore_ascii_case("liquibase formatted sql") {
             log.header = true;
             continue;
+        }
+        if let Some(args) = body.get(.."property".len()).filter(|k| k.eq_ignore_ascii_case("property")).map(|_| &body["property".len()..]) {
+            if args.starts_with(char::is_whitespace) {
+                log.properties.extend(args.split_whitespace().find_map(|t| t.strip_prefix("name:")).and_then(non_empty));
+                log.opaque_properties |= args.split_whitespace().any(|t| t.starts_with("file:"));
+                continue;
+            }
         }
         let Some(keyword) = body.get(.."changeset".len()) else {
             continue;

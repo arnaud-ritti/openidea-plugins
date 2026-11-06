@@ -386,6 +386,7 @@ impl Providers for WebSocketTools {
         let snap = self.snapshot(doc);
         let mut markers = Vec::new();
         let mut problems = Vec::new();
+        let check_routing = host::setting_bool("springWebsocket.checkBrokerPrefixes").unwrap_or(true);
         for u in snap.of_document(doc) {
             let related = snap.related(&doc.path, u);
             match u.kind {
@@ -401,7 +402,9 @@ impl Providers for WebSocketTools {
                     markers.push(LineMarker { line: u.range.start.line, icon: None, tooltip, target });
                 }
                 Kind::Send | Kind::SendToUser | Kind::ClientSubscribe | Kind::ClientSend => {
-                    if u.kind == Kind::Send && !snap.config.brokers.is_empty() && !snap.config.routed(&u.dest) {
+                    if check_routing
+                        && u.kind == Kind::Send
+                        && !snap.config.brokers.is_empty() && !snap.config.routed(&u.dest) {
                         let message = format!(
                             "`{}` is not under a broker prefix ({}), so subscribers won't receive it.",
                             u.dest,
@@ -649,6 +652,39 @@ class KtChatController(private val messagingTemplate: SimpMessagingTemplate) {
         let targets = tools.definition(&d, Position::new(19, 45));
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].range.start, Position::new(8, 13));
+    }
+
+    fn unrouted(host: &MockHost, name: &str, text: &str) -> usize {
+        WebSocketTools::default().line_markers(&doc(name, text));
+        host.diagnostics()
+            .get(&format!("/project/src/main/java/com/acme/chat/{name}"))
+            .map_or(0, |d| d.iter().filter(|d| d.code.as_deref() == Some("unrouted-destination")).count())
+    }
+
+    #[test]
+    fn unrouted_destination_warns() {
+        let host = setup();
+        let text = "@Controller\nclass C {\n    @MessageMapping(\"/a\")\n    @SendTo(\"/elsewhere/é\")\n    void a() {}\n}\n";
+        host.add_file("src/main/java/com/acme/chat/C.java", text);
+        assert_eq!(unrouted(&host, "C.java", text), 1);
+    }
+
+    #[test]
+    fn unrouted_destination_is_quiet_for_library_or_dynamic_name() {
+        let host = setup();
+        let text = "class C {\n    void a() {\n        messagingTemplate.convertAndSend(\"${dest}\", m);\n        messagingTemplate.convertAndSend(dest(), m);\n        rabbitTemplate.send(\"/elsewhere\", m);\n        stomp.send(\"/topic/ok\", m);\n    }\n}\n";
+        host.add_file("src/main/java/com/acme/chat/C.java", text);
+        assert_eq!(unrouted(&host, "C.java", text), 0);
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = setup();
+        let bad = "class C {\n    void a() { messagingTemplate.convertAndSend(\"/elsewhere\", m); }\n}\n";
+        host.add_file("src/main/java/com/acme/chat/C.java", bad);
+        assert_eq!(unrouted(&host, "C.java", bad), 1);
+        let fixed = bad.replace("/elsewhere", "/topic/x");
+        assert_eq!(unrouted(&host, "C.java", &fixed), 0);
     }
 
     #[test]

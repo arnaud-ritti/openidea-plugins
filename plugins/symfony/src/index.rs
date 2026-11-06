@@ -52,6 +52,8 @@ pub struct Index {
     pub entries: Names,
     pub roles: Names,
     pub renders: Vec<Render>,
+    /// `symfony/framework-bundle` constraint of composer.json as (major, minor).
+    pub framework_version: Option<(u32, u32)>,
     /// The compiled routes / container were read: bundles' names are known, so
     /// a missing name is an error.
     pub compiled_routes: bool,
@@ -79,6 +81,15 @@ const BUILT_IN_ROLES: &[&str] = &[
 // ponytail: 3 s of reading per build, then the index is partial; incremental per-file updates if projects outgrow it.
 const BUDGET: Duration = Duration::from_secs(3);
 const MAX_FILES: u32 = 5000;
+
+/// The first `major.minor` of the `symfony/framework-bundle` constraint (`^6.4`, `7.*`).
+pub fn framework_version(composer: &str) -> Option<(u32, u32)> {
+    let after = &composer[composer.find("\"symfony/framework-bundle\"")? + "\"symfony/framework-bundle\"".len()..];
+    let constraint = after.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?.split('"').next()?;
+    let mut numbers = constraint.split(|c: char| !c.is_ascii_digit()).filter(|n| !n.is_empty()).map(|n| n.parse::<u32>().ok());
+    let major = numbers.next()??;
+    Some((major, numbers.next().flatten().unwrap_or(0)))
+}
 
 /// Whether the project is a Symfony application (the plugin's auto-configuration check).
 pub fn is_symfony(project: &Project) -> bool {
@@ -136,6 +147,7 @@ impl Index {
         }
 
         let composer = project.read_file("composer.json").unwrap_or_default();
+        index.framework_version = framework_version(&composer);
         for (namespace, directory) in psr4(&composer) {
             let directory = format!("{}/", directory.trim_end_matches('/'));
             for path in files(&[&format!("{directory}**/*.php")]) {
@@ -611,7 +623,7 @@ pub fn yaml_routes(path: &str, text: &str, names: &mut impl Sink) {
 }
 
 /// Value of `name="…"` (or `name='…'`) in an XML tag, with its offset.
-fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<(&'a str, usize)> {
+pub(crate) fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<(&'a str, usize)> {
     let mut from = 0;
 
     while let Some(found) = tag[from..].find(name) {
@@ -636,7 +648,7 @@ fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<(&'a str, usize)> {
 }
 
 /// Start tags `<name …>` of an XML document with their offsets.
-fn xml_tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
+pub(crate) fn xml_tags<'a>(text: &'a str, name: &str) -> Vec<(&'a str, usize)> {
     let open = format!("<{name}");
 
     text.match_indices(open.as_str())
@@ -682,7 +694,7 @@ pub fn xml_routes(path: &str, text: &str, names: &mut impl Sink) {
 
 /// End of a parenthesised argument list starting after `(` at `from`,
 /// skipping strings.
-fn closing_paren(text: &str, from: usize) -> usize {
+pub(crate) fn closing_paren(text: &str, from: usize) -> usize {
     let bytes = text.as_bytes();
     let mut depth = 1;
     let mut quote: Option<u8> = None;
@@ -783,7 +795,7 @@ pub fn php_class(text: &str) -> Option<(String, usize)> {
     Some((format!("{namespace}{}", &text[at..at + name_len]), at))
 }
 
-fn class_declaration(text: &str) -> Option<usize> {
+pub(crate) fn class_declaration(text: &str) -> Option<usize> {
     text.match_indices("class ").map(|(at, _)| at).find(|&at| {
         let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
         let before = text[line_start..at].trim();

@@ -6,6 +6,7 @@
 pub mod beans;
 pub mod config;
 pub mod diagram;
+pub mod finding;
 pub mod index;
 pub mod java;
 pub mod kotlin;

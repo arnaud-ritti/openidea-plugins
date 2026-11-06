@@ -3,6 +3,8 @@
 //! configuration files, and Spring Cloud Gateway route predicates and filters.
 //! Text-based, Java and Kotlin: names and paths match as written.
 
+mod checks;
+
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
@@ -213,6 +215,8 @@ pub struct StreamConfig {
     pub definitions: Vec<Vec<Name>>,
     /// Names declared by `spring.cloud.stream.output-bindings` and the like.
     pub declared: Vec<String>,
+    /// Binding names under binder-specific keys (`spring.cloud.stream.kafka.bindings.`).
+    pub binder_bindings: Vec<Name>,
 }
 
 /// The segment of `k` right after `prefix` (a binding name), when it is written on that key's line.
@@ -224,9 +228,18 @@ fn segment(text: &str, k: &Key, prefix: &str) -> Option<Name> {
     Some(Name { name: name.to_owned(), range: range(text, at, at + name.len()) })
 }
 
+/// `spring.cloud.stream.kafka.bindings.` of a binder-specific key.
+fn binder_prefix(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("spring.cloud.stream.")?;
+    let binder = rest.split('.').next().filter(|b| !matches!(*b, "bindings" | "function") && !b.is_empty())?;
+    let prefix_len = "spring.cloud.stream.".len() + binder.len() + ".bindings.".len();
+    key.get(..prefix_len).filter(|p| p.ends_with(".bindings."))
+}
+
 pub fn stream_config(text: &str, keys: &[Key]) -> StreamConfig {
     let mut out = StreamConfig::default();
     for k in keys {
+        out.binder_bindings.extend(binder_prefix(&k.key).and_then(|p| segment(text, k, p)));
         out.bindings.extend([BINDINGS, FUNCTION_BINDINGS].iter().filter_map(|p| segment(text, k, p)));
         if k.key.strip_prefix(FUNCTION_BINDINGS).is_some_and(|b| !b.contains('.')) && !k.value.is_empty() {
             out.aliases.push(k.value.clone());
@@ -258,7 +271,7 @@ pub fn stream_config(text: &str, keys: &[Key]) -> StreamConfig {
 }
 
 /// The function a binding name is for: `process-in-0` → `process`.
-fn function_of(binding: &str) -> Option<&str> {
+pub(crate) fn function_of(binding: &str) -> Option<&str> {
     let (rest, n) = binding.rsplit_once('-')?;
     if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -317,7 +330,7 @@ fn calls(client: &Endpoint, server: &Endpoint) -> bool {
         && same_path(&client.path, &server.path)
 }
 
-fn functions<'a>(java: &'a Index<JavaFacts>, name: &'a str) -> impl Iterator<Item = (&'a str, &'a FunctionBean)> {
+pub(crate) fn functions<'a>(java: &'a Index<JavaFacts>, name: &'a str) -> impl Iterator<Item = (&'a str, &'a FunctionBean)> {
     java.iter().flat_map(|(p, f)| f.functions.iter().map(move |b| (p, b))).filter(move |(_, b)| b.name == name)
 }
 
@@ -424,11 +437,16 @@ fn config_slot(path: &str, text: &str, at: usize) -> Option<(Slot, usize)> {
 pub struct CloudTools {
     java: Indexes<JavaFacts>,
     config: Indexes<StreamConfig>,
+    builds: Indexes<checks::Build>,
 }
 
 impl Default for CloudTools {
     fn default() -> Self {
-        Self { java: Indexes::new(SOURCE_GLOBS, java_file), config: Indexes::new(CONFIG_GLOBS, config_file) }
+        Self {
+            java: Indexes::new(SOURCE_GLOBS, java_file),
+            config: Indexes::new(CONFIG_GLOBS, config_file),
+            builds: Indexes::new(checks::BUILD_GLOBS, checks::read_build),
+        }
     }
 }
 
@@ -448,7 +466,7 @@ impl CloudTools {
 
     fn java_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let facts = facts_in(&doc.path, &doc.text);
-        let problems: Vec<Diagnostic> = facts
+        let mut problems: Vec<Diagnostic> = facts
             .unmapped
             .iter()
             .map(|&(range, custom)| {
@@ -461,8 +479,16 @@ impl CloudTools {
                 Diagnostic::new(range, severity, message).code("feign-method-without-mapping")
             })
             .collect();
+        let groups = checks::Groups::from_settings();
+        let Some((java, config)) = self.indexes(doc) else {
+            let _ = host::publish_diagnostics(&doc.path, &problems);
+            return Vec::new();
+        };
+        if groups.stream_bindings {
+            let unbound = checks::stream_channel_unbound(&doc.path, &doc.text, java, config);
+            problems.extend(unbound.iter().map(|f| f.diagnostic(&doc.text)));
+        }
         let _ = host::publish_diagnostics(&doc.path, &problems);
-        let Some((java, config)) = self.indexes(doc) else { return Vec::new() };
         let endpoints = |pick: fn(&JavaFacts) -> &Vec<Endpoint>, matches: &dyn Fn(&Endpoint) -> bool| {
             java.iter()
                 .flat_map(|(p, f)| pick(f).iter().map(move |e| (p, e)))
@@ -490,8 +516,27 @@ impl CloudTools {
         }
         let keys = config::keys(&doc.path, &doc.text);
         let mine = stream_config(&doc.text, &keys);
-        let Some((java, config)) = self.indexes(doc) else { return };
+        let groups = checks::Groups::from_settings();
         let mut problems = Vec::new();
+        if groups.bootstrap
+            && checks::is_bootstrap_file(&doc.path)
+            && let Some(project) = project_of(&doc.path)
+        {
+            let builds = self.builds.get(&project, PROVIDER_BUDGET / 2);
+            builds.update(&doc.path, &doc.text);
+            let missing = checks::bootstrap_config_missing_dependency(&doc.path, &doc.text, builds);
+            problems.extend(missing.iter().map(|f| f.diagnostic(&doc.text)));
+        }
+        let Some((java, config)) = self.indexes(doc) else {
+            let _ = host::publish_diagnostics(&doc.path, &problems);
+            return;
+        };
+        if groups.stream_bindings {
+            for b in mine.binder_bindings.iter().filter(|b| checks::binder_binding_unbound(&b.name, java, config)) {
+                let message = format!("Binder properties for binding `{}`, which spring.cloud.stream.bindings and the project's functions do not declare", b.name);
+                problems.push(Diagnostic::new(b.range, Severity::Info, message).code("stream-channel-unbound"));
+            }
+        }
         // Functions may come from libraries or Kotlin: only check projects that declare some.
         if java.complete() && java.iter().any(|(_, f)| !f.functions.is_empty()) {
             for b in mine.bindings.iter().filter(|b| !b.name.contains("${")) {
@@ -963,5 +1008,118 @@ class StreamFunctions {
         assert_eq!(function_of("input"), None);
         assert!(same_path("/api/users/{id}", "/api/users/{userId:\\d+}"));
         assert!(!same_path("/api/users", "/api/users/{id}"));
+    }
+
+    const SENDER: &str = "class Sender {\n    void go(StreamBridge bridge) { bridge.send(\"é😀-out-0\", 1); bridge.send(\"alerts-out-0\", 2); bridge.send(\"dyn-${x}\", 3); }\n}\n";
+    const SENDER_PATH: &str = "src/main/java/com/acme/Sender.java";
+
+    fn codes(host: &MockHost, path: &str) -> Vec<(String, Severity)> {
+        host.diagnostics()
+            .get(&format!("/project/{path}"))
+            .map(|d| d.iter().map(|d| (d.code.clone().unwrap_or_default(), d.severity)).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn stream_channel_unbound_warns() {
+        let host = setup();
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(SENDER_PATH, "java", SENDER));
+        assert_eq!(codes(&host, SENDER_PATH), [("stream-channel-unbound".to_owned(), Severity::Info)]);
+        let found = &host.diagnostics()[&format!("/project/{SENDER_PATH}")][0];
+        assert_eq!(found.range.start.line, 1);
+        assert_eq!(found.range.end.character - found.range.start.character, 2 + 1 + 6);
+
+        let props = "spring.cloud.stream.kafka.bindings.typo-in-0.consumer.start-offset=earliest\nspring.cloud.stream.kafka.bindings.process-in-0.consumer.start-offset=earliest\n";
+        let kafka = doc(&format!("{RESOURCES}/application-kafka.properties"), "properties", props);
+        host.add_file(&format!("{RESOURCES}/application-kafka.properties"), props);
+        let mut tools = CloudTools::default();
+        tools.line_markers(&kafka);
+        let found = &host.diagnostics()[&kafka.path];
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].code.as_deref(), written(props, found[0].range)), (Some("stream-channel-unbound"), "typo-in-0"));
+    }
+
+    #[test]
+    fn stream_channel_unbound_is_quiet_for_library_or_dynamic_name() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Sender.java", "class S { void go(KafkaTemplate t) { t.send(\"nope-out-0\", 1); } }");
+        host.add_file(&format!("{RESOURCES}/application.yml"), YAML);
+        let library = "class S { void go(KafkaTemplate t) { t.send(\"nope-out-0\", 1); } }";
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(SENDER_PATH, "java", library));
+        assert!(codes(&host, SENDER_PATH).is_empty());
+
+        let dynamic = "class S { void go(StreamBridge b, String n) { b.send(n, 1); b.send(\"a-${x}\", 1); b.send(\"only\"); } }";
+        tools.line_markers(&doc(SENDER_PATH, "java", dynamic));
+        assert!(codes(&host, SENDER_PATH).is_empty());
+
+        let no_config = MockHost::install();
+        no_config.add_file("src/main/java/com/acme/Sender.java", SENDER);
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(SENDER_PATH, "java", SENDER));
+        assert!(codes(&no_config, SENDER_PATH).is_empty());
+    }
+
+    #[test]
+    fn fixed_sender_publishes_empty_list() {
+        let host = setup();
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(SENDER_PATH, "java", SENDER));
+        assert_eq!(codes(&host, SENDER_PATH).len(), 1);
+        let fixed = SENDER.replace("é😀-out-0", "ticks-out-0");
+        tools.line_markers(&doc(SENDER_PATH, "java", &fixed));
+        assert!(codes(&host, SENDER_PATH).is_empty());
+    }
+
+    const POM: &str = "<project><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.2.4</version></parent></project>";
+    const BOOTSTRAP_PATH: &str = "src/main/resources/bootstrap.yml";
+    const BOOTSTRAP: &str = "spring:\n  application:\n    name: é😀\n";
+
+    fn bootstrap_codes(files: &[(&str, &str)]) -> Vec<(String, Severity)> {
+        let host = MockHost::install();
+        host.add_file(BOOTSTRAP_PATH, BOOTSTRAP);
+        for (path, text) in files {
+            host.add_file(path, text);
+        }
+        CloudTools::default().line_markers(&doc(BOOTSTRAP_PATH, "yaml", BOOTSTRAP));
+        codes(&host, BOOTSTRAP_PATH)
+    }
+
+    #[test]
+    fn bootstrap_config_missing_dependency_warns() {
+        assert_eq!(
+            bootstrap_codes(&[("pom.xml", POM)]),
+            [("bootstrap-config-missing-dependency".to_owned(), Severity::Warning)]
+        );
+        let gradle = "plugins {\n    id 'org.springframework.boot' version '3.1.0'\n}\n";
+        assert_eq!(bootstrap_codes(&[("build.gradle", gradle)]).len(), 1);
+        let kts = "plugins { id(\"org.springframework.boot\") version \"2.7.18\" }";
+        assert_eq!(bootstrap_codes(&[("build.gradle.kts", kts)]).len(), 1);
+    }
+
+    #[test]
+    fn bootstrap_config_missing_dependency_is_quiet_for_library_or_dynamic_name() {
+        let starter = format!("{POM}<dependency><artifactId>spring-cloud-starter-bootstrap</artifactId></dependency>");
+        assert!(bootstrap_codes(&[("pom.xml", &starter)]).is_empty());
+        assert!(bootstrap_codes(&[("pom.xml", POM), ("gradle/libs.versions.toml", "boot = { module = \"org.springframework.cloud:spring-cloud-starter-bootstrap\" }")]).is_empty());
+        assert!(bootstrap_codes(&[("pom.xml", &POM.replace("3.2.4", "${boot.version}"))]).is_empty());
+        assert!(bootstrap_codes(&[("pom.xml", &POM.replace("3.2.4", "2.3.12.RELEASE"))]).is_empty());
+        assert!(bootstrap_codes(&[]).is_empty());
+        assert!(bootstrap_codes(&[("pom.xml", POM), ("src/main/resources/application.properties", "spring.cloud.bootstrap.enabled=true")]).is_empty());
+    }
+
+    #[test]
+    fn fixed_bootstrap_publishes_empty_list() {
+        let host = MockHost::install();
+        host.add_file("pom.xml", POM);
+        host.add_file(BOOTSTRAP_PATH, BOOTSTRAP);
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(BOOTSTRAP_PATH, "yaml", BOOTSTRAP));
+        assert_eq!(codes(&host, BOOTSTRAP_PATH).len(), 1);
+        host.add_file("pom.xml", &format!("{POM}<artifactId>spring-cloud-starter-bootstrap</artifactId>"));
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(BOOTSTRAP_PATH, "yaml", BOOTSTRAP));
+        assert!(codes(&host, BOOTSTRAP_PATH).is_empty());
     }
 }

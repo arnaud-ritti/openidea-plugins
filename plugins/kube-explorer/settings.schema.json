@@ -4,6 +4,46 @@
       "type": "string",
       "title": "Kubeconfig file (leave empty to use KUBECONFIG or ~/.kube/config)",
       "default": ""
+    },
+    "debugImage": {
+      "type": "string",
+      "title": "Image of the ephemeral debug container (Debug button on a pod)",
+      "default": "busybox:stable"
+    },
+    "allowRevealSecrets": {
+      "type": "boolean",
+      "title": "Allow Show Secret and YAML on a secret (off: secret data is never read; on: YAML of a secret is shown unstripped)",
+      "default": false
+    },
+    "checkDeprecatedApiVersions": {
+      "type": "boolean",
+      "title": "Report removed or deprecated apiVersions (extensions/v1beta1, batch/v1beta1, ...)",
+      "default": true
+    },
+    "checkDuplicateEnvNames": {
+      "type": "boolean",
+      "title": "Report an env variable defined twice in one container",
+      "default": true
+    },
+    "checkMissingName": {
+      "type": "boolean",
+      "title": "Report a built-in resource without metadata.name or generateName",
+      "default": true
+    },
+    "checkMissingSelector": {
+      "type": "boolean",
+      "title": "Report a Deployment, StatefulSet, DaemonSet or ReplicaSet without spec.selector",
+      "default": true
+    },
+    "checkHelmWhitespaceTrim": {
+      "type": "boolean",
+      "title": "Report Helm whitespace trim markers written without a space ({{-foo, foo-}})",
+      "default": true
+    },
+    "checkChartKeys": {
+      "type": "boolean",
+      "title": "Report a Chart.yaml without apiVersion, name or version",
+      "default": true
     }
   }
 }

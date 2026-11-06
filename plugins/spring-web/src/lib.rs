@@ -15,9 +15,10 @@ use spring_text::{SOURCE_GLOBS, config, contains, is_kotlin, range};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+mod checks;
 mod endpoints;
 
-const MAPPINGS: [&str; 6] =
+pub(crate) const MAPPINGS: [&str; 6] =
     ["RequestMapping", "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping"];
 /// Template engines Spring Boot auto-configures, looked up under `templates/`.
 const TEMPLATE_EXTENSIONS: [&str; 7] = ["html", "ftlh", "ftl", "mustache", "peb", "jte", "kte"];
@@ -33,6 +34,8 @@ const NOT_BINDERS: [&str; 52] = [
     "Pageable", "Sort", "MultipartFile", "HttpHeaders",
 ];
 const CONFIG_GLOBS: &[&str] = &["**/application*.properties", "**/application*.yml", "**/application*.yaml"];
+const VERSIONING_GLOBS: &[&str] =
+    &["**/*.java", "**/*.kt", "**/application*.properties", "**/application*.yml", "**/application*.yaml"];
 /// View resolution settings: (prefix key, suffix key, default prefix, default suffix).
 const VIEW_SETTINGS: [(&str, &str, &str, &str); 2] = [
     ("spring.mvc.view.prefix", "spring.mvc.view.suffix", "", ".jsp"),
@@ -302,6 +305,7 @@ fn handler_targets(index: &Index<FileInfo>, path: &str, handler: &Handler) -> Ve
 pub struct WebTools {
     endpoints: Indexes<FileInfo>,
     settings: Indexes<Vec<(String, String)>>,
+    versioning: Indexes<checks::Versioning>,
     /// Glob → when listed and the files.
     listings: BTreeMap<String, (Instant, Vec<String>)>,
 }
@@ -311,12 +315,32 @@ impl Default for WebTools {
         Self {
             endpoints: Indexes::new(SOURCE_GLOBS, endpoints::file_info),
             settings: Indexes::new(CONFIG_GLOBS, view_settings),
+            versioning: Indexes::new(VERSIONING_GLOBS, checks::versioning),
             listings: BTreeMap::new(),
         }
     }
 }
 
 impl WebTools {
+    /// The findings of the text checks over a Java document.
+    fn checked(&mut self, doc: &Document) -> Vec<Diagnostic> {
+        if is_kotlin(&doc.path) {
+            return Vec::new();
+        }
+        let groups = checks::Groups::from_settings();
+        let configured = match self.versioning.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
+            Some(index) if groups.api_versioning => {
+                let files: Vec<_> = index.iter().map(|(_, v)| *v).collect();
+                checks::project_versioning(index.complete(), &files)
+            }
+            _ => None,
+        };
+        checks::check_java(&java::parse(&doc.text), configured, groups)
+            .iter()
+            .map(|f| f.diagnostic(&doc.text))
+            .collect()
+    }
+
     /// The project's templates, those of the document's module first.
     fn templates(&mut self, doc: &Document) -> Vec<Template> {
         let Some(project) = project_of(&doc.path) else { return Vec::new() };
@@ -422,7 +446,8 @@ fn problems(doc: &Document) -> Vec<Problem> {
 
 impl Providers for WebTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        let diagnostics: Vec<Diagnostic> = problems(doc).into_iter().map(|p| p.diagnostic).collect();
+        let mut diagnostics: Vec<Diagnostic> = problems(doc).into_iter().map(|p| p.diagnostic).collect();
+        diagnostics.extend(self.checked(doc));
         let _ = host::publish_diagnostics(&doc.path, &diagnostics);
         let links = self.links(doc).into_iter().map(|l| {
             let others = if l.targets.len() > 1 { format!(" (+{} more)", l.targets.len() - 1) } else { String::new() };
@@ -762,5 +787,25 @@ class UserApiTests {
         assert_eq!(labels, ["fragments/card", "users/list", "users/show", "home"]);
         assert_eq!(items[0].replace, Some(Range::new(Position::new(19, 30), Position::new(19, 32))));
         assert!(tools.completion(&d, Position::new(24, 30), None).is_empty(), "not a handler method");
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/application.properties", "server.port=1\n");
+        let path = "src/main/java/com/acme/web/Api.java";
+        let broken = "package a;\nimport org.springframework.web.bind.annotation.*;\n@RestController\nclass Api {\n    @GetMapping(path = \"/é😀\", version = \"2\")\n    String a() { return \"\"; }\n    @InitBinder\n    String b(WebDataBinder d) { return \"\"; }\n}\n";
+        let mut tools = WebTools::default();
+        tools.line_markers(&doc(path, broken));
+        let key = format!("/project/{path}");
+        let found = &host.diagnostics()[&key];
+        let codes: Vec<_> = found.iter().filter_map(|d| d.code.as_deref()).collect();
+        assert_eq!(codes, ["api-version-mismatch", "init-binder-signature"]);
+        assert_eq!(found[0].range.start.line, 4);
+        assert_eq!(found[0].range.end.character - found[0].range.start.character, 3);
+
+        let fixed = broken.replace(", version = \"2\"", "").replace("String b(", "void b(").replace("return \"\"; }\n}", "}\n}");
+        tools.line_markers(&doc(path, &fixed));
+        assert!(host.diagnostics().get(&key).is_none_or(|d| d.is_empty()));
     }
 }

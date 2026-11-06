@@ -4,6 +4,7 @@
 //! `@ConfigurationProperties` classes) and cron expression checks in
 //! `@Scheduled(cron = …)` and `*.cron` keys. Text-based, Java only.
 
+mod checks;
 mod cron;
 mod meta;
 
@@ -26,13 +27,26 @@ fn placeholder(s: &str) -> bool {
     s.contains("${") || s.contains("#{")
 }
 
+const AUTOWIRE_MODE_GLOBS: &[&str] = &[
+    "**/spring.properties",
+    "**/junit-platform.properties",
+    "**/application*.properties",
+    "**/application*.yml",
+    "**/application*.yaml",
+    "**/pom.xml",
+    "**/build.gradle",
+    "**/build.gradle.kts",
+    "**/gradle.properties",
+];
+
 pub struct BootTools {
     sources: Indexes<Meta>,
+    autowire_mode: Indexes<bool>,
 }
 
 impl Default for BootTools {
     fn default() -> Self {
-        Self { sources: Indexes::new(SOURCES, parse_source) }
+        Self { sources: Indexes::new(SOURCES, parse_source), autowire_mode: Indexes::new(AUTOWIRE_MODE_GLOBS, checks::sets_autowire_mode) }
     }
 }
 
@@ -47,6 +61,16 @@ impl BootTools {
             catalog.add(meta);
         }
         (catalog, index.complete())
+    }
+
+    /// The text checks over a Java document; they need the whole project read to tell whether the autowire mode is set.
+    fn checked(&mut self, doc: &Document) -> Vec<Diagnostic> {
+        let groups = checks::Groups::from_settings();
+        let mode_set = match self.autowire_mode.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
+            Some(index) if groups.test_constructors && index.complete() => Some(index.iter().next().is_some()),
+            _ => None,
+        };
+        checks::check_java(&java::parse(&doc.text), mode_set, groups).iter().map(|f| f.diagnostic(&doc.text)).collect()
     }
 }
 
@@ -172,7 +196,9 @@ impl Providers for BootTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let problems = if doc.path.ends_with(".java") {
             self.sources.for_document(&doc.path, &doc.text, PROVIDER_BUDGET);
-            cron_problems(&doc.text)
+            let mut problems = cron_problems(&doc.text);
+            problems.extend(self.checked(doc));
+            problems
         } else if is_config_file(&doc.path) {
             let (project, complete) = self.project(doc);
             let lookup = Lookup(vec![&project, bundled()]);
@@ -401,5 +427,42 @@ public class MailProperties {
         assert_eq!(codes(&found), [("invalid-cron", "Cron hour `25`: 25 is outside 0-23.")]);
         let at = java.find("0 0 25").unwrap();
         assert_eq!(found[0].range, range(java, at, at + 12));
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        host.add_file("src/test/resources/spring.properties", "other=1\n");
+        let path = "/project/src/test/java/OwnerTests.java";
+        let broken = "import org.springframework.context.event.EventListener;\n@SpringBootTest\nclass OwnerTests {\n    OwnerTests(Service s) {}\n    @EventListener\n    void é😀(A a, B b) {}\n}\n";
+        let mut tools = BootTools::default();
+        tools.line_markers(&doc(path, broken));
+        let found = &host.diagnostics()[path];
+        let codes: Vec<_> = found.iter().filter_map(|d| d.code.as_deref()).collect();
+        assert_eq!(codes, ["test-constructor-autowire", "event-listener-signature"]);
+        assert_eq!(found[1].range, range(broken, broken.find("é😀").unwrap(), broken.find("(A").unwrap()));
+        assert_eq!(found[1].range.end.character - found[1].range.start.character, 3);
+
+        let fixed = broken.replace("    OwnerTests(", "    @Autowired OwnerTests(").replace("(A a, B b)", "(A a)");
+        tools.line_markers(&doc(path, &fixed));
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn junit_platform_properties_sets_autowire_mode() {
+        let host = MockHost::install();
+        host.add_file("src/test/resources/junit-platform.properties", "spring.test.constructor.autowire.mode=all\n");
+        let path = "/project/src/test/java/OwnerTests.java";
+        BootTools::default().line_markers(&doc(path, "@SpringBootTest\nclass OwnerTests {\n    OwnerTests(Service s) {}\n}\n"));
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn test_constructor_check_is_quiet_when_mode_is_configured() {
+        let host = MockHost::install();
+        host.add_file("src/test/resources/spring.properties", "spring.test.constructor.autowire.mode=all\n");
+        let path = "/project/src/test/java/OwnerTests.java";
+        BootTools::default().line_markers(&doc(path, "@SpringBootTest\nclass OwnerTests {\n    OwnerTests(Service s) {}\n}\n"));
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
     }
 }

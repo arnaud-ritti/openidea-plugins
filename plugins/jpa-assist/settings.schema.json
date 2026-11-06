@@ -11,6 +11,21 @@
       "title": "Language for entities copied from CREATE TABLE",
       "enum": ["java", "kotlin"],
       "default": "java"
+    },
+    "jpaAssist.checkEntityId": {
+      "type": "boolean",
+      "title": "Warn about entities with no @Id, @EmbeddedId or @IdClass, own or inherited",
+      "default": true
+    },
+    "jpaAssist.checkAttributeTypes": {
+      "type": "boolean",
+      "title": "Warn about @Temporal, @Enumerated and @Version on types the JPA specification does not allow",
+      "default": true
+    },
+    "jpaAssist.checkListenerSignatures": {
+      "type": "boolean",
+      "title": "Warn about lifecycle callbacks with the wrong parameters or return type",
+      "default": true
     }
   }
 }

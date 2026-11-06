@@ -176,6 +176,46 @@ pub fn checkout(project: &Project, remote: &str, mr: &MergeRequest) -> Result<St
     Ok(format!("Checked out {local}."))
 }
 
+/// The `git` calls that add a worktree for a merge request's branch.
+#[derive(Debug, PartialEq)]
+pub struct WorktreePlan {
+    pub path: String,
+    pub fetch: Vec<String>,
+    pub add: Vec<String>,
+}
+
+/// `<parent of root>/<repository folder>-<branch>`, the branch reduced to `[A-Za-z0-9_.]` words; `None` when nothing is left of it.
+pub fn worktree_path(root: &str, branch: &str) -> Option<String> {
+    let root = root.trim_end_matches(['/', '\\']);
+    let (parent, name) = root.rsplit_once(['/', '\\']).unwrap_or(("", root));
+    let words: String = branch.chars().map(|c| if c.is_ascii_alphanumeric() || "_.".contains(c) { c } else { '-' }).collect();
+    let words = words.split('-').filter(|w| !w.trim_matches('.').is_empty()).collect::<Vec<_>>().join("-");
+    let words = words.trim_matches(['-', '.']);
+
+    (!words.is_empty()).then(|| format!("{parent}/{name}-{words}"))
+}
+
+/// Same sources as [`checkout`] (the branch, or `refs/merge-requests/<iid>/head` for forks), fetched to a remote-tracking ref and checked out detached.
+pub fn worktree_plan(root: &str, remote: &str, mr: &MergeRequest) -> Result<WorktreePlan, Error> {
+    if mr.source_branch.starts_with('-') {
+        return Err(Error::Failed(format!("Refusing the branch name `{}`: it looks like a git option.", mr.source_branch)));
+    }
+
+    let path = worktree_path(root, &mr.source_branch).ok_or_else(|| Error::Failed(format!("`{}` is not a usable branch name.", mr.source_branch)))?;
+    let local = local_branch(mr);
+    let tracking = format!("{remote}/{local}");
+    let source = match mr.source_project_id == mr.target_project_id {
+        true => format!("refs/heads/{local}"),
+        false => format!("refs/merge-requests/{}/head", mr.iid),
+    };
+
+    Ok(WorktreePlan {
+        fetch: vec!["fetch".into(), remote.into(), format!("+{source}:refs/remotes/{tracking}")],
+        add: ["worktree", "add", "--detach", "--", &path, &tracking].map(String::from).to_vec(),
+        path,
+    })
+}
+
 impl GitLab {
     fn clear_branch(&mut self) {
         if self.branch.take().is_some() {
@@ -279,6 +319,7 @@ impl GitLab {
                 diagnostic.source = Some("GitLab".into());
                 diagnostic
             })
+            .chain(self.ci_problems.get(path).cloned().unwrap_or_default())
             .collect();
 
         if diagnostics.is_empty() && !self.published.contains(path) {

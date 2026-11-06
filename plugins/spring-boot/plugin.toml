@@ -28,3 +28,7 @@ languages = ["properties", "yaml"]
 [[contributes.providers]]
 kinds = ["line-markers"]
 languages = ["java"]
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Spring Boot"

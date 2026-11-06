@@ -10,6 +10,10 @@
 
 **Spec:** [`docs/audit-2026-11-06.md`](../../audit-2026-11-06.md) (verdict table, _Feasibility check_, _Limitations of the audit_), [`PARITY.md`](../../../PARITY.md) (_Audit update 2026-11-06_). Supersedes the overlapping tasks of [`2026-11-06-parity-improvement.md`](2026-11-06-parity-improvement.md); the Track U (upstream) section of that plan still applies to every **B** row, which is out of scope here.
 
+## Outcome
+
+Executed on branch `feasible-parity` (46 commits over `0c3ef63`); every task is tagged below. Skipped: Task 1 (IDE probe, no IDE in the session, so template placeholders, prefilled code-action edits, the language ids `vue`/`javascriptreact`/`typescriptreact` and `on-event:` activation stay unverified), Task 17 (Pest navigation, FormRequest promotion) and Task 23 (nothing feasible). Narrowed: `spring-security` `matcher-order` is new for Java/Kotlin because `unreachable-patterns` was XML-only; `spring-graphql` (`unknown-schema-field`) and `spring-websocket` (`unrouted-destination`) already had the check, so only a setting and tests were added; `gitlab` already had the rebase API, so only palette commands were added; Symfony `duplicate-service-key` and `unquoted-at-sign` already existed; `devcontainer` templates and `read-configuration`, `liquibase` duplicate-changeset, the Flyway view and OpenAPI JSON already existed (Task 21 added only Liquibase `unresolved-property` and the OpenAPI/AsyncAPI templates); Quarkus `missing-required` was dropped (the metadata has no required-ness); the Laravel scope-call-to-attribute intention was dropped; `spring-batch` Java step-not-a-bean and `spring-websocket` controller-less `@MessageMapping` were skipped as false-positive prone; `spring-cloud` stream checks cover `StreamBridge` literals only; Task 12 delivers inspections only (directive completion stays in `aritti.laravel`); Task 15 has Ziggy `route()` completion and definition but no Inertia page completion in JS. `Finding` lives in `crates/spring-text` for the Spring plugins; other plugins carry a local copy.
+
 ## Baseline: what `parity-improvement` already did
 
 An earlier session executed [`2026-11-06-parity-improvement.md`](2026-11-06-parity-improvement.md) on branch `parity-improvement` (worktree `/Users/aritti/Projects/openidea-plugins-parity`, head `e4ef2e5`, 108 commits ahead of `main`, merged from `parity-a1`, `parity-a2`, `parity-b`, `parity-d`). Checked 2026-11-06: `git merge-tree` against `main` is conflict-free on committed files, all 36 plugins pass `cargo test` on the branch (more tests than on `main`, for example `laravel` 73 against 42, `spring-data` 20 against 5, `spring-web` 13 against 5), and there are no dead-code warnings (`jpql.rs` is wired in).
@@ -62,7 +66,7 @@ Unless a task says otherwise, steps are:
 
 ## Phase 0: Land the baseline and de-risk the F\* rows
 
-### Task 0 [PARTLY DONE]: Land the audit work on `main`
+### Task 0 [DONE]: Land the audit work on `main`
 
 `parity-improvement` is merged (`efb7abe`, 2026-11-06 13:20). What remains uncommitted in the root checkout: 36 `plugin.toml` release-please markers (including `laravel` and `blade`), `release-please-config.json`, `.release-please-manifest.json`, 21 new `plugins/*/LICENSE` files, `docs/audit-2026-11-06.md`, this plan, and the re-applied `PARITY.md` section _Audit update 2026-11-06_ (the first version was lost when the untracked file was replaced by the merge).
 
@@ -71,7 +75,7 @@ Unless a task says otherwise, steps are:
 - [ ] **Step 3:** Decide with the owner whether `docs/audit-2026-11-06.md` (which names the decompile) is published; `PARITY.md` carries only the short factual note.
 - [ ] **Step 4:** `for d in plugins/*/; do (cd "$d" && openidea-plugin build) || echo "FAILED: $d"; done` on the merged `main`; expect no `FAILED` line.
 
-### Task 1 [OPEN]: Probe the three untested IDE behaviours
+### Task 1 [SKIPPED: no IDE in the session]: Probe the three untested IDE behaviours
 
 Gates Task 12 (Blade completion), 15 (Inertia/Ziggy), 8 (GitLab CI navigation) and 18 (YAML intentions).
 
@@ -90,7 +94,7 @@ Gates Task 12 (Blade completion), 15 (Inertia/Ziggy), 8 (GitLab CI navigation) a
 
 Each task adds `src/checks.rs` to the plugin (pure functions over `spring_text::java::JavaFile`/text returning `Vec<Finding>` with `start`, `end`, `code`, `message`), publishes them where the plugin already publishes (or on `file-opened`/`file-saved`), and a boolean setting. Pattern to follow: `publish_field_injections` in `plugins/spring-beans/src/lib.rs`.
 
-### Task 2 [OPEN]: `spring-beans` core inspections
+### Task 2 [DONE]: `spring-beans` core inspections
 
 **Files:** Create `plugins/spring-beans/src/checks.rs`; modify `src/lib.rs`, `src/tests.rs`, `plugin.toml` (activation events `on-event:file-opened`, `file-saved` if absent), `settings.schema.json`.
 
@@ -107,7 +111,7 @@ Tests (names; each asserts the code and the highlighted text):
 
 - [ ] Steps: shared shape. `self-invocation` ships default **off** (setting `springBeans.checkSelfInvocation`).
 
-### Task 3 [OPEN]: `spring-beans` unresolved references (F\*, default off)
+### Task 3 [DONE]: `spring-beans` unresolved references (F\*, default off)
 
 **Files:** Modify `plugins/spring-beans/src/{checks.rs,lib.rs,tests.rs}`, `settings.schema.json`.
 
@@ -117,7 +121,7 @@ Tests: `depends_on_unknown_name_warns_when_enabled`; `depends_on_is_quiet_when_p
 
 - [ ] Steps: shared shape. Document in README that library and auto-configured beans are invisible, so the check is off by default.
 
-### Task 4 [PARTIAL]: `spring-security` matcher checks
+### Task 4 [DONE]: `spring-security` matcher checks
 
 **Files:** Modify `plugins/spring-security/src/lib.rs` (add `checks` module), tests in the same file.
 
@@ -137,7 +141,7 @@ Tests: `update_query_without_modifying_warns`; `page_return_without_pageable_par
 
 - [ ] Steps: shared shape.
 
-### Task 6 [PARTIAL]: `spring-web`, `spring-boot`, `spring-cloud`, `spring-graphql`, `spring-batch`, `spring-websocket` small checks
+### Task 6 [DONE]: `spring-web`, `spring-boot`, `spring-cloud`, `spring-graphql`, `spring-batch`, `spring-websocket` small checks
 
 One commit per plugin. Each adds a `checks` module with one or two codes, tests `<code>_warns` and `<code>_is_quiet_for_library_or_dynamic_name`:
 
@@ -149,7 +153,7 @@ One commit per plugin. Each adds a `checks` module with one or two codes, tests 
 
 - [ ] Steps: shared shape per plugin.
 
-### Task 7 [OPEN]: `jpa-assist` checks
+### Task 7 [DONE]: `jpa-assist` checks
 
 **Files:** Modify `plugins/jpa-assist/src/{model.rs,lib.rs}`, tests.
 
@@ -163,7 +167,7 @@ Tests: `entity_without_id_warns`; `entity_with_embedded_id_is_quiet`; `mapped_su
 
 ## Phase 2: Source-port gaps
 
-### Task 8 [OPEN]: `gitlab` CI file support
+### Task 8 [DONE]: `gitlab` CI file support
 
 **Files:** Create `plugins/gitlab/src/ci.rs`; modify `src/lib.rs`, `plugin.toml` (provider `kinds = ["definition"]`, `languages = ["yaml"]`; activation `on-file:**/.gitlab-ci.yml`, `on-file:**/*.gitlab-ci.yml`), `src/tests.rs`.
 
@@ -173,7 +177,7 @@ Tests: `needs_unknown_job_warns`; `extends_hidden_job_is_defined`; `stage_not_in
 
 - [ ] Steps: shared shape. The reader is a block scanner (top-level keys, `needs:`/`extends:` lists, `script:` blocks), not a YAML parser; unknown shapes yield no findings.
 
-### Task 9 [OPEN]: `gitlab` worktree and update branch (F\*)
+### Task 9 [DONE]: `gitlab` worktree and update branch (F\*)
 
 **Files:** Modify `plugins/gitlab/src/{review.rs,branch.rs,lib.rs}`, `plugin.toml`, tests.
 
@@ -183,7 +187,7 @@ Tests: `worktree_args_use_the_merge_request_branch`; `update_branch_request_targ
 
 - [ ] Steps: shared shape.
 
-### Task 10 [OPEN]: `quarkus` property checks
+### Task 10 [DONE]: `quarkus` property checks
 
 **Files:** Modify `plugins/quarkus/src/{lib.rs,java.rs}`, create `src/checks.rs`, tests in `lib.rs`.
 
@@ -193,7 +197,7 @@ Tests: `duplicate_key_in_same_profile_warns`; `same_key_in_different_profiles_is
 
 - [ ] Steps: shared shape.
 
-### Task 11 [PARTIAL]: `symfony` text inspections and New-menu templates
+### Task 11 [DONE]: `symfony` text inspections and New-menu templates
 
 **Files:** Create `plugins/symfony/src/checks.rs`, `plugins/symfony/templates/*.php`; modify `src/{lib.rs,index.rs}`, `plugin.toml`, `settings.schema.json`.
 
@@ -209,7 +213,7 @@ Test `every_template_is_registered_and_exists` iterating `plugin.toml`.
 
 ## Phase 3: Laravel and Blade
 
-### Task 12 [PARTIAL]: `blade` inspections (directive completion already lives in `aritti.laravel`)
+### Task 12 [DONE]: `blade` inspections (directive completion already lives in `aritti.laravel`)
 
 **Files:** Modify `plugins/blade/src/lib.rs` (move checks to `src/checks.rs`), `plugin.toml` (`completion` provider for `blade`, activation `on-event:file-opened`), tests.
 
@@ -229,7 +233,7 @@ Tests: `finds_directive_names_in_providers`; `ignores_commented_directives`; `di
 
 - [ ] Steps: shared shape.
 
-### Task 14 [PARTIAL]: `laravel` Eloquent inspections and intentions
+### Task 14 [DONE]: `laravel` Eloquent inspections and intentions
 
 **Files:** Create `plugins/laravel/src/eloquent_checks.rs`, `src/intentions.rs`; modify `src/{lib.rs,php.rs,tests.rs}`, `plugin.toml` (provider `code-actions` for `php`, `blade`).
 
@@ -239,7 +243,7 @@ Tests: `guarded_attribute_assigned_through_fill_warns`; `prunable_model_without_
 
 - [ ] Steps: shared shape; commit inspections and intentions separately.
 
-### Task 15 [OPEN]: `laravel` JS/TS completion (F\*)
+### Task 15 [DONE]: `laravel` JS/TS completion (F\*)
 
 **Files:** Modify `plugins/laravel/src/{lib.rs,refs.rs}`, `plugin.toml` (`completion` + `definition` for `javascript`, `typescript`, `vue`; activation `on-language:vue` stays off).
 
@@ -257,7 +261,7 @@ Tests: `unknown_blade_component_warns`; `package_component_namespace_is_skipped`
 
 - [ ] Steps: shared shape.
 
-### Task 17 [OPEN (optional)]: `laravel` Pest navigation and FormRequest promotion (F\*, optional)
+### Task 17 [SKIPPED: optional, both tests need types]: `laravel` Pest navigation and FormRequest promotion (F\*, optional)
 
 **Files:** `plugins/laravel/src/{php.rs,lib.rs,tests.rs}`.
 
@@ -269,7 +273,7 @@ Tests: `pest_it_description_links_to_matching_subject_only_when_unique`; `promot
 
 ## Phase 4: Kubernetes, dev containers, config
 
-### Task 18 [OPEN]: `kube-explorer` manifest inspections and intentions
+### Task 18 [DONE]: `kube-explorer` manifest inspections and intentions
 
 **Files:** Create `plugins/kube-explorer/src/{manifest.rs,checks.rs}`; modify `src/lib.rs`, `plugin.toml` (provider `code-actions` for `yaml`; activation `on-file:**/*.yaml` is too broad, use `on-event:file-opened` and test the first lines), tests.
 
@@ -279,7 +283,7 @@ Tests: `non_kubernetes_yaml_is_ignored`; `deprecated_ingress_api_version_warns`;
 
 - [ ] Steps: shared shape.
 
-### Task 19 [OPEN]: `kube-explorer` templates, debug container, secrets (F\*)
+### Task 19 [DONE]: `kube-explorer` templates, debug container, secrets (F\*)
 
 **Files:** `plugins/kube-explorer/templates/*.yaml`, `src/lib.rs`, `plugin.toml`, tests.
 
@@ -289,13 +293,13 @@ Tests: `every_template_is_registered_and_exists`; `debug_args_include_context_na
 
 - [ ] Steps: shared shape.
 
-### Task 20 [PARTIAL]: `devcontainer` inspections and templates
+### Task 20 [DONE]: `devcontainer` inspections and templates
 
 **Files:** `plugins/devcontainer/src/lib.rs`, `plugin.toml`, `templates/*.json`. Codes `unknown-property`, `features-malformed`; command `Read Configuration` via `devcontainer read-configuration` (5 s). Tests: `unknown_top_level_property_warns`; `read_configuration_json_is_summarised_in_notification`; `all_templates_registered`. Superseded plan Task 20 is replaced.
 
 - [ ] Steps: shared shape. Remember `find_files` skips `.devcontainer`: probe `.devcontainer/devcontainer.json` with `read_file`.
 
-### Task 21 [PARTIAL]: `flyway`, `liquibase`, `openapi` leftovers
+### Task 21 [DONE]: `flyway`, `liquibase`, `openapi` leftovers
 
 - [ ] **Step 1:** `plugins/liquibase`: the duplicate-changeset check exists in `src/checks.rs`; confirm `unresolved-property` and add it if absent with the test `duplicate_id_and_author_warns` and `unresolved_property_placeholder_warns`. Add changelog `fileTemplates` (XML, YAML).
 - [ ] **Step 2:** `plugins/openapi`: JSON specs and `$ref` resolution (superseded plan Task 10): tests `json_ref_resolves_and_reports_unresolved`, `ref_file_completion_uses_cached_file_list`. Add OpenAPI/AsyncAPI templates.
@@ -310,7 +314,7 @@ Tests: `laravel_log_line_is_parsed_with_the_default_pattern` (`[2026-11-06 10:00
 
 - [ ] Steps: shared shape.
 
-### Task 23: Small existing-plugin items still marked F in the audit
+### Task 23 [SKIPPED: nothing feasible]: Small existing-plugin items still marked F in the audit
 
 - [ ] `tasks`: nothing feasible (all **B**). `properties`: nothing (all **B**). `dotenv` Docker `env_file` and flow-style YAML (earlier plan Task 8) is extra, not parity: optional.
 - [ ] `dependency-audit` is outside this audit: leave to the earlier plan (Task 9).

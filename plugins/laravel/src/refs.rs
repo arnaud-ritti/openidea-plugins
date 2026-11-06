@@ -113,8 +113,8 @@ impl Site {
         self.callee.strip_prefix('@').is_some_and(|name| names.contains(&name))
     }
 
-    /// The string is the value of a key in the rules array itself, not in a nested list or the messages array.
-    fn is_rule_value(&self, text: &str) -> bool {
+    /// The argument holding the rules array of a validation call.
+    fn rules_argument(&self, text: &str) -> usize {
         let is_array = |range: Option<&Range<usize>>| {
             range.is_some_and(|r| {
                 let argument = text[php::trimmed(text, r.clone())].trim_start();
@@ -126,7 +126,7 @@ impl Site {
             Some(php::arguments(text, open))
         };
 
-        let rules_argument = match self.callee.as_str() {
+        match self.callee.as_str() {
             "$this->validate" => {
                 let arguments = arguments().unwrap_or_default();
                 usize::from(!is_array(arguments.first()))
@@ -137,8 +137,17 @@ impl Site {
             }
             _ if self.is_method(&["validateWithBag"]) || self.is_static(&["Validator"], &["make"]) || self.is_function(&["validator"]) => 1,
             _ => 0,
-        };
-        self.depth == 1 && self.key.is_some() && self.arg == rules_argument
+        }
+    }
+
+    /// The string is the value of a key in the rules array itself, not in a nested list or the messages array.
+    fn is_rule_value(&self, text: &str) -> bool {
+        self.depth == 1 && self.key.is_some() && self.arg == self.rules_argument(text)
+    }
+
+    /// The string is an element of the list of rules of a key of the rules array.
+    fn is_rule_list_element(&self, text: &str) -> bool {
+        self.depth == 2 && self.key.is_none() && self.outer_key.is_some() && self.arg == self.rules_argument(text)
     }
 
     fn direct(&self, argument: usize) -> bool {
@@ -617,6 +626,27 @@ pub fn literal_at(language: &str, text: &str, at: usize) -> Option<(Kind, Range<
                 found = classify(text, language, literal, site)
                     .filter(|(kind, _)| *kind != Kind::Rule || site.is_rule_value(text))
                     .map(|(kind, _)| (kind, literal.start..literal.end));
+            }
+            return false;
+        }
+        true
+    });
+
+    found
+}
+
+/// The bracket opening the list of rules whose element is at `at`: `['required', 'email']` of `'email' => [...]`.
+pub fn rule_list_at(language: &str, text: &str, at: usize) -> Option<usize> {
+    let from = window_start(language, text, at)?;
+    let mut found = None;
+
+    walk(text, from, text.len(), language != "blade", false, |literal, site| {
+        if literal.start > at {
+            return false;
+        }
+        if at <= literal.end {
+            if literal.closed && matches!(classify(text, language, literal, site), Some((Kind::Rule, _))) && site.is_rule_list_element(text) {
+                found = site.array_open;
             }
             return false;
         }

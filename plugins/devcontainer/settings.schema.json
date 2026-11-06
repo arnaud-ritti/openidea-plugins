@@ -4,6 +4,16 @@
       "type": "string",
       "title": "Configuration file, relative to the project root (leave empty to use .devcontainer/devcontainer.json, then .devcontainer.json)",
       "default": ""
+    },
+    "checkProperties": {
+      "type": "boolean",
+      "title": "Warn about misspelled top-level properties in devcontainer.json",
+      "default": true
+    },
+    "checkFeatures": {
+      "type": "boolean",
+      "title": "Check the shape of the features object in devcontainer.json",
+      "default": true
     }
   }
 }

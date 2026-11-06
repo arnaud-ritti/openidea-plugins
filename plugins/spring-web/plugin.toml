@@ -16,3 +16,7 @@ required = ["project.read"]
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers", "code-actions"]
 languages = ["java", "kotlin"]
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Spring Web"

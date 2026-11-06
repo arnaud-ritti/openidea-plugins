@@ -76,3 +76,7 @@ id = "changelog-sql"
 name = "Liquibase Changelog (Formatted SQL)"
 extension = "sql"
 path = "templates/changelog.sql"
+
+[contributes.settings]
+title = "Liquibase Changelogs"
+schema = "settings.schema.json"

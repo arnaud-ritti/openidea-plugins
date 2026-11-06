@@ -44,10 +44,22 @@ in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
   Route names are only checked when _Settings › Plugins › Laravel_ asks for it,
   because packages add routes the plugin can't see. Files are checked when
   opened or saved.
+- Eloquent problems (setting `checkEloquent`, PHP files): `Post::create($request->all())`
+  or `(new Post)->fill($request->all())` when `Post` in `app/Models` or `app/` has
+  `$guarded = []` and no `$fillable`; a literal key of `Post::create([...])` that
+  a non-empty `$fillable` leaves out (mass assignment discards it); a model using
+  `Prunable` or `MassPrunable` while none of `routes/console.php`,
+  `app/Console/Kernel.php` and `bootstrap/app.php` mentions `model:prune` (quiet
+  when none can be read); and `orderBy('created_at', 'desc')` /
+  `orderBy('created_at')`, a hint with a quick fix to `latest()` / `oldest()`.
+  Models with `getFillable()`, `#[Fillable]` or `unguard` stay quiet, as do
+  classes without a file in the project and dynamic class names.
 - Quick fix (⌥⏎) on a missing `file.key` translation key: add `'key' => 'key'`
   to the main locale's lang file.
 - Intentions (⌥⏎): `'required|email'` in a validation call or `rules()` becomes
-  `['required', 'email']` (not offered when a rule is `regex:`);
+  `['required', 'email']` (not offered when a rule is `regex:`) and back: a list of
+  plain string rules becomes `'required|email'` (not offered when an element is
+  a `Rule` object, closure or contains `|`, or a regex rule contains `,`);
   `'UserController@index'` becomes `[UserController::class, 'index']` when the
   file is in `App\Http\Controllers` or already imports the class (no import is
   added); in a `.blade.php` file `{{ $x }}` and `{!! $x !!}` toggle.
@@ -109,6 +121,24 @@ and the caret position, so each uses the default namespace of its type
 table; edit the namespace by hand when the file lives in a subfolder. A
 migration file name needs its timestamp prefix typed by hand (see
 `LIMITATIONS.md`).
+
+## JavaScript, TypeScript and Vue
+
+In `javascript`, `typescript`, `vue`, `javascriptreact` and `typescriptreact`
+files the plugin completes and opens (Go to) Ziggy route names in
+`route('...')` and `route().current('...')`, including `:href="route('...')"`
+in a Vue template. It works from the in-memory route index only and returns
+at once when the file has no `route(` / `.current(`. Page names are not
+completed in JavaScript: no Inertia client call takes one (the page name is
+resolved by `resolvePageComponent` and glob imports).
+
+Declaring a provider for these languages makes the host load the plugin for
+them, so activation is limited to `on-file:resources/js/**`. The language ids
+`vue`, `javascriptreact` and `typescriptreact` are declared but unverified in
+the IDE; files are also recognised by extension. Scanning is line-bounded for quotes and backticks; block comments carry across
+lines, so a `/*` in the text of a multi-line template literal hides later route
+calls in the file, and a stray quote hides route calls to the end of its line.
+Comments and strings are tracked with a simple scan (no regex literals, no Vue text awareness; a stray quote can pair with a later one on the same line).
 
 ## Not ported
 

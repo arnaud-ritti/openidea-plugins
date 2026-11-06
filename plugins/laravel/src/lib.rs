@@ -10,7 +10,9 @@ mod actions;
 mod blade;
 mod controllers;
 mod directives;
+mod eloquent_checks;
 mod index;
+mod js;
 mod migrations;
 mod php;
 mod refs;
@@ -264,6 +266,27 @@ pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -
     found
 }
 
+/// `db:seed` runs inside `Model::unguarded()`, so mass assignment there is not discarded.
+const UNGUARDED_DIRECTORIES: &[&str] = &["/database/seeders/", "/database/seeds/", "/database/factories/"];
+
+/// Mass assignment, prunable and `orderBy` problems of a PHP file.
+fn eloquent_problems(project: &Project, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+    if language != "php" || !enabled("checkEloquent") {
+        return Vec::new();
+    }
+
+    let Ok(root) = project.root() else { return Vec::new() };
+    let read = |relative: &str| project.read_file(&format!("{root}/{relative}")).ok();
+
+    let unguarded_run = UNGUARDED_DIRECTORIES.iter().any(|directory| path.contains(directory));
+
+    eloquent_checks::findings(text, &read)
+        .into_iter()
+        .filter(|finding| !(unguarded_run && finding.code == "guarded-attribute-assignment"))
+        .map(|finding| problem(text, finding.start..finding.end, finding.code, finding.severity, finding.message))
+        .collect()
+}
+
 fn enabled(setting: &str) -> bool {
     host::setting_bool(setting).unwrap_or(true)
 }
@@ -359,7 +382,12 @@ impl Main {
         let enabled = host::setting_bool("diagnostics").unwrap_or(true);
         let check_routes = host::setting_bool("reportMissingRoutes").unwrap_or(false);
         let found = match project.read_file(path) {
-            Ok(text) if enabled && !index.partial => problems(index, language, &text, check_routes),
+            Ok(text) if enabled && !index.partial => {
+                let mut found = problems(index, language, &text, check_routes);
+                found.extend(eloquent_problems(project, path, language, &text));
+                found.sort_by_key(|d| (d.range.start.line, d.range.start.character));
+                found
+            }
             _ => Vec::new(),
         };
 
@@ -514,8 +542,48 @@ fn directive_items(index: &Index, replace: Range) -> Vec<CompletionItem> {
         .collect()
 }
 
+impl Main {
+    fn script_completion(&self, doc: &Document, at: Position) -> Vec<CompletionItem> {
+        if !js::mentions_route(&doc.text) {
+            return Vec::new();
+        }
+
+        let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
+        let Some(name) = js::route_name_at(&doc.text, offset) else { return Vec::new() };
+        let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
+
+        let replace = range_of(&doc.text, name.start, name.end);
+        index
+            .routes
+            .iter()
+            .map(|(name, entry)| {
+                let mut item = CompletionItem::new(name, CompletionKind::Reference);
+                item.detail = entry.detail.clone();
+                item.replace = Some(replace);
+                item
+            })
+            .collect()
+    }
+
+    fn script_definition(&self, doc: &Document, at: Position) -> Vec<Location> {
+        if !js::mentions_route(&doc.text) {
+            return Vec::new();
+        }
+
+        let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
+        let Some(name) = js::route_name_at(&doc.text, offset) else { return Vec::new() };
+        let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
+
+        index.routes.get(&doc.text[name]).and_then(location).into_iter().collect()
+    }
+}
+
 impl Providers for Main {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        if js::is_script(&doc.path, &doc.language) {
+            return self.script_completion(doc, at);
+        }
+
         let Some(language) = language_of(&doc.path, &doc.language) else { return Vec::new() };
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
@@ -538,6 +606,10 @@ impl Providers for Main {
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        if js::is_script(&doc.path, &doc.language) {
+            return self.script_definition(doc, at);
+        }
+
         let Some(language) = language_of(&doc.path, &doc.language) else { return Vec::new() };
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
@@ -568,6 +640,19 @@ impl Providers for Main {
         let mut found = Vec::new();
         if let Some(index) = self.index_for(&doc.path) {
             found.extend(missing_key_actions(index, doc, language, offset));
+        }
+
+        if language == "php" && enabled("checkEloquent") {
+            let masked = php::mask_comments(&doc.text);
+            found.extend(eloquent_checks::order_by(&masked).into_iter().filter(|f| f.start <= offset && offset <= f.end).filter_map(|finding| {
+                Some(CodeAction {
+                    title: format!("Replace with {}", finding.replacement.as_deref()?),
+                    kind: Some("quickfix".into()),
+                    preferred: true,
+                    edits: vec![(doc.path.clone(), vec![TextEdit { range: range_of(&doc.text, finding.start, finding.end), text: finding.replacement? }])],
+                    data: None,
+                })
+            }));
         }
 
         found.extend(actions::rewrites(&doc.path, language, &doc.text, offset).into_iter().map(|rewrite| CodeAction {
