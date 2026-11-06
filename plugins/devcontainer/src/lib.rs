@@ -22,6 +22,10 @@ impl Plugin for Main {
             return stop(&project, &root);
         }
 
+        if id == "info" {
+            return info(&project, &root);
+        }
+
         let mut args = vec!["--workspace-folder".to_owned(), root.clone(), "--config".to_owned(), config_file(&project)?];
 
         let (title, command, extra): (&str, &str, &[&str]) = match id {
@@ -55,6 +59,65 @@ fn config_file(project: &Project) -> Result<String, Error> {
     }
 
     Err("No .devcontainer/devcontainer.json or .devcontainer.json found in this project. To use another file, set it in Settings › Plugins › Dev Container CLI › Configuration file.".into())
+}
+
+fn info(project: &Project, root: &str) -> Result<Option<String>, Error> {
+    let args = vec!["read-configuration".to_owned(), "--workspace-folder".to_owned(), root.to_owned(), "--config".to_owned(), config_file(project)?];
+    let _task = host::begin_task("Reading the Dev Container configuration", false);
+    let output = project.run_process("devcontainer", &args, None)?;
+
+    if output.status != Some(0) {
+        return Err(format!("devcontainer read-configuration failed: {}", output.stderr.trim()).into());
+    }
+
+    let summary = summarise(&output.stdout).ok_or("devcontainer read-configuration printed no JSON configuration.")?;
+    host::notify(NotificationLevel::Info, "Dev Container", &summary);
+
+    Ok(None)
+}
+
+/// The CLI may print log noise before its JSON, so the first parseable object wins.
+fn summarise(stdout: &str) -> Option<String> {
+    let value = stdout
+        .match_indices('{')
+        .find_map(|(start, _)| serde_json::Deserializer::from_str(&stdout[start..]).into_iter::<serde_json::Value>().next()?.ok())?;
+    let config = value.get("configuration")?;
+    let mut lines = vec![];
+
+    if let Some(image) = config.get("image").and_then(|v| v.as_str()) {
+        lines.push(format!("Image: {image}"));
+    }
+
+    let compose = match config.get("dockerComposeFile") {
+        Some(serde_json::Value::String(file)) => Some(file.clone()),
+        Some(serde_json::Value::Array(files)) => Some(files.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>().join(", ")),
+        _ => None,
+    };
+    if let Some(files) = compose {
+        lines.push(format!("Compose file: {files}"));
+    }
+
+    if let Some(user) = config.get("remoteUser").and_then(|v| v.as_str()) {
+        lines.push(format!("Remote user: {user}"));
+    }
+
+    let ports: Vec<String> = config
+        .get("forwardPorts")
+        .and_then(|v| v.as_array())
+        .map(|ports| ports.iter().map(|p| p.as_str().map(str::to_owned).unwrap_or_else(|| p.to_string())).collect())
+        .unwrap_or_default();
+    lines.push(match ports.is_empty() {
+        true => "Forwarded ports: none".to_owned(),
+        false => format!("Forwarded ports: {}", ports.join(", ")),
+    });
+
+    let features = config.get("features").and_then(|v| v.as_object()).map_or(0, |f| f.len());
+    lines.push(format!("Features: {features}"));
+
+    let has_post_create = config.get("postCreateCommand").is_some_and(|v| !v.is_null() && v.as_str() != Some(""));
+    lines.push(format!("postCreateCommand: {}", if has_post_create { "yes" } else { "no" }));
+
+    Some(lines.join("\n"))
 }
 
 /// The CLI has no stop command; its containers carry the workspace folder as a label.
@@ -213,5 +276,66 @@ mod tests {
         }
 
         assert!(registered >= 7);
+    }
+    const CONFIGURATION: &str = r#"npm notice hello
+{"configuration": {"image": "mcr.microsoft.com/devcontainers/base:ubuntu", "remoteUser": "vscode",
+ "forwardPorts": [3000, 8080], "features": {"a": {}, "b": {}}, "postCreateCommand": "npm i"}, "workspace": {}}"#;
+
+    fn info_host(result: Result<ProcessOutput, Error>) -> MockHost {
+        let host = host();
+        host.add_file(".devcontainer/devcontainer.json", "{}");
+        host.on_process("devcontainer", move |args, _| {
+            assert_eq!(args, ["read-configuration", "--workspace-folder", "/work/app", "--config", ".devcontainer/devcontainer.json"]);
+            result.clone()
+        });
+        host
+    }
+
+    #[test]
+    fn read_configuration_json_is_summarised_in_notification() {
+        let host = info_host(ok(CONFIGURATION));
+
+        Main.run_command("info", &host.invocation(), None).unwrap();
+
+        let body = &host.notifications()[0].body;
+        assert!(body.contains("Image: mcr.microsoft.com/devcontainers/base:ubuntu"), "{body}");
+        assert!(body.contains("Remote user: vscode"));
+        assert!(body.contains("Forwarded ports: 3000, 8080"));
+        assert!(body.contains("Features: 2"));
+        assert!(body.contains("postCreateCommand: yes"));
+    }
+
+    #[test]
+    fn read_configuration_compose_file_is_summarised() {
+        let host = info_host(ok(r#"{"configuration": {"dockerComposeFile": ["docker-compose.yml"], "service": "app"}}"#));
+
+        Main.run_command("info", &host.invocation(), None).unwrap();
+
+        let body = &host.notifications()[0].body;
+        assert!(body.contains("Compose file: docker-compose.yml"), "{body}");
+        assert!(body.contains("postCreateCommand: no"));
+    }
+
+    #[test]
+    fn read_configuration_quiet_failures() {
+        for result in [
+            ok("not json"),
+            Ok(ProcessOutput { status: Some(1), stdout: String::new(), stderr: "boom".into() }),
+            Err(Error::NotFound("devcontainer".into())),
+        ] {
+            let host = info_host(result);
+
+            assert!(Main.run_command("info", &host.invocation(), None).is_err());
+            assert!(host.notifications().is_empty());
+        }
+    }
+
+    #[test]
+    fn info_without_cli_capability_is_denied() {
+        let host = info_host(ok("{}")).with_capabilities(&["project.read"]);
+
+        let error = Main.run_command("info", &host.invocation(), None).unwrap_err();
+
+        assert!(matches!(error, Error::Denied(cap) if cap == "process:devcontainer"));
     }
 }

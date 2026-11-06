@@ -8,6 +8,7 @@ Runs the project's [Dev Container](https://containers.dev) with the
 | Dev Container: Start Container | `devcontainer up` in a terminal |
 | Dev Container: Rebuild Container | `devcontainer up --remove-existing-container` |
 | Dev Container: Open Shell in Container | `devcontainer exec … bash -l` (or `sh -l`) |
+| Dev Container: Show Configuration | `devcontainer read-configuration`, summarised in a notification (image or compose file, remote user, forwarded ports, feature count, `postCreateCommand`) |
 | Dev Container: Stop Container | `docker stop` on the containers labelled with the project folder |
 
 The plugin uses `.devcontainer/devcontainer.json`, or else `.devcontainer.json`.

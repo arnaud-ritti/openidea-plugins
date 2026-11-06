@@ -33,6 +33,11 @@ id = "stop"
 title = "Dev Container: Stop Container"
 category = "Dev Container"
 
+[[contributes.commands]]
+id = "info"
+title = "Dev Container: Show Configuration"
+category = "Dev Container"
+
 [[contributes.menus]]
 menu = "tools"
 command = "up"
