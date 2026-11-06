@@ -1,6 +1,6 @@
 # Spring Messaging Tools
 
-Producer ↔ consumer navigation for Spring Kafka, Spring AMQP (RabbitMQ) and Spring JMS (ActiveMQ/Artemis) in Java projects in OpenIDEA:
+Producer ↔ consumer navigation for Spring Kafka, Spring AMQP (RabbitMQ) and Spring JMS (ActiveMQ/Artemis) in Java and Kotlin projects in OpenIDEA:
 
 - **Index** of every destination literal:
   - consumers: `@KafkaListener(topics = …)`, `@RabbitListener(queues = …)` (plus `queuesToDeclare = @Queue(…)` and `bindings = @QueueBinding(value = @Queue(…), exchange = @Exchange(…))`, which consume the queue and the exchange), `@JmsListener(destination = …)`;

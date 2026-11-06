@@ -760,6 +760,27 @@ class KtEvents(private val kafkaTemplate: KafkaTemplate<String, String>, val rab
     }
 
     #[test]
+    fn kotlin_templates_and_type_only_receivers() {
+        let src = r#"class A(private val template: KafkaTemplate<String, String>, private val tpl: RabbitTemplate) {
+    private val outbox: JmsTemplate = build()
+    fun f(prefix: String, env: String) {
+        template.send("$prefix-orders", "x")
+        template.send("orders-$env", "x")
+        template.send("typed-topic", "x")
+        tpl.convertAndSend("typed-queue", "x")
+        outbox.convertAndSend("typed-dest", "x")
+    }
+}
+"#;
+        let found: Vec<_> = parse("A.kt", src).unwrap().into_iter().map(|e| (e.broker, e.name)).collect();
+        assert_eq!(found, [
+            (Broker::Kafka, "typed-topic".to_owned()),
+            (Broker::Rabbit, "typed-queue".to_owned()),
+            (Broker::Jms, "typed-dest".to_owned()),
+        ]);
+    }
+
+    #[test]
     fn finds_kafka_endpoints() {
         use Broker::Kafka;
         assert_eq!(
