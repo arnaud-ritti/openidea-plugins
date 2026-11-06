@@ -32,3 +32,9 @@ languages = ["java"]
 [contributes.settings]
 schema = "settings.schema.json"
 title = "Spring Boot"
+
+[[contributes.fileIcons]]
+id = "spring-boot-config"
+patterns = ["application*.properties", "application*.yml", "application*.yaml", "bootstrap*.properties", "bootstrap*.yml", "bootstrap*.yaml"]
+icon = "icons/config.svg"
+iconDark = "icons/config_dark.svg"
