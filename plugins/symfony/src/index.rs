@@ -52,6 +52,8 @@ pub struct Index {
     pub entries: Names,
     pub roles: Names,
     pub renders: Vec<Render>,
+    /// `symfony/framework-bundle` constraint of composer.json as (major, minor).
+    pub framework_version: Option<(u32, u32)>,
     /// The compiled routes / container were read: bundles' names are known, so
     /// a missing name is an error.
     pub compiled_routes: bool,
@@ -79,6 +81,15 @@ const BUILT_IN_ROLES: &[&str] = &[
 // ponytail: 3 s of reading per build, then the index is partial; incremental per-file updates if projects outgrow it.
 const BUDGET: Duration = Duration::from_secs(3);
 const MAX_FILES: u32 = 5000;
+
+/// The first `major.minor` of the `symfony/framework-bundle` constraint (`^6.4`, `7.*`).
+pub fn framework_version(composer: &str) -> Option<(u32, u32)> {
+    let after = &composer[composer.find("\"symfony/framework-bundle\"")? + "\"symfony/framework-bundle\"".len()..];
+    let constraint = after.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?.split('"').next()?;
+    let mut numbers = constraint.split(|c: char| !c.is_ascii_digit()).filter(|n| !n.is_empty()).map(|n| n.parse::<u32>().ok());
+    let major = numbers.next()??;
+    Some((major, numbers.next().flatten().unwrap_or(0)))
+}
 
 /// Whether the project is a Symfony application (the plugin's auto-configuration check).
 pub fn is_symfony(project: &Project) -> bool {
@@ -136,6 +147,7 @@ impl Index {
         }
 
         let composer = project.read_file("composer.json").unwrap_or_default();
+        index.framework_version = framework_version(&composer);
         for (namespace, directory) in psr4(&composer) {
             let directory = format!("{}/", directory.trim_end_matches('/'));
             for path in files(&[&format!("{directory}**/*.php")]) {

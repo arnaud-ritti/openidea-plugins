@@ -4,6 +4,8 @@
 //! check stays silent when the class, service or file it would need is not
 //! in the index.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use openidea_plugin::Severity;
@@ -29,9 +31,36 @@ impl Finding {
 /// Source of a project file by absolute path.
 pub type Reader<'a> = &'a dyn Fn(&str) -> Option<String>;
 
+const MAX_CLASS_BYTES: usize = 256 * 1024;
+const MAX_CLASS_READS: usize = 500;
+
 pub struct Context<'a> {
     pub index: &'a Index,
-    pub read: Reader<'a>,
+    read: Reader<'a>,
+    sources: RefCell<BTreeMap<String, Option<String>>>,
+}
+
+impl<'a> Context<'a> {
+    pub fn new(index: &'a Index, read: Reader<'a>) -> Context<'a> {
+        Context { index, read, sources: RefCell::default() }
+    }
+
+    /// A class file, read at most once per run; `None` when it is too large
+    /// or the run already read `MAX_CLASS_READS` files.
+    fn source(&self, path: &str) -> Option<String> {
+        let mut sources = self.sources.borrow_mut();
+        if let Some(cached) = sources.get(path) {
+            return cached.clone();
+        }
+
+        if sources.len() >= MAX_CLASS_READS {
+            return None;
+        }
+
+        let source = (self.read)(path).filter(|text| text.len() <= MAX_CLASS_BYTES);
+        sources.insert(path.to_owned(), source.clone());
+        source
+    }
 }
 
 fn is_route_file(path: &str) -> bool {
@@ -71,16 +100,25 @@ fn is_plain_class(source: &str) -> bool {
 
     let mut words = source[declaration..header_end].split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty());
     while let Some(word) = words.next() {
-        if word == "extends" {
-            let parent = words.next().unwrap_or_default().rsplit('\\').next().unwrap_or_default();
-            if !matches!(parent, "AbstractController" | "Controller") {
-                return false;
-            }
+        if word == "extends" && !is_framework_controller(source, words.next().unwrap_or_default()) {
+            return false;
         }
     }
 
     let body = &source[header_end..];
     !body.contains("function __call") && !body.lines().any(|line| line.trim_start().starts_with("use ") && !line.contains('('))
+}
+
+const FRAMEWORK_CONTROLLERS: &str = "Symfony\\Bundle\\FrameworkBundle\\Controller\\";
+
+/// Whether a parent class name resolves to the framework's base controller.
+fn is_framework_controller(source: &str, parent: &str) -> bool {
+    let parent = parent.trim_start_matches('\\');
+    if let Some(name) = parent.strip_prefix(FRAMEWORK_CONTROLLERS) {
+        return matches!(name, "AbstractController" | "Controller");
+    }
+
+    matches!(parent, "AbstractController" | "Controller") && source.contains(&format!("use {FRAMEWORK_CONTROLLERS}{parent};"))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -117,7 +155,7 @@ fn method_state(source: &str, name: &str) -> Method {
 /// that are unknown, vendor code or may inherit what they lack.
 fn plain_class_source(ctx: &Context, class: &str) -> Option<String> {
     let entry = ctx.index.classes.get(class.trim_start_matches('\\'))?;
-    let source = (ctx.read)(&entry.path)?;
+    let source = ctx.source(&entry.path)?;
     is_plain_class(&source).then_some(source)
 }
 
@@ -165,6 +203,10 @@ fn check_route_setting_controller(ctx: &Context, spec: &str, range: Range<usize>
     check_controller(ctx, spec, range, out);
 }
 
+fn annotation_deprecated(ctx: &Context) -> bool {
+    ctx.index.framework_version.is_some_and(|version| version >= (6, 4))
+}
+
 const ANNOTATION_MESSAGE: &str = "The route type \"annotation\" is deprecated since Symfony 6.4 and removed in 7.0; use \"attribute\".";
 const PATTERN_MESSAGE: &str = "The route setting \"pattern\" was removed in Symfony 3.0; use \"path\".";
 
@@ -182,7 +224,7 @@ fn yaml_routes(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
                 }
             }
             "pattern" if top_level => out.push(Finding::warn(key_range, "deprecated-route-setting", PATTERN_MESSAGE.into())),
-            "type" if top_level => {
+            "type" if top_level && annotation_deprecated(ctx) => {
                 if let Some(range) = yaml_scalar(text, key).filter(|r| &text[r.clone()] == "annotation") {
                     out.push(Finding::warn(range, "deprecated-route-setting", ANNOTATION_MESSAGE.into()));
                 }
@@ -207,7 +249,7 @@ fn xml_routes(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
         }
     }
 
-    for (tag, at) in index::xml_tags(text, "import") {
+    for (tag, at) in index::xml_tags(text, "import").into_iter().filter(|_| annotation_deprecated(ctx)) {
         if let Some((_, offset)) = index::xml_attribute(tag, "type").filter(|(value, _)| *value == "annotation") {
             out.push(Finding::warn(at + offset..at + offset + "annotation".len(), "deprecated-route-setting", ANNOTATION_MESSAGE.into()));
         }
@@ -294,7 +336,7 @@ fn yaml_definitions(text: &str) -> Vec<ServiceDef> {
         };
 
         let mut named = Vec::new();
-        if child("parent").is_none() && child("factory").is_none() {
+        if child("parent").is_none() && child("factory").is_none() && child("constructor").is_none() {
             for key in keys.iter().filter(own) {
                 if key.parents.len() == 3 && key.parents[2] == "arguments" && key.key.starts_with('$') {
                     named.push((key.key.clone(), key.offset..key.offset + key.key.len()));
@@ -323,7 +365,7 @@ fn xml_definitions(text: &str) -> Vec<ServiceDef> {
 
         let mut named = Vec::new();
         let body_end = if tag.ends_with('/') { None } else { text[at..].find("</service>").map(|i| at + i) };
-        let body_end = body_end.filter(|end| attribute("parent").is_none() && !text[at..*end].contains("<factory"));
+        let body_end = body_end.filter(|end| attribute("parent").is_none() && attribute("constructor").is_none() && !text[at..*end].contains("<factory"));
         if let Some(end) = body_end {
             let body = &text[at + tag.len()..end];
             let skipped = ["call", "configurator"].map(|name| xml_spans(text, at + tag.len(), end, name));
@@ -468,7 +510,7 @@ pub fn check_services(ctx: &Context, path: &str, language: &str, text: &str) -> 
     for definition in &definitions {
         let Some((class, range)) = &definition.class else { continue };
         let Some(entry) = ctx.index.classes.get(class) else { continue };
-        let Some(source) = (ctx.read)(&entry.path) else { continue };
+        let Some(source) = ctx.source(&entry.path) else { continue };
 
         if is_deprecated(&source) {
             out.push(Finding::warn(range.clone(), "deprecated-service-class", format!("Service class \"{class}\" is deprecated.")));
@@ -570,7 +612,10 @@ fn missing_assets(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
         return;
     }
 
-    for open in call_opens(text, "->getUrl(").chain(call_opens(text, "asset(")) {
+    let uses_asset_component = text.contains("Packages") || text.contains("Symfony\\Component\\Asset");
+    let get_url = call_opens(text, "->getUrl(").filter(|_| uses_asset_component);
+
+    for open in get_url.chain(call_opens(text, "asset(")) {
         let arguments = refs::arguments(text, open);
         if arguments.len() != 1 {
             continue;
@@ -584,7 +629,12 @@ fn missing_assets(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
         }
 
         let file = name.split(['?', '#']).next().unwrap_or(name);
-        if !ctx.index.assets.contains_key(file) {
+        let generated = matches!(file.split('/').next(), Some("build" | "bundles" | "assets" | "_assets"));
+        let directory_indexed = file.rsplit_once('/').is_none_or(|(directory, _)| {
+            let prefix = format!("{directory}/");
+            ctx.index.assets.keys().any(|known| known.starts_with(&prefix))
+        });
+        if !generated && directory_indexed && !ctx.index.assets.contains_key(file) {
             out.push(Finding::warn(range, "missing-asset", format!("Asset \"{name}\" does not exist in the public directory.")));
         }
     }
@@ -602,7 +652,8 @@ fn missing_translation_domains(ctx: &Context, text: &str, out: &mut Vec<Finding>
 
         let domain = &text[range.clone()];
         let name = domain.strip_suffix("+intl-icu").unwrap_or(domain);
-        if is_dynamic(name) || BUILT_IN_DOMAINS.contains(&name) || ctx.index.translations.contains_key(name) {
+        let project_local = !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'));
+        if !project_local || BUILT_IN_DOMAINS.contains(&name) || ctx.index.translations.contains_key(name) {
             continue;
         }
 
@@ -667,7 +718,7 @@ mod tests {
     }
 
     fn fixture_index() -> Index {
-        let mut index = Index::default();
+        let mut index = Index { framework_version: Some((7, 0)), ..Index::default() };
         for (class, _) in CLASSES {
             index.classes.insert(class.into(), Entry { detail: None, path: class_path(class), at: Position::new(0, 0) });
         }
@@ -696,7 +747,7 @@ mod tests {
 
     fn project(host: &MockHost) -> Main {
         host.add_file("composer.json", r#"{"require": {"symfony/framework-bundle": "^7.0"}, "autoload": {"psr-4": {"App\\": "src/"}}}"#);
-        host.add_file("src/Controller/BlogController.php", &BLOG.replace("Controller;\n", "Controller;\n"));
+        host.add_file("src/Controller/BlogController.php", BLOG);
         host.add_file("translations/messages.en.yaml", "app: x\n");
         host.add_file("public/img/logo.png", "");
         let mut plugin = Main::default();
@@ -930,6 +981,7 @@ mod tests {
     fn php_index() -> Index {
         let mut index = fixture_index();
         index.assets.insert("img/logo.png".into(), Entry { detail: None, path: "/project/public/img/logo.png".into(), at: Position::new(0, 0) });
+        index.assets.insert("css/app.css".into(), Entry { detail: None, path: "/project/public/css/app.css".into(), at: Position::new(0, 0) });
         index.translations.insert("messages".into(), Default::default());
         index.translations.insert("admin".into(), Default::default());
         index
@@ -975,7 +1027,7 @@ mod tests {
 
     #[test]
     fn missing_asset_warns() {
-        let text = "<?php\nclass A\n{\n    public function url($packages)\n    {\n        $packages->getUrl('img/missing.png');\n        return asset(\"css/none.css\");\n    }\n}\n";
+        let text = "<?php // Packages\nclass A\n{\n    public function url($packages)\n    {\n        $packages->getUrl('img/missing.png');\n        return asset(\"css/none.css\");\n    }\n}\n";
         let found = run_php(text);
         assert_eq!(codes(&found), ["missing-asset"; 2]);
         assert_eq!(found[0].message, "Asset \"img/missing.png\" does not exist in the public directory.");
@@ -997,11 +1049,11 @@ mod tests {
             "$this->asset('img/none.png');",
             "$packages->getUrl($path);",
         ] {
-            let text = format!("<?php\nfunction f($packages) {{\n    {call}\n}}\n");
+            let text = format!("<?php // Packages\nfunction f($packages) {{\n    {call}\n}}\n");
             assert!(run_php(&text).is_empty(), "{call}");
         }
 
-        let text = "<?php\n$packages->getUrl('img/none.png');\n";
+        let text = "<?php // Packages\n$packages->getUrl('img/none.png');\n";
         assert!(run_with(&fixture_index(), FORM, "php", text).is_empty());
     }
 
@@ -1038,7 +1090,7 @@ mod tests {
 
     #[test]
     fn php_group_ranges_use_utf16_columns_with_multibyte_text() {
-        let text = "<?php /* é😀 */ $packages->getUrl('img/missing.png');\n";
+        let text = "<?php /* é😀 */ $packages->getUrl('img/missing.png');\n// Packages\n";
         let found = run_php(text);
         assert_eq!(found[0].range.start, Position::new(0, 15 + 20));
         assert_eq!(found[0].range.end.character, 15 + 20 + 15);
@@ -1069,5 +1121,101 @@ mod tests {
         let host = MockHost::install();
         let mut plugin = project(&host);
         assert!(opened(&host, &mut plugin, "/project/src/Gone.php").is_empty());
+    }
+
+    fn run_custom(index: &Index, files: &[(&str, &str)], path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
+        let files: BTreeMap<String, String> = files.iter().map(|(p, t)| ((*p).to_owned(), (*t).to_owned())).collect();
+        let read = |file: &str| files.get(file).cloned();
+        let groups = Groups { controllers: true, services: true, php_calls: true };
+        crate::extra_problems(index, groups, &read, path, language, text)
+    }
+
+    fn class_index(class: &str, path: &str) -> Index {
+        let mut index = Index { framework_version: Some((7, 0)), ..Index::default() };
+        index.classes.insert(class.into(), Entry { detail: None, path: path.into(), at: Position::new(0, 0) });
+        index
+    }
+
+    #[test]
+    fn missing_asset_is_quiet_for_build_and_bundles_output() {
+        for call in [
+            "asset('build/app.js')",
+            "asset('bundles/foo/x.css')",
+            "asset('assets/app.js')",
+            "asset('_assets/a.js')",
+            "asset('unindexed/dir/file.png')",
+        ] {
+            let text = format!("<?php\nfunction f() {{\n    return {call};\n}}\n");
+            assert!(run_php(&text).is_empty(), "{call}");
+        }
+    }
+
+    #[test]
+    fn get_url_on_unrelated_object_is_quiet() {
+        let text = "<?php\nfunction f($page) {\n    return $page->getUrl('en');\n}\n";
+        assert!(run_php(text).is_empty());
+        let text = "<?php\nfunction f($page) {\n    return $page->getUrl('img/missing.png');\n}\n";
+        assert!(run_php(text).is_empty());
+    }
+
+    #[test]
+    fn vendor_bundle_domain_is_quiet() {
+        for domain in ["EasyAdminBundle", "SonataAdminBundle", "FOSUserBundle", "KnpPaginatorBundle", "vendor.admin", "Mixed"] {
+            let text = format!("<?php\nfunction f($translator) {{\n    $translator->trans('k', [], '{domain}');\n}}\n");
+            assert!(run_php(&text).is_empty(), "{domain}");
+        }
+    }
+
+    #[test]
+    fn annotation_type_is_quiet_without_a_64_project() {
+        let yaml = "import:\n    resource: ../src/\n    type: annotation\n";
+        for version in [None, Some((6, 3)), Some((5, 4))] {
+            let index = Index { framework_version: version, ..Index::default() };
+            assert!(run_with(&index, ROUTES, "yaml", yaml).is_empty(), "{version:?}");
+        }
+        let index = Index { framework_version: Some((6, 4)), ..Index::default() };
+        assert_eq!(codes(&run_with(&index, ROUTES, "yaml", yaml)), ["deprecated-route-setting"]);
+
+        assert_eq!(crate::index::framework_version(r#"{"require": {"symfony/framework-bundle": "^6.4"}}"#), Some((6, 4)));
+        assert_eq!(crate::index::framework_version(r#"{"require": {"symfony/framework-bundle": "7.*"}}"#), Some((7, 0)));
+        assert_eq!(crate::index::framework_version(r#"{"require": {"symfony/framework-bundle": "*"}}"#), None);
+        assert_eq!(crate::index::framework_version("{}"), None);
+    }
+
+    #[test]
+    fn project_base_class_named_controller_is_unknown() {
+        let base = "<?php\nnamespace App\\Controller;\nuse App\\Base\\Controller;\nclass Child extends Controller\n{\n    public function own() {}\n}\n";
+        let index = class_index("App\\Controller\\Child", "/project/Child.php");
+        let yaml = "a:\n    controller: App\\Controller\\Child::inheritedFromBase\n";
+        assert!(run_custom(&index, &[("/project/Child.php", base)], ROUTES, "yaml", yaml).is_empty());
+
+        let framework = base.replace("App\\Base\\Controller", "Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController").replace("extends Controller", "extends AbstractController");
+        assert_eq!(codes(&run_custom(&index, &[("/project/Child.php", &framework)], ROUTES, "yaml", yaml)), ["controller-method-missing"]);
+    }
+
+    #[test]
+    fn static_constructor_service_is_quiet() {
+        let yaml = "services:\n    a:\n        class: App\\Mailer\n        constructor: create\n        arguments:\n            $nope: 1\n";
+        assert!(run(SERVICES, "yaml", yaml).is_empty());
+        let xml = "<container><service id=\"a\" class=\"App\\Mailer\" constructor=\"create\"><argument key=\"$nope\"/></service></container>";
+        assert!(run("/project/config/services.xml", "xml", xml).is_empty());
+    }
+
+    #[test]
+    fn class_file_is_read_once_per_run() {
+        let reads = std::cell::Cell::new(0);
+        let read = |_: &str| {
+            reads.set(reads.get() + 1);
+            Some(MAILER.to_owned())
+        };
+        let index = fixture_index();
+        let ctx = Context::new(&index, &read);
+        let yaml = "services:\n    a:\n        class: App\\Mailer\n        arguments: { $x: 1 }\n    b:\n        class: App\\Mailer\n        arguments: { $y: 1 }\n";
+        assert_eq!(check_services(&ctx, SERVICES, "yaml", yaml).len(), 2);
+        assert_eq!(reads.get(), 1);
+
+        let big = |_: &str| Some(format!("{MAILER}{}", " ".repeat(MAX_CLASS_BYTES)));
+        let ctx = Context::new(&index, &big);
+        assert!(check_services(&ctx, SERVICES, "yaml", yaml).is_empty());
     }
 }

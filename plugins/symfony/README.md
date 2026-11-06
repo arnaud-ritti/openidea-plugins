@@ -47,7 +47,7 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     `__invoke`, or a class-level `#[Route]` with neither `__invoke` nor routed
     methods; `deprecated-route-setting`, only these: the
     `Bundle:Controller:action` notation (removed in 4.0), `pattern` (removed in
-    3.0), `type: annotation` on imports (deprecated in 6.4), and the
+    3.0), `type: annotation` on imports (deprecated in 6.4; only reported when composer.json requires `symfony/framework-bundle` 6.4 or newer), and the
     `_method` / `_scheme` requirements (removed in 3.0). Classes that extend a
     class other than `AbstractController`, use traits or define `__call` are
     not reported.
@@ -63,8 +63,16 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     `->getUrl('x')` / `asset('x')` of a file absent from the public directory
     (not for URLs, absolute paths, dynamic names or a second package
     argument); `missing-translation-domain`, `->trans(…, domain)` / `t()` with a
-    domain that has no file in `translations/` (`messages`, `validators` and
-    `security` are never reported).
+    domain that has no file in `translations/` (only lower-case project-style
+    domain names are reported: `messages`, `validators`, `security`, dotted or
+    capitalised names such as `EasyAdminBundle` never are). Assets under
+    `build/`, `bundles/`, `assets/` and in directories with no indexed file
+    are not reported; `->getUrl()` is only checked in files that mention
+    `Packages` or `Symfony\Component\Asset`. Class files are read at most once
+    per run (256 KB and 500 files caps); beyond that the checks stay silent.
+    A parent named `Controller` / `AbstractController` counts only when it
+    resolves to the framework's. Services with `constructor`, `parent` or a
+    factory are not checked for named arguments.
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
   YAML files; on an unquoted `@` / `%` YAML value, quote it.
 - Gutter: controller `render()` → template; template → controllers rendering

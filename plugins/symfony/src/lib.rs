@@ -299,7 +299,7 @@ impl Groups {
 
 /// Problems of the text inspections, converted to diagnostics.
 fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
-    let ctx = checks::Context { index, read };
+    let ctx = checks::Context::new(index, read);
     let mut findings = Vec::new();
 
     if groups.controllers {
