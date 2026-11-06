@@ -4,6 +4,7 @@ mod catalog;
 mod changelog;
 mod checks;
 mod complete;
+mod indexer;
 
 use changelog::{Changelog, Include, Target};
 use openidea_plugin::providers::{CompletionItem, Document, LineMarker, Providers};
@@ -13,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use openidea_plugin::text::offset;
-use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Project, Range, host, register_plugin};
+use openidea_plugin::{Error, NotificationLevel, Invocation, Location, Plugin, Position, Project, Range, host, register_plugin};
 use spring_text::index::project_of;
 use std::cell::OnceCell;
 
@@ -31,7 +32,55 @@ pub struct Liquibase {
 
 impl Plugin for Liquibase {
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+        match id {
+            "update-confirmed" => {
+                if confirmed("Liquibase: update", "Update applies every pending changeset to the database. Run it?")? {
+                    run_liquibase(vec!["update".to_owned()])?;
+                }
+                Ok(None)
+            }
+            "rollback-count" => {
+                let Some(answer) = host::input("Number of changesets to roll back", Some("1"))? else { return Ok(None) };
+                let Ok(count) = answer.trim().parse::<u32>() else {
+                    host::notify(NotificationLevel::Warning, TITLE, &format!("\"{}\" is not a number of changesets.", answer.trim()));
+                    return Ok(None);
+                };
+                if count == 0 {
+                    host::notify(NotificationLevel::Warning, TITLE, "Roll back at least one changeset.");
+                    return Ok(None);
+                }
+                let body = format!("Roll back the last {count} deployed changeset(s) from the database?");
+                if confirmed("Liquibase: rollback-count", &body)? {
+                    run_liquibase(vec!["rollback-count".to_owned(), count.to_string()])?;
+                }
+                Ok(None)
+            }
+            _ => Err(Error::NotFound(format!("command {id}"))),
+        }
+    }
+}
+
+const TITLE: &str = "Liquibase Changelogs";
+
+/// A host that cannot show the dialog (`Invalid`) leaves a command that writes to the database unconfirmed, so it does not run.
+fn confirmed(title: &str, body: &str) -> Result<bool, Error> {
+    match host::confirm(title, body) {
+        Err(Error::Invalid(_)) => {
+            host::notify(NotificationLevel::Warning, TITLE, "This host cannot ask for confirmation. Use the run configuration instead.");
+            Ok(false)
+        }
+        other => other,
+    }
+}
+
+fn run_liquibase(args: Vec<String>) -> Result<(), Error> {
+    let title = format!("Liquibase {}", args.join(" "));
+    match host::open_terminal(&title, "liquibase", &args) {
+        Err(Error::Denied(_)) => {
+            host::notify(NotificationLevel::Warning, TITLE, "Allow running liquibase for Liquibase Changelogs in Settings › Plugins.");
+            Ok(())
+        }
+        other => other,
     }
 }
 
@@ -519,13 +568,63 @@ impl Views for Liquibase {
     }
 }
 
-register_plugin!(Liquibase, providers, views);
+// `register_plugin!` has no arm for providers, views and indexing together.
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn() -> Liquibase = <Liquibase as Default>::default;
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    struct Component;
+    openidea_plugin::__plugin_exports!(Liquibase, Component, openidea_plugin::bindings);
+    openidea_plugin::__providers_exports!(Liquibase, Component);
+    openidea_plugin::__views_exports!(Liquibase, Component);
+    openidea_plugin::__indexing_exports!(Liquibase, Component);
+    openidea_plugin::bindings::__export_plugin_world!(Component with_types_in openidea_plugin::bindings);
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
     use openidea_plugin::providers::Document;
+
+    #[test]
+    fn update_runs_only_when_confirmed() {
+        let host = MockHost::install().with_capabilities(&["project.read", "process:liquibase"]);
+        let mut liquibase = Liquibase::default();
+
+        host.answer_next_prompt(None);
+        liquibase.run_command("update-confirmed", &host.invocation(), None).unwrap();
+        assert!(host.terminals().is_empty());
+
+        host.answer_next_prompt(Some(&[]));
+        liquibase.run_command("update-confirmed", &host.invocation(), None).unwrap();
+        assert_eq!(host.terminals()[0].args, ["update"]);
+    }
+
+    #[test]
+    fn rollback_count_asks_for_a_count_then_confirms() {
+        let host = MockHost::install().with_capabilities(&["project.read", "process:liquibase"]);
+        let mut liquibase = Liquibase::default();
+
+        host.answer_next_prompt(None);
+        liquibase.run_command("rollback-count", &host.invocation(), None).unwrap();
+        host.answer_next_prompt(Some(&["two"]));
+        liquibase.run_command("rollback-count", &host.invocation(), None).unwrap();
+        host.answer_next_prompt(Some(&["0"]));
+        liquibase.run_command("rollback-count", &host.invocation(), None).unwrap();
+        assert!(host.terminals().is_empty());
+        assert_eq!(host.notifications().len(), 2);
+
+        host.answer_next_prompt(Some(&["3"]));
+        host.answer_next_prompt(None);
+        liquibase.run_command("rollback-count", &host.invocation(), None).unwrap();
+        assert!(host.terminals().is_empty());
+
+        host.answer_next_prompt(Some(&["3"]));
+        host.answer_next_prompt(Some(&[]));
+        liquibase.run_command("rollback-count", &host.invocation(), None).unwrap();
+        assert_eq!(host.terminals()[0].args, ["rollback-count", "3"]);
+    }
 
     const MASTER: &str = "/project/src/main/resources/db/changelog/master.yaml";
     const MASTER_YAML: &str = "databaseChangeLog:
@@ -641,7 +740,7 @@ mod tests {
 
     #[test]
     fn tree_survives_cycles_and_missing_includes_and_empty_projects() {
-        let host = MockHost::install();
+        let host = MockHost::install().with_capabilities(&["project.read", "process:liquibase"]);
         let mut liquibase = Liquibase::default();
         let Body::Message(text) = liquibase.render("changesets", None, &host.invocation()).unwrap().body else { panic!("message expected") };
         assert_eq!(text, "No Liquibase changelogs found in this project.");

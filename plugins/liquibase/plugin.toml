@@ -4,14 +4,26 @@ version = "0.1.0" # x-release-please-version
 description = "Liquibase changelog support for XML, YAML and formatted SQL. Flags duplicate and incomplete changesets, unknown change types, missing includes and missing formatted SQL headers while you type; completes change types and their attributes in YAML and changeset comments in SQL; Go to Definition on include; New › Liquibase Changelog templates; status, validate, update-sql and update run configurations for projects with a liquibase.properties. Independent implementation, not affiliated with Liquibase Inc. or JetBrains."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0: first release. Live checks (duplicate and incomplete changesets, unknown change types in YAML, unresolved include and includeAll, formatted SQL header), YAML and formatted SQL completion, Go to Definition on include, changelog templates and Liquibase CLI run configurations. Change type and attribute names from the Liquibase 4.29 XSD (Apache-2.0)."
+change-notes = "Project-wide Go to Declaration from the document index: include to the changelog file, rollback changeSetId to its changeSet, table names to createTable. Liquibase: Update (Asks First)… and Liquibase: Rollback Count… commands, with confirmation and a changeset count. 0.1.0: first release. Live checks (duplicate and incomplete changesets, unknown change types in YAML, unresolved include and includeAll, formatted SQL header), YAML and formatted SQL completion, Go to Definition on include, changelog templates and Liquibase CLI run configurations. Change type and attribute names from the Liquibase 4.29 XSD (Apache-2.0)."
 categories = ["tools", "linters"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:xml", "on-language:yaml", "on-language:sql", "on-view:changesets"]
 
 [capabilities]
 required = ["project.read"]
+# process: Update and Rollback Count commands (a terminal).
+optional = ["process:liquibase"]
+
+[[contributes.commands]]
+id = "update-confirmed"
+title = "Liquibase: Update (Asks First)…"
+category = "Liquibase"
+
+[[contributes.commands]]
+id = "rollback-count"
+title = "Liquibase: Rollback Count…"
+category = "Liquibase"
 
 [[contributes.providers]]
 kinds = ["line-markers"]
@@ -53,10 +65,13 @@ files = ["liquibase.properties"]
 command = "liquibase"
 args = ["update"]
 
+[[contributes.documentIndexers]]
+extensions = ["xml", "yaml", "yml", "json", "sql"]
+
 [[contributes.views]]
 id = "changesets"
 title = "Liquibase Changesets"
-icon = "database"
+icon = "icons/liquibase.svg"
 location = "bottom"
 
 [[contributes.fileTemplates]]
