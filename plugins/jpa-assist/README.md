@@ -33,6 +33,13 @@ entity's properties (and one level into its associations), conditions
 declaration with parameters and return type (`List`, `Optional` for
 `First`/`Top1`, `long` for `count`, …) and adds the imports it needs.
 
+## Navigation
+
+A gutter arrow on an `@Entity` class opens the Spring Data repository that
+declares it as domain type (the tooltip lists all of them; the arrow opens the
+first). Repository files are found by the `*Repository.java` / `.kt` name. The
+reverse arrow, from a repository to its entity, comes from Spring Data.
+
 ## Generators
 
 - On an entity's class line, ⌥⏎ offers **Generate equals() and hashCode()**

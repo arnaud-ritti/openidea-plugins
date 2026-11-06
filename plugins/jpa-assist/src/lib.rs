@@ -19,11 +19,11 @@ mod queries;
 use std::collections::{HashMap, HashSet};
 
 use openidea_plugin::host;
-use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project, Range, register_plugin,
+    Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Location, Position, Project, Range, register_plugin,
 };
 
 use checks::{Finding, inspect_entity, inspect_repository};
@@ -340,6 +340,39 @@ impl Providers for JpaAssist {
             .collect()
     }
 
+    fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        let Some(class) = parse_class(&doc.text, &doc.path) else { return Vec::new() };
+        if class.kind != Kind::Entity {
+            return Vec::new();
+        }
+        let Some(project) = project_of(&doc.path) else { return Vec::new() };
+
+        let mut repositories = Vec::new();
+        for pattern in ["**/*Repository.java", "**/*Repository.kt"] {
+            for path in project.find_files(pattern, MAX_SOURCES).unwrap_or_default() {
+                let Some(kotlin) = language_of(&path) else { continue };
+                let Ok(text) = project.read_file(&path) else { continue };
+                let Some(repository) = parse_repository(&text, kotlin) else { continue };
+                if repository.entity != class.name {
+                    continue;
+                }
+
+                let at = position(&text, repository.name_start);
+                repositories.push((repository.name, Location { path: path.into(), range: Range::new(at, at) }));
+            }
+        }
+
+        let Some((_, first)) = repositories.first() else { return Vec::new() };
+        let names: Vec<&str> = repositories.iter().map(|(name, _)| name.as_str()).collect();
+
+        vec![LineMarker {
+            line: class.pos.line,
+            icon: Some("navigate".into()),
+            tooltip: format!("Repositories: {}", names.join(", ")),
+            target: Some(first.clone()),
+        }]
+    }
+
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(kotlin) = language_of(&doc.path) else { return Vec::new() };
         let text = &doc.text;
@@ -564,6 +597,24 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         host.open_editor("/project/db.sql", "sql", "create table tag (id bigint primary key, label text);", &[(0, 20, 0, 20)]);
         plugin.run_command("copy-entity", &host.invocation(), None).unwrap();
         assert!(host.clipboard().unwrap().contains("public class Tag {"));
+    }
+
+    #[test]
+    fn entity_marker_targets_repository() {
+        let _host = host();
+        let mut plugin = JpaAssist::default();
+        let doc = Document { path: "/project/src/shop/Order.java".into(), language: "java".into(), version: 1, text: ORDER.into() };
+
+        let markers = plugin.line_markers(&doc);
+
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].line, 5);
+        assert_eq!(markers[0].icon.as_deref(), Some("navigate"));
+        assert_eq!(markers[0].tooltip, "Repositories: OrderRepository");
+        assert_eq!(markers[0].target.as_ref().unwrap().path, "/project/src/shop/data/OrderRepository.java");
+
+        let customer = Document { path: "/project/src/shop/Customer.java".into(), language: "java".into(), version: 1, text: "@Entity\nclass Customer {}".into() };
+        assert!(plugin.line_markers(&customer).is_empty());
     }
 
     #[test]

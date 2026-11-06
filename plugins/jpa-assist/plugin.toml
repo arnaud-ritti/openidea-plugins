@@ -15,7 +15,7 @@ required = ["events", "project.read", "editor.read", "storage"]
 optional = ["clipboard"]
 
 [[contributes.providers]]
-kinds = ["completion", "code-actions"]
+kinds = ["completion", "code-actions", "line-markers"]
 languages = ["java", "kotlin"]
 
 [[contributes.views]]
