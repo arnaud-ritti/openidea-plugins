@@ -32,6 +32,11 @@ fn key(kind: &str, name: &str) -> String {
     format!("kube:{kind}/{name}")
 }
 
+/// Defined at every reference to a resource, so a marker on the resource can jump to its users.
+fn users_key(resource_key: &str) -> String {
+    format!("kube-users:{}", resource_key.trim_start_matches("kube:"))
+}
+
 struct Value {
     text: String,
     start: usize,
@@ -140,7 +145,12 @@ fn edges(text: &str) -> Edges {
     flush(doc, &mut definitions, &mut references);
     definitions.truncate(MAX_ANCHORS);
     references.truncate(MAX_ANCHORS);
-    Edges { definitions, references, ..Edges::default() }
+    let mut markers: Vec<Anchor> = references.clone();
+    markers.extend(definitions.iter().map(|d| Anchor { key: users_key(&d.key), range: d.range }));
+    definitions.extend(references.iter().map(|r| Anchor { key: users_key(&r.key), range: r.range }));
+    markers.truncate(MAX_ANCHORS);
+    definitions.truncate(2 * MAX_ANCHORS);
+    Edges { definitions, references, markers, ..Edges::default() }
 }
 
 impl DocumentIndexer for KubeExplorer {
@@ -161,7 +171,7 @@ mod tests {
     fn metadata_name_defines_and_fields_reference() {
         let text = "apiVersion: v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  template:\n    spec:\n      serviceAccountName: runner\n      containers:\n        - name: app\n          envFrom:\n            - configMapRef:\n                name: \"app-config\"\n          env:\n            - name: A\n              valueFrom:\n                secretKeyRef:\n                  name: db\n                  key: pw\n      volumes:\n        - name: v\n          secret:\n            secretName: certs\n---\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: web-hpa\nspec:\n  scaleTargetRef:\n    kind: Deployment\n    name: web\n";
         let found = edges(text);
-        assert_eq!(keys(&found.definitions), ["kube:Deployment/web", "kube:HorizontalPodAutoscaler/web-hpa"]);
+        assert_eq!(keys(&found.definitions[..2]), ["kube:Deployment/web", "kube:HorizontalPodAutoscaler/web-hpa"]);
         assert_eq!(
             keys(&found.references),
             [
@@ -174,6 +184,23 @@ mod tests {
         );
         assert_eq!(found.definitions[0].range.start.line, 3);
         assert_eq!(found.definitions[0].range.start.character, 8);
+    }
+
+    #[test]
+    fn markers_link_a_resource_to_its_users_and_back() {
+        let found = edges("kind: Secret\nmetadata:\n  name: db\n---\nkind: Pod\nmetadata:\n  name: app\nspec:\n  containers:\n    - envFrom:\n        - secretRef:\n            name: db\n");
+        assert_eq!(keys(&found.markers), ["kube:Secret/db", "kube-users:Secret/db", "kube-users:Pod/app"]);
+        assert_eq!(keys(&found.definitions), ["kube:Secret/db", "kube:Pod/app", "kube-users:Secret/db"]);
+        assert_eq!(found.markers[0].range.start.line, 11);
+        assert_eq!(found.markers[1].range.start.line, 2);
+        assert_eq!(found.definitions[2].range.start.line, 11);
+    }
+
+    #[test]
+    fn a_manifest_without_references_marks_only_its_definitions() {
+        let found = edges("kind: Service\nmetadata:\n  name: web\n");
+        assert_eq!(keys(&found.markers), ["kube-users:Service/web"]);
+        assert!(found.references.is_empty());
     }
 
     #[test]

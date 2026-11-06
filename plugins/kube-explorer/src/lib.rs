@@ -7,7 +7,13 @@
 //! Every cluster call is a `kubectl` run with the chosen context and
 //! namespace as flags, so the user's kubeconfig is never changed.
 
+mod chart_actions;
 mod checks;
+mod complete;
+mod config;
+mod helm;
+mod kinds;
+mod logs;
 mod convert;
 mod indexer;
 mod manifest;
@@ -19,10 +25,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, RandomState};
 use std::path::Path;
 
-use openidea_plugin::providers::{CodeAction, Document, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, Document, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Context, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Range, host,
+    Context, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Position, Range, host,
 };
 
 pub const TREE: &str = "kube";
@@ -111,6 +117,10 @@ pub struct KubeExplorer {
     revealed: Option<(String, Vec<(String, String)>)>,
     /// A Secret being created. Dropped by Back and by submitting.
     draft: Option<Draft>,
+    /// A log snapshot shown instead of the tree.
+    log_view: Option<logs::LogView>,
+    /// A Secret being edited. Dropped by Back and by saving.
+    editing_secret: Option<secrets::SecretEdit>,
     /// Chosen by Debug Resource's prompt, used by the next debug.
     debug_image: Option<String>,
 }
@@ -147,7 +157,7 @@ impl KubeExplorer {
 
     fn args_in(&self, namespace: Option<&str>, rest: &[&str]) -> Vec<String> {
         let mut args = Vec::new();
-        if let Some(path) = host::setting_string("kubeconfig").filter(|p| !p.is_empty()) {
+        if let Some(path) = config::kubeconfig() {
             args.push(format!("--kubeconfig={path}"));
         }
         if let Some(context) = &self.context {
@@ -278,7 +288,7 @@ impl KubeExplorer {
             }
             return Err(failure(KUBECTL, &secrets::redact(&out.stderr, &entries), out.status));
         }
-        host::notify(NotificationLevel::Info, "Secret created", &format!("{name} in {}", self.target()));
+        config::notify_success("Secret created", &format!("{name} in {}", self.target()));
         self.reload();
         Ok(())
     }
@@ -442,7 +452,7 @@ impl KubeExplorer {
         let origin = KubeExplorer { context: given(context), namespace: given(namespace), ..KubeExplorer::default() };
         let _task = host::begin_task(&format!("Applying {kind}/{name}"), false);
         match origin.kubectl(&["replace", "-f", path], None) {
-            Ok(out) => host::notify(NotificationLevel::Info, &format!("Applied {kind}/{name}"), out.trim()),
+            Ok(out) => config::notify_success(&format!("Applied {kind}/{name}"), out.trim()),
             Err(e) => host::notify(NotificationLevel::Error, &format!("Could not apply {kind}/{name}"), &e.to_string()),
         }
     }
@@ -548,6 +558,13 @@ impl KubeExplorer {
         }
         if !Self::reveal_allowed() {
             self.revealed = None;
+            self.editing_secret = None;
+        }
+        if let Some(edit) = &self.editing_secret {
+            return Ok(self.render_secret_edit(edit));
+        }
+        if let Some(log_view) = &self.log_view {
+            return Ok(log_view.render());
         }
         if let Some((name, values)) = &self.revealed {
             return Ok(self.render_revealed(name, values));
@@ -651,9 +668,11 @@ impl KubeExplorer {
         view.button(Button::new("describe", "Describe").icon("info").enabled(self.selected.is_some()))
             .button(Button::new("yaml", "YAML").icon("file-yaml").enabled(self.selected.is_some()))
             .button(Button::new("logs", "Logs").icon("file-log").enabled(logs))
+            .button(Button::new("log-view", "Log Viewer").icon("list-filter").enabled(logs))
             .button(Button::new("shell", "Shell").icon("terminal").enabled(pod_selected))
             .button(Button::new("attach", "Attach").icon("attach-to-process").enabled(pod_selected))
             .button(Button::new("show-secret", "Show Secret").icon("eye").enabled(kind == "secrets"))
+            .button(Button::new("edit-secret", "Edit Secret").icon("edit").enabled(kind == "secrets"))
             .button(Button::new("create-secret", "Create Secret").icon("add").enabled(!self.all_namespaces()))
             .button(Button::new("debug", "Debug").icon("debug").enabled(pod_selected))
             .button(Button::new("port-forward", "Port Forward").icon("external-link").enabled(forwardable))
@@ -730,7 +749,9 @@ impl KubeExplorer {
             },
             ViewEvent::Button(button) => self.button(&button)?,
             ViewEvent::Field(key, value) if key.starts_with("secret-") => {
-                if let Some(draft) = &mut self.draft {
+                if let Some(edit) = &mut self.editing_secret {
+                    edit.set_field(&key, value);
+                } else if let Some(draft) = &mut self.draft {
                     match key.as_str() {
                         "secret-name" => draft.name = value,
                         "secret-key" => draft.key = value,
@@ -765,6 +786,9 @@ impl KubeExplorer {
             notify_install_hint();
             return Ok(());
         }
+        if button.starts_with("log-") && button != "log-view" {
+            return self.log_button(button);
+        }
         match button {
             "back" => {
                 self.details = None;
@@ -772,6 +796,8 @@ impl KubeExplorer {
                 self.pending_delete = None;
                 self.revealed = None;
                 self.draft = None;
+                self.editing_secret = None;
+                self.log_view = None;
                 host::refresh_view(TREE);
                 return Ok(());
             }
@@ -795,6 +821,7 @@ impl KubeExplorer {
                 return Ok(());
             }
             "submit-secret" => return self.create_secret(),
+            "submit-secret-edit" => return self.save_secret_edit(),
             "start-forward" => {
                 let Some((namespace, target, ports)) = &self.forward else {
                     return Ok(());
@@ -844,6 +871,8 @@ impl KubeExplorer {
             "attach" => host::open_terminal(&format!("Attach: {row}"), KUBECTL, &args(&["attach", "-it", &name]))?,
             "debug" => self.debug_pod(&row)?,
             "show-secret" if kind == "secrets" => self.show_secret(&row)?,
+            "edit-secret" if kind == "secrets" => self.edit_secret(&row)?,
+            "log-view" => self.open_log_view(&kind, &row)?,
             "port-forward" => self.start_port_forward(&kind, &row)?,
             "shell" => host::open_terminal(
                 &format!("Shell: {row}"),
@@ -941,7 +970,7 @@ fn helm_repo_update() -> Result<(), Error> {
     if out.status != Some(0) {
         return Err(failure(HELM, &out.stderr, out.status));
     }
-    host::notify(NotificationLevel::Info, "Helm repositories updated", &output_tail(&out.stdout));
+    config::notify_success("Helm repositories updated", &output_tail(&out.stdout));
     Ok(())
 }
 
@@ -1093,19 +1122,22 @@ fn chart_file(path: &str) -> Option<String> {
 
 const MAX_BYTES: usize = 1 << 20;
 
-/// Publishes the manifest problems of an opened or saved YAML file of an open project.
-fn inspect(path: &str) {
-    if !(path.ends_with(".yaml") || path.ends_with(".yml") || path.ends_with(".tpl")) {
-        return;
-    }
-    let Some(project) = host::projects()
+/// The open project that holds `path`, with its root.
+fn project_of(path: &str) -> Option<(String, openidea_plugin::Project)> {
+    host::projects()
         .unwrap_or_default()
         .into_iter()
         .filter_map(|p| Some((p.root().ok()?, p)))
         .filter(|(root, _)| Path::new(path).starts_with(root))
         .max_by_key(|(root, _)| root.len())
-        .map(|(_, project)| project)
-    else {
+}
+
+/// Publishes the manifest problems of an opened or saved YAML file of an open project.
+fn inspect(path: &str) {
+    if !(path.ends_with(".yaml") || path.ends_with(".yml") || path.ends_with(".tpl")) || config::is_non_kubernetes(path) {
+        return;
+    }
+    let Some((root, project)) = project_of(path) else {
         return;
     };
     let Ok(text) = project.read_file(path) else { return };
@@ -1122,7 +1154,12 @@ fn inspect(path: &str) {
         let setting = checks::SETTINGS.iter().find(|(c, _)| *c == code).map(|(_, s)| *s);
         setting.and_then(host::setting_bool) != Some(false)
     };
-    let diagnostics: Vec<_> = checks::for_file(path, &text, in_chart, patch_context)
+    let mut findings = checks::for_file(path, &text, in_chart, patch_context);
+    if in_chart && chart_file(path).is_some_and(|chart| chart.ends_with("/Chart.yaml")) {
+        let chart_dir = chart_file(path).map(|chart| chart.trim_end_matches("/Chart.yaml").to_owned()).unwrap_or_default();
+        findings.extend(helm::check(&text, &helm::Chart::load(&project, &root, &chart_dir, &text)));
+    }
+    let diagnostics: Vec<_> = findings
         .iter()
         .filter(|finding| enabled(finding.code))
         .map(|finding| finding.diagnostic(&text))
@@ -1167,6 +1204,10 @@ impl Plugin for KubeExplorer {
             "helm-parameters" => return self.helm_parameters().map(|()| None),
             "customize-namespaces" => return self.customize_namespaces().map(|()| None),
             "edit-debug-images" => return self.edit_debug_images().map(|()| None),
+            "helm-repo-cache" => return self.cache_helm_repositories().map(|()| None),
+            "choose-kubeconfig" => return self.choose_kubeconfig().map(|()| None),
+            "telepresence-connect" => return self.telepresence("connect").map(|()| None),
+            "telepresence-quit" => return self.telepresence("quit").map(|()| None),
             "how-to-install-kubectl" => {
                 notify_install_hint();
                 return Ok(None);
@@ -1190,7 +1231,7 @@ impl Plugin for KubeExplorer {
         };
         let _task = host::begin_task(working, false);
         let text = self.command(id, ctx)?;
-        host::notify(NotificationLevel::Info, done, &text);
+        config::notify_success(done, &text);
         Ok(None)
     }
 }
@@ -1199,9 +1240,9 @@ impl KubeExplorer {
     fn resource_command(&mut self, action: &str, key: Option<&str>) -> Result<(), Error> {
         let (kind, row) = key.and_then(resource).ok_or("Right-click a resource in Kube Explorer.")?;
         let applies = match action {
-            "logs" | "log-sources" => kind == "pods" || WORKLOADS.contains(&kind.as_str()),
+            "logs" | "log-sources" | "log-view" => kind == "pods" || WORKLOADS.contains(&kind.as_str()),
             "shell" | "attach" | "debug" => kind == "pods",
-            "show-secret" => kind == "secrets",
+            "show-secret" | "edit-secret" => kind == "secrets",
             "port-forward" => FORWARDABLE.iter().any(|(k, _)| *k == kind),
             "describe" | "yaml" | "delete" => true,
             _ => return Err(Error::NotFound(format!("command resource-{action}"))),
@@ -1222,7 +1263,7 @@ impl KubeExplorer {
         self.selected = Some((kind, row));
         self.confirm_delete = action == "delete";
         self.button(action)?;
-        if self.details.is_some() || self.forward.is_some() || self.revealed.is_some() {
+        if self.details.is_some() || self.forward.is_some() || self.revealed.is_some() || self.editing_secret.is_some() || self.log_view.is_some() {
             host::reveal_view(TREE)?;
         }
         host::refresh_view(TREE);
@@ -1313,9 +1354,14 @@ impl KubeExplorer {
 }
 
 impl Providers for KubeExplorer {
+    fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        complete::items(doc, at)
+    }
+
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let mut actions = schema::code_actions(doc);
         actions.extend(convert::code_actions(doc, selection));
+        actions.extend(chart_actions::code_actions(doc, selection));
         actions
     }
 }
@@ -1888,7 +1934,7 @@ mod tests {
     #[test]
     fn every_context_menu_command_is_declared() {
         let manifest = include_str!("../plugin.toml");
-        for action in ["describe", "yaml", "logs", "shell", "attach", "debug", "port-forward", "show-secret", "delete"] {
+        for action in ["describe", "yaml", "logs", "log-view", "shell", "attach", "debug", "port-forward", "show-secret", "edit-secret", "delete"] {
             assert!(manifest.contains(&format!("command = \"resource-{action}\"")), "{action}");
         }
     }
@@ -2387,10 +2433,12 @@ mod tests {
         ("pods", "yaml"),
         ("pods", "logs"),
         ("deployments", "logs"),
+        ("pods", "log-view"),
         ("pods", "shell"),
         ("pods", "attach"),
         ("pods", "debug"),
         ("secrets", "show-secret"),
+        ("secrets", "edit-secret"),
         ("services", "port-forward"),
         ("pods", "delete"),
     ];

@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.38" }
+regex-lite = "0.1"
 
 [profile.release]
 opt-level = "s"

@@ -68,7 +68,7 @@ impl KubeExplorer {
         if out.status != Some(0) {
             return Err(crate::failure(HELM, &out.stderr, out.status));
         }
-        host::notify(NotificationLevel::Info, "Helm chart created", &format!("{name}: {}", out.stdout.trim()));
+        crate::config::notify_success("Helm chart created", &format!("{name}: {}", out.stdout.trim()));
         Ok(())
     }
 

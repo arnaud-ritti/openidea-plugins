@@ -34,6 +34,12 @@ pub struct Doc {
     pub top_keys: Vec<String>,
     /// Each indent-0 key with the byte range of its name and its scalar value.
     pub top_entries: Vec<(String, Range<usize>, Option<Value>)>,
+    /// The keys directly under `spec:` and `metadata:` (as values spanning the key) with their scalar values.
+    pub spec_keys: Vec<Value>,
+    pub spec_inline: bool,
+    pub metadata_keys: Vec<(String, Value, Option<Value>)>,
+    /// The keys under `metadata.annotations`, with their scalar values.
+    pub annotation_keys: Vec<(Value, Option<Value>)>,
     /// Bytes of the document, after its `---` line.
     pub range: Range<usize>,
     pub start_line: usize,
@@ -229,9 +235,22 @@ fn scan_section(doc: &mut Doc, lines: &[Line], mask: &[bool], at: usize, section
     if section == "spec" && inline {
         doc.has_selector = true;
         doc.has_template = true;
+        doc.spec_inline = true;
     }
     for j in children(lines, mask, at) {
-        let Some((key, _, value)) = key_value(lines[j].content(), lines[j].content_start()) else { continue };
+        let Some((key, key_start, value)) = key_value(lines[j].content(), lines[j].content_start()) else { continue };
+        let key_span = Value { text: key.clone(), start: key_start, end: key_start + key.len() };
+        match section {
+            "spec" => doc.spec_keys.push(key_span.clone()),
+            _ => doc.metadata_keys.push((key.clone(), key_span.clone(), value.clone())),
+        }
+        if section == "metadata" && key == "annotations" && value.is_none() {
+            for k in children(lines, mask, j) {
+                if let Some((name, start, value)) = key_value(lines[k].content(), lines[k].content_start()) {
+                    doc.annotation_keys.push((Value { text: name.clone(), start, end: start + name.len() }, value));
+                }
+            }
+        }
         match (section, key.as_str()) {
             ("metadata", "name") => doc.name = value,
             ("metadata", "generateName") => doc.has_generate_name = true,

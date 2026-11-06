@@ -5,6 +5,7 @@
 use openidea_plugin::text::position;
 use openidea_plugin::{Diagnostic, Severity};
 
+use crate::kinds::{self, Problem};
 use crate::manifest::{Doc, documents};
 use crate::schema;
 
@@ -17,6 +18,8 @@ pub const CHART_MISSING_KEY: &str = "chart-missing-key";
 pub const CHART_UNKNOWN_KEY: &str = "chart-unknown-key";
 pub const CHART_INVALID_VALUE: &str = "chart-invalid-value";
 pub const HELM_EXCESSIVE_TRIM: &str = "helm-excessive-trim";
+pub use crate::kinds::{DEPRECATED_KEY, READ_ONLY_FIELD, UNKNOWN_KEY, UNKNOWN_KIND};
+pub use crate::helm::{HELM_UNKNOWN_INCLUDE, HELM_UNKNOWN_VALUE};
 
 /// Setting (a boolean, default on) that switches each code off.
 pub const SETTINGS: &[(&str, &str)] = &[
@@ -29,6 +32,12 @@ pub const SETTINGS: &[(&str, &str)] = &[
     (CHART_UNKNOWN_KEY, "checkChartSchema"),
     (CHART_INVALID_VALUE, "checkChartSchema"),
     (HELM_EXCESSIVE_TRIM, "checkHelmExcessiveTrim"),
+    (UNKNOWN_KEY, "checkKindSchema"),
+    (UNKNOWN_KIND, "checkKindSchema"),
+    (READ_ONLY_FIELD, "checkReadOnlyFields"),
+    (DEPRECATED_KEY, "checkDeprecatedKeys"),
+    (HELM_UNKNOWN_VALUE, "checkHelmValues"),
+    (HELM_UNKNOWN_INCLUDE, "checkHelmIncludes"),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,7 +50,7 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn new(start: usize, end: usize, code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(start: usize, end: usize, code: &'static str, message: impl Into<String>) -> Self {
         Self { start, end, code, message: message.into(), severity: Severity::Warning }
     }
 
@@ -99,6 +108,7 @@ fn check_in(docs: &[Doc], text: &str, patch_context: bool) -> Vec<Finding> {
         found.extend(missing_name(doc));
         if !patch_context {
             found.extend(missing_selector(doc));
+            found.extend(kind_schema(doc, text));
         }
     }
     found
@@ -174,6 +184,22 @@ fn duplicate_env_names(doc: &Doc) -> Vec<Finding> {
         }
     }
     found
+}
+
+fn kind_schema(doc: &Doc, text: &str) -> Vec<Finding> {
+    kinds::check(doc, text)
+        .into_iter()
+        .map(|issue| {
+            let (code, severity) = match issue.problem {
+                Problem::UnknownKey if issue.message.contains("bundled reference") => (UNKNOWN_KEY, Severity::Info),
+                Problem::UnknownKey => (UNKNOWN_KEY, Severity::Warning),
+                Problem::UnknownKind => (UNKNOWN_KIND, Severity::Info),
+                Problem::ReadOnly => (READ_ONLY_FIELD, Severity::Info),
+                Problem::Deprecated => (DEPRECATED_KEY, Severity::Warning),
+            };
+            Finding { severity, ..Finding::new(issue.start, issue.end, code, issue.message) }
+        })
+        .collect()
 }
 
 fn is_built_in(doc: &Doc) -> bool {
@@ -917,6 +943,59 @@ mod tests {
         let diagnostics = host.diagnostics();
         assert_eq!(diagnostics.keys().collect::<Vec<_>>(), ["/p/chart/templates/a.yaml"]);
         assert_eq!(diagnostics["/p/chart/templates/a.yaml"][0].code.as_deref(), Some(HELM_WHITESPACE_TRIM));
+    }
+
+    const CHART_YAML: &str = "apiVersion: v2\nname: c\nversion: 1\n";
+    const CHART_TEMPLATE: &str = "a: {{ .Values.image.nope.x }}\nb: {{ include \"c.gone\" . }}\nc: {{ include \"c.name\" . }}\n";
+
+    fn published_chart_codes(host: &MockHost) -> Vec<String> {
+        publish(host, Event::FileOpened("/p/chart/templates/a.yaml".into()));
+        host.diagnostics().get("/p/chart/templates/a.yaml").into_iter().flatten().map(|d| d.code.clone().unwrap()).collect()
+    }
+
+    #[test]
+    fn chart_templates_are_checked_against_values_and_defines() {
+        let host = project(&[
+            ("chart/Chart.yaml", CHART_YAML),
+            ("chart/values.yaml", "image:\n  tag: 1\n"),
+            ("chart/templates/_helpers.tpl", "{{- define \"c.name\" -}}c{{- end -}}"),
+            ("chart/templates/a.yaml", CHART_TEMPLATE),
+        ]);
+        assert_eq!(published_chart_codes(&host), [HELM_UNKNOWN_VALUE, HELM_UNKNOWN_INCLUDE]);
+    }
+
+    #[test]
+    fn chart_with_dependencies_or_subcharts_is_not_judged() {
+        let with_dependencies = format!("{CHART_YAML}dependencies:\n  - name: redis\n");
+        let host = project(&[("chart/Chart.yaml", &with_dependencies), ("chart/values.yaml", "image: {}\n"), ("chart/templates/a.yaml", CHART_TEMPLATE)]);
+        assert!(published_chart_codes(&host).is_empty());
+
+        let host = project(&[("chart/Chart.yaml", CHART_YAML), ("chart/charts/redis/Chart.yaml", CHART_YAML), ("chart/values.yaml", "image:\n  tag: 1\n"), ("chart/templates/a.yaml", CHART_TEMPLATE)]);
+        assert!(published_chart_codes(&host).is_empty());
+    }
+
+    #[test]
+    fn chart_checks_can_be_switched_off() {
+        let host = project(&[("chart/Chart.yaml", CHART_YAML), ("chart/values.yaml", "image:\n  tag: 1\n"), ("chart/templates/a.yaml", CHART_TEMPLATE)]);
+        host.set_setting("checkHelmValues", "false");
+        host.set_setting("checkHelmIncludes", "false");
+        assert!(published_chart_codes(&host).is_empty());
+    }
+
+    #[test]
+    fn kind_schema_findings_follow_their_switches_and_stay_off_helm_files() {
+        let manifest = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: a\n  uid: 1\nspecs: {}\n";
+        let host = project(&[("d.yaml", manifest), ("h.yaml", &format!("{manifest}x: {{{{ .Values.a }}}}\n"))]);
+        publish(&host, Event::FileOpened("/p/d.yaml".into()));
+        publish(&host, Event::FileOpened("/p/h.yaml".into()));
+        let codes: Vec<_> = host.diagnostics()["/p/d.yaml"].iter().map(|d| d.code.clone().unwrap()).collect();
+        assert_eq!(codes, [UNKNOWN_KEY, READ_ONLY_FIELD]);
+        assert!(host.diagnostics().get("/p/h.yaml").is_none_or(|found| found.is_empty()));
+
+        host.set_setting("checkKindSchema", "false");
+        host.set_setting("checkReadOnlyFields", "false");
+        publish(&host, Event::FileOpened("/p/d.yaml".into()));
+        assert!(host.diagnostics().get("/p/d.yaml").is_none_or(|found| found.is_empty()));
     }
 
     #[test]
