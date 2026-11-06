@@ -769,6 +769,29 @@ fn migrate_fresh_runs_only_when_confirmed() {
     assert!(host.notifications()[2].body.contains("again within"));
 }
 
+#[test]
+fn migrate_fresh_confirmation_is_per_project() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php"]);
+    let mut plugin = activated(&host);
+    let ran = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = ran.clone();
+    host.on_process("php", move |_, _| {
+        counter.set(counter.get() + 1);
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "ok".into(), stderr: String::new() })
+    });
+
+    host.set_project_root(Some("/project-a"));
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    host.set_project_root(Some("/project-b"));
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+
+    assert_eq!(ran.get(), 0);
+    assert_eq!(host.notifications().len(), 2);
+
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    assert_eq!(ran.get(), 1);
+}
+
 fn complete_directives(plugin: &mut Main, marked: &str) -> Vec<String> {
     let (text, at) = cursor(marked);
     labels(plugin.completion(&doc("/project/resources/views/posts/show.blade.php", "blade", &text), at, None))

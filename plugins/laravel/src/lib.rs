@@ -315,8 +315,8 @@ pub struct Main {
     checked: BTreeSet<String>,
     /// Expanded nodes of the tool window.
     expanded: BTreeSet<String>,
-    /// When `migrate-fresh` was asked for the first time.
-    fresh_asked: Option<Instant>,
+    /// Project root and time `migrate-fresh` was first asked for.
+    fresh_asked: Option<(String, Instant)>,
 }
 
 impl Main {
@@ -440,9 +440,13 @@ impl Plugin for Main {
             "storage-link" => self.artisan(ctx, "storage:link"),
             "db-seed" => self.artisan(ctx, "db:seed"),
             "migrate-fresh" => {
-                let confirmed = self.fresh_asked.take().is_some_and(|asked| asked.elapsed() < Duration::from_secs(30));
+                let root = ctx.project().and_then(|project| project.root().ok()).unwrap_or_default();
+                let confirmed = self
+                    .fresh_asked
+                    .take()
+                    .is_some_and(|(asked_root, asked)| asked_root == root && asked.elapsed() < Duration::from_secs(30));
                 if !confirmed {
-                    self.fresh_asked = Some(Instant::now());
+                    self.fresh_asked = Some((root, Instant::now()));
                     host::notify(
                         NotificationLevel::Warning,
                         SOURCE,
