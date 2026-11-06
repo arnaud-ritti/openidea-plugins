@@ -5,14 +5,17 @@
 
 pub mod beans;
 pub mod config;
+pub mod constants;
 pub mod diagram;
 pub mod finding;
 pub mod index;
 pub mod java;
 pub mod kotlin;
 pub mod metadata;
+pub mod sibling;
 pub mod tree;
 pub mod xml;
+pub mod xml_check;
 
 use openidea_plugin::text::position;
 use openidea_plugin::{Position, Range};
