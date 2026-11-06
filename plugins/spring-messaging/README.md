@@ -20,7 +20,11 @@ XML checks (hand-written tables, not read from the XSDs; only these elements): R
 
 Kotlin sources are indexed too (array literals, `suspend` and expression-bodied functions), except the nested `queuesToDeclare`/`bindings` annotations, which are read in Java only.
 
-Not ported: broker connection and live topics, Spring Cloud Stream bindings (a separate plugin), SpEL, `BindingBuilder` routing, constants held in non-constant expressions or other projects' classes.
+SpEL destinations: a whole-value template `"#{'orders'}"`, `"#{'a' + 'b'}"`, `"#{'${app.topic}'}"` (placeholders resolve as usual) and `"#{T(com.acme.Queues).ORDERS}"` (a constant of the project) is read as that name. Anything that needs evaluating (`@bean.method()`, conditions, a constant joined to a literal) is skipped.
+
+More XML checks: `true`/`false` values of Rabbit `connection-factory` (`publisher-confirms`, `publisher-returns`), `admin` (`auto-startup`, `ignore-declaration-exceptions`) and `listener-container` (`auto-declare`, `mismatched-queues-fatal`). Other namespace elements (`template`, `binding`, `annotation-driven`, `jca-listener-container`) are not modelled: their schemas were not at hand to list them completely.
+
+Not ported: broker connection and live topics, Spring Cloud Stream bindings (a separate plugin), SpEL beyond the destinations above, `BindingBuilder` routing, constants held in non-constant expressions or other projects' classes.
 
 ```sh
 cargo test

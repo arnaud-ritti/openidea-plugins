@@ -158,6 +158,37 @@ fn constant_str(expr: &str, at: usize, own: Option<&str>) -> Option<Str> {
     Some(Str { value: format!("{CONSTANT}{key}"), at, end: at + expr.len() })
 }
 
+/// The destination a whole-value SpEL template names: `#{'orders'}`, `#{"a" + 'b'}` and `#{T(com.acme.Queues).ORDERS}`.
+/// `None` for anything that needs evaluating (method calls, beans, conditions).
+fn spel_destination(value: &str) -> Option<String> {
+    let body = value.trim().strip_prefix("#{")?.strip_suffix('}')?;
+    let mut out = String::new();
+    let mut constants = 0;
+    for operand in body.split('+').map(str::trim) {
+        if constants > 0 {
+            return None;
+        }
+        let quoted = ['\'', '"'].into_iter().find_map(|q| operand.strip_prefix(q)?.strip_suffix(q));
+        if let Some(literal) = quoted {
+            if literal.contains(['\'', '"', '#']) {
+                return None;
+            }
+            out.push_str(literal);
+            continue;
+        }
+        let reference = operand.strip_prefix("T(")?;
+        let (ty, name) = reference.split_once(").")?;
+        let ty = ty.rsplit('.').next()?;
+        let ident = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !ident(ty) || !ident(name) || constants > 0 || !out.is_empty() {
+            return None;
+        }
+        constants += 1;
+        out = format!("{CONSTANT}{ty}.{name}");
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// The constants named in an annotation attribute (`queues = {Queues.A, Queues.B}`).
 fn constant_strs(arg: &Arg, own: Option<&str>) -> Vec<Str> {
     let mut at = arg.at;
@@ -185,14 +216,22 @@ struct Collector<'a> {
 impl Collector<'_> {
     fn add(&mut self, broker: Broker, space: &'static str, role: Role, via: &str, s: &Str) {
         let v = &s.value;
-        if v.is_empty() || v.contains("#{") || v.starts_with("!{") {
+        if v.is_empty() || v.starts_with("!{") {
             return;
         }
+        let name = if v.contains("#{") {
+            match spel_destination(v) {
+                Some(name) => name,
+                None => return,
+            }
+        } else {
+            v.clone()
+        };
         let range = range(self.text, s.at, s.end);
         self.out.push(Endpoint {
             broker,
             space,
-            name: v.clone(),
+            name,
             role,
             via: via.to_owned(),
             at: s.at,
@@ -1042,6 +1081,38 @@ class KtEvents(private val kafkaTemplate: KafkaTemplate<String, String>, val rab
     }
 
     #[test]
+    fn reads_simple_spel_destinations() {
+        assert_eq!(spel_destination("#{'orders'}").as_deref(), Some("orders"));
+        assert_eq!(spel_destination("#{'a' + \"-b\"}").as_deref(), Some("a-b"));
+        assert_eq!(spel_destination("#{'${app.topic}'}").as_deref(), Some("${app.topic}"));
+        assert_eq!(spel_destination("#{T(com.acme.Queues).ORDERS}"), Some(format!("{CONSTANT}Queues.ORDERS")));
+        for dynamic in ["#{@names.next()}", "#{'a'.concat(x)}", "#{T(Q).A + 'x'}", "#{x}", "pre#{'a'}", "#{'a' + b}", "#{}", "#{cond ? 'a' : 'b'}"] {
+            assert_eq!(spel_destination(dynamic), None, "{dynamic}");
+        }
+    }
+
+    #[test]
+    fn spel_destinations_become_endpoints() {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/application.properties", "app.topic=events\n");
+        host.add_file("src/main/java/com/acme/Queues.java", "class Queues { static final String ORDERS = \"orders.in\"; }");
+        let listeners = "class L {\n    @KafkaListener(topics = \"#{'${app.topic}'}\") void a(String s) {}\n    @RabbitListener(queues = \"#{T(com.acme.Queues).ORDERS}\") void b(String s) {}\n    @JmsListener(destination = \"#{@names.next()}\") void c(String s) {}\n}\n";
+        let producers = "class P {\n    void go() {\n        kafkaTemplate.send(\"events\", \"x\");\n        rabbitTemplate.convertAndSend(\"orders.in\", \"x\");\n        jmsTemplate.convertAndSend(\"anything\", \"x\");\n    }\n}\n";
+        host.add_file("src/main/java/L.java", listeners);
+        host.add_file("src/main/java/P.java", producers);
+        let mut m = Messaging::default();
+        let l = Document { path: "/project/src/main/java/L.java".into(), language: "java".into(), version: 1, text: listeners.into() };
+        let lines: Vec<_> = m.line_markers(&l).iter().map(|k| (k.line, k.tooltip.clone())).collect();
+        assert_eq!(
+            lines,
+            [
+                (1, "Kafka topic events: P.java:3 (send)".to_owned()),
+                (2, "RabbitMQ queue orders.in: P.java:4 (convertAndSend)".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn expands_placeholders_to_depth_two() {
         let props: Props = [("a.b", "x"), ("deep", "${a.b}"), ("deeper", "${deep}")]
             .into_iter()
@@ -1239,6 +1310,15 @@ class Sender {
             (6, "unresolved-reference".into(), Severity::Info),
             (5, "unresolved-listener-method".into(), Severity::Warning),
         ]);
+    }
+
+    #[test]
+    fn xml_rabbit_booleans_are_checked() {
+        let _host = listener_host();
+        let xml = "<beans xmlns:rabbit=\"http://www.springframework.org/schema/rabbit\">\n<rabbit:connection-factory id=\"cf\" publisher-returns=\"yes\"/>\n<rabbit:admin auto-startup=\"true\"/>\n</beans>";
+        let found = listener_xml::problems(xml, &spring_text::index::Index::new(&[], listener_xml::parse));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code.as_deref(), Some("invalid-attribute-value"));
     }
 
     #[test]
