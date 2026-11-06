@@ -646,4 +646,15 @@ class A { fun f() { t.send("$p-orders", 1); t.send("orders-$env", 1); t.send("a$
         let sent: Vec<_> = calls(src).iter().filter(|c| c.name == "send").map(|c| c.args[0].string.as_ref().map(|s| s.value.clone())).collect();
         assert_eq!(sent, [None, None, None, Some("ok$x".to_owned()), Some("c$".to_owned())]);
     }
+
+    #[test]
+    fn kotlin_escaped_dollar_placeholder_stays_a_plain_literal() {
+        let src = r#"@KafkaListener(topics = ["\${app.topic}"])
+class A { fun f() { t.send("\${app.topic}", 1) } }"#;
+        let f = parse(src);
+        let got: Vec<_> = f.types[0].annotation("KafkaListener").unwrap().strings(&["topics"]).iter().map(|s| s.value.clone()).collect();
+        assert_eq!(got, ["${app.topic}"]);
+        let sent: Vec<_> = calls(src).iter().filter(|c| c.name == "send").map(|c| c.args[0].string.as_ref().map(|s| s.value.clone())).collect();
+        assert_eq!(sent, [Some("${app.topic}".to_owned())]);
+    }
 }
