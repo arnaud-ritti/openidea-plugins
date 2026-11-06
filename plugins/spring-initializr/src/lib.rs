@@ -149,12 +149,12 @@ impl Launcher {
     pub fn cli_args(&mut self) -> Result<Vec<String>, String> {
         for (key, label) in [("groupId", "group"), ("artifactId", "artifact"), ("name", "name"), ("bootVersion", "Spring Boot version"), ("javaVersion", "Java version")] {
             let value = self.get(key);
-            if !value.is_empty() && !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+            if value.starts_with('-') || !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
                 return Err(format!("The {label} `{value}` may only contain letters, digits, `.`, `_` and `-` for the Spring Boot CLI."));
             }
         }
         let package = self.get("packageName");
-        if !package.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) {
+        if package.starts_with('-') || !package.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) {
             return Err(format!("The package name `{package}` may only contain letters, digits, `.` and `_` for the Spring Boot CLI."));
         }
         let kind = self.get("type");
@@ -177,14 +177,15 @@ impl Launcher {
             }
         }
         let dependencies = self.get("dependencies").split([',', ' ']).filter(|d| !d.is_empty()).collect::<Vec<_>>().join(",");
-        if dependencies.chars().any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ','))) {
+        let bad_char = |c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ','));
+        if dependencies.chars().any(bad_char) || dependencies.split(',').any(|d| d.starts_with('-')) {
             return Err(format!("The dependencies `{dependencies}` may only be comma-separated ids for the Spring Boot CLI."));
         }
         if !dependencies.is_empty() {
             args.push(format!("--dependencies={dependencies}"));
         }
         args.push("--extract".into());
-        args.push(self.get("artifactId"));
+        args.push(format!("./{}", self.get("artifactId")));
         Ok(args)
     }
 
@@ -206,7 +207,11 @@ impl Launcher {
                 );
                 host::open_url(&self.starter_url())
             }
-            result => result,
+            Err(error) => {
+                host::notify(NotificationLevel::Warning, "Spring Initializr", &format!("Could not open the terminal: {error}"));
+                Ok(())
+            }
+            Ok(()) => Ok(()),
         }
     }
 
@@ -406,7 +411,7 @@ mod tests {
                 "init", "--build=gradle", "--type=gradle-project-kotlin", "--language=kotlin", "--boot-version=3.5.16",
                 "--java-version=17", "--packaging=jar", "--groupId=com.example", "--artifactId=my-app", "--name=my-app",
                 "--description=a b; rm -rf ~ 'x'", "--package-name=com.example.myapp", "--dependencies=web,data-jpa",
-                "--extract", "my-app"
+                "--extract", "./my-app"
             ]
         );
         assert!(host.opened_urls().is_empty());
@@ -431,5 +436,20 @@ mod tests {
         assert!(host.terminals().is_empty());
         assert!(host.opened_urls()[0].starts_with("https://start.spring.io/starter.zip?"));
         assert!(host.notifications()[0].body.contains("process:spring"));
+    }
+
+    #[test]
+    fn spring_init_refuses_leading_dash_values() {
+        let host = MockHost::install().with_capabilities(&["storage", "process:spring"]);
+        let mut l = Launcher::default();
+        for (key, value) in [("artifactId", "--help"), ("artifactId", "-x"), ("groupId", "-g"), ("dependencies", "web,-web")] {
+            let mut l2 = Launcher::default();
+            field(&mut l2, &host, key, value);
+            click(&mut l2, &host, "cli");
+        }
+        assert!(host.terminals().is_empty());
+        assert_eq!(host.notifications().len(), 4);
+        field(&mut l, &host, "artifactId", "--help");
+        assert!(l.cli_args().is_err());
     }
 }
