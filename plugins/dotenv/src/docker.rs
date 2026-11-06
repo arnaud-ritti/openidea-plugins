@@ -85,8 +85,11 @@ pub fn dockerfile(text: &str) -> Vec<Entry> {
     out
 }
 
+/// Merge keys, aliases, anchors and `${…}` interpolations aren't variable names.
 fn is_anchor_syntax(key: &str) -> bool {
-    key.is_empty() || key.starts_with(['<', '*', '&'])
+    let mut chars = key.chars();
+    let starts_well = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    !starts_well || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn is_comment_or_empty(rest: &str) -> bool {
@@ -282,5 +285,11 @@ mod tests {
     fn anchor_merge_keys_are_skipped_not_crashing() {
         let text = "x-env: &env\n  X: 1\nservices:\n  a:\n    environment: *env\n  b:\n    environment:\n      <<: *env\n      Y: 2\n  c:\n    environment: &local\n      - *env\n      - Z=3\n";
         assert_eq!(keys(text, compose(text)), [e("Y", "2"), e("Z", "3")]);
+    }
+
+    #[test]
+    fn interpolated_items_are_not_declared() {
+        let text = "services:\n  a:\n    environment: [${A}=1, \"${VAR}\", OK=1]\n  b:\n    environment:\n      - ${B}=2\n      - C=3\n";
+        assert_eq!(keys(text, compose(text)), [e("OK", "1"), e("C", "3")]);
     }
 }

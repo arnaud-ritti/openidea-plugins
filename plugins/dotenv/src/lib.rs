@@ -213,7 +213,7 @@ impl Plugin for DotEnv {
             if let Some(index) = self.projects.get_mut(&root) {
                 index.update(path, text.as_deref());
                 if let Some(text) = &text {
-                    index.add_compose_env_files(&project, path, text);
+                    index.add_compose_env_files(&project, &root, path, text);
                 }
             }
             if let Some(text) = text.filter(|_| is_env_file(path)) {
