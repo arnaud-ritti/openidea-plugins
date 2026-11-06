@@ -30,6 +30,7 @@ pub struct Versioning {
     pub is_config_file: bool,
     pub configured: bool,
     pub custom_parser: bool,
+    pub inserter: bool,
 }
 
 /// Reads one source or `application*` file: `None` for a source that does not mention API versioning.
@@ -38,7 +39,8 @@ pub fn versioning(path: &str, text: &str) -> Option<Versioning> {
     let lower = text.to_ascii_lowercase();
     let configured = lower.contains("apiversion") || lower.contains("api-version") || lower.contains("api_version");
     let custom_parser = text.contains("ApiVersionParser");
-    (is_config_file || configured).then_some(Versioning { is_config_file, configured, custom_parser })
+    let inserter = text.contains("ApiVersionInserter");
+    (is_config_file || configured).then_some(Versioning { is_config_file, configured, custom_parser, inserter })
 }
 
 /// Whether the project configures versioning; `None` unless every file was read and an `application*` file exists.
@@ -185,11 +187,11 @@ mod tests {
         assert_eq!(none("/p/application.properties", "spring.mvc.apiversion.use.header=X"), Some(true));
         assert_eq!(none("/p/A.java", "class A {}"), None);
         assert_eq!(none("/p/C.java", "class C implements WebMvcConfigurer { void configureApiVersioning(ApiVersionConfigurer c) {} }"), Some(true));
-        let cfg = Versioning { is_config_file: true, configured: false, custom_parser: false };
+        let cfg = Versioning { is_config_file: true, configured: false, custom_parser: false, inserter: false };
         assert_eq!(project_versioning(true, &[cfg]), Some(false));
         assert_eq!(project_versioning(false, &[cfg]), None);
-        assert_eq!(project_versioning(true, &[Versioning { is_config_file: false, configured: true, custom_parser: false }]), None);
-        assert_eq!(project_versioning(true, &[cfg, Versioning { is_config_file: false, configured: true, custom_parser: false }]), Some(true));
+        assert_eq!(project_versioning(true, &[Versioning { is_config_file: false, configured: true, custom_parser: false, inserter: false }]), None);
+        assert_eq!(project_versioning(true, &[cfg, Versioning { is_config_file: false, configured: true, custom_parser: false, inserter: false }]), Some(true));
     }
 
     const BINDERS: &str = "import org.springframework.web.bind.annotation.InitBinder;\n@Controller\nclass A {\n    @InitBinder\n    String bad(WebDataBinder b) { return \"\"; }\n    @InitBinder(\"x\")\n    void none(Locale l) {}\n    @InitBinder\n    void ok(WebDataBinder b, WebRequest r) {}\n}\n";

@@ -13,13 +13,14 @@ use openidea_plugin::{
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, JavaFile, Param, Str};
 use spring_text::tree::Expansion;
-use spring_text::{SOURCE_GLOBS, config, contains, is_kotlin, range};
+use spring_text::{SOURCE_GLOBS, config, contains, is_kotlin, parse_source, range, source_calls};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 mod checks;
 mod endpoints;
 mod generate;
+mod xml_checks;
 
 pub(crate) const MAPPINGS: [&str; 6] =
     ["RequestMapping", "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping"];
@@ -442,17 +443,190 @@ impl WebTools {
     }
 }
 
+impl WebTools {
+    /// Opt-in hints for view names no template answers, once the project has templates at all.
+    fn unresolved_views(&mut self, doc: &Document) -> Vec<Diagnostic> {
+        if !host::setting_bool("springWeb.reportUnresolvedViews").unwrap_or(false) {
+            return Vec::new();
+        }
+        let views = self.views(doc);
+        if views.is_empty() || self.templates(doc).is_empty() {
+            return Vec::new();
+        }
+        views
+            .into_iter()
+            .filter(|(s, found)| found.is_empty() && !view_name(&s.value).is_empty())
+            .map(|(s, _)| {
+                let message = format!("No template named \"{}\" in the known template folders; another view resolver may serve it.", view_name(&s.value));
+                Diagnostic::new(range(&doc.text, s.at, s.end), Severity::Hint, message).code("unresolved-view")
+            })
+            .collect()
+    }
+
+    /// `apiVersion(...)` in a test of a project with nothing that carries the version into a request.
+    fn api_version_hints(&mut self, doc: &Document) -> Vec<Diagnostic> {
+        if !doc.path.contains("/src/test/") || !doc.text.contains("apiVersion(") {
+            return Vec::new();
+        }
+        let Some(index) = self.versioning.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        let files: Vec<_> = index.iter().map(|(_, v)| *v).collect();
+        if !index.complete() || files.iter().any(|f| f.inserter || (f.is_config_file && f.configured)) {
+            return Vec::new();
+        }
+        source_calls(&doc.path, &doc.text)
+            .into_iter()
+            .filter(|c| c.name == "apiVersion" && !c.is_new)
+            .map(|c| {
+                let message = "The project defines no ApiVersionInserter and no spring.mvc.apiversion.* configuration, so this version may not reach the request.";
+                Diagnostic::new(range(&doc.text, c.at, c.at + c.name.len()), Severity::Hint, message).code("api-version-without-inserter")
+            })
+            .collect()
+    }
+
+    /// One marker per endpoint of the document showing its URL, on lines no link marker already uses.
+    fn url_markers(&mut self, doc: &Document, taken: &BTreeSet<u32>) -> Vec<LineMarker> {
+        if !host::setting_bool("springWeb.showUrlMarkers").unwrap_or(true) {
+            return Vec::new();
+        }
+        let Some(index) = self.endpoints.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        let Some(mine) = index.files().get(&doc.path) else { return Vec::new() };
+        let mut lines = taken.clone();
+        let mut out = Vec::new();
+        for e in &mine.endpoints {
+            let line = e.range.start.line;
+            if !lines.insert(line) {
+                continue;
+            }
+            let verb = if e.verb.is_empty() { "ANY" } else { e.verb.as_str() };
+            out.push(LineMarker { line, icon: None, tooltip: format!("URL: {verb} {}", e.path), target: None });
+        }
+        out
+    }
+
+    fn request_completions(&mut self, doc: &Document, offset: usize) -> Option<Vec<CompletionItem>> {
+        let request = endpoints::typed_requests(&doc.path, &doc.text).into_iter().find(|r| r.at <= offset && offset <= r.end)?;
+        let index = self.endpoints.for_document(&doc.path, &doc.text, PROVIDER_BUDGET)?;
+        let replace = range(&doc.text, request.at, request.end);
+        let mut seen = BTreeSet::new();
+        let mut items = Vec::new();
+        for (_, info) in index.iter() {
+            for e in info.endpoints.iter().filter(|e| e.verb.is_empty() || e.verb == request.verb) {
+                if seen.insert(e.path.clone()) {
+                    let verb = if e.verb.is_empty() { "ANY" } else { e.verb.as_str() };
+                    items.push(CompletionItem {
+                        detail: Some(verb.to_owned()),
+                        replace: Some(replace),
+                        ..CompletionItem::new(&e.path, CompletionKind::Value)
+                    });
+                }
+            }
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        Some(items)
+    }
+
+    /// The files of the static folders a string literal under the caret names.
+    fn static_files(&self, doc: &Document, at: usize) -> Vec<Location> {
+        let Some(project) = project_of(&doc.path) else { return Vec::new() };
+        let Some(rel) = java::tokens(&doc.text).into_iter().filter_map(|t| t.string()).find(|s| s.holds(at)) else {
+            return Vec::new();
+        };
+        let Some(rel) = static_resource(&rel.value) else { return Vec::new() };
+        let mut found = Vec::new();
+        for root in STATIC_ROOTS {
+            for path in project.find_files(&format!("**/{root}/{rel}"), 20).unwrap_or_default() {
+                if !found.contains(&path) {
+                    found.push(path);
+                }
+            }
+        }
+        found.into_iter().map(|path| Location { path, range: Range::default() }).collect()
+    }
+}
+
 fn problems(doc: &Document) -> Vec<Problem> {
-    if is_kotlin(&doc.path) {
+    if is_xml(doc) {
         return Vec::new();
     }
-    path_problems(&doc.text, &java::parse(&doc.text))
+    path_problems(&doc.text, &parse_source(&doc.path, &doc.text))
+}
+
+fn is_xml(doc: &Document) -> bool {
+    doc.language == "xml" || doc.path.ends_with(".xml")
+}
+
+/// Live templates: abbreviation, annotation line and the label of the mapping.
+const MAPPING_SNIPPETS: [(&str, &str, &str); 6] = [
+    ("getm", "@GetMapping(\"${1:/}\")", "get"),
+    ("postm", "@PostMapping(\"${1:/}\")", "post"),
+    ("putm", "@PutMapping(\"${1:/}\")", "put"),
+    ("delm", "@DeleteMapping(\"${1:/}\")", "delete"),
+    ("patm", "@PatchMapping(\"${1:/}\")", "patch"),
+    ("reqm", "@RequestMapping(value = \"${1:/}\", method = RequestMethod.${2:GET})", "handle"),
+];
+
+/// The mapping snippets whose abbreviation starts with the word before `offset`, inside a controller's class body.
+fn mapping_snippets(doc: &Document, offset: usize) -> Vec<CompletionItem> {
+    let before = &doc.text[..offset];
+    let word = before.rsplit(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+    if word.is_empty() {
+        return Vec::new();
+    }
+    let file = parse_source(&doc.path, &doc.text);
+    let in_controller = file.types.iter().any(|t| {
+        t.has(&["Controller", "RestController"])
+            && t.start < offset
+            && offset < t.end
+            && !t.methods().any(|m| m.body.is_some_and(|(from, to)| from < offset && offset < to))
+    });
+    if !in_controller {
+        return Vec::new();
+    }
+    let kotlin = is_kotlin(&doc.path);
+    MAPPING_SNIPPETS
+        .iter()
+        .filter(|(abbreviation, _, _)| abbreviation.starts_with(word))
+        .map(|(abbreviation, annotation, name)| {
+            let handler = if kotlin {
+                format!("fun ${{3:{name}}}(${{4}}) {{\n    $0\n}}")
+            } else {
+                format!("public ${{3:ResponseEntity<?>}} ${{4:{name}}}(${{5}}) {{\n    $0\n}}")
+            };
+            CompletionItem {
+                detail: Some("Spring request mapping".into()),
+                insert_text: format!("{annotation}\n{handler}"),
+                snippet: true,
+                ..CompletionItem::new(abbreviation, CompletionKind::Snippet)
+            }
+        })
+        .collect()
+}
+
+const STATIC_EXTENSIONS: [&str; 13] =
+    ["css", "js", "mjs", "map", "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "woff2", "html"];
+const STATIC_ROOTS: [&str; 3] = ["static", "public", "META-INF/resources"];
+
+/// The path under a static root that a string literal names: `/css/app.css`, `classpath:/static/js/a.js`.
+fn static_resource(literal: &str) -> Option<&str> {
+    let rel = literal.strip_prefix("classpath:").unwrap_or(literal).trim_start_matches('/');
+    let rel = rel.strip_prefix("static/").or_else(|| rel.strip_prefix("public/")).unwrap_or(rel);
+    let extension = rel.rsplit_once('.')?.1;
+    let plain = !rel.is_empty() && !rel.contains(['*', '{', '$', ':', ' ', '"']);
+    (plain && STATIC_EXTENSIONS.contains(&extension)).then_some(rel)
 }
 
 impl Providers for WebTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        if is_xml(doc) {
+            let found = xml_checks::check(&doc.text);
+            let diagnostics: Vec<_> = found.iter().map(|f| f.diagnostic(&doc.text)).collect();
+            let _ = host::publish_diagnostics(&doc.path, &diagnostics);
+            return Vec::new();
+        }
         let mut diagnostics: Vec<Diagnostic> = problems(doc).into_iter().map(|p| p.diagnostic).collect();
         diagnostics.extend(self.checked(doc));
+        diagnostics.extend(self.unresolved_views(doc));
+        diagnostics.extend(self.api_version_hints(doc));
         let _ = host::publish_diagnostics(&doc.path, &diagnostics);
         let links = self.links(doc).into_iter().map(|l| {
             let others = if l.targets.len() > 1 { format!(" (+{} more)", l.targets.len() - 1) } else { String::new() };
@@ -477,7 +651,10 @@ impl Providers for WebTools {
                 })
             })
             .collect::<Vec<_>>();
-        views.into_iter().chain(links).collect()
+        let mut markers: Vec<LineMarker> = views.into_iter().chain(links).collect();
+        let taken = markers.iter().map(|m| m.line).collect();
+        markers.extend(self.url_markers(doc, &taken));
+        markers
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
@@ -489,11 +666,24 @@ impl Providers for WebTools {
             .flat_map(|(_, found)| found.into_iter().map(|t| t.location()))
             .collect();
         out.extend(self.links(doc).into_iter().filter(|l| l.at <= at && at <= l.end).flat_map(|l| l.targets));
+        if out.is_empty() && !is_xml(doc) {
+            out = self.static_files(doc, at);
+        }
         out
     }
 
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(offset) = offset(&doc.text, at) else { return Vec::new() };
+        if is_xml(doc) {
+            return Vec::new();
+        }
+        if let Some(items) = self.request_completions(doc, offset) {
+            return items;
+        }
+        let snippets = mapping_snippets(doc, offset);
+        if !snippets.is_empty() {
+            return snippets;
+        }
         if is_kotlin(&doc.path) {
             return Vec::new();
         }
@@ -824,7 +1014,7 @@ class UserController {
         let mut tools = WebTools::default();
         let d = doc("src/main/java/com/acme/web/UserController.java", CONTROLLER);
         let markers = tools.line_markers(&d);
-        let found: Vec<_> = markers.iter().map(|m| (m.line, m.tooltip.as_str())).collect();
+        let found: Vec<_> = markers.iter().filter(|m| !m.tooltip.starts_with("URL:")).map(|m| (m.line, m.tooltip.as_str())).collect();
         assert_eq!(
             found,
             [
@@ -924,7 +1114,124 @@ class UserApiTests {
         assert_eq!(targets[0].range.start.line, 7);
         assert!(tools.definition(&d, Position::new(9, 30)).is_empty(), "no POST /users mapping");
         let main = doc("src/main/java/com/acme/UserApi.java", USERS);
-        assert!(tools.line_markers(&main).is_empty(), "not a test source");
+        let urls: Vec<_> = tools.line_markers(&main).into_iter().map(|m| (m.line, m.tooltip, m.target.is_none())).collect();
+        assert!(urls.contains(&(7, "URL: GET /users/{id}".to_owned(), true)), "{urls:?}");
+        assert!(urls.iter().any(|u| u.1 == "URL: PUT /users"), "{urls:?}");
+    }
+
+    #[test]
+    fn offers_mapping_snippets_in_controller_bodies() {
+        let _host = MockHost::install();
+        let src = "@RestController\nclass A {\n    getm\n    void x() { getm }\n}\nclass B {\n    getm\n}\n";
+        let mut tools = WebTools::default();
+        let d = doc("src/main/java/A.java", src);
+        let items = tools.completion(&d, Position::new(2, 8), None);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].snippet && items[0].insert_text.starts_with("@GetMapping(\"${1:/}\")\npublic "));
+        assert!(tools.completion(&d, Position::new(3, 17), None).is_empty(), "inside a method body");
+        assert!(tools.completion(&d, Position::new(6, 8), None).is_empty(), "not a controller");
+        let reqm = src.replace("getm\n    void", "m\n    void");
+        let all = tools.completion(&doc("src/main/java/A.java", &reqm), Position::new(2, 5), None);
+        assert!(all.is_empty(), "no abbreviation starts with m");
+        let kotlin = Document { path: "/project/A.kt".into(), language: "kotlin".into(), version: 1, text: "@Controller\nclass A {\n    pos\n}\n".into() };
+        let items = tools.completion(&kotlin, Position::new(2, 7), None);
+        assert!(items[0].insert_text.contains("fun ${3:post}"));
+    }
+
+    #[test]
+    fn url_markers_can_be_turned_off() {
+        let host = MockHost::install();
+        host.set_setting("springWeb.showUrlMarkers", "false");
+        let mut tools = WebTools::default();
+        let main = doc("src/main/java/com/acme/UserApi.java", USERS);
+        assert!(tools.line_markers(&main).is_empty());
+    }
+
+    #[test]
+    fn completes_mapping_urls_in_test_literals() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/UserApi.java", USERS);
+        let mut tools = WebTools::default();
+        let typing = USER_TESTS.replace("get(\"/users/{id}\", 1)", "get(\"\", 1)");
+        let d = doc("src/test/java/com/acme/UserApiTests.java", &typing);
+        let items = tools.completion(&d, Position::new(7, 29), None);
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["/users", "/users/by-{name}", "/users/{id}", "/users/{id}/orders"]);
+        let get = USER_TESTS.replace("get(\"/users/{id}\", 1)", "get(\"/users/\", 1)");
+        let d = doc("src/test/java/com/acme/UserApiTests.java", &get);
+        let labels: Vec<_> = tools.completion(&d, Position::new(7, 31), None).into_iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"/users/{id}".to_owned()) && labels.contains(&"/users".to_owned()), "{labels:?}");
+        assert!(tools.completion(&d, Position::new(2, 5), None).is_empty());
+    }
+
+    #[test]
+    fn static_resource_literals_go_to_the_file() {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/static/css/app.css", "");
+        host.add_file("src/main/resources/public/js/a.js", "");
+        let mut tools = WebTools::default();
+        let src = "class C { String a = \"/css/app.css\"; String b = \"classpath:/public/js/a.js\"; String c = \"/nope.css\"; String d = \"/users/list\"; }";
+        let d = doc("src/main/java/C.java", src);
+        let at = |needle: &str| Position::new(0, src.find(needle).unwrap() as u32 + 2);
+        let mut paths = |p| tools.definition(&d, p).into_iter().map(|l| l.path).collect::<Vec<_>>();
+        assert_eq!(paths(at("/css")), ["/project/src/main/resources/static/css/app.css"]);
+        assert_eq!(paths(at("classpath")), ["/project/src/main/resources/public/js/a.js"]);
+        assert!(paths(at("/nope")).is_empty());
+        assert!(paths(at("/users")).is_empty());
+    }
+
+    #[test]
+    fn unresolved_views_are_a_hint_only_when_asked() {
+        let host = web_project();
+        let mut tools = WebTools::default();
+        let src = CONTROLLER.replace("return \"home\";", "return \"nowhere\";");
+        let d = doc("src/main/java/com/acme/web/UserController.java", &src);
+        tools.line_markers(&d);
+        let path = "/project/src/main/java/com/acme/web/UserController.java";
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.iter().all(|p| p.code.as_deref() != Some("unresolved-view"))));
+
+        host.set_setting("springWeb.reportUnresolvedViews", "true");
+        tools.line_markers(&d);
+        let hints: Vec<_> = host.diagnostics()[path].iter().filter(|p| p.code.as_deref() == Some("unresolved-view")).cloned().collect();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].severity, Severity::Hint);
+        assert!(hints[0].message.contains("nowhere"));
+    }
+
+    #[test]
+    fn kotlin_controllers_get_path_variable_checks() {
+        let host = MockHost::install();
+        let src = "@RestController\nclass A {\n    @GetMapping(\"/u/{id}\")\n    fun get(@PathVariable(\"uid\") id: Long): String = \"\"\n}\n";
+        let d = Document { path: "/project/src/main/kotlin/A.kt".into(), language: "kotlin".into(), version: 1, text: src.into() };
+        WebTools::default().line_markers(&d);
+        let codes: Vec<_> = host.diagnostics()[&d.path].iter().map(|p| p.code.clone().unwrap()).collect();
+        assert!(codes.contains(&"unknown-path-variable".to_owned()), "{codes:?}");
+    }
+
+    #[test]
+    fn mvc_xml_is_checked() {
+        let host = MockHost::install();
+        let text = r#"<beans xmlns:mvc="http://www.springframework.org/schema/mvc"><mvc:resources mapping="/x/**"/></beans>"#;
+        let d = Document { path: "/project/mvc.xml".into(), language: "xml".into(), version: 1, text: text.into() };
+        assert!(WebTools::default().line_markers(&d).is_empty());
+        assert_eq!(host.diagnostics()[&d.path][0].code.as_deref(), Some("missing-attribute"));
+    }
+
+    #[test]
+    fn api_version_in_tests_needs_an_inserter() {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/application.properties", "server.port=1\n");
+        let test = "class T { void t() { client.get().uri(\"/x\").apiVersion(\"1.1\").exchange(); } }";
+        let d = doc("src/test/java/T.java", test);
+        let mut tools = WebTools::default();
+        tools.line_markers(&d);
+        let hints = |host: &MockHost| host.diagnostics().get(&d.path).map_or(0, |v| v.iter().filter(|p| p.code.as_deref() == Some("api-version-without-inserter")).count());
+        assert_eq!(hints(&host), 1);
+
+        host.add_file("src/main/java/Cfg.java", "class Cfg { ApiVersionInserter i; }");
+        let mut tools = WebTools::default();
+        tools.line_markers(&d);
+        assert_eq!(hints(&host), 0);
     }
 
     #[test]

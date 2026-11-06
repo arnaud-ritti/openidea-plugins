@@ -14,6 +14,16 @@
       "type": "boolean",
       "title": "Warn when an @InitBinder method returns a value or takes no WebDataBinder",
       "default": true
+    },
+    "springWeb.reportUnresolvedViews": {
+      "type": "boolean",
+      "title": "Hint when a returned view name matches no template in the known template folders",
+      "default": false
+    },
+    "springWeb.showUrlMarkers": {
+      "type": "boolean",
+      "title": "Show the URL of each request mapping in the gutter",
+      "default": true
     }
   }
 }

@@ -9,9 +9,19 @@ Spring MVC helpers for Java controllers in OpenIDEA:
 - **Functional routes**: `RouterFunctions.route().GET("/x", handler)` (also `POST`/`PUT`/`DELETE`/`PATCH`/`HEAD`/`OPTIONS`), `route(RequestPredicates.GET("/x"), handler)`, `.andRoute(…)`, and the prefixes of `.path("/api", b -> …)` and `.nest(path("/api"), b -> …)` are read as endpoints, as are the Kotlin `router {}`/`coRouter {}` DSL (`GET("/x")`, `"/api".nest { … }`, `nest(path("/api")) { … }`). A handler written `this::list`, `Handler::list` or Kotlin `::list` gets a gutter arrow and Go to Definition to the project method. Kotlin sources are indexed for this (`**/*.kt`); the other checks stay Java-only. A route under a `nest` whose predicate is not a plain `path("…")` (including Kotlin `("/a" and accept(…)).nest { }`) is skipped. Kotlin `"/a".nest { }`, `"/a" nest { }` and `path("/a").nest { }` are read.
 - **Test URLs**: in `src/test/` sources, a URL literal of `mockMvc.perform(get("/users/{id}", 1))` (any HTTP method, also `MockMvcRequestBuilders.get`), `webTestClient.get().uri("/users")` (also `WebClient`/`RestClient`) and `restTemplate.getForObject("/users", …)`/`exchange("/users", HttpMethod.GET, …)` gets a gutter arrow and Go to Definition to the request mappings that serve it, matched by HTTP method and URI template (`{id}` matches any segment; `*`, `**`, `{*rest}` and mixed segments like `by-{name}` work). Every matching mapping is offered; `{id:regex}` constraints are ignored when matching, so more mappings than Spring would pick may be offered; absolute URLs (`http://…`) are skipped; a URL no mapping serves is left alone. The RestTemplate calls need a receiver named like `restTemplate`/`template`. Mappings are those with literal paths in `@Controller`/`@RestController` classes and functional routes.
 
+- **URL markers**: every request mapping and functional route shows its URL (`URL: GET /users/{id}`) in the gutter, unless a link marker already uses the line. Setting `springWeb.showUrlMarkers`. The marker has no target.
+- **URL completion in tests**: inside the URL literal of `mockMvc.perform(get("…"))`, `webTestClient.get().uri("…")` and `restTemplate.getForObject("…")`, the project's mapping paths for that HTTP method are offered. Unverified in the IDE: completion inside string literals.
+- **Static resources**: Go to Definition on a string literal such as `"/css/app.css"` or `"classpath:/static/js/a.js"` opens the file under a `static/`, `public/` or `META-INF/resources/` folder of the project (`css`, `js`, images, fonts, `html`).
+- **Snippets**: in a controller class body, typing `getm`, `postm`, `putm`, `delm`, `patm` or `reqm` offers a mapping method with tab stops (Java and Kotlin).
+- **File templates**: New menu entries Spring Controller, REST Controller and Controller Advice, for Java and Kotlin (`$PACKAGE$`, `$NAME$` and `$END$`; the host drops the `package` line when there is no package).
+- **Kotlin controllers**: the path variable checks also run on Kotlin controllers.
+- **Unresolved views** (opt-in, `springWeb.reportUnresolvedViews`, default off): a Hint on a returned view name that no template of the known folders answers, once the project has at least one template.
+- **`<mvc:…>` XML**: required attributes of `view-controller`, `redirect-view-controller`, `status-controller`, `resources`, `mapping` and `exclude-mapping`, from a hard-coded table. Unverified in the IDE: the `xml` provider activation.
+- **API version in tests**: a Hint on `apiVersion(...)` in a test when the project mentions neither `ApiVersionInserter` nor `spring.mvc.apiversion.*` in any file.
+
 Matching is text-based. Mapping paths written as constants, concatenations or `${…}` placeholders are not checked.
 
-Not ported: Endpoints tool window and HTTP client (built into OpenIDEA), URL completion in tests and HTTP clients, Kotlin controllers, model variable resolution in JSP/Thymeleaf templates, static resource references.
+Not ported: HTTP client (built into OpenIDEA), URL completion in HTTP clients other than the test calls above, model variable resolution in JSP/Thymeleaf templates, static resource references in templates.
 
 ```sh
 cargo test
