@@ -159,7 +159,7 @@ const TIMEOUT_MS: u32 = 10_000;
 /// Storage layout: the single key `queries` holds a JSON object
 /// `"{ecosystem}:{name}@{version}"` -> `{"at": secs, "vulns": [[id, modified], ...]}`
 /// (the host rewrites the whole storage file on every write, so it is read and written once per audit);
-/// `v:{id}` holds one `Advisory` each.
+/// `adv:{id}` holds one `Advisory` each.
 #[derive(Clone, Serialize, Deserialize)]
 struct CachedQuery {
     at: u64,
@@ -197,7 +197,7 @@ fn cached_queries() -> BTreeMap<String, CachedQuery> {
 }
 
 pub(crate) fn cached_advisory(id: &str) -> Option<Advisory> {
-    serde_json::from_str(&host::storage::get(&format!("v:{id}")).ok()??).ok()
+    serde_json::from_str(&host::storage::get(&format!("adv:{id}")).ok()??).ok()
 }
 
 fn is_safe_id(id: &str) -> bool {
@@ -257,7 +257,7 @@ fn advisory(id: &str, modified: &str, online: &mut bool, deadline: Instant, writ
         return id_only;
     };
 
-    writer.set(&format!("v:{id}"), &serde_json::to_string(&advisory).unwrap_or_default());
+    writer.set(&format!("adv:{id}"), &serde_json::to_string(&advisory).unwrap_or_default());
 
     advisory
 }
@@ -281,7 +281,7 @@ impl CacheWriter {
         self.dropped = true;
         // ponytail: 1 MiB storage; the whole cache is dropped when it fills
         let _ = host::storage::delete("queries");
-        for stale in host::storage::keys("v:").unwrap_or_default() {
+        for stale in host::storage::keys("adv:").unwrap_or_default() {
             let _ = host::storage::delete(&stale);
         }
 
@@ -299,11 +299,19 @@ pub fn ignored_advisories() -> HashSet<String> {
         .collect()
 }
 
+/// Advisories cached under `v:` before aliases were stored; they are re-fetched under `adv:`.
+fn drop_pre_alias_advisories() {
+    for old in host::storage::keys("v:").unwrap_or_default() {
+        let _ = host::storage::delete(&old);
+    }
+}
+
 pub fn is_ignored(ignored: &HashSet<String>, id: &str, aliases: &[String]) -> bool {
     ignored.contains(&id.to_lowercase()) || aliases.iter().any(|alias| ignored.contains(&alias.to_lowercase()))
 }
 
 pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<Vec<Finding>, Error> {
+    drop_pre_alias_advisories();
     let mut cache = cached_queries();
     let mut seen: HashSet<String> = HashSet::new();
     let mut unique: Vec<(&Dep, String)> = Vec::new();

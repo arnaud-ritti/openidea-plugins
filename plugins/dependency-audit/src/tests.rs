@@ -107,7 +107,7 @@ fn a_failed_advisory_still_reports_its_id() {
     let findings = osv::audit(&[jackson()], true, 0, soon()).unwrap();
     assert_eq!(findings[0].advisories[0].id, "GHSA-57j2-w4cx-62h2");
     assert_eq!(findings[0].advisories[0].severity, None);
-    assert!(!host.storage().contains_key("v:GHSA-57j2-w4cx-62h2"), "a failed advisory isn't cached");
+    assert!(!host.storage().contains_key("adv:GHSA-57j2-w4cx-62h2"), "a failed advisory isn't cached");
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn a_hostile_advisory_id_is_never_fetched_or_stored() {
     let findings = osv::audit(&[jackson()], true, 0, soon()).unwrap();
     assert_eq!(findings[0].advisories[0].id, "../querybatch");
     assert!(host.requests().iter().all(|r| r.method == "POST"));
-    assert!(host.storage().keys().all(|k| !k.starts_with("v:")));
+    assert!(host.storage().keys().all(|k| !k.starts_with("adv:")));
 }
 
 #[test]
@@ -486,7 +486,7 @@ fn rendering_again_reuses_the_advisory_details_it_already_read() {
     let mut plugin = scanned(&host);
     let detail = |items: Vec<TreeItem>| items.into_iter().find(|i| i.label == "GHSA-35jh-r3h4-6jhm").unwrap().detail;
     let first = detail(tree(&mut plugin, &host));
-    for stale in host::storage::keys("v:").unwrap() {
+    for stale in host::storage::keys("adv:").unwrap() {
         host::storage::delete(&stale).unwrap();
     }
 
@@ -555,4 +555,38 @@ fn ignored_cve_alias_is_not_reported() {
     let labels: Vec<String> = tree(&mut plugin, &host).into_iter().map(|i| i.label).collect();
     assert!(labels.iter().any(|l| l.starts_with("lodash")), "the alias is no longer ignored");
     assert!(!labels.iter().any(|l| l.contains("jackson")), "lowercase ids match");
+}
+
+fn cve_lodash_osv(req: &HttpRequest) -> Result<HttpResponse, Error> {
+    match req.url.as_str() {
+        "https://api.osv.dev/v1/vulns/GHSA-35jh-r3h4-6jhm" => ok(LODASH.replacen(r#""summary""#, r#""aliases": ["CVE-2019-10744"], "summary""#, 1)),
+        _ => osv(req),
+    }
+}
+
+fn lodash_audit(now: u64) -> Vec<crate::osv::Finding> {
+    osv::audit(&[dep(Ecosystem::Npm, "lodash", "4.17.15")], true, now, soon()).unwrap()
+}
+
+#[test]
+fn alias_matching_works_inside_audit() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(cve_lodash_osv);
+    host.set_setting("ignoredAdvisories", r#""CVE-2019-10744""#);
+
+    assert!(lodash_audit(0).is_empty());
+}
+
+#[test]
+fn old_cache_entry_without_aliases_is_refetched() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(cve_lodash_osv);
+    host.set_setting("ignoredAdvisories", r#""CVE-2019-10744""#);
+    host::storage::set("v:GHSA-35jh-r3h4-6jhm", r#"{"id":"GHSA-35jh-r3h4-6jhm","modified":"2024-01-01T00:00:00Z","summary":"old","severity":"HIGH","fixed":{}}"#).unwrap();
+    let queries = json!({"npm:lodash@4.17.15": {"at": 0, "vulns": [["GHSA-35jh-r3h4-6jhm", "2024-01-01T00:00:00Z"]]}});
+    host::storage::set("queries", &queries.to_string()).unwrap();
+
+    assert!(lodash_audit(1).is_empty());
+    assert!(host.requests().iter().any(|r| r.url.ends_with("/GHSA-35jh-r3h4-6jhm")), "fetched again");
+    assert!(host.storage().keys().all(|k| !k.starts_with("v:")), "the old key is dropped");
 }
