@@ -235,6 +235,16 @@ fn kotlin_code_only(text: &str) -> String {
             }
         } else if b[i..].starts_with(b"\"\"\"") {
             i = text[i + 3..].find("\"\"\"").map_or(b.len(), |n| i + 3 + n + 3);
+        } else if b[i] == b'\'' {
+            let mut j = i + 1;
+            while j < b.len() && j <= i + 8 && b[j] != b'\'' && b[j] != b'\n' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            if j >= b.len() || j > i + 8 || b[j] != b'\'' {
+                i += 1;
+                continue;
+            }
+            i = j + 1;
         } else if b[i] == b'"' {
             i += 1;
             while i < b.len() && b[i] != b'"' && b[i] != b'\n' {
@@ -754,6 +764,7 @@ class SecurityConfig : WebSecurityConfigurerAdapter() {
             host.diagnostics().get(&d.path).is_none_or(Vec::is_empty)
         };
         assert!(quiet("A", format!("{import}{body}")));
+        assert!(!quiet("P", format!("{import}http.authorizeRequests {{ }}\n{body}")));
         assert!(quiet("B", "val x = http.authorizeRequests { }.antMatchers(\"/a\")\n".into()));
     }
 
@@ -781,5 +792,22 @@ class SecurityConfig : WebSecurityConfigurerAdapter() {
         assert!(quiet(&catch_all(""), " request-matcher=\"regex\"").is_empty());
         assert!(quiet(&catch_all(""), " request-matcher-ref=\"m\"").is_empty());
         assert_eq!(quiet(&catch_all(""), ""), ["unreachable-patterns"]);
+    }
+
+    #[test]
+    fn kotlin_char_literal_quote_does_not_open_a_string() {
+        let host = MockHost::install();
+        let mut tools = SecurityTools::default();
+        let import = "import org.springframework.security.config.annotation.web.invoke\n";
+        let mut codes = |name: &str, body: &str| {
+            let d = Document { path: format!("/project/{name}.kt"), language: "kotlin".into(), version: 1, text: format!("{import}{body}") };
+            tools.line_markers(&d);
+            host.diagnostics().get(&d.path).map(|v| v.len()).unwrap_or(0)
+        };
+        assert_eq!(codes("A", "val q = '\"'; http.authorizeRequests { }\n"), 1);
+        assert_eq!(codes("B", "'\"'.also { println(\"authorizeRequests {\") }\n"), 0);
+        assert_eq!(codes("C", "val a = '\\n'; val b = '\\''; val c = '\\\\'; http.authorizeRequests { }\n"), 1);
+        assert_eq!(codes("D", "val s = \"it's\"; don't; http.authorizeRequests { }\n"), 1);
+        assert_eq!(codes("E", "x = '\n"), 0);
     }
 }
