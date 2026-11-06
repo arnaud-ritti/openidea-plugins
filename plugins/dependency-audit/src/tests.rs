@@ -507,3 +507,27 @@ fn a_dependency_shared_by_two_manifests_is_marked_in_both_and_listed_once() {
     let jackson = tree(&mut plugin, &host).into_iter().filter(|i| i.label.starts_with("com.fasterxml")).count();
     assert_eq!(jackson, 1);
 }
+
+#[test]
+fn ignored_advisory_is_not_reported() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.set_setting("ignoredAdvisories", r##""# accepted\nGHSA-35jh-r3h4-6jhm  # lodash, no fix yet\n""##);
+    let mut plugin = scanned(&host);
+
+    assert_eq!(host.notifications()[0].body, "Vulnerable dependencies: 1 of 3 (3 files). See the Vulnerable Dependencies tool window.");
+    let labels: Vec<String> = tree(&mut plugin, &host).into_iter().map(|i| i.label).collect();
+    assert!(!labels.iter().any(|l| l.contains("lodash") || l == "GHSA-35jh-r3h4-6jhm"));
+    assert!(labels.contains(&"GHSA-57j2-w4cx-62h2".to_string()));
+    assert!(host.diagnostics().get("/project/web/package.json").is_none_or(|d| d.is_empty()));
+}
+
+#[test]
+fn ignoring_an_advisory_hides_it_from_an_earlier_scan() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    let mut plugin = scanned(&host);
+    host.set_setting("ignoredAdvisories", r#""GHSA-57j2-w4cx-62h2""#);
+
+    let labels: Vec<String> = tree(&mut plugin, &host).into_iter().map(|i| i.label).collect();
+    assert!(labels.iter().any(|l| l.starts_with("lodash")));
+    assert!(!labels.iter().any(|l| l.contains("jackson")));
+}

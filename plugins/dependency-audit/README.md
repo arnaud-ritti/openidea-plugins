@@ -12,6 +12,12 @@ or save the file, with a quick fix that upgrades it.
 | `package-lock.json` | every locked package (lockfile v2 and v3) |
 | `composer.json` | the version in `composer.lock` next to it; else an exact version in `require` or `require-dev` |
 | `composer.lock` | every locked package |
+| `libs.versions.toml` | `[libraries]` entries as Maven dependencies: `module` or `group`+`name` with a literal `version` or a `version.ref` from `[versions]`, or `"g:a:version"`; entries without a resolvable version are skipped |
+| `yarn.lock` | every locked npm package (v1 and Berry) |
+| `pnpm-lock.yaml` | every locked npm package in `packages:` (lockfile v6 and v9) |
+| `Cargo.lock` | every registry crate (workspace members and path or git packages are skipped) |
+| `requirements.txt` | `name==version` pins (PyPI) |
+| `poetry.lock` | every locked PyPI package |
 
 A manifest with a lockfile is checked at the locked versions, so `^4.17.15` is judged by what is
 installed, not by the range.
@@ -39,6 +45,9 @@ for the tool window, the notification says so.
 Settings › Plugins › Dependency Audit › **Check on open and save** (`autoCheck`, on by default).
 Off: nothing is sent until you run a scan.
 
+**Ignored advisories** (`ignoredAdvisories`): one advisory id per line (`GHSA-…`, `CVE-…`), `#` starts a comment.
+Listed ids are not reported, neither as squiggles nor in the Vulnerable Dependencies view.
+
 ## Privacy
 
 Package names and versions, never source code, are sent to `api.osv.dev`, a free service run by
@@ -51,9 +60,11 @@ but never fetched. Turn off the setting to contact OSV only when you run a scan.
 - Maven and Gradle dependencies without a version (managed by a BOM, a parent POM or a
   plugin such as Spring Boot's), and versions taken from variables.
 - Version ranges with no lockfile, and `package-lock.json` v1.
-- Gradle version catalogs (`libs.versions.toml`).
-- `yarn.lock` and `pnpm-lock.yaml`.
-- Other ecosystems (Cargo, PyPI, Go…).
+- Catalog entries declared over several lines, `version` ranges (`strictly`, `require`), and `version.ref` keys missing from `[versions]`.
+- pnpm lockfile v5 (`/name/1.2.3` keys), and `requirements.txt` lines that aren't an exact `==` pin.
+- Other ecosystems (Go…).
+
+No new dependencies: the new formats are read by hand.
 
 See `LIMITATIONS.md` at the repository root for the API gaps behind these.
 

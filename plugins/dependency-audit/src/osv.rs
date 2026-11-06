@@ -286,6 +286,16 @@ impl CacheWriter {
     }
 }
 
+/// Advisory ids of the `ignoredAdvisories` setting: one per line, `#` starts a comment.
+pub fn ignored_advisories() -> HashSet<String> {
+    host::setting_string("ignoredAdvisories")
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default().trim().to_owned())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
 pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<Vec<Finding>, Error> {
     let mut cache = cached_queries();
     let mut seen: HashSet<String> = HashSet::new();
@@ -324,6 +334,7 @@ pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<
     let mut advisories: HashMap<String, Advisory> = HashMap::new();
     let mut online = online;
     let mut findings = Vec::new();
+    let ignored = ignored_advisories();
 
     for (dep, key) in unique {
         let Some(query) = cache.get(&key) else {
@@ -331,7 +342,7 @@ pub fn audit(deps: &[Dep], online: bool, now: u64, deadline: Instant) -> Result<
         };
         let mut found = Vec::new();
 
-        for (id, modified) in &query.vulns {
+        for (id, modified) in query.vulns.iter().filter(|(id, _)| !ignored.contains(id)) {
             let advisory = advisories
                 .entry(id.clone())
                 .or_insert_with(|| advisory(id, modified, &mut online, deadline, &mut writer));

@@ -1009,12 +1009,12 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 
 ## aritti.dependency-audit (clean-room, inspired by JetBrains' package vulnerability checks)
 
-Checks Maven, Gradle, npm and Composer dependencies against OSV.dev. Checked against v0.1.37 on 2026-11-05.
+Checks Maven, Gradle (incl. version catalogs), npm (package-lock, yarn, pnpm), Composer, Cargo and PyPI dependencies against OSV.dev. Checked against v0.1.37 on 2026-11-05.
 
 ### Missing API
 
 - **No build model**
-  - **Blocks:** versions managed by a BOM, a parent POM or a Gradle plugin, and `libs.versions.toml` aliases.
+  - **Blocks:** versions managed by a BOM, a parent POM or a Gradle plugin (`libs.versions.toml` aliases with a version are read).
   - **Why:** a plugin sees text, not the resolved dependency graph.
   - **Workaround:** such dependencies are skipped; versioned ones are still checked.
   - **Would need:** the IDE's Maven/Gradle model through WIT, or accepting `process:mvn`.
@@ -1043,9 +1043,7 @@ Checks Maven, Gradle, npm and Composer dependencies against OSV.dev. Checked aga
 
 ### Not done, but possible with the current API
 
-- `libs.versions.toml`, `yarn.lock` and `pnpm-lock.yaml`.
-- Cargo and PyPI.
-- An ignore list for accepted advisories.
+- Go modules and other lockfiles.
 - CVSS scoring (severity comes from the advisory's labels).
 
 ## aritti.quarkus (port of com.redhat.devtools.intellij.quarkus)

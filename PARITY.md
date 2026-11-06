@@ -45,7 +45,7 @@ Path: **Source** = ported from an open-source repo, licence files kept. **Clean-
 | `flyway` | Flyway support (Database Tools) | Clean-room | Low-Medium | Naming checks and CLI commands; no wrapper runs, no rename fix, no confirm dialog, no DB connection |
 | `liquibase` | Liquibase support (Database Tools) | Clean-room | Low-Medium | Changelog checks and CLI commands; fixed run-config args, no classpath resolution |
 | `openapi` | OpenAPI Specifications (`com.intellij.swagger`) | Clean-room | Medium | YAML only, no rename/usages/hover, no structure view, preview only by Open With |
-| `dependency-audit` | Vulnerable dependency checks | Clean-room | Medium | No resolved build model (BOM/parent/version catalog skipped), no advisory link from the squiggle, Maven/Gradle/npm/Composer only |
+| `dependency-audit` | Vulnerable dependency checks | Clean-room | Medium | No resolved build model (BOM/parent skipped), no advisory link from the squiggle, no Go/other ecosystems |
 | `kube-explorer` | Kubernetes (`com.intellij.kubernetes`) | Clean-room | Medium | No context-menu actions (until upstream #1746), no streaming logs or watch, no custom-resource schemas, no Helm template language |
 | `devcontainer` | Dev Containers (Gateway) | Clean-room | Low | Start/rebuild/stop/shell in a terminal; no open-inside-container, no result tracking, no features browser |
 
