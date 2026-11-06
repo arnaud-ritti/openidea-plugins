@@ -1,0 +1,14 @@
+{
+  "properties": {
+    "springCloud.checkStreamBindings": {
+      "type": "boolean",
+      "title": "Hint when a StreamBridge destination or binder-specific key names a Stream binding that no configuration declares",
+      "default": true
+    },
+    "springCloud.checkBootstrap": {
+      "type": "boolean",
+      "title": "Warn when a bootstrap file is ignored because spring-cloud-starter-bootstrap is missing (Spring Boot 2.4+)",
+      "default": true
+    }
+  }
+}
