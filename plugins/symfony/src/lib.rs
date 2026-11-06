@@ -694,7 +694,7 @@ impl Providers for Main {
 
         let intentions = match doc.language.as_str() {
             "php" => intentions::php_actions(&doc.text, offset, index.framework_version),
-            "twig" => {
+            "twig" if intentions::caret_on_extends(&doc.text, offset) => {
                 let blocks: Vec<String> = project_for(&doc.path).map(|project| parent_blocks(index, &project, &doc.text).into_keys().collect()).unwrap_or_default();
                 intentions::twig_actions(&doc.text, offset, &blocks)
             }

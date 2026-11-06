@@ -7,6 +7,7 @@ use std::ops::Range;
 use crate::checks;
 use crate::php_text::{self, Target, Visibility};
 use crate::refs;
+use crate::twig;
 
 pub struct Action {
     pub title: String,
@@ -308,6 +309,39 @@ fn route_attribute_action(text: &str, class: &Class, method: &Method, framework_
     Some(Action { title: "Add #[Route] attribute".into(), kind: "refactor.rewrite", edits: import.into_iter().chain([edit]).collect() })
 }
 
+/// Tokens of the parameter types and names; default values are left out.
+fn declared_tokens(parameters: &str) -> impl Iterator<Item = &str> {
+    let mut depth = 0usize;
+    let mut in_default = false;
+    let mut kept = Vec::new();
+    let mut start = 0;
+
+    for (position, byte) in parameters.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b'=' if depth == 0 => {
+                kept.push(&parameters[start..position]);
+                in_default = true;
+            }
+            b',' if depth == 0 => {
+                if !in_default {
+                    kept.push(&parameters[start..position]);
+                }
+                in_default = false;
+                start = position + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if !in_default {
+        kept.push(&parameters[start..]);
+    }
+
+    kept.into_iter().flat_map(tokens)
+}
+
 fn tokens(text: &str) -> impl Iterator<Item = &str> {
     text.split(|character: char| !(character.is_alphanumeric() || matches!(character, '_' | '\\' | '$')))
         .filter(|token| !token.is_empty())
@@ -315,7 +349,7 @@ fn tokens(text: &str) -> impl Iterator<Item = &str> {
 
 fn parameter_action(text: &str, masked: &str, method: &Method, (short, fqcn, variable): (&str, &str, &str)) -> Option<Action> {
     let parameters = &masked[method.parameters.clone()];
-    if tokens(parameters).any(|token| token.trim_start_matches('\\') == short || token.trim_start_matches('\\') == fqcn || token == variable) {
+    if declared_tokens(parameters).any(|token| token.trim_start_matches('\\') == short || token.trim_start_matches('\\') == fqcn || token == variable) {
         return None;
     }
 
@@ -417,12 +451,22 @@ fn form_actions(text: &str, at: usize) -> Vec<Action> {
     actions
 }
 
-pub fn twig_actions(text: &str, at: usize, parent_blocks: &[String]) -> Vec<Action> {
-    let Some(open) = text[..(at + 2).min(text.len())].rfind("{%") else { return Vec::new() };
-    let Some(close) = text[open..].find("%}").map(|found| open + found + 2) else { return Vec::new() };
+/// Whether `at` is on a `{% extends %}` tag that is not inside a comment or verbatim body.
+pub fn caret_on_extends(text: &str, at: usize) -> bool {
+    let Some(open) = text[..(at + 2).min(text.len())].rfind("{%") else { return false };
+    if !twig::code_regions(text).iter().any(|region| region.contains(&open)) {
+        return false;
+    }
+
+    let Some(close) = text[open..].find("%}").map(|found| open + found + 2) else { return false };
     let inside = text[open + 2..close - 2].trim_start_matches(['-', '~']).trim_start();
     let is_extends = inside.strip_prefix("extends").is_some_and(|rest| !rest.bytes().next().is_some_and(refs::is_identifier));
-    if at > close || !is_extends {
+
+    at <= close && is_extends
+}
+
+pub fn twig_actions(text: &str, at: usize, parent_blocks: &[String]) -> Vec<Action> {
+    if !caret_on_extends(text, at) {
         return Vec::new();
     }
 
@@ -726,5 +770,28 @@ mod tests {
         let twig = "{% extends 'a' %}\r\né";
         let out = apply(twig, &twig_actions(twig, 3, &["x".to_owned()])[0]);
         assert!(out.ends_with("\r\né\r\n\r\n{% block x %}\r\n    {{ parent() }}\r\n{% endblock %}\r\n"), "{out:?}");
+    }
+
+    #[test]
+    fn caret_on_extends_is_a_cheap_predicate_for_the_extends_tag_only() {
+        assert!(caret_on_extends(CHILD, 5));
+        assert!(!caret_on_extends(CHILD, CHILD.len() - 3));
+        assert!(!caret_on_extends(CHILD, caret(CHILD, "block body")));
+        assert!(!caret_on_extends("plain text", 3));
+    }
+
+    #[test]
+    fn block_override_is_quiet_inside_comments_and_verbatim() {
+        let commented = "{# {% extends 'b' %} #}\n";
+        assert!(twig_actions(commented, 8, &parents()).is_empty());
+        let verbatim = "{% verbatim %}{% extends 'b' %}{% endverbatim %}";
+        assert!(twig_actions(verbatim, 18, &parents()).is_empty());
+    }
+
+    #[test]
+    fn parameter_defaults_do_not_count_as_declared_types() {
+        let text = "<?php\nclass A\n{\n    #[Route('/a')]\n    public function show(string $class = Request::class, array $u = [UserInterface::class]) {}\n}\n";
+        let actions = php_actions(text, caret(text, "show"), V7);
+        assert_eq!(titles(&actions), ["Add parameter: Request $request", "Add parameter: UserInterface $user"]);
     }
 }
