@@ -211,6 +211,15 @@ These aren't API limits; they were left out for size:
 - Twig macro completion and navigation (`{% import 'x.twig' as m %}`, then `m.name(`), and navigation to filters and functions that the project's own extension classes declare;
 - Twig `paths:` read from other config files, including `when@` overrides.
 
+### Added by the feasible-parity pass (2026-11-06)
+
+All checks are text-based, quiet on unresolvable input, switchable in settings (`controllerChecks`, `serviceChecks`, `phpCallChecks`, `twigChecks`) and gated by the master `diagnostics` switch; they run on open and save only.
+
+- **New codes:** `controller-method-missing`, `deprecated-route-setting` (`Bundle:Controller:action`, `pattern`, `type: annotation` from Symfony 6.4 on, `_method`/`_scheme` requirements), `deprecated-service-class`, `duplicate-parameter-key`, `named-argument-missing`, `form-type-string`, `missing-asset`, `missing-translation-domain`, `twig-missing-route`, `twig-missing-asset`; nine New-menu templates (command, controller, form type, Twig extension, compiler pass, kernel test, web test, event subscriber, voter).
+- **Limits:** classes come from the PSR-4 index of project sources; a class with a parent or trait outside the project is unknown and nothing is reported. Each check reads class files (cached per run, 256 KB per class, 500 reads). `missing-asset` is quiet for `build`, `bundles`, `assets`, `_assets` and for directories with no indexed file. `missing-translation-domain` reports only lowercase project-style domains when the project has no file for them; vendor domains written in lowercase (`sonata_admin`) are still reported. `type: annotation` needs a `symfony/framework-bundle` constraint of 6.4 or newer in `composer.json`. With `twigChecks` off, Twig routes are no longer reported at all (the older `missing-route` skips Twig). Twig checks do not skip `{# #}` comments or `{% verbatim %}` spans.
+- **Not verified in the IDE:** the `$NAME$` and `$END$` placeholders in the template files (copied from the `jpa-assist` convention; the namespaces are fixed, so no `$PACKAGE$`), and that a template with no name prompt creates a usable file.
+- **Would need for type-aware checks:** the symbol queries described above (U4).
+
 ## Laravel (`aritti.laravel`) and Blade (`aritti.blade`)
 
 Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus features that follow Laravel's documentation. Checked against the SDK, WIT and host source of v0.1.37 on 2026-11-06. The gaps in the Symfony section above apply here too (no PHP semantic model, no references, rename or hover, code actions can't create files, problems aren't re-checked while typing, one target per gutter marker); this section only adds what is specific to Laravel.
@@ -263,6 +272,16 @@ Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus feat
 - Gate resource abilities (`Gate::resource('posts', …)` registers `posts.view` and friends) are not read.
 - Artisan `make:*` commands: there is no input dialog for the name.
 - Intentions on the open file are code actions (⌥⏎): validation string to array (not offered when a rule is `regex:`/`not_regex:`, whose pattern may hold pipes), `'UserController@index'` to `[UserController::class, 'index']` (only when the routes file is in `App\Http\Controllers` or imports the class with a plain `use`; imports are never inserted), and the Blade `{{ }}` / `{!! !!}` toggle. Rule string to rule object needs a new class file, which plugins can't create.
+
+### Added by the feasible-parity pass (2026-11-06)
+
+- **Eloquent checks** (`checkEloquent`, PHP files, on open and save): `guarded-attribute-assignment` (`Class::create/make(...)` with request input or an array literal, and `(new Class)->fill(...)`, when the class resolves to a project model that declares `$fillable` or `$guarded`), `unscheduled-prunable`, and `simplify-order-by` (hint with a quick fix to `latest()`/`oldest()`). Diagnostic codes are bare, without the `laravel.` prefix of the older problems.
+- **Limits:** the model is resolved by import or FQCN under `App\` and read from the PSR-4 path; no type inference, so `$post->fill()` is not checked; `forceFill`/`forceCreate` are not checked (they bypass `$fillable` by design); a model with neither property is not flagged; models using `getFillable`, `mergeFillable`, `#[Fillable]`, `#[Guarded]` or `unguard` stay quiet. `unscheduled-prunable` looks for the schedule in `routes/console.php` and `app/Console/Kernel.php`, so a schedule in a service provider gives a false positive; a global `Model::unguard()` makes the fillable warning wrong. Tests, seeders and factories are checked like other files. Model and schedule files are read on each check.
+- **Intention:** a rules array to a pipe string, offered with the caret on a string element of a rules list for a key; not offered with `Rule` objects, closures, `|`, quotes, `$`, `\`, comments, keyed items or `regex`/`not_regex` rules.
+- **Dropped:** the scope-call-to-attribute intention (needs types). Not done: Pest navigation and promoting `$request` to a FormRequest (both need types or a new file).
+- **Ziggy in JS/TS/Vue:** `route('name')` and `route().current('name')` complete and open the route in `javascript`, `typescript`, `vue`, `javascriptreact` and `typescriptreact` files (also inside `:href="route('x')"`). The scanner is line-bounded for quotes and tracks only block comments across lines. Accepted behaviours, pinned by tests: a `/*` inside the text of a multi-line template literal opens a block comment and silences later route calls until the next `*/`; a stray quote can pair with a later quote of the same kind on its line; an apostrophe in Vue template text and a bare `//` in template text give false negatives; `<style>` is not excluded; `.cjs`, `.mts` and `.cts` are not matched; a template literal with `${` before the cursor is quiet. The scan starts at offset 0 on each call (unmeasured on 1 MB bundles), and `route(` must be written without a space. There is no Inertia page completion in JS: no documented client call takes a page name.
+- **Blade inspections** (`aritti.blade`, `checkDirectivePairs`, `checkParentheses`): `unpaired-directive` and `unpaired-parenthesis-in-string` for files whose path ends `.blade.php`, published on open and save. A bare `@empty` and stray `@show`/`@stop`/`@append`/`@overwrite` are not reported; `<img @error=...>` reads as an `@error` block (as Laravel's compiler does); the parenthesis check counts `)` inside comments and heredocs. Directive completion stays in `aritti.laravel`, so a blade-only install has none.
+- **Not verified in the IDE:** the language ids `vue`, `javascriptreact` and `typescriptreact` (files are also matched by extension, but the host calls a provider only for declared ids); `on-file:resources/js/**` activation for a `.vue` file opened first; mid-word replacement in the editor; completion on `@`; the quick fix of `simplify-order-by` and the rules intention, which depend on prefilled code-action edits being applied without a resolve step; for Blade, that the file that first activates the plugin is checked only on its next open or save (events are subscribed in `activate`), and that `on-language:blade` loads the plugin before any `.blade.php` event.
 
 ## aritti.dotenv (port of ru.adelf.idea.dotenv)
 
@@ -320,6 +339,14 @@ Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus feat
 - No "ambiguous candidates" or "no bean of this type" warnings: without library and auto-configuration beans they would be mostly false positives.
 - "Use constructor injection" adds a parameter and `this.name = name;` to a single existing Java constructor, or creates one when there is none. It refuses several constructors, `@Autowired`/`@Inject` setters, `this(...)` delegation, a field that is already assigned, a parameter name clash and files whose braces don't balance (braces in strings and comments count, so such a file just loses the fix). There is no Kotlin quick fix.
 - XML: only `<beans>` files; custom namespaces (`<int:channel id>`) are seen as named beans without a type. `p:name-ref` and `c:name-ref` attributes are followed when the prefix is bound to the Spring `p` or `c` namespace on the element or an ancestor; `p:name="literal"` and other namespaces' `x:thing-ref` are ignored.
+
+### Added by the feasible-parity pass (2026-11-06)
+
+New codes, Java only, project sources only, published on open and save through `events` (optional: a denied subscription logs a warning and the checks still run from the line-marker path). Each group has a `springBeans.*` setting.
+
+- `non-proxyable-method` (`@Transactional`, `@Async`, `@Cacheable`, `@Retryable`, security annotations on a private, final or static method), `scheduled-signature`, `duplicate-bean-name`, `configuration-proxy-method`, `bean-name-convention` (hint), `self-invocation` (off by default), and opt-in `unresolved-depends-on` and `component-scan-package-missing` (`checkUnresolvedReferences`, default off).
+- **Limits:** duplicates see project beans only (no library or auto-configured beans); computed names and `@Conditional*` beans are skipped, but Kotlin and XML beans never set the conditional flag, so a Kotlin `@ConditionalOn*` bean can still clash with a Java one; a profile written `!x` is treated as not overlapping; other files' computed stereotype names read as the default class name, so a clash with a class of that name can be a false positive. Self-invocation misses inherited and overloaded callees, skips classes with `extends`, and cannot see `@EnableAspectJAutoProxy(mode = ASPECTJ)`, where private and self calls do work. The proxy checks do not require the class to be a bean. Unresolved references are quiet when the project uses auto-configuration unless the name equals a project class or bean; XML component-scan and Kotlin annotations are not checked. The edited, unsaved file is what the check sees.
+- **Not done:** Kotlin diagnostics (Kotlin files get no new checks).
 
 ## Spring plugins (aritti.spring-*: ports of com.intellij.spring.*)
 
@@ -388,6 +415,19 @@ These could be done with the current API; they are listed so they aren't mistake
 - Deliberately skipped because they would mostly be false positives without a semantic model: unresolved-autowiring checks, "missing view" warnings, unmapped GraphQL fields above `Hint`, and messaging destinations nobody produces or consumes.
 - Spring OSGi (source port): its checks that need real type resolution fall under the first gap above. `OsgiSpringBeanGenerateProvider` has no Generate-menu API.
 
+### Added by the feasible-parity pass (2026-11-06)
+
+New checks in the other Spring plugins (all on by default, each with a setting, published on open and save, quiet on library or dynamic input):
+
+- **spring-security** (`checkMatchers`, `checkDebug`): `matchers-after-any-request`, `matcher-order` (a literal ant pattern shadowed by an earlier broader one; XML stays on the older `unreachable-patterns`), `debug-enabled`. Limits: literal ant patterns only, no cross-chain or cross-file analysis, no servlet-path or MVC semantics; `.debug(true)` warns in any file that mentions `WebSecurityCustomizer`.
+- **spring-web:** `api-version-mismatch` is quiet unless every source and `application*` file was read and nothing mentions API versioning; `init-binder-signature` (Error for a non-void return). Java only.
+- **spring-boot:** `test-constructor-autowire` cannot see system properties or environment set outside the scanned files and warns for constructor parameters such as `@TempDir` or `@Mock`; `event-listener-signature` reports more than one parameter and a plain String or primitive return.
+- **spring-cloud:** `stream-channel-unbound` (hint) covers `StreamBridge.send("literal", ...)` and binder keys only, because `StreamBridge` creates bindings dynamically; legacy `@Input`/`@Output` channels are skipped. `bootstrap-config-missing-dependency` needs a literal Boot version of 2.4 or newer in every build file that states one.
+- **spring-graphql:** the unmatched-mapping check is the existing `unknown-schema-field`, now behind `springGraphql.checkUnmatchedMapping`; it is quiet with no schema file or an unknown type.
+- **spring-batch:** `chunk-missing-commit-interval` (XML only; `checkChunk`) is quiet with `parent` or `abstract` ancestors and `${}` values, and `abstract="false"` still suppresses it. The message was written from the reference documentation and not checked against the XSD. A Java `.start()`/`.next()` step-not-a-bean check is not done (helper methods and parameters make it false-positive prone).
+- **spring-websocket:** the destination check is the existing `unrouted-destination` (`checkBrokerPrefixes`), only when broker prefixes are configured. A `@MessageMapping` without `@Controller` is not reported.
+- **Shared:** `Finding` (range, code, message, severity) lives in `crates/spring-text`; the diagnostics carry no fix.
+
 ## aritti.devcontainer (clean-room, inspired by org.jetbrains.plugins.docker.gateway)
 
 Drives the devcontainer CLI (`@devcontainers/cli`) and Docker: Start, Rebuild, Open Shell, Stop and
@@ -431,6 +471,13 @@ inside the container, needs work in OpenIDEA itself: see _Upstream work_.
 - Creating a dev container from a Git repository URL (clone, then open in the container): no API clones or opens a project.
 - Browsing and adding Dev Container Features or templates: no picker. The New menu offers fixed starter configurations (see the templates row above).
 - Applying the configuration's IDE customisations (extensions, settings) inside the container: nothing in OpenIDEA maps them.
+
+### Added by the feasible-parity pass (2026-11-06)
+
+- **Inspections** (`checkProperties`, `checkFeatures`; `events` optional, activation `on-event:file-opened`/`file-saved`): `unknown-property` reports a top-level key only when it is within edit distance 2 of a known key (the message names the suggestion); any other unknown key, `x-*`, `$*` and everything inside `customizations` stay quiet. `features-malformed` reports a `features` value that is not an object, a feature id that is empty or has whitespace, and a feature value that is not an object, string or boolean (null is tolerated). The scanner is a tolerant JSONC reader (comments, trailing commas).
+- **Limits:** the known-key list was written from memory of the specification, so a real key within distance 2 of another known key could be flagged if it is missing from the list; files over 256 KB publish an empty list; checks run only on opened or saved files, with no project-wide pass (`find_files` skips `.devcontainer`). Activation uses the event form because `on-file:` is not documented to match dot-directories.
+- **Accepted:** for a file starting with a UTF-8 BOM, line-0 ranges are one UTF-16 column to the right if the editor document omits the BOM, so the squiggle on the first line is off by one. The manifest-activation test is a substring check on `plugin.toml`, not a TOML parse.
+- **Not verified in the IDE:** `on-event:` activation in the real host.
 
 ## JPA Assist (`aritti.jpa-assist`)
 
@@ -586,6 +633,10 @@ The plugin API is the same in both.
 
 - Go to Definition from a part of a derived query to the field is in `spring-data`; from a JPQL alias path (`u.address.zip`) it is not done, because `jpa-assist` doesn't parse `@Query` (`spring-data` checks and completes entity and alias properties there).
 
+### Added by the feasible-parity pass (2026-11-06)
+
+- **jpa-assist:** `entity-missing-id` replaces `jpa-missing-id`: it follows project superclasses and warns only when the whole chain is project entities without an id; a library or unfound superclass is quiet and the search is capped by `MAX_SOURCES`. `attribute-type` covers `@Temporal`, `@Enumerated` and `@Version` on well-known types only; `@Lob` is not checked. `entity-listener-signature` treats a class with callbacks, a `persistence` import and no entity marker as a listener (heuristic, no `@EntityListeners` cross-reference), and a file with both an entity and a listener holds the listener to the zero-parameter rule. Settings `checkEntityId`, `checkAttributeTypes`, `checkListenerSignatures`.
+
 ## aritti.kube-explorer (clean-room, inspired by JetBrains Kubernetes 263.7307.101)
 
 Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plugin API change since
@@ -619,6 +670,14 @@ Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plug
 | Pod logs, shell, attach, port forward | `host::open_terminal` running `kubectl` | The plugin can't read, filter or stop them (no handle); a port forward stays until the user closes its terminal | `process.spawn` handles (see above) |
 | Cluster calls from the tree | `--request-timeout=4s` on reads; tasks for apply/delete | View and command calls get 5 s (60 s with a task); an unreachable cluster blocks the instance, and queued editor providers are dropped meanwhile | Asynchronous host calls, or a background worker per plugin |
 | Helm commands on the chart around the open file | `Project::find_files("**/Chart.yaml")`, innermost directory containing the file | `find_files` skips hidden and gitignored directories, so such charts aren't found | `find_files` option to include ignored files, or `Project::exists(path)` / a stat call |
+
+### Added by the feasible-parity pass (2026-11-06)
+
+- **Manifest inspections** (six settings, `events` and `project.read` optional, activation `on-event:file-opened`/`file-saved`): `deprecated-api-version` (11 rows of removed groups with the release that removed them), `duplicate-env-name`, `missing-name`, `missing-selector`, `helm-whitespace-trim`, `chart-missing-key`. Intentions: List to separate documents and documents to List. Limits: block-style YAML only (flow-style `env`, `metadata` or `spec` keeps a check quiet); files containing `{{` get only the Helm group; the deprecation table lacks `autoscaling/v2beta1` and `v2beta2` and the `discovery`, `events`, `flowcontrol` and `storage` `v1beta1` rows; `missing-selector` is quiet for files in a directory with a `kustomization` file or a name containing `patch`, and only looks at the file's own directory; comments inside a List's items are kept but List-level metadata and header comments are dropped by the conversions; every `.yaml`, `.yml` and `.tpl` open or save costs a file read, capped at 1 MiB; changing a setting does not refresh published diagnostics until the next save.
+- **Templates:** 15 New-menu templates (`k8s-<kind>`) that pass the manifest checks.
+- **Debug:** a button on a pod runs `kubectl debug -it <pod> --image=<debugImage> --target=<first container>` in a terminal (default image `busybox:stable`, setting `debugImage`). Only the first container is the target, the cluster must support ephemeral containers, and pod or image names with whitespace, control characters or a leading `-` are refused.
+- **Secrets (setting `allowRevealSecrets`, default off):** Show Secret and Create Secret are tree-toolbar buttons, not palette commands. With the setting off, Show Secret shows nothing and runs no `kubectl`, and the YAML of a Secret (edit and open) is refused too; Describe is left alone because it shows no values. With it on, YAML of a Secret is unstripped. Show runs `kubectl get secret -o json`, decodes in the plugin and keeps values in the Form body in plugin memory only; they clear on Back (there is no view-close event) and are hidden if the setting is turned off. Non-UTF-8 values show as base64. Create builds an Opaque manifest with base64 `data` and runs `kubectl create -f -` with the manifest on stdin (never `apply`, so an existing secret is not overwritten and no last-applied copy of the values is stored); an existing name gives a value-free message. **The Form API has no masked field, so typed values in Create are visible on screen.** Values never go to logs, notifications, storage, the clipboard, terminals or process arguments; failure text is redacted of the raw and base64 values, and that redaction misses JSON-escaped and partial forms. A Secret's YAML already opened as a temp file stays on disk when the setting is turned off.
+- **Not verified in the IDE:** the `$NAME$` and `$END$` placeholders in the templates; that Form field values persist as the plugin assumes; prefilled code-action edits (the intentions use whole-document edits).
 
 ## aritti.tasks (port of com.intellij.tasks)
 
@@ -796,6 +855,12 @@ Port of `org.jetbrains.plugins.gitlab` 263.7307.200 (intellij-community tag
 - Fork merge requests are fetched from `refs/merge-requests/<iid>/head` of the target remote. A fork remote was judged not worth it: it needs the fork's URL (an extra call, maybe to a private project) and edits the user's git config for no gain.
 - Markdown rendering of notes. Left out to keep the wasm small; a host `markdown-to-html` would make it free for every plugin.
 - Usage statistics aren't ported, on purpose.
+
+### Added by the feasible-parity pass (2026-11-06)
+
+- **Merge request worktree and branch update:** *Open Merge Request in Worktree* fetches the branch (or `refs/merge-requests/<iid>/head` for forks) and runs `git worktree add --detach` into `<parent>/<repo>-<branch>`; it notifies the path and opens nothing. It refuses branch names starting with `-` and paths that sanitise to empty; "already exists" is left to git (no existence probe). *Update Merge Request Branch* reuses the existing rebase call and reads `merge_error` from one GET right after the PUT; rebase is asynchronous, so a conflict that surfaces later is not reported, and a closed merge request or a 403 may not give readable text.
+- **`.gitlab-ci.yml` inspections:** `undefined-job`, `undefined-stage`, `duplicate-job-usage`, `single-quoted-shell-variable` (an `echo`/`printf` whose only argument is one single-quoted string), plus Go to Definition on `needs`, `dependencies`, `extends` and `stage`. Settings `ciJobReferences`, `ciStages`, `ciDuplicateJobUsage`, `ciSingleQuotedVariables`; activation `on-event:file-saved` and `on-file` globs. Quiet when `include:` is present (jobs; stages too when `stages:` is absent), for project, pipeline and trigger `needs`, `$VAR` names, anchors, merges, `!reference`, tabs, and stages given as a multi-line flow list, alias or tag. Not ported: schema validation, completion, following `include:` files, `rules`/`only` checks. Diagnostics refresh on open and save only. A plugin that declares a `yaml` provider loads for every YAML file; the provider returns first thing unless the path matches. The CI checks run before the token check, so no token is needed.
+- **Not verified in the IDE:** `on-event:` activation in the real host and the mock's default `setting_bool` (true) against the real one.
 
 ## Ideolog (`aritti.ideolog`)
 
@@ -1021,6 +1086,10 @@ The `changesets` view (bottom, icon `database`) shows changesets in execution or
 
 - Diagnostics come only from the `line-markers` provider, and there is no database API: see the Spring plugins rows "Diagnostics have no provider of their own" and "No database API".
 
+### Added by the feasible-parity pass (2026-11-06)
+
+- **`unresolved-property`** (`checkProperties`, new settings schema): a `${name}` in a changelog that no `property` declaration in a scanned changelog, no `liquibase.properties` or Spring `application*` config (`[spring.][liquibase.]parameter(s).<name>`, profile and module files too) defines. `database.*` is built in. Quiet when no config file is readable, on `includeAll` anywhere, an unresolvable include, `property file=`, `defaultsFile`, `spring.config.import|location|additional-location|activate`, dynamic names (`${:x}`, `${}`), `$${x}`, `\${x}`, XML comments and SQL `--` lines, names not starting with a letter or `_`, and scan caps (1,000 listed, 200 changelogs, 256 KB). Limits: JSON changelogs are unchecked; `LIQUIBASE_PARAMETER_*` environment variables are not read; the scan over likely changelogs repeats on each check with an undeclared placeholder (bounded, not cached); `find_files` skips hidden and ignored directories, so config there is best effort; `spring.profiles` is not a quiet trigger, profile files are read instead. The `${:name}` escape syntax is not verified in the documentation and is treated as dynamic.
+
 ## aritti.openapi (clean-room, inspired by com.intellij.swagger)
 
 Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
@@ -1045,6 +1114,10 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 - The endpoints view re-scans the project on each render.
 - The dark theme is a colour inversion.
 - A missing `$ref` file is told apart from an unreadable one by treating `NotFound` and `Invalid` as missing: see "Missing files are reported as `Invalid`" in the Liquibase section.
+
+### Added by the feasible-parity pass (2026-11-06)
+
+- **Templates:** New-menu entries for OpenAPI 3.1 (YAML and JSON) and AsyncAPI 3.0 (YAML) with a `$NAME$` title only. The AsyncAPI file is not checked as OpenAPI (detection needs an `openapi` or `swagger` key). Not verified in the IDE: `$NAME$` expansion.
 
 ## aritti.dependency-audit (clean-room, inspired by JetBrains' package vulnerability checks)
 
@@ -1111,6 +1184,15 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 - **Blocks:** creating a Quarkus project in the IDE.
 - **Why:** same as *Code actions can't create, rename or delete files* in the Symfony section (a plugin can't create files). The command opens code.quarkus.io in the browser instead.
 
+### Added by the feasible-parity pass (2026-11-06)
+
+Settings `quarkus.checkSyntax`, `quarkus.checkValues`, `quarkus.checkExpressions`; the checks share the place of `deprecated-property`/`unknown-property`, so a fixed file publishes an empty list.
+
+- **Syntax:** `duplicate-key` (properties and YAML, per `---` document), `missing-separator` (a line with a single token only; `key value` is valid Java properties syntax), `unassigned-value` (hint, only for a known non-map property whose metadata has a default).
+- **`invalid-value`, conservative:** booleans are never flagged (SmallRye reads anything but a few spellings as false); closed enums from the metadata compare case-, `-`- and `_`-insensitively and accept the property's default; log levels take the JUL and common names or an integer; durations take an integer, ISO `P...` or `<number><unit>` runs; list, map and `${`/`\` values are skipped. The enum leniency is assumed, not verified. A rule that over-accepts on non-JUL closed enums is possible.
+- **`undefined-expression`:** only in `application.properties|yaml|yml`, and only a typo candidate: a name of six or more characters, not environment-shaped, not a system prefix, catalog key or defined key, within edit distance 2 of a key defined in the same file. A typo rule can fire on sibling numbered names defined only elsewhere. The `quarkus.` prefix is treated as a system prefix, which silences that catalog check.
+- **Not done:** required-property check (`missing-required`): the bundled metadata has no required or optional information.
+
 ## aritti.ignore (port of mobi.hsz.idea.gitignore)
 
 Source port (`.ignore`, Marketplace 7495). Audited on 2026-11-06 from the Marketplace page and the project's README (task 0 audit); our side from the repo, feasibility from this file. Not run side by side with the original.
@@ -1173,3 +1255,14 @@ Checked against the host and frontend source of v0.1.37 on 2026-11-05.
 - **Blocks:** showing data (a merge request's title, author, description) in a `Form` without it looking editable.
 - **Why:** `Text` and `Multiline` fields are always inputs; edits the plugin ignores are silently lost.
 - **Would need:** a `readonly` flag on `field`, or a `Label`/`Info` field value.
+
+### Not verified in the IDE (feasible-parity pass, 2026-11-06)
+
+Built and tested against the mock host only; the IDE probe (plan Task 1) was not run. Open in the real host:
+
+- the `$NAME$` and `$END$` placeholders in New-menu templates (Symfony, Kubernetes, OpenAPI/AsyncAPI);
+- prefilled code-action edits applied without a resolve step (Laravel and Kubernetes intentions, the `simplify-order-by` fix);
+- the language ids `vue`, `javascriptreact` and `typescriptreact`;
+- `on-event:file-opened`/`file-saved` activation in the real host (gitlab, kube-explorer, devcontainer, symfony, spring-beans) and `on-file:` globs for dot-directories;
+- completion on `@` in a plugin language;
+- the first file that activates `blade` is checked on its next open or save.
