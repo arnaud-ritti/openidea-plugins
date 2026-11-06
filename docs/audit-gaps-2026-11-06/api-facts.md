@@ -1,0 +1,14 @@
+# OpenIDEA plugin API facts (v1.1.0 WIT, SDK 0.1.37) and feasibility classes
+
+Classes: **F** feasible with the current API; **F*** feasible, with a stated risk or cost (unverified in the IDE, false-positive risk, load cost); **B** blocked by a missing API (name the Track U item).
+
+Track U (upstream gaps): U1 references/rename/hover providers; U2 file creation in code-action edits; U3 find_files include-ignored + files-changed event; U4 Java/PHP type resolution; U5 quick-pick/input dialogs and opening a view from a command; U6 provider path patterns and trigger-characters, syntax for built-in languages; U7 diagnostics provider / document-changed event. Also blocked today: injection (SpEL/JPQL/Go templates), inlay hints/code vision, Project-view decorations, editor decorations, caret/selection control, folding control, streaming processes, clipboard read, database/diagram APIs, secret/process capabilities fixed in the manifest (`net:` hosts, `process:` programs).
+
+What the API gives:
+- Providers per language id (`"*"` for any), no path patterns: completion (gets `trigger`), inline-completion, code-actions (gets the selection range: caret intentions are feasible; edits to EXISTING files only, several files allowed), definition (locations), line-markers (icons: navigate/implemented/implementing/run; one target). 50 ms budget, instance reclaimed after 5 min idle.
+- Diagnostics: `publish_diagnostics(path, list)` replaces the plugin's list for a file; called from commands or events (`file-opened`, `file-saved`, `editor-focused`, `vcs-changed`, `scheduled`); problems lag edits until save. Severity error/warning/info/hint, tags unnecessary/deprecated, related locations.
+- Project: read_file (unsaved editor text wins; missing file = Invalid on the real host), find_files(glob, limit) skips hidden/ignored paths on the real host, run_process(program, args, cwd, stdin) with `process:<program>` approval, vcs status/remotes/fetch.
+- UI: views (Tree/List/Form/Table/Message/Html), notifications, status items, tasks with progress; `open_terminal(title, program, args)`; `open_location`; no popups/quick-pick/input; a command's returned text is dropped.
+- Contributions: commands, menus (flat: editor.context, projectView.context, editorTab.context, tools), keymaps, settings (scalar types only), fileTemplates (New menu; id, name, extension, path; placeholders `$NAME$`/`$END$`/`$PACKAGE$` unverified), runDetectors (root marker file names + one program + fixed args), fileIcons, languages (toml: extensions, filenames, comments, indent, formatter, tree-sitter, language-servers), customEditors, secrets (header substitution in `net` requests), themes.
+- `net:<host>` and `process:<program>` are fixed in the manifest. Events batch within ~2 s for idle plugins.
+- Language injection, rename, find usages, hover, inlay hints, folding control, caret control: not available.
