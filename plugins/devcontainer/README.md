@@ -20,9 +20,10 @@ adds one based on the matching containers.dev reference image.
 
 ## Dev Containers view
 
-The bottom panel lists the project's running containers (`docker ps` filtered by the
+The bottom panel lists the project's containers, running and stopped (`docker ps -a` filtered by the
 `devcontainer.local_folder` label the CLI sets, so only containers started from this folder show). Select a
-row for Open Shell (`docker exec -it`) or Stop; double-click opens a shell. Needs `process:docker`. The label
+row for Open Shell (`docker exec -it`) or Stop on a running container, or Start (`docker start`) on a stopped one;
+double-click opens a shell, or starts a stopped container. Needs `process:docker`. The label
 is taken from the CLI's behaviour and has not been checked against every CLI version. A gutter marker on
 `image` that starts the container is not offered: a gutter marker can open a location but not run a command.
 

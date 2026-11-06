@@ -28,6 +28,7 @@ const LOGIN_SHELL: &str = "command -v bash >/dev/null && exec bash -l; exec sh -
 pub struct Main {
     /// Container id picked in the Dev Containers view.
     selected: Option<String>,
+    running: std::collections::BTreeSet<String>,
 }
 
 impl Plugin for Main {
@@ -1096,7 +1097,7 @@ mod tests {
         let host = host();
         host.on_process("docker", move |args, _| match args[0].as_str() {
             "ps" => {
-                assert_eq!(args[2], "label=devcontainer.local_folder=/work/app");
+                assert_eq!(args[1..4], ["-a", "--filter", "label=devcontainer.local_folder=/work/app"]);
                 ok(output)
             }
             _ => ok(""),
@@ -1133,6 +1134,29 @@ mod tests {
         assert!(plugin.selected.is_none());
     }
 
+    const PS_ALL: &str = "{\"ID\":\"abc123\",\"Image\":\"node:20\",\"Names\":\"up\",\"State\":\"running\",\"Status\":\"Up 2 minutes\"}\n{\"ID\":\"def456\",\"Image\":\"node:18\",\"Names\":\"old\",\"State\":\"exited\",\"Status\":\"Exited (0) 3 days ago\"}\n";
+
+    #[test]
+    fn view_lists_stopped_containers_and_starts_them() {
+        let host = docker_host(PS_ALL);
+        let mut plugin = Main::default();
+        let view = plugin.render("containers", None, &host.invocation()).unwrap();
+        let Body::List(items) = &view.body else { panic!("a list") };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].detail.as_deref(), Some("node:18 - Exited (0) 3 days ago"));
+        assert_eq!(view.status.as_deref(), Some("1 running, 1 stopped"));
+
+        plugin.handle("containers", ViewEvent::Select("def456".into()), &host.invocation()).unwrap();
+        let toolbar = plugin.render("containers", None, &host.invocation()).unwrap().toolbar;
+        assert!(!toolbar[1].enabled && !toolbar[2].enabled && toolbar[3].enabled);
+
+        plugin.handle("containers", ViewEvent::Button("start".into()), &host.invocation()).unwrap();
+        assert!(host.process_runs().iter().any(|run| run.args == ["start", "def456"]));
+
+        plugin.handle("containers", ViewEvent::Activate("abc123".into()), &host.invocation()).unwrap();
+        assert_eq!(host.terminals()[0].args[2], "abc123");
+    }
+
     #[test]
     fn view_explains_empty_denied_and_failed_listings() {
         let host = docker_host("");
@@ -1140,7 +1164,7 @@ mod tests {
             Body::Message(text) => text,
             _ => panic!("a message"),
         };
-        assert!(message(&host).starts_with("No running dev container"));
+        assert!(message(&host).starts_with("No dev container"));
 
         let denied = MockHost::install().with_capabilities(&["project.read"]);
         assert!(message(&denied).contains("docker permission"));
