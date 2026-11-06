@@ -162,6 +162,14 @@ impl Discussion {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
+pub struct Award {
+    pub id: u64,
+    pub name: String,
+    pub user: User,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct DraftNote {
     pub id: u64,
     pub note: String,
@@ -641,6 +649,36 @@ impl Project<'_> {
         let path = self.mr(iid, &format!("/discussions/{}?resolved={resolved}", encode(safe::discussion_id(discussion)?)));
 
         rest("PUT", &path, None).map(drop)
+    }
+
+    pub fn edit_note(&self, iid: u64, note_id: u64, body: &str) -> Result<(), Error> {
+        rest("PUT", &self.mr(iid, &format!("/notes/{note_id}")), Some(json!({ "body": body }))).map(drop)
+    }
+
+    pub fn delete_note(&self, iid: u64, note_id: u64) -> Result<(), Error> {
+        rest("DELETE", &self.mr(iid, &format!("/notes/{note_id}")), None).map(drop)
+    }
+
+    /// The award emoji of a note, or of the merge request itself when `note_id` is `None`.
+    fn awards_path(&self, iid: u64, note_id: Option<u64>) -> String {
+        match note_id {
+            Some(note) => self.mr(iid, &format!("/notes/{note}/award_emoji")),
+            None => self.mr(iid, "/award_emoji"),
+        }
+    }
+
+    pub fn awards(&self, iid: u64, note_id: Option<u64>) -> Result<Vec<Award>, Error> {
+        paged(&self.awards_path(iid, note_id), 100)
+    }
+
+    pub fn add_award(&self, iid: u64, note_id: Option<u64>, name: &str) -> Result<(), Error> {
+        let path = format!("{}?name={}", self.awards_path(iid, note_id), encode(safe::emoji(name)?));
+
+        rest("POST", &path, None).map(drop)
+    }
+
+    pub fn remove_award(&self, iid: u64, note_id: Option<u64>, award_id: u64) -> Result<(), Error> {
+        rest("DELETE", &format!("{}/{award_id}", self.awards_path(iid, note_id)), None).map(drop)
     }
 
     /// REST has no draft flag; the original uses this same mutation.

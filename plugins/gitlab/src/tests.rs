@@ -230,7 +230,7 @@ fn details_offer_the_review_flow() {
 
     assert_eq!(
         buttons(&view),
-        ["comment", "approve", "merge", "review", "draft", "close", "checkout", "browser", "copy", "refresh"]
+        ["comment", "react", "approve", "merge", "review", "draft", "close", "checkout", "browser", "copy", "refresh"]
     );
     assert!(view.toolbar.iter().all(|b| b.icon.is_some()), "{view:?}");
     assert_eq!(
@@ -239,9 +239,10 @@ fn details_offer_the_review_flow() {
     );
     let Body::Form(fields) = &view.body else { panic!("{view:?}") };
     let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
-    assert_eq!(keys, ["comment", "as-draft", "remove-source-branch", "squash", "description"]);
-    assert_eq!(fields[4].label, "Description (read-only)");
-    assert_eq!(fields[4].value, FieldValue::Multiline("Adds it".into()));
+    assert_eq!(keys, ["comment", "as-draft", "emoji", "remove-source-branch", "squash", "description"]);
+    assert_eq!(fields[2].value, FieldValue::Choice(safe::EMOJIS.map(str::to_owned).to_vec(), "thumbsup".into()));
+    assert_eq!(fields[5].label, "Description (read-only)");
+    assert_eq!(fields[5].value, FieldValue::Multiline("Adds it".into()));
     assert!(!fields.iter().any(|f| matches!(f.value, FieldValue::Text(_))), "no read-only facts as inputs: {fields:?}");
 }
 
@@ -2235,5 +2236,251 @@ mod share_form_tests {
         assert!(matches!(view.body, Body::Message(_)), "{view:?}");
         assert!(host.requests().is_empty());
         assert!(host.process_runs().is_empty());
+    }
+}
+
+mod note_action_tests {
+    use super::*;
+
+    const MR_URL: &str = "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7";
+
+    const MINE: &str = r#"[
+        {"id": "d1", "notes": [
+            {"id": 11, "body": "Why?", "author": {"id": 3, "username": "bob"}, "created_at": "2026-01-02", "resolvable": true},
+            {"id": 12, "body": "Because", "author": {"id": 1, "username": "me"}, "created_at": "2026-01-03"},
+            {"id": 14, "body": "Also", "author": {"id": 1, "username": "me"}, "created_at": "2026-01-04"}
+        ]},
+        {"id": "d2", "notes": [{"id": 13, "body": "changed the description", "author": {"id": 1, "username": "me"}, "created_at": "2026-01-01", "system": true}]}
+    ]"#;
+
+    fn notes(req: &HttpRequest) -> Result<HttpResponse, Error> {
+        let path = req.url.strip_prefix(MR_URL).unwrap_or("").split('?').next().unwrap_or("");
+
+        match (req.method.as_str(), path) {
+            ("GET", "/discussions") => ok(MINE),
+            ("GET", "/notes/12/award_emoji") => ok(
+                r#"[{"id": 55, "name": "thumbsup", "user": {"id": 1, "username": "me"}},
+                    {"id": 56, "name": "rocket", "user": {"id": 3, "username": "bob"}}]"#,
+            ),
+            ("GET", p) if p.ends_with("/award_emoji") => ok("[]"),
+            ("DELETE", _) => ok(""),
+            _ => gitlab(req),
+        }
+    }
+
+    fn host() -> MockHost {
+        let host = setup();
+        host.on_fetch(notes);
+        host
+    }
+
+    fn on(host: &MockHost, key: &str) -> GitLab {
+        let mut plugin = GitLab::default();
+        plugin.handle(LIST, ViewEvent::Select(key.into()), &host.invocation()).unwrap();
+        plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        plugin
+    }
+
+    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
+        plugin.handle(DETAILS, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
+        plugin.render(DETAILS, None, &host.invocation()).unwrap()
+    }
+
+    fn comment(view: &View) -> &FieldValue {
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+        &fields.iter().find(|f| f.key == COMMENT_KEY).unwrap().value
+    }
+
+    #[test]
+    fn edit_saves_the_comment_text_to_the_selected_own_note() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        assert_eq!(label(&view, "edit-note"), "Save Edit");
+
+        plugin.handle(DETAILS, field("comment", "Because of X"), &host.invocation()).unwrap();
+        let view = click(&mut plugin, &host, "edit-note");
+
+        assert_eq!(writes(&host), [("PUT".into(), format!("{MR_URL}/notes/12"), r#"{"body":"Because of X"}"#.into())]);
+        assert!(view.status.as_deref().unwrap().starts_with("Comment edited."), "{view:?}");
+        assert_eq!(host.storage().get("comment"), None);
+    }
+
+    #[test]
+    fn edit_and_delete_are_not_offered_for_someone_elses_note_or_a_system_note() {
+        for key in ["d:7:d1", "n:7:d1:11", "d:7:d2"] {
+            let host = host();
+            let mut plugin = on(&host, key);
+            plugin.handle(DETAILS, field("comment", "taken over"), &host.invocation()).unwrap();
+
+            let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+            assert!(!buttons(&view).contains(&"edit-note") && !buttons(&view).contains(&"delete-note"), "{key}: {view:?}");
+
+            click(&mut plugin, &host, "edit-note");
+            click(&mut plugin, &host, "delete-note");
+            click(&mut plugin, &host, "delete-note");
+            assert!(writes(&host).is_empty(), "{key}");
+        }
+    }
+
+    #[test]
+    fn delete_needs_a_second_click() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        assert_eq!(label(&view, "delete-note"), "Delete Comment");
+
+        let view = click(&mut plugin, &host, "delete-note");
+        assert!(writes(&host).is_empty(), "the first click only asks to confirm");
+        assert_eq!(label(&view, "delete-note"), "Confirm Delete Comment");
+
+        let view = click(&mut plugin, &host, "delete-note");
+
+        assert_eq!(writes(&host), [("DELETE".into(), format!("{MR_URL}/notes/12"), String::new())]);
+        assert!(view.status.as_deref().unwrap().starts_with("Comment deleted."), "{view:?}");
+    }
+
+    #[test]
+    fn another_action_cancels_a_pending_delete() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        click(&mut plugin, &host, "delete-note");
+        plugin.handle(LIST, ViewEvent::Select("n:7:d1:14".into()), &host.invocation()).unwrap();
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        assert_eq!(label(&view, "delete-note"), "Delete Comment");
+
+        click(&mut plugin, &host, "delete-note");
+        click(&mut plugin, &host, "copy");
+        let view = click(&mut plugin, &host, "delete-note");
+        assert!(writes(&host).is_empty());
+        assert_eq!(label(&view, "delete-note"), "Confirm Delete Comment");
+
+        storage::set("note", "12").unwrap();
+        click(&mut plugin, &host, "delete-note");
+        assert!(writes(&host).is_empty(), "a confirm shown for note 14 does not delete note 12");
+
+        click(&mut plugin, &host, "delete-note");
+        assert_eq!(writes(&host), [("DELETE".into(), format!("{MR_URL}/notes/12"), String::new())]);
+    }
+
+    #[test]
+    fn react_adds_the_chosen_emoji_to_the_selected_note() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        plugin.handle(DETAILS, field("emoji", "rocket"), &host.invocation()).unwrap();
+        let view = click(&mut plugin, &host, "react");
+
+        assert_eq!(writes(&host), [("POST".into(), format!("{MR_URL}/notes/12/award_emoji?name=rocket"), String::new())]);
+        assert!(view.status.as_deref().unwrap().starts_with("Reacted with :rocket:."), "{view:?}");
+    }
+
+    #[test]
+    fn react_again_removes_my_own_award() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        let view = click(&mut plugin, &host, "react");
+
+        assert_eq!(writes(&host), [("DELETE".into(), format!("{MR_URL}/notes/12/award_emoji/55"), String::new())]);
+        assert!(view.status.as_deref().unwrap().starts_with("Removed your :thumbsup:."), "{view:?}");
+    }
+
+    #[test]
+    fn react_without_a_selected_note_awards_the_merge_request() {
+        let host = host();
+        let mut plugin = on(&host, "mr:7");
+
+        plugin.handle(DETAILS, field("emoji", "tada"), &host.invocation()).unwrap();
+        click(&mut plugin, &host, "react");
+
+        assert_eq!(writes(&host), [("POST".into(), format!("{MR_URL}/award_emoji?name=tada"), String::new())]);
+    }
+
+    #[test]
+    fn an_emoji_outside_the_list_is_refused_and_no_request_is_sent() {
+        for emoji in ["thumbsup&name=x", "../x"] {
+            let host = host();
+            let mut plugin = on(&host, "n:7:d1:12");
+            let before = host.requests().len();
+
+            plugin.handle(DETAILS, field("emoji", emoji), &host.invocation()).unwrap();
+            plugin.handle(DETAILS, ViewEvent::Button("react".into()), &host.invocation()).unwrap();
+
+            assert_eq!(host.requests().len(), before, "{emoji}");
+            assert!(plugin.status.as_deref().unwrap().contains("refusing the emoji"), "{emoji}");
+
+            let api = api::Project("g/p");
+            assert!(api.add_award(7, Some(12), emoji).is_err());
+            assert_eq!(host.requests().len(), before, "{emoji}");
+        }
+    }
+
+    #[test]
+    fn note_ids_come_from_the_tree_key_not_from_form_text() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        for key in ["note", "note-id", "note_id", "id"] {
+            plugin.handle(DETAILS, field(key, "14"), &host.invocation()).unwrap();
+        }
+        plugin.handle(DETAILS, field("comment", "14"), &host.invocation()).unwrap();
+        click(&mut plugin, &host, "edit-note");
+        click(&mut plugin, &host, "delete-note");
+        click(&mut plugin, &host, "delete-note");
+
+        let urls: Vec<String> = writes(&host).into_iter().map(|w| w.1).collect();
+        assert_eq!(urls, [format!("{MR_URL}/notes/12"), format!("{MR_URL}/notes/12")]);
+    }
+
+    #[test]
+    fn a_failed_edit_keeps_the_comment_text_and_says_why() {
+        let host = host();
+        host.on_fetch(|r| match r.method == "PUT" {
+            true => Ok(HttpResponse { status: 400, headers: vec![], body: br#"{"message":"note is too long"}"#.to_vec() }),
+            false => notes(r),
+        });
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        plugin.handle(DETAILS, field("comment", "LGTM"), &host.invocation()).unwrap();
+        let view = click(&mut plugin, &host, "edit-note");
+
+        assert_eq!(host.storage().get("comment").map(String::as_str), Some("LGTM"));
+        assert!(view.status.as_deref().unwrap().contains("note is too long"), "{view:?}");
+        assert_eq!(comment(&view), &FieldValue::Multiline("LGTM".into()));
+    }
+
+    #[test]
+    fn note_actions_are_quiet_when_the_setting_is_off() {
+        let host = host();
+        host.set_setting("noteActions", "false");
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+        assert!(!fields.iter().any(|f| f.key == "emoji"), "{view:?}");
+        assert!(buttons(&view).iter().all(|b| !["edit-note", "delete-note", "react"].contains(b)), "{view:?}");
+
+        plugin.handle(DETAILS, field("comment", "x"), &host.invocation()).unwrap();
+        for id in ["edit-note", "delete-note", "delete-note", "react"] {
+            click(&mut plugin, &host, id);
+        }
+
+        assert!(writes(&host).is_empty());
+        assert!(host.requests().iter().all(|r| !r.url.contains("award_emoji")));
+        assert_eq!(plugin.status, None);
+    }
+
+    #[test]
+    fn an_empty_edit_is_refused() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        plugin.handle(DETAILS, field("comment", " \n "), &host.invocation()).unwrap();
+        let view = click(&mut plugin, &host, "edit-note");
+
+        assert!(writes(&host).is_empty());
+        assert!(view.status.as_deref().unwrap().starts_with("Write the new text"), "{view:?}");
     }
 }

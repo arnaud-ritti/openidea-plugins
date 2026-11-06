@@ -16,7 +16,7 @@ mod safe;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use api::{Approvals, Discussion, DraftNote, FileDiff, MergeRequest, ProjectInfo, TimelineEvent, User};
+use api::{Approvals, Discussion, DraftNote, FileDiff, MergeRequest, Note, ProjectInfo, TimelineEvent, User};
 use branch::BranchReview;
 use openidea_plugin::host::{self, storage};
 use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
@@ -36,6 +36,8 @@ const SHARE: &str = "share-project-form";
 const FILTER_KEY: &str = "filter";
 const SELECTED_KEY: &str = "selected";
 const THREAD_KEY: &str = "thread";
+/// The selected reply; without it a selected thread means its first note.
+const NOTE_KEY: &str = "note";
 const COMMENT_KEY: &str = "comment";
 const AS_DRAFT_KEY: &str = "as-draft";
 const EVENTS_KEY: &str = "show-events";
@@ -193,7 +195,9 @@ fn date(timestamp: &str) -> &str {
 }
 
 /// Buttons that run only on a second click, relabelled "Confirm …" in between.
-const CONFIRMED: [&str; 2] = ["merge", "close"];
+const CONFIRMED: [&str; 3] = ["merge", "close", "delete-note"];
+
+const NOTE_ACTIONS: [&str; 3] = ["edit-note", "delete-note", "react"];
 
 fn approvals_text(approvals: &Approvals) -> String {
     let names: Vec<&str> = approvals.approved_by.iter().map(|a| a.user.username.as_str()).collect();
@@ -272,6 +276,8 @@ pub struct GitLab {
     share: forms::ShareForm,
     /// The namespaces the share form offers, loaded when it is first drawn.
     namespaces: Option<Vec<api::Namespace>>,
+    /// The reaction picked in the details form, checked against `safe::EMOJIS` when used.
+    emoji: Option<String>,
 }
 
 impl GitLab {
@@ -302,6 +308,43 @@ impl GitLab {
         let id = storage::get(THREAD_KEY).ok().flatten()?;
 
         self.threads.get(&iid)?.iter().find(|d| d.id == id)
+    }
+
+    fn selected_note(&self, iid: u64) -> Option<&Note> {
+        let thread = self.thread(iid)?;
+        let Some(id) = storage::get(NOTE_KEY).ok().flatten() else {
+            return thread.notes.first();
+        };
+        let id: u64 = id.parse().ok()?;
+
+        thread.notes.iter().find(|n| n.id == id)
+    }
+
+    /// The selected note's id when a thread is selected, `None` for the merge request itself.
+    fn reaction_target(&self, iid: u64) -> Result<Option<u64>, Error> {
+        if storage::get(THREAD_KEY)?.is_none() {
+            return Ok(None);
+        }
+
+        let note = self.selected_note(iid).ok_or("The selected comment is gone. Refresh the merge request.")?;
+
+        Ok(Some(note.id))
+    }
+
+    fn own_note(&mut self, iid: u64) -> Result<u64, Error> {
+        let me = self.me()?;
+
+        self.selected_note(iid).filter(|n| is_own(n, &me)).map(|n| n.id).ok_or_else(|| "Select one of your own comments first.".into())
+    }
+
+    /// What a confirm click is bound to: a delete stays with the note it was first clicked on.
+    fn confirm_token(&self, button: &str) -> String {
+        let note = Self::selected().and_then(|iid| Some((self.thread(iid)?.id.clone(), self.selected_note(iid)?.id)));
+
+        match (button, note) {
+            ("delete-note", Some((thread, note))) => format!("{button}:{thread}:{note}"),
+            _ => button.to_owned(),
+        }
     }
 
     /// Threads and, when shown, the timeline events of `iid`.
@@ -465,9 +508,10 @@ impl GitLab {
                 }
             }
             ViewEvent::Select(key) => {
-                let (iid, thread) = match Key::parse(&key) {
-                    Some(Key::MergeRequest(iid)) => (iid, None),
-                    Some(Key::Thread(iid, d) | Key::Note(iid, d, _)) => (iid, Some(d)),
+                let (iid, thread, note) = match Key::parse(&key) {
+                    Some(Key::MergeRequest(iid)) => (iid, None, None),
+                    Some(Key::Thread(iid, d)) => (iid, Some(d), None),
+                    Some(Key::Note(iid, d, n)) => (iid, Some(d), Some(n)),
                     None => return Ok(()),
                 };
 
@@ -482,6 +526,11 @@ impl GitLab {
                 match thread {
                     Some(d) => storage::set(THREAD_KEY, d)?,
                     None => storage::delete(THREAD_KEY)?,
+                }
+
+                match note {
+                    Some(n) => storage::set(NOTE_KEY, &n.to_string())?,
+                    None => storage::delete(NOTE_KEY)?,
                 }
 
                 self.status = None;
@@ -560,7 +609,9 @@ impl GitLab {
         let opened = mr.state == "opened";
         let comment = storage::get(COMMENT_KEY)?.unwrap_or_default();
         let as_draft = preference(AS_DRAFT_KEY, true);
-        let mut view = View::new(Body::Form(details_fields(details, thread.as_ref(), comment, as_draft))).button(Button::new("comment", comment_label(as_draft, thread.is_some())).icon("review-comment"));
+        let emoji = note_actions_enabled().then(|| self.emoji.clone().unwrap_or_else(|| safe::EMOJIS[0].to_owned()));
+        let fields = details_fields(details, thread.as_ref(), comment, as_draft, emoji);
+        let mut view = View::new(Body::Form(fields)).button(Button::new("comment", comment_label(as_draft, thread.is_some())).icon("review-comment"));
 
         if !details.drafts.is_empty() {
             view = view.button(Button::new("submit", &format!("Submit Review ({})", details.drafts.len())).icon("send"));
@@ -568,6 +619,19 @@ impl GitLab {
 
         if let Some(thread) = thread.as_ref().filter(|t| t.resolvable()) {
             view = view.button(Button::new("resolve", if thread.resolved() { "Unresolve Thread" } else { "Resolve Thread" }).icon("check"));
+        }
+
+        if note_actions_enabled() {
+            if self.selected_note(iid).is_some_and(|n| is_own(n, &me)) {
+                let delete = match self.confirm == Some(self.confirm_token("delete-note")) {
+                    true => "Confirm Delete Comment",
+                    false => "Delete Comment",
+                };
+                view = view.button(Button::new("edit-note", "Save Edit").icon("edit")).button(Button::new("delete-note", delete).icon("trash"));
+            }
+
+            let react = if thread.is_some() { "React to Comment" } else { "React" };
+            view = view.button(Button::new("react", react).icon("star"));
         }
 
         if opened {
@@ -635,9 +699,14 @@ impl GitLab {
             _ => return Ok(()),
         };
 
+        if NOTE_ACTIONS.contains(&button.as_str()) && !note_actions_enabled() {
+            return Ok(());
+        }
+
         let pending = self.confirm.take();
-        if CONFIRMED.contains(&button.as_str()) && pending.as_deref() != Some(button.as_str()) {
-            self.confirm = Some(button);
+        let token = self.confirm_token(&button);
+        if CONFIRMED.contains(&button.as_str()) && pending.as_deref() != Some(token.as_str()) {
+            self.confirm = Some(token);
             host::refresh_view(DETAILS);
             return Ok(());
         }
@@ -693,6 +762,7 @@ impl GitLab {
             }
             ("remove-source-branch", Some(d)) => d.remove_source_branch = checked,
             ("squash", Some(d)) => d.squash = checked,
+            ("emoji", _) => self.emoji = Some(value.to_owned()),
             _ => {}
         }
 
@@ -730,6 +800,32 @@ impl GitLab {
                 }
 
                 done("Review submitted.")
+            }
+            "edit-note" => {
+                let note = self.own_note(mr.iid)?;
+                let body = storage::get(COMMENT_KEY)?.unwrap_or_default();
+                if body.trim().is_empty() {
+                    return Err("Write the new text in the comment box first.".into());
+                }
+
+                api.edit_note(mr.iid, note, &body)?;
+                storage::delete(COMMENT_KEY)?;
+                done("Comment edited.")
+            }
+            "delete-note" => {
+                let note = self.own_note(mr.iid)?;
+                api.delete_note(mr.iid, note).and_then(|_| done("Comment deleted."))
+            }
+            "react" => {
+                let emoji = safe::emoji(self.emoji.as_deref().unwrap_or(safe::EMOJIS[0]))?;
+                let note = self.reaction_target(mr.iid)?;
+                let me = self.me()?;
+                let mine = api.awards(mr.iid, note)?.into_iter().find(|a| a.name == emoji && a.user.id == me.id);
+
+                match mine {
+                    Some(award) => api.remove_award(mr.iid, note, award.id).map(|_| format!("Removed your :{emoji}:.")),
+                    None => api.add_award(mr.iid, note, emoji).map(|_| format!("Reacted with :{emoji}:.")),
+                }
             }
             "resolve" => {
                 let thread = self.thread(mr.iid).ok_or("Select a thread first.")?;
@@ -805,7 +901,7 @@ fn details_summary(details: &Details) -> String {
 }
 
 /// The comment and merge options as inputs; the description and replied-to note are shown, and edits to them ignored.
-fn details_fields(details: &Details, thread: Option<&Discussion>, comment: String, as_draft: bool) -> Vec<Field> {
+fn details_fields(details: &Details, thread: Option<&Discussion>, comment: String, as_draft: bool, emoji: Option<String>) -> Vec<Field> {
     let mut fields = Vec::new();
 
     if let Some(thread) = thread {
@@ -818,6 +914,10 @@ fn details_fields(details: &Details, thread: Option<&Discussion>, comment: Strin
     fields.push(Field::new(COMMENT_KEY, label, FieldValue::Multiline(comment)));
     fields.push(Field::new(AS_DRAFT_KEY, "Add to my review (published when you submit the review)", FieldValue::Checkbox(as_draft)));
 
+    if let Some(emoji) = emoji {
+        fields.push(Field::new("emoji", "Reaction", FieldValue::Choice(safe::EMOJIS.map(str::to_owned).to_vec(), emoji)));
+    }
+
     if details.mr.state == "opened" {
         fields.push(Field::new("remove-source-branch", "Delete source branch on merge", FieldValue::Checkbox(details.remove_source_branch)));
         fields.push(Field::new("squash", "Squash commits on merge", FieldValue::Checkbox(details.squash)));
@@ -828,6 +928,15 @@ fn details_fields(details: &Details, thread: Option<&Discussion>, comment: Strin
     }
 
     fields
+}
+
+/// Only your own comments can be edited or deleted; GitLab writes system notes.
+fn is_own(note: &Note, me: &User) -> bool {
+    note.author.id == me.id && !note.system
+}
+
+fn note_actions_enabled() -> bool {
+    host::setting_bool("noteActions").unwrap_or(true)
 }
 
 fn forms_enabled() -> bool {

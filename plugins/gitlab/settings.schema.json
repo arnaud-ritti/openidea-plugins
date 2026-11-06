@@ -30,6 +30,11 @@
       "title": "Show the GitLab form views (Create Merge Request, Create Snippet, Share Project)",
       "default": true
     },
+    "noteActions": {
+      "type": "boolean",
+      "title": "Edit and delete your own comments and react with emoji in the merge request details",
+      "default": true
+    },
     "cloneUsingSsh": {
       "type": "boolean",
       "title": "Clone and share using SSH",

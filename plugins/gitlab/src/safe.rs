@@ -3,7 +3,6 @@
 
 use openidea_plugin::Error;
 
-#[cfg_attr(not(test), expect(dead_code, reason = "consumed by the later GitLab tasks"))]
 pub const EMOJIS: [&str; 8] = ["thumbsup", "thumbsdown", "heart", "tada", "laughing", "confused", "rocket", "eyes"];
 
 const GITLAB: &str = "https://gitlab.com/";
@@ -47,7 +46,6 @@ pub fn discussion_id(s: &str) -> Result<&str, Error> {
     accept("thread id", s, (1..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "consumed by the later GitLab tasks"))]
 pub fn emoji(s: &str) -> Result<&'static str, Error> {
     EMOJIS.into_iter().find(|e| *e == s).ok_or_else(|| refused("emoji", s))
 }
