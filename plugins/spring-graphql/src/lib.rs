@@ -285,8 +285,8 @@ pub fn handlers(text: &str) -> Vec<Handler> {
 }
 
 /// The handler methods of a Java or Kotlin source's controllers.
-pub fn handlers_in(text: &str, kotlin: bool) -> Vec<Handler> {
-    let file = if kotlin { kotlin::parse(text) } else { java::parse(text) };
+pub fn handlers_in(text: &str, is_kotlin: bool) -> Vec<Handler> {
+    let file = if is_kotlin { kotlin::parse(text) } else { java::parse(text) };
     let span = |at: usize, s: &str| range(text, at, at + s.len());
     let mut out = Vec::new();
     for c in file.types.iter().filter(|t| t.has(&["Controller", "RestController"])) {
@@ -381,8 +381,8 @@ enum Slot {
     Field(Option<&'static str>, String),
 }
 
-fn annotation_slot(text: &str, at: usize, kotlin: bool) -> Option<(Slot, Str)> {
-    let file = if kotlin { kotlin::parse(text) } else { java::parse(text) };
+fn annotation_slot(text: &str, at: usize, is_kotlin: bool) -> Option<(Slot, Str)> {
+    let file = if is_kotlin { kotlin::parse(text) } else { java::parse(text) };
     for c in &file.types {
         for a in c.annotations.iter().filter(|a| a.name == "SchemaMapping") {
             if let Some(s) = a.strings(&["typeName"]).into_iter().find(|s| s.holds(at)) {
@@ -524,11 +524,11 @@ pub fn document_fields(text: &str) -> Vec<DocField> {
 }
 
 /// The client documents embedded in a Java or Kotlin source: `.document("…")` literals.
-fn inline_documents(text: &str, kotlin: bool) -> Vec<DocField> {
+fn inline_documents(text: &str, is_kotlin: bool) -> Vec<DocField> {
     if !text.contains("document") {
         return Vec::new();
     }
-    let calls = if kotlin { kotlin::calls(text) } else { java::calls(text) };
+    let calls = if is_kotlin { kotlin::calls(text) } else { java::calls(text) };
     let mut out = Vec::new();
     for call in calls.iter().filter(|c| c.name == "document" && !c.is_new) {
         let Some(s) = call.args.first().and_then(|a| a.string.as_ref()) else { continue };
@@ -1046,5 +1046,102 @@ class BookController {
         assert!(target.target.as_ref().unwrap().path.ends_with("BookController.kt"));
         let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/BookController.kt"];
         assert_eq!(problems.iter().filter_map(|d| d.code.as_deref()).collect::<Vec<_>>(), ["unknown-graphql-argument"]);
+    }
+
+    const DOC_SCHEMA: &str = "schema { query: RootQuery subscription: Subscription }\ntype RootQuery { bookById(id: ID): Book other: Book }\ntype Subscription { bookAdded: Book }\ntype Mutation { addBook: Book }\ntype Book { id: ID title: String }";
+
+    fn doc_links(path: &str, language: &str, text: &str, needle: &str) -> Vec<Location> {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/graphql/schema.graphqls", DOC_SCHEMA);
+        GraphQlTools::default().definition(&doc(path, language, text), at(text, needle))
+    }
+
+    fn quiet_links(text: &str, needle: &str) -> Vec<Location> {
+        let path = "src/main/resources/graphql-documents/d.graphql";
+        GraphQlTools::default().definition(&doc(path, "graphql", text), at(text, needle))
+    }
+
+    fn graphql_doc(text: &str, needle: &str) -> Vec<Location> {
+        doc_links("src/main/resources/graphql-documents/d.graphql", "graphql", text, needle)
+    }
+
+    #[test]
+    fn document_alias_links_the_real_field() {
+        let text = "{ other: bookById(id: 1) { title } }";
+        assert!(graphql_doc(text, "other").is_empty(), "an alias is not a schema field");
+        let found = graphql_doc(text, "bookById");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].range.start, start(DOC_SCHEMA, "bookById"));
+        assert_eq!(graphql_doc(text, "title").len(), 1);
+    }
+
+    #[test]
+    fn document_fragments_and_spreads() {
+        let text = "fragment B on Book { title }\nquery { bookById(id: 1) { ...B ... on Book { id } } }";
+        assert_eq!(graphql_doc(text, "title").len(), 1, "resolved against Book");
+        assert!(graphql_doc(text, "B on").is_empty());
+        let spread = "fragment title on Book { title }\nquery { bookById(id: 1) { ...title } }";
+        let host = MockHost::install();
+        host.add_file("src/main/resources/graphql/schema.graphqls", DOC_SCHEMA);
+        let last = position(spread, spread.rfind("title").unwrap() + 1);
+        let path = "src/main/resources/graphql-documents/d.graphql";
+        assert!(GraphQlTools::default().definition(&doc(path, "graphql", spread), last).is_empty());
+        assert!(graphql_doc(text, "B ...").is_empty());
+        assert!(graphql_doc(text, "id }").is_empty(), "inline fragments are skipped");
+        assert_eq!(graphql_doc(text, "bookById").len(), 1);
+        let on_query = "fragment Q on RootQuery { bookById(id: 1) { id } }";
+        assert_eq!(graphql_doc(on_query, "bookById").len(), 1);
+        assert_eq!(graphql_doc(on_query, "id }").len(), 1);
+    }
+
+    #[test]
+    fn document_subscription_and_mutation_roots() {
+        let found = graphql_doc("subscription { bookAdded { id } }", "bookAdded");
+        assert_eq!(found[0].range.start, start(DOC_SCHEMA, "bookAdded"));
+        assert_eq!(graphql_doc("subscription OnAdd { bookAdded { id } }", "id").len(), 1);
+        assert_eq!(graphql_doc("mutation { addBook { id } }", "addBook").len(), 1);
+        let renamed = graphql_doc("query Q($i: ID) { bookById(id: $i) { id } }", "bookById");
+        assert_eq!(renamed.len(), 1, "schema query rename");
+    }
+
+    #[test]
+    fn document_unknown_root_field_is_quiet() {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/graphql/schema.graphqls", DOC_SCHEMA);
+        assert!(quiet_links("{ nope }", "nope").is_empty());
+        assert!(quiet_links("{ bookById { nope } }", "nope").is_empty());
+        assert_eq!(quiet_links("{ bookById { id } }", "bookById").len(), 1);
+        assert!(host.diagnostics().values().all(Vec::is_empty));
+        let text = "# bookById é\nquery { bookById(id: \"é\", x: [1 {\n# end\n";
+        let mut tools = GraphQlTools::default();
+        for end in (0..=text.len()).filter(|&e| text.is_char_boundary(e)) {
+            let d = doc("src/main/resources/graphql-documents/d.graphql", "graphql", &text[..end]);
+            tools.definition(&d, position(&text[..end], end));
+        }
+        let java = "class C { void f() { client.document(\"query { bookById(\"); } }";
+        for end in (0..=java.len()).filter(|&e| java.is_char_boundary(e)) {
+            let d = doc("src/main/java/C.java", "java", &java[..end]);
+            tools.definition(&d, position(&java[..end], end));
+        }
+    }
+
+    #[test]
+    fn kotlin_inline_document_links_to_schema() {
+        let text = "class C {\n    fun f() {\n        client.document(\"\"\"query { bookById(id: 1) { title } }\"\"\").retrieve(\"x\")\n        foo.document(\"{ nope }\")\n    }\n}\n";
+        let found = doc_links("src/main/kotlin/C.kt", "kotlin", text, "bookById");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].range.start, start(DOC_SCHEMA, "bookById"));
+        assert_eq!(doc_links("src/main/kotlin/C.kt", "kotlin", text, "title").len(), 1);
+        assert!(doc_links("src/main/kotlin/C.kt", "kotlin", text, "nope").is_empty());
+        let escaped = "class C { void f() { client.document(\"{ bookById(name: \\\"x\\\") { id } }\"); } }";
+        assert!(doc_links("src/main/java/C.java", "java", escaped, "bookById").is_empty(), "escapes are skipped");
+    }
+
+    #[test]
+    fn gql_documents_link_to_schema() {
+        let text = "query { bookById(id: 1) { id } }";
+        let found = doc_links("src/main/resources/graphql-documents/find.gql", "graphql", text, "bookById");
+        assert_eq!(found.len(), 1);
+        assert!(doc_links("src/main/resources/other/find.gql", "graphql", text, "bookById").is_empty());
     }
 }
