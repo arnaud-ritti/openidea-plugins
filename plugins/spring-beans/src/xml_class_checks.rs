@@ -52,6 +52,16 @@ pub fn property_site(text: &str, cursor: usize) -> Option<(String, usize, usize)
     Some((class.to_owned(), name.value_at, name.value_end))
 }
 
+/// A `<constructor-arg name>` value under the cursor: the class of its bean and the bytes of the value.
+pub fn constructor_arg_site(text: &str, cursor: usize) -> Option<(String, usize, usize)> {
+    let els = xml::elements(text);
+    let (_, e) = els.iter().enumerate().find(|(i, e)| e.local() == "constructor-arg" && in_namespace(&els, *i, BEANS_NS) && e.attr("name").is_some_and(|a| a.holds(cursor)))?;
+    let bean = &els[e.parent?];
+    let class = bean.value("class").filter(|c| !dynamic(c) && bean.local() == "bean")?;
+    let name = e.attr("name")?;
+    Some((class.to_owned(), name.value_at, name.value_end))
+}
+
 pub fn check(els: &[xml::Element], world: &World, groups: Groups) -> Vec<Finding> {
     let mut out = Vec::new();
     if !groups.xml || !world.complete {
@@ -86,6 +96,9 @@ pub fn check(els: &[xml::Element], world: &World, groups: Groups) -> Vec<Finding
                 };
                 if let Some(message) = problem {
                     out.push(error(factory.value_at, factory.value_end, "xml-factory-method", message));
+                } else if named.iter().all(|m| !m.is_public) {
+                    let message = format!("{}() is not public: Spring can still call it, but a public factory-method is the convention and survives tighter access settings.", factory.value);
+                    out.push(Finding::new(factory.value_at, factory.value_end, "xml-factory-method-visibility", message).with_severity(openidea_plugin::Severity::Info));
                 }
             }
             continue;
@@ -93,6 +106,7 @@ pub fn check(els: &[xml::Element], world: &World, groups: Groups) -> Vec<Finding
         if bean.attr("factory-bean").is_some() {
             continue;
         }
+        lookup_methods(&children, &ty.name, &qualified, world, &mut out);
         if let Some(chain) = world.member_chain(&ty.name, Some(&qualified)) {
             for attr_name in ["init-method", "destroy-method"] {
                 let Some(attr) = bean.attr(attr_name).filter(|a| !dynamic(&a.value)) else { continue };
@@ -123,4 +137,19 @@ pub fn check(els: &[xml::Element], world: &World, groups: Groups) -> Vec<Finding
         }
     }
     out
+}
+
+fn lookup_methods(children: &[&xml::Element], class: &str, qualified: &str, world: &World, out: &mut Vec<Finding>) {
+    let Some(chain) = world.member_chain(class, Some(qualified)) else { return };
+    for element in children.iter().filter(|c| matches!(c.local(), "lookup-method" | "replaced-method")) {
+        let Some(name) = element.attr("name").filter(|a| !dynamic(&a.value)) else { continue };
+        let named: Vec<&MethodInfo> = chain.iter().flat_map(|t| &t.methods).filter(|m| m.name == name.value).collect();
+        if named.is_empty() {
+            let message = format!("{class} has no method {}() to override, so Spring fails to create the bean.", name.value);
+            out.push(error(name.value_at, name.value_end, "xml-lookup-method", message));
+        } else if named.iter().all(|m| m.is_private || m.is_final || m.is_static) {
+            let message = format!("{}() is private, final or static: the generated subclass cannot override it, so the {} has no effect.", name.value, element.local());
+            out.push(Finding::new(name.value_at, name.value_end, "xml-lookup-method", message).with_severity(openidea_plugin::Severity::Info));
+        }
+    }
 }

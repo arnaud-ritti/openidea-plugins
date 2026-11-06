@@ -95,6 +95,9 @@ pub struct MethodInfo {
     pub name: String,
     pub params: usize,
     pub is_static: bool,
+    pub is_public: bool,
+    pub is_final: bool,
+    pub is_private: bool,
     /// Carries `@Required`.
     pub required: bool,
     pub range: Range,
@@ -113,6 +116,8 @@ pub struct TypeInfo {
     pub methods: Vec<MethodInfo>,
     /// The parameter count of each declared constructor.
     pub ctors: Vec<usize>,
+    /// The parameter names of each declared constructor.
+    pub ctor_names: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,11 +277,15 @@ fn type_info(file: &java::JavaFile, index: usize, text: &str) -> TypeInfo {
             name: m.name.clone(),
             params: m.params.len(),
             is_static: modifier(m, "static"),
+            is_public: modifier(m, "public") || t.kind == "interface",
+            is_final: modifier(m, "final"),
+            is_private: modifier(m, "private"),
             required: m.annotations.iter().any(|a| a.name == "Required"),
             range: range(text, m.at, m.at + m.name.len()),
         })
         .collect();
     let ctors = t.members.iter().filter(|m| m.kind == MemberKind::Constructor).map(|m| m.params.len()).collect();
+    let ctor_names = t.members.iter().filter(|m| m.kind == MemberKind::Constructor).map(|m| m.params.iter().map(|p| p.name.clone()).collect()).collect();
     TypeInfo {
         name: t.name.clone(),
         qualified: file.qualified(index),
@@ -286,6 +295,7 @@ fn type_info(file: &java::JavaFile, index: usize, text: &str) -> TypeInfo {
         members_known: matches!(t.kind.as_str(), "class" | "interface") && !t.has(&LOMBOK),
         methods,
         ctors,
+        ctor_names,
     }
 }
 

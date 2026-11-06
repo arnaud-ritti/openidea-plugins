@@ -36,7 +36,7 @@ pub fn unresolved_targets(path: &str, file: &JavaFile, ty: &TypeDecl, world: &Wo
         let bean_names: &[&str] = match annotation.name.as_str() {
             "Lookup" => &["value"],
             "Scheduled" => &["scheduler"],
-            "MockitoSpyBean" => &["name", "value"],
+            "MockitoSpyBean" | "MockitoBean" => &["name", "value"],
             _ => &[],
         };
         if !bean_names.is_empty() && spring(file, std::slice::from_ref(annotation), &annotation.name).is_some() {
@@ -46,6 +46,9 @@ pub fn unresolved_targets(path: &str, file: &JavaFile, ty: &TypeDecl, world: &Wo
                 }
                 out.push(Finding::new(from, to, "unresolved-bean-name", format!("No bean named \"{name}\" is defined in the project. Libraries and auto-configuration can still provide it.")));
             }
+        }
+        if annotation.name == "ContextConfiguration" {
+            default_context_file(path, file, ty, annotation, out);
         }
         let Some((_, keys)) = RESOURCE_ANNOTATIONS.iter().find(|(n, _)| *n == annotation.name) else { continue };
         if spring(file, std::slice::from_ref(annotation), &annotation.name).is_none() || has_value(annotation, "ignoreResourceNotFound", "true") {
@@ -60,6 +63,20 @@ pub fn unresolved_targets(path: &str, file: &JavaFile, ty: &TypeDecl, world: &Wo
     }
 }
 
+fn default_context_file(path: &str, file: &JavaFile, ty: &TypeDecl, annotation: &Annotation, out: &mut Vec<Finding>) {
+    let bare = annotation.args.is_empty();
+    let has_nested = file.types.iter().any(|t| t.outer.is_some_and(|o| file.types[o].name == ty.name));
+    if !bare || has_nested || !ty.extends.is_empty() || ty.outer.is_some() || spring(file, std::slice::from_ref(annotation), "ContextConfiguration").is_none() {
+        return;
+    }
+    let relative = format!("{}/{}-context.xml", file.package.replace('.', "/"), ty.name);
+    if !matches!(read_classpath(path, &relative), Some(None)) {
+        return;
+    }
+    let message = format!("@ContextConfiguration names no configuration, no nested @Configuration class exists and {relative} is missing from the resource folders.");
+    out.push(Finding::new(annotation.at, annotation.end, "resource-not-found", message).with_severity(openidea_plugin::Severity::Info));
+}
+
 /// Whether `location` exists in the module's resources; none when it can't be told.
 fn resource_exists(source: &str, package: &str, annotation: &str, location: &str) -> Option<bool> {
     if location.is_empty() || location.contains(['*', '$', '{', '#', '?', '\\']) || location.starts_with("classpath*:") {
@@ -71,10 +88,10 @@ fn resource_exists(source: &str, package: &str, annotation: &str, location: &str
         return None;
     } else if let Some(rest) = location.strip_prefix('/') {
         rest.to_owned()
-    } else if matches!(annotation, "ContextConfiguration" | "Sql") {
-        format!("{}/{location}", package.replace('.', "/"))
+    } else if annotation == "PropertySource" {
+        location.to_owned()
     } else {
-        return None;
+        format!("{}/{location}", package.replace('.', "/"))
     };
     read_classpath(source, &relative).map(|found| found.is_some())
 }

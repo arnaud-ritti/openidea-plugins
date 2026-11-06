@@ -40,11 +40,13 @@ pub fn check_xml(path: &str, text: &str, world: &World, groups: Groups) -> Vec<F
     if groups.xml {
         out.extend(xml_check::check(&els, SCAN_RULES, |_| true));
         scan_filters(&els, &children, &mut out);
+        filter_expressions(&els, world, &mut out);
         import_resources(path, &els, groups, &mut out);
         inactive_profiles(&els, &mut out);
     }
     if groups.unresolved_references && world.complete {
         unresolved_references(&els, &by_name, &mut out);
+        unresolved_classes(&els, world, &mut out);
         unresolved_placeholders(path, &els, &mut out);
     }
     if groups.xml {
@@ -447,22 +449,29 @@ fn import_resources(path: &str, els: &[xml::Element], groups: Groups, out: &mut 
     for (_, e) in beans_elements(els, "import") {
         let Some(attr) = e.attr("resource").filter(|a| !dynamic(&a.value) && !a.value.contains(['*', '?'])) else { continue };
         let location = attr.value.trim();
-        let missing = if let Some(rest) = location.strip_prefix("classpath:") {
-            groups.unresolved_references && matches!(crate::target_checks::read_classpath(path, rest.trim_start_matches('/')), Some(None))
+        let found = if let Some(rest) = location.strip_prefix("classpath:") {
+            groups.unresolved_references.then(|| crate::target_checks::read_classpath(path, rest.trim_start_matches('/'))).flatten()
         } else if location.contains(':') || location.starts_with('/') {
-            false
+            None
         } else {
-            matches!(sibling_exists(path, location), Some(false))
+            sibling_text(path, location)
         };
-        if missing {
+        if let Some(Some(text)) = &found {
+            let imported = xml::elements(text);
+            if location.ends_with(".xml") && xml::root(&imported) != Some("beans") {
+                let message = format!("\"{location}\" is not a Spring beans file (its root element is not <beans>), so the import registers nothing.");
+                out.push(Finding::new(attr.value_at, attr.value_end, "xml-import-not-beans", message).with_severity(Severity::Info));
+            }
+        }
+        if matches!(found, Some(None)) {
             let message = format!("No file \"{location}\" to import. A build step can still generate it.");
             out.push(Finding::new(attr.value_at, attr.value_end, "xml-import-missing", message));
         }
     }
 }
 
-/// Whether `relative` exists next to `path`: in the same classpath folder for a resource, else on disk. None when it escapes the project.
-fn sibling_exists(path: &str, relative: &str) -> Option<bool> {
+/// The text of `relative` next to `path`: in the same classpath folder for a resource, else on disk; `Some(None)` when absent, none when it escapes the project.
+fn sibling_text(path: &str, relative: &str) -> Option<Option<String>> {
     let mut parts: Vec<&str> = path.split('/').collect();
     parts.pop();
     for part in relative.split('/') {
@@ -477,11 +486,68 @@ fn sibling_exists(path: &str, relative: &str) -> Option<bool> {
     let joined = parts.join("/");
     for marker in ["/src/main/resources/", "/src/test/resources/"] {
         if let Some((_, tail)) = joined.split_once(marker) {
-            return crate::target_checks::read_classpath(path, tail).map(|found| found.is_some());
+            return crate::target_checks::read_classpath(path, tail);
         }
     }
     let project = spring_text::index::project_of(path)?;
-    Some(project.read_file(&joined).is_ok())
+    Some(project.read_file(&joined).ok())
+}
+
+/// Whether the project's sources declare a package under the first two segments of `qualified`, so a miss is not a library class.
+fn owns_package_root(world: &World, qualified: &str) -> bool {
+    let root = qualified.split('.').take(2).collect::<Vec<_>>().join(".");
+    qualified.contains('.') && world.files.values().flat_map(|m| &m.types).any(|t| t.qualified.starts_with(&format!("{root}.")))
+}
+
+fn unresolved_classes(els: &[xml::Element], world: &World, out: &mut Vec<Finding>) {
+    for (_, e) in beans_elements(els, "bean") {
+        let Some(class) = e.attr("class").filter(|a| !dynamic(&a.value)) else { continue };
+        let qualified = class.value.trim().replace('$', ".");
+        if !owns_package_root(world, &qualified) || world.project_type(&qualified).is_some() {
+            continue;
+        }
+        let message = format!("No class {qualified} in the project's sources, although the project declares other classes under this package root.");
+        out.push(Finding::new(class.value_at, class.value_end, "unresolved-class", message).with_severity(Severity::Info));
+    }
+}
+
+fn filter_expressions(els: &[xml::Element], world: &World, out: &mut Vec<Finding>) {
+    for e in els.iter().filter(|e| matches!(e.local(), "include-filter" | "exclude-filter")) {
+        let (Some(kind), Some(expression)) = (e.attr("type"), e.attr("expression")) else { continue };
+        if dynamic(&expression.value) || dynamic(&kind.value) {
+            continue;
+        }
+        let value = expression.value.trim();
+        let problem = match kind.value.as_str() {
+            "annotation" | "assignable" | "custom" => {
+                let qualified = value.replace('$', ".");
+                (owns_package_root(world, &qualified) && world.project_type(&qualified).is_none()).then(|| format!("No class {qualified} in the project's sources."))
+            }
+            "regex" => regex_problem(value).map(str::to_owned),
+            _ => None,
+        };
+        if let Some(message) = problem {
+            out.push(Finding::new(expression.value_at, expression.value_end, "xml-filter-expression", message).with_severity(Severity::Info));
+        }
+    }
+}
+
+fn regex_problem(expression: &str) -> Option<&'static str> {
+    let mut depth = 0i32;
+    let mut escaped = false;
+    for c in expression.chars() {
+        match (escaped, c) {
+            (true, _) => escaped = false,
+            (false, '\\') => escaped = true,
+            (false, '(') => depth += 1,
+            (false, ')') => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return Some("The regular expression has a closing parenthesis without an opening one.");
+        }
+    }
+    (depth > 0).then_some("The regular expression has a parenthesis that is never closed.")
 }
 
 fn inactive_profiles(els: &[xml::Element], out: &mut Vec<Finding>) {

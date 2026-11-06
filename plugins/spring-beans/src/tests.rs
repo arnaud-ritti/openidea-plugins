@@ -2524,7 +2524,7 @@ const POOL: (&str, &str) = (
     "src/main/java/com/acme/Pool.java",
     "package com.acme;\npublic class Pool {\n    public Pool(int size) {}\n    @Required\n    public void setUrl(String url) {}\n    public void setMaxSize(int n) {}\n    public void open() {}\n    public static Pool create() { return null; }\n    public Pool copy() { return null; }\n}\n",
 );
-const SHAPE: (&str, &str) = ("src/main/java/com/acme/Shape.java", "package com.acme;\npublic abstract class Shape {}\n");
+const SHAPE: (&str, &str) = ("src/main/java/com/acme/Shape.java", "package com.acme;\npublic abstract class Shape {\n    public abstract Object x();\n}\n");
 
 fn class_findings(body: &str, files: &[(&str, &str)]) -> Vec<(String, String)> {
     let host = MockHost::install();
@@ -2746,4 +2746,119 @@ fn externalizing_is_refused_outside_annotation_strings_and_for_known_keys() {
     assert_eq!(host.editor_text(), SCHEDULED);
     let placeholder = SCHEDULED.replace("0 0 * * * *", "${x}");
     assert!(run(&externalize_host(&placeholder, 2, 24), "externalize-annotation-string", &[]).is_err());
+}
+
+const FACTORY: (&str, &str) = (
+    "src/main/java/com/acme/Maker.java",
+    "package com.acme;\npublic class Maker {\n    static Maker hidden() { return null; }\n    public static Maker open() { return null; }\n    public Object make() { return null; }\n    private Object secret() { return null; }\n}\n",
+);
+
+#[test]
+fn factory_method_visibility_is_an_info_hint() {
+    let body = "<bean class=\"com.acme.Maker\" factory-method=\"hidden\"/><bean class=\"com.acme.Maker\" factory-method=\"open\"/>";
+    assert_eq!(class_findings(body, &[FACTORY]), [pair("xml-factory-method-visibility", "hidden")]);
+}
+
+#[test]
+fn lookup_and_replaced_methods_must_be_overridable() {
+    let body = "<bean class=\"com.acme.Maker\"><lookup-method name=\"make\" bean=\"x\"/><lookup-method name=\"nope\" bean=\"x\"/><replaced-method name=\"secret\" replacer=\"r\"/></bean>";
+    assert_eq!(class_findings(body, &[FACTORY]), [pair("xml-lookup-method", "nope"), pair("xml-lookup-method", "secret")]);
+}
+
+#[test]
+fn import_of_a_file_that_is_not_beans_is_info() {
+    let body = "<import resource=\"other.xml\"/><import resource=\"beans2.xml\"/>";
+    let files = [("src/main/resources/other.xml", "<project/>"), ("src/main/resources/beans2.xml", "<beans/>")];
+    assert_eq!(xml_with_setting(body, false, &files), [pair("xml-import-not-beans", "other.xml")]);
+}
+
+#[test]
+fn unresolved_bean_class_needs_a_project_package_root() {
+    let files = [("src/main/java/com/acme/Real.java", "package com.acme;\nclass Real {}\n")];
+    let body = "<bean class=\"com.acme.Gone\"/><bean class=\"com.acme.Real\"/><bean class=\"org.lib.Other\"/>";
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkUnresolvedReferences", "true");
+    for (name, content) in files {
+        host.add_file(name, content);
+    }
+    assert_eq!(xml_findings(&host, &beans_xml(body)), [pair("unresolved-class", "com.acme.Gone")]);
+}
+
+#[test]
+fn component_scan_filter_expressions_are_checked() {
+    let body = "<context:component-scan base-package=\"a\"><context:include-filter type=\"regex\" expression=\"(a.*\"/><context:exclude-filter type=\"regex\" expression=\"a.*\"/></context:component-scan>";
+    assert_eq!(xml_with_setting(body, false, &[]), [pair("xml-filter-expression", "(a.*")]);
+}
+
+#[test]
+fn mockito_bean_names_and_relative_resources_are_checked() {
+    let text = "package com.acme;\n@ImportResource(\"rel.xml\")\n@PropertySource(\"app.properties\")\nclass T {\n    @MockitoBean(name = \"gone\")\n    Clock c;\n}\n";
+    let found = project_findings(text, &[("src/main/resources/app.properties", "")]);
+    assert_eq!(found, [pair("resource-not-found", "rel.xml"), pair("unresolved-bean-name", "gone")]);
+    let present = [("src/main/resources/com/acme/rel.xml", "<beans/>"), ("src/main/resources/app.properties", "")];
+    assert_eq!(project_findings(text, &present), [pair("unresolved-bean-name", "gone")]);
+}
+
+#[test]
+fn bare_context_configuration_needs_its_default_file() {
+    let text = "package com.acme;\n@ContextConfiguration\nclass FooTest {}\n";
+    assert_eq!(project_findings(text, &[]), [pair("resource-not-found", "@ContextConfiguration")]);
+    let present = [("src/test/resources/com/acme/FooTest-context.xml", "<beans/>")];
+    assert!(project_findings(text, &present).is_empty());
+    assert!(project_findings(&text.replace("class FooTest {}", "class FooTest { @Configuration static class C {} }"), &[]).is_empty());
+}
+
+#[test]
+fn cache_config_without_cache_annotations_is_a_hint() {
+    let text = "@CacheConfig(cacheNames = \"a\")\nclass A {\n    void m() {}\n}\n";
+    assert_eq!(found(text), [pair("cache-config-unused", "@CacheConfig(cacheNames = \"a\")")]);
+    assert!(found(&text.replace("void m() {}", "@Cacheable\n    void m() {}")).is_empty());
+    let both = "@CacheConfig(cacheManager = \"m\", cacheResolver = \"r\")\nclass A {\n    @Cacheable\n    void m() {}\n}\n";
+    assert_eq!(found(both), [pair("cache-attribute-conflict", "\"r\"")]);
+}
+
+fn completion_labels(path: &str, text: &str, cursor_after: &str, files: &[(&str, &str)]) -> Vec<String> {
+    let host = MockHost::install();
+    for (name, content) in files {
+        host.add_file(name, content);
+    }
+    let mut n = Navigator::default();
+    n.completion(&doc(path, text), after(text, cursor_after, 1), None).into_iter().map(|i| i.label).collect()
+}
+
+#[test]
+fn live_templates_complete_by_abbreviation_with_tab_stops() {
+    let host = MockHost::install();
+    let text = "class A {\n    sbe\n}\n";
+    let items = Navigator::default().completion(&java("A.java", text), after(text, "sbe", 1), None);
+    assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["sbean"]);
+    assert!(items[0].snippet && items[0].insert_text.contains("${1:Type}"));
+    let kotlin = Navigator::default().completion(&doc("A.kt", "class A {\n    sbe\n}\n"), after("class A {\n    sbe\n}\n", "sbe", 1), None);
+    assert_eq!(kotlin.len(), 1);
+    drop(host);
+    let in_string = "class A { String s = \"sbe\"; }";
+    assert!(completion_labels("A.java", in_string, "\"sbe", &[]).is_empty());
+}
+
+#[test]
+fn xml_live_templates_only_in_element_content() {
+    let body = beans_xml("  sbe");
+    assert_eq!(completion_labels("/project/b.xml", &body, "  sbe", &[]), ["sbean"]);
+    let inside = beans_xml("<bean sbe/>");
+    assert!(completion_labels("/project/b.xml", &inside, "<bean sbe", &[]).is_empty());
+}
+
+#[test]
+fn scope_profile_and_constructor_arg_values_complete() {
+    let body = beans_xml("<bean class=\"com.acme.Pool\" scope=\"\"><constructor-arg name=\"\"/></bean>");
+    let files = [POOL];
+    assert!(completion_labels("/project/b.xml", &body, "scope=\"", &files).contains(&"prototype".to_owned()));
+    let host_files = [POOL, ("src/main/java/com/acme/P.java", "package com.acme;\n@Profile(\"dev\")\n@Service\nclass P {}\n")];
+    let java_text = "@Scope(\"pr\") @Profile(\"d\")\nclass B {}\n";
+    assert!(completion_labels("/project/src/main/java/B.java", java_text, "@Scope(\"", &[]).contains(&"singleton".to_owned()));
+    assert_eq!(completion_labels("/project/src/main/java/B.java", java_text, "@Profile(\"", &host_files), ["dev"]);
+    let xml_profile = beans_xml("<beans profile=\"\"/>");
+    assert_eq!(completion_labels("/project/b.xml", &xml_profile, "<beans profile=\"", &host_files), ["dev"]);
+    let args = beans_xml("<bean class=\"com.acme.Pool\"><constructor-arg name=\"\"/></bean>");
+    assert_eq!(completion_labels("/project/b.xml", &args, "constructor-arg name=\"", &files), ["size"]);
 }

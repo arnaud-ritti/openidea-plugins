@@ -168,6 +168,24 @@ name = "Spring Configuration Properties (Kotlin)"
 extension = "kt"
 path = "templates/ConfigurationProperties.kt"
 
+[[contributes.fileTemplates]]
+id = "spring-beans-xml"
+name = "Spring Config (XML)"
+extension = "xml"
+path = "templates/Beans.xml"
+
+[[contributes.fileTemplates]]
+id = "spring-beans-context-xml"
+name = "Spring Config with Component Scan (XML)"
+extension = "xml"
+path = "templates/BeansContext.xml"
+
+[[contributes.fileTemplates]]
+id = "spring-beans-aop-xml"
+name = "Spring Config with AOP (XML)"
+extension = "xml"
+path = "templates/BeansAop.xml"
+
 [[contributes.documentIndexers]]
 extensions = ["java", "kt", "xml", "properties", "yml", "yaml", "sql"]
 

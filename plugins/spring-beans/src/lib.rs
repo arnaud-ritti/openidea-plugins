@@ -12,6 +12,7 @@ mod indexer;
 mod injection_checks;
 mod kotlin;
 mod kotlin_build;
+mod live_templates;
 mod model;
 mod sites;
 mod target_checks;
@@ -467,6 +468,30 @@ impl Navigator {
         let _ = host::publish_diagnostics(path, &problems);
     }
 
+    fn live_templates(doc: &Document, cursor: usize) -> Vec<CompletionItem> {
+        let text = doc.text.as_str();
+        let (start, end) = sites::word(text, 0, cursor, cursor);
+        let typed = &text[start..end];
+        let in_beans_xml = doc.language != "xml" || xml_checks::is_beans_file(&spring_text::xml::elements(text)) && live_templates::outside_tag(text, start);
+        let line = &text[text[..start].rfind('\n').map_or(0, |n| n + 1)..start];
+        let in_literal_or_comment = doc.language != "xml" && (line.matches('"').count() % 2 == 1 || line.contains("//"));
+        if typed.is_empty() || !in_beans_xml || in_literal_or_comment {
+            return Vec::new();
+        }
+        let replace = range(text, start, end);
+        live_templates::for_language(&doc.language)
+            .iter()
+            .filter(|t| t.abbreviation.starts_with(typed))
+            .map(|t| CompletionItem {
+                insert_text: t.snippet.to_owned(),
+                snippet: true,
+                replace: Some(replace),
+                detail: Some(t.description.to_owned()),
+                ..CompletionItem::new(t.abbreviation, CompletionKind::Snippet)
+            })
+            .collect()
+    }
+
     fn bean_items(world: &World, replace: Range) -> Vec<CompletionItem> {
         let mut seen = BTreeSet::new();
         world
@@ -542,6 +567,7 @@ impl Providers for Navigator {
                     let (s, e) = sites::list_item(text, hit.from, cursor, hit.to);
                     to_locations(world.named(&text[s..e]))
                 }
+                Site::Scope | Site::Profile => Vec::new(),
                 Site::Class => {
                     let class = text[hit.from..hit.to].replace('$', ".");
                     world
@@ -582,12 +608,41 @@ impl Providers for Navigator {
                     .collect()
             });
         }
-        let Some(hit) = sites::at(hits(doc), cursor) else { return Vec::new() };
+        if let Some((class, from, to)) = xml_class_checks::constructor_arg_site(&doc.text, cursor) {
+            let replace = range(&doc.text, from, to);
+            let items = self.with_doc(doc, |world, _| {
+                let simple = class.rsplit(['.', '$']).next().unwrap_or(&class);
+                let chain = world.member_chain(simple, Some(&class.replace('$', "."))).unwrap_or_default();
+                let names: BTreeSet<&String> = chain.first().into_iter().flat_map(|t| &t.ctor_names).flatten().collect();
+                names
+                    .into_iter()
+                    .map(|n| CompletionItem { detail: Some(format!("constructor parameter of {class}")), replace: Some(replace), ..CompletionItem::new(n, CompletionKind::Property) })
+                    .collect::<Vec<_>>()
+            });
+            return items;
+        }
+        let Some(hit) = sites::at(hits(doc), cursor) else { return Self::live_templates(doc, cursor) };
         let text = doc.text.as_str();
         self.with_doc(doc, |world, _| match &hit.site {
             Site::BeanRef => {
                 let (s, e) = sites::list_item(text, hit.from, cursor, hit.to);
                 Self::bean_items(world, range(text, s, e))
+            }
+            Site::Scope => {
+                let replace = range(text, hit.from, hit.to);
+                xml_checks::KNOWN_SCOPES
+                    .iter()
+                    .map(|scope| CompletionItem { detail: Some("bean scope".into()), replace: Some(replace), ..CompletionItem::new(scope, CompletionKind::Keyword) })
+                    .collect()
+            }
+            Site::Profile => {
+                let (s, e) = sites::word_in(text, hit.from, cursor, hit.to);
+                let replace = range(text, s, e);
+                let profiles: BTreeSet<&str> = world.beans().flat_map(|(_, b)| b.profiles.iter().map(|p| p.trim_start_matches('!'))).filter(|p| !p.is_empty()).collect();
+                profiles
+                    .into_iter()
+                    .map(|p| CompletionItem { detail: Some("profile".into()), replace: Some(replace), ..CompletionItem::new(p, CompletionKind::Reference) })
+                    .collect()
             }
             Site::Class => {
                 let typed = &text[hit.from..cursor];

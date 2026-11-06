@@ -96,7 +96,8 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
     let mut out = Vec::new();
     if groups.cache {
         for ty in file.types.iter().filter(|t| t.kind == "class" || t.kind == "interface") {
-            annotation_checks::check_cache(file, ty, &mut out);
+            let subtyped = !world.complete || world.files.values().flat_map(|m| &m.types).any(|t| t.supers.contains(&ty.name));
+            annotation_checks::check_cache(file, ty, subtyped, &mut out);
         }
     }
     for ty in file.types.iter().filter(|t| t.kind == "class") {

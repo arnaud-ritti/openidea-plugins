@@ -6,7 +6,7 @@ use crate::model::{self, FileModel};
 use crate::sites::Site;
 use crate::Navigator;
 use openidea_plugin::indexing::{Alias, Anchor, Document, DocumentIndexer, Edges};
-use spring_text::java::{self, Annotation, JavaFile};
+use spring_text::java::{Annotation, JavaFile};
 use spring_text::{config, range, xml};
 
 const MAX_ANCHORS: usize = 4096;
@@ -29,6 +29,10 @@ fn publisher_key(event: &str) -> String {
     format!("publish:{event}#call")
 }
 
+fn override_key(name: &str) -> String {
+    format!("override#{name}")
+}
+
 fn class_key(ty: &str) -> String {
     format!("class:{ty}#decl")
 }
@@ -42,6 +46,9 @@ fn definitions(model: &FileModel) -> Vec<Anchor> {
     for bean in &model.beans {
         let names = std::iter::once(&bean.name).chain(&bean.aliases).chain(&bean.qualifiers);
         out.extend(names.filter(|n| !n.is_empty()).map(|n| Anchor { key: bean_key(n), range: bean.range }));
+        if bean.kind == "@Bean" && !bean.name.is_empty() {
+            out.push(Anchor { key: override_key(&bean.name), range: bean.range });
+        }
         if bean.ty.is_empty() {
             continue;
         }
@@ -86,10 +93,8 @@ fn class_literals(text: &str) -> impl Iterator<Item = &str> {
 /// a publisher's marker goes to the listeners of its event, a listener's to the publishers.
 fn events(path: &str, text: &str) -> (Vec<Anchor>, Vec<Anchor>) {
     let (mut definitions, mut markers) = (Vec::new(), Vec::new());
-    if !path.ends_with(".java") {
-        return (definitions, markers);
-    }
-    let file = java::parse(text);
+    let kotlin = spring_text::is_kotlin(path);
+    let file = spring_text::parse_source(path, text);
     let mut listen = |event: &str, range| {
         definitions.push(Anchor { key: listener_key(event), range });
         markers.push(Anchor { key: publisher_key(event), range });
@@ -97,8 +102,8 @@ fn events(path: &str, text: &str) -> (Vec<Anchor>, Vec<Anchor>) {
     for ty in &file.types {
         for method in ty.methods() {
             let Some(annotation) = method.annotations.iter().find(|a| LISTENER_ANNOTATIONS.contains(&a.name.as_str())) else { continue };
-            let declared: Vec<&str> =
-                annotation.args.iter().filter(|a| a.name == "value" || a.name == "classes").flat_map(|a| class_literals(&a.text)).collect();
+            let literals: Vec<String> = annotation.args.iter().filter(|a| a.name == "value" || a.name == "classes").map(|a| a.text.replace("::class", ".class")).collect();
+            let declared: Vec<&str> = literals.iter().flat_map(|text| class_literals(text)).collect();
             let from_parameter = method.params.first().map(|p| p.ty.name.as_str());
             let events = if declared.is_empty() { from_parameter.into_iter().collect() } else { declared };
             let at = range(text, method.at, method.at + method.name.len());
@@ -109,8 +114,10 @@ fn events(path: &str, text: &str) -> (Vec<Anchor>, Vec<Anchor>) {
             listen(&event.name, at);
         }
     }
-    for call in java::calls(text).iter().filter(|c| c.name == "publishEvent") {
-        let Some(created) = call.args.first().and_then(|a| a.text.strip_prefix("new ")) else { continue };
+    for call in spring_text::source_calls(path, text).iter().filter(|c| c.name == "publishEvent") {
+        let Some(first) = call.args.first() else { continue };
+        let created = if kotlin { Some(first.text.as_str()).filter(|t| t.starts_with(char::is_uppercase)) } else { first.text.strip_prefix("new ") };
+        let Some(created) = created else { continue };
         let name: String = created.trim_start().chars().take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '$')).collect();
         let Some(event) = name.rsplit('.').next().filter(|e| !e.is_empty()) else { continue };
         let at = range(text, call.at, call.at + call.name.len());
@@ -335,8 +342,10 @@ impl DocumentIndexer for Navigator {
         let mut markers = markers;
         markers.extend(event_markers);
         markers.extend(class_xml_markers(&model));
+        markers.extend(model.beans.iter().filter(|b| b.kind == "@Bean" && !b.name.is_empty()).map(|b| Anchor { key: override_key(&b.name), range: b.range }));
         let (linked, linked_references, linked_aliases) = link_keys(&doc.path, &doc.text);
         definitions.extend(linked);
+        markers.extend(linked_references.iter().filter(|a| a.key.starts_with("package:")).cloned());
         references.extend(linked_references);
         definitions.truncate(MAX_ANCHORS);
         references.truncate(MAX_ANCHORS);
@@ -428,8 +437,8 @@ mod tests {
     }
 
     #[test]
-    fn events_in_kotlin_and_unknown_payloads_are_ignored() {
-        assert!(!keys(&index("A.kt", "class A { fun f() { publisher.publishEvent(Foo()) } }").markers).iter().any(|k| k.starts_with("event:")));
+    fn unknown_event_payloads_are_ignored() {
+        assert!(!keys(&index("A.kt", "class A { fun f(o: Any) { publisher.publishEvent(o) } }").markers).iter().any(|k| k.starts_with("event:")));
         let edges = index("B.java", "class B { void f(Object o) { events.publishEvent(o); events.publishEvent(\"x\"); } }");
         assert!(!keys(&edges.markers).iter().any(|k| k.starts_with("event:")));
     }
@@ -502,5 +511,26 @@ mod tests {
             assert!(has(&edges.references, key, covers, xml), "{key}");
         }
         assert!(!keys(&edges.references).iter().any(|k| k.contains("${")));
+    }
+
+    #[test]
+    fn component_scan_and_bean_overrides_are_markers() {
+        let scan = index("A.java", "@ComponentScan(\"com.acme\")\nclass A {}\n");
+        assert!(keys(&scan.markers).contains(&"package:com.acme#decl"));
+        let beans = index("C.java", "@Configuration\nclass C {\n    @Bean\n    Clock clock() { return null; }\n}\n");
+        assert!(keys(&beans.markers).contains(&"override#clock"));
+        assert!(keys(&beans.definitions).contains(&"override#clock"));
+        let same = |key: &str| beans.markers.iter().find(|a| a.key == key).map(|a| a.range) == beans.definitions.iter().find(|a| a.key == key).map(|a| a.range);
+        assert!(same("override#clock"), "the host drops a marker whose target is itself");
+    }
+
+    #[test]
+    fn kotlin_publishers_and_listeners_are_linked() {
+        let listener = index("L.kt", "class L {\n    @EventListener\n    fun on(e: OrderPlaced) {}\n    @EventListener(classes = [Gone::class])\n    fun gone() {}\n}\n");
+        assert!(keys(&listener.definitions).contains(&"event:OrderPlaced#listener"));
+        assert!(keys(&listener.definitions).contains(&"event:Gone#listener"));
+        let publisher = index("P.kt", "class P {\n    fun place() {\n        events.publishEvent(OrderPlaced(this))\n    }\n}\n");
+        assert!(keys(&publisher.markers).contains(&"event:OrderPlaced#listener"));
+        assert!(keys(&publisher.definitions).contains(&"publish:OrderPlaced#call"));
     }
 }

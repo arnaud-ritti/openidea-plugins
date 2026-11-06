@@ -149,6 +149,7 @@ pub fn model(text: &str) -> FileModel {
                     members_known: false,
                     methods: Vec::new(),
                     ctors: Vec::new(),
+                    ctor_names: Vec::new(),
                 });
                 let kind = if t.s == "interface" { "interface" } else { "class" };
                 let repository = model::is_repository(kind, supers.iter().map(String::as_str));

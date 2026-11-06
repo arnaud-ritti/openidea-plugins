@@ -162,7 +162,19 @@ fn cache_annotations<'a>(file: &JavaFile, annotations: &'a [Annotation]) -> Vec<
     CACHE_ANNOTATIONS.iter().filter_map(|name| spring(file, annotations, name)).collect()
 }
 
-pub fn check_cache(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
+fn check_cache_config(file: &JavaFile, ty: &TypeDecl, subtyped: bool, out: &mut Vec<Finding>) {
+    let Some(config) = spring(file, &ty.annotations, "CacheConfig") else { return };
+    if let (Some(_), Some(other)) = (config.arg("cacheManager"), config.arg("cacheResolver")) {
+        out.push(Finding::new(other.at, other.end, "cache-attribute-conflict", "@CacheConfig sets both cacheManager and cacheResolver: Spring rejects the configuration, use one.").with_severity(Severity::Error));
+    }
+    let used = ty.methods().any(|m| !cache_annotations(file, &m.annotations).is_empty() || spring(file, &m.annotations, "Caching").is_some());
+    if used || subtyped || ty.kind != "class" || ty.modifiers.iter().any(|m| m == "abstract") {
+        return;
+    }
+    out.push(Finding::new(config.at, config.end, "cache-config-unused", "@CacheConfig only supplies defaults to cache annotations on the methods of this class, and none has one.").with_severity(Severity::Hint));
+}
+
+pub fn check_cache(file: &JavaFile, ty: &TypeDecl, subtyped: bool, out: &mut Vec<Finding>) {
     if ty.kind == "interface" {
         if is_repository(&ty.kind, ty.supers().map(|s| s.name.as_str())) {
             return;
@@ -180,6 +192,7 @@ pub fn check_cache(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
         return;
     }
 
+    check_cache_config(file, ty, subtyped, out);
     for method in ty.methods() {
         cache_expressions(&method.annotations, file, out);
     }
