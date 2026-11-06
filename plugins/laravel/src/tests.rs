@@ -313,7 +313,7 @@ fn adds_missing_translation_keys() {
     let blade = doc("/project/resources/views/a.blade.php", "blade", "{{ __('messages.goodbye') }}{{ __('messages.nested.x') }}");
 
     let actions = plugin.code_actions(&blade, Range::new(Position::new(0, 16), Position::new(0, 16)));
-    assert_eq!(actions.len(), 1);
+    assert_eq!(actions.len(), 2);
     assert_eq!(actions[0].title, "Add translation key \"messages.goodbye\" to en/messages.php");
 
     let resolved = plugin.resolve_code_action(&blade, actions[0].clone()).unwrap();
@@ -322,7 +322,8 @@ fn adds_missing_translation_keys() {
     assert_eq!(edits[0].text, "    'goodbye' => 'goodbye',\n");
     assert_eq!(edits[0].range.start, Position::new(7, 0));
 
-    assert!(plugin.code_actions(&blade, Range::new(Position::new(0, 45), Position::new(0, 45))).is_empty());
+    let nested = plugin.code_actions(&blade, Range::new(Position::new(0, 45), Position::new(0, 45)));
+    assert!(nested.iter().all(|a| !a.title.starts_with("Add translation key")));
 }
 
 #[test]
@@ -517,4 +518,85 @@ fn partial_index_stays_quiet() {
     plugin.indexes.get_mut(&root).unwrap().partial = false;
     assert_eq!(codes(&plugin, "blade", blade).len(), 3);
     assert_eq!(codes(&plugin, "php", php).len(), 2);
+}
+
+fn rewrite_titles(plugin: &mut Main, path: &str, language: &str, text: &str, marker: &str) -> Vec<String> {
+    let at = text.find(marker).unwrap() + 1;
+    let position = text::position(text, at);
+    plugin.code_actions(&doc(path, language, text), Range::new(position, position)).into_iter().map(|a| a.title).collect()
+}
+
+fn apply_rewrite(plugin: &mut Main, path: &str, language: &str, text: &str, marker: &str) -> String {
+    let at = text.find(marker).unwrap() + 1;
+    let position = text::position(text, at);
+    let document = doc(path, language, text);
+    let action = plugin.code_actions(&document, Range::new(position, position)).remove(0);
+    let mut edits: Vec<_> = action.edits[0].1.iter().map(|e| (text::offset(text, e.range.start).unwrap(), text::offset(text, e.range.end).unwrap(), e.text.clone())).collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+    let mut result = text.to_owned();
+    for (start, end, replacement) in edits {
+        result.replace_range(start..end, &replacement);
+    }
+    result
+}
+
+#[test]
+fn validation_string_to_array() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/PostController.php";
+    let text = "<?php\n$request->validate(['email' => 'required|email|max:255', 'slug' => 'regex:/a|b/|required', 'one' => 'required', 'name' => [\"a\"]]);\n";
+
+    let result = apply_rewrite(&mut plugin, path, "php", text, "required|email");
+    assert!(result.contains("'email' => ['required', 'email', 'max:255'],"));
+    assert!(result.contains("'regex:/a|b/|required'"));
+
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "regex:").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "php", "<?php\n$x = ['a' => 'b|c'];\n", "b|c").is_empty());
+}
+
+#[test]
+fn validation_one_rule_is_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['one' => 'required']);\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/A.php", "php", text, "required").is_empty());
+}
+
+#[test]
+fn controller_string_to_class_array() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/routes/web.php";
+
+    let imported = "<?php\nuse App\\Http\\Controllers\\UserController;\nRoute::get('/u', 'UserController@index');\n";
+    let result = apply_rewrite(&mut plugin, path, "php", imported, "UserController@");
+    assert_eq!(result, "<?php\nuse App\\Http\\Controllers\\UserController;\nRoute::get('/u', [UserController::class, 'index']);\n");
+
+    let same_namespace = "<?php\nnamespace App\\Http\\Controllers;\nRoute::get('/u', 'UserController@index');\n";
+    assert!(apply_rewrite(&mut plugin, path, "php", same_namespace, "UserController@").contains("[UserController::class, 'index']"));
+
+    let not_imported = "<?php\nRoute::get('/u', 'UserController@index');\n";
+    assert!(rewrite_titles(&mut plugin, path, "php", not_imported, "UserController@").is_empty());
+
+    let other_import = "<?php\nuse App\\Other\\PostController;\nRoute::get('/u', 'UserController@index');\n";
+    assert!(rewrite_titles(&mut plugin, path, "php", other_import, "UserController@").is_empty());
+}
+
+#[test]
+fn blade_braces_escape_toggle() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/resources/views/a.blade.php";
+
+    let escaped = "<p>{{ $x }}</p>\n";
+    assert_eq!(apply_rewrite(&mut plugin, path, "blade", escaped, "$x"), "<p>{!! $x !!}</p>\n");
+
+    let raw = "<p>{!! $x !!}</p>\n";
+    assert_eq!(apply_rewrite(&mut plugin, path, "blade", raw, "$x"), "<p>{{ $x }}</p>\n");
+
+    assert!(rewrite_titles(&mut plugin, path, "blade", "{{-- $x --}}", "$x").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "blade", "@{{ $x }}", "$x").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "blade", "<p>text</p>", "text").is_empty());
+    assert!(rewrite_titles(&mut plugin, "/project/app/a.php", "php", "<?php echo '{{ $x }}';", "$x").is_empty());
 }

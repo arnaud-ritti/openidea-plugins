@@ -575,6 +575,27 @@ pub fn reference_at(language: &str, text: &str, at: usize) -> Option<Reference> 
     found
 }
 
+/// The whole string literal at `at` and what it holds, for the actions that rewrite it.
+pub fn literal_at(language: &str, text: &str, at: usize) -> Option<(Kind, Range<usize>)> {
+    let from = window_start(language, text, at)?;
+    let mut found = None;
+
+    walk(text, from, text.len(), language != "blade", false, |literal, site| {
+        if literal.start > at {
+            return false;
+        }
+        if at <= literal.end {
+            if literal.closed {
+                found = classify(text, language, literal, site).map(|(kind, _)| (kind, literal.start..literal.end));
+            }
+            return false;
+        }
+        true
+    });
+
+    found
+}
+
 /// The component or Livewire name of `<x-name` / `<livewire:name` at `at`.
 fn tag_reference(text: &str, at: usize) -> Option<Reference> {
     let bytes = text.as_bytes();

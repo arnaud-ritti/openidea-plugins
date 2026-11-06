@@ -40,6 +40,11 @@ everything below still works in them.
   opened or saved.
 - Quick fix (⌥⏎) on a missing `file.key` translation key: add `'key' => 'key'`
   to the main locale's lang file.
+- Intentions (⌥⏎): `'required|email'` in a validation call or `rules()` becomes
+  `['required', 'email']` (not offered when a rule is `regex:`);
+  `'UserController@index'` becomes `[UserController::class, 'index']` when the
+  file is in `App\Http\Controllers` or already imports the class (no import is
+  added); in a `.blade.php` file `{{ $x }}` and `{!! $x !!}` toggle.
 - Gutter: `view()` → view file; controller method → its route; view → views
   extending or including it and the controllers rendering it; `@section` →
   parent section and the views filling it; `@push` ↔ `@stack`.

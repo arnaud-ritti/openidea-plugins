@@ -6,6 +6,7 @@
 //! MIT) has are ported from its public source; the rest follows Laravel's own
 //! documentation. See README.md for what was and wasn't ported.
 
+mod actions;
 mod blade;
 mod controllers;
 mod index;
@@ -517,39 +518,31 @@ impl Providers for Main {
         }
     }
 
-    /// Adds a missing translation key to the main locale's lang file.
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(language) = language_of(&doc.path, &doc.language) else { return Vec::new() };
-        let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, selection.start) else { return Vec::new() };
-        let Some(reference) = refs::reference_at(language, &doc.text, offset) else { return Vec::new() };
 
-        let name = &doc.text[reference.start..reference.end];
-        if reference.kind != Kind::Translation || is_dynamic(name) || !missing_translation(index, name) {
-            return Vec::new();
+        let mut found = Vec::new();
+        if let Some(index) = self.index_for(&doc.path) {
+            found.extend(missing_key_actions(index, doc, language, offset));
         }
 
-        let Some((file_key, key)) = name.split_once('.') else { return Vec::new() };
-        if key.contains('.') {
-            return Vec::new();
-        }
+        found.extend(actions::rewrites(&doc.path, language, &doc.text, offset).into_iter().map(|rewrite| CodeAction {
+            title: rewrite.title,
+            kind: Some(rewrite.kind.into()),
+            preferred: false,
+            edits: vec![(
+                doc.path.clone(),
+                rewrite.edits.into_iter().map(|(range, text)| TextEdit { range: range_of(&doc.text, range.start, range.end), text }).collect(),
+            )],
+            data: None,
+        }));
 
-        let files = index.translation_files.get(file_key).map(Vec::as_slice).unwrap_or_default();
-        files
-            .iter()
-            .take(1)
-            .map(|file| CodeAction {
-                title: format!("Add translation key \"{name}\" to {}/{}", file.rsplit('/').nth(1).unwrap_or_default(), file_name(file)),
-                kind: Some("quickfix".into()),
-                preferred: false,
-                edits: Vec::new(),
-                data: Some(format!("{file}\n{key}")),
-            })
-            .collect()
+        found
     }
 
     fn resolve_code_action(&mut self, _doc: &Document, mut action: CodeAction) -> Result<CodeAction, Error> {
-        let data = action.data.clone().ok_or("Nothing to resolve.")?;
+        let Some(data) = action.data.clone() else { return Ok(action) };
         let (file, key) = data.split_once('\n').ok_or("Malformed code action.")?;
         let project = project_for(file).ok_or("The file is not in an open project.")?;
         let text = project.read_file(file)?;
@@ -563,6 +556,34 @@ impl Providers for Main {
         action.edits = vec![(file.to_owned(), vec![edit])];
         Ok(action)
     }
+}
+
+/// Adds a missing translation key to the main locale's lang file.
+fn missing_key_actions(index: &Index, doc: &Document, language: &str, offset: usize) -> Vec<CodeAction> {
+    let Some(reference) = refs::reference_at(language, &doc.text, offset) else { return Vec::new() };
+
+    let name = &doc.text[reference.start..reference.end];
+    if reference.kind != Kind::Translation || is_dynamic(name) || !missing_translation(index, name) {
+        return Vec::new();
+    }
+
+    let Some((file_key, key)) = name.split_once('.') else { return Vec::new() };
+    if key.contains('.') {
+        return Vec::new();
+    }
+
+    let files = index.translation_files.get(file_key).map(Vec::as_slice).unwrap_or_default();
+    files
+        .iter()
+        .take(1)
+        .map(|file| CodeAction {
+            title: format!("Add translation key \"{name}\" to {}/{}", file.rsplit('/').nth(1).unwrap_or_default(), file_name(file)),
+            kind: Some("quickfix".into()),
+            preferred: false,
+            edits: Vec::new(),
+            data: Some(format!("{file}\n{key}")),
+        })
+        .collect()
 }
 
 fn php_markers(index: &Index, project: &Project, doc: &Document) -> Vec<LineMarker> {

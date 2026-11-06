@@ -244,6 +244,7 @@ Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus feat
 - Custom validation rule classes (`app/Rules`) are objects, not strings, so only Laravel's own rule names are completed, and a rule's parameters (`exists:users,email`) are not.
 - Gate resource abilities (`Gate::resource('posts', …)` registers `posts.view` and friends) are not read.
 - Artisan `make:*` commands: there is no input dialog for the name.
+- Intentions on the open file are code actions (⌥⏎): validation string to array (not offered when a rule is `regex:`/`not_regex:`, whose pattern may hold pipes), `'UserController@index'` to `[UserController::class, 'index']` (only when the routes file is in `App\Http\Controllers` or imports the class with a plain `use`; imports are never inserted), and the Blade `{{ }}` / `{!! !!}` toggle. Rule string to rule object needs a new class file, which plugins can't create.
 
 ## aritti.dotenv (port of ru.adelf.idea.dotenv)
 
