@@ -94,6 +94,7 @@ name = "Laravel: Test"
 files = ["artisan"]
 command = "php"
 args = ["artisan", "test"]
+test = true
 
 [[contributes.runDetectors]]
 id = "queue-work"
