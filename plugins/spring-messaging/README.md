@@ -16,7 +16,9 @@ Placeholders: `${key}` and `${key:default}` in `topics`, `queues`, `destination`
 
 XML listeners: `<jms:listener destination>` and `<rabbit:listener queue-names>` (bean-name `queues` are not read) in Spring XML files link their destination like annotated consumers; `ref`/`method` are not linked to the bean (no bean index here). Spring Kafka has no XML listener.
 
-Not ported: broker connection and live topics, Spring Cloud Stream bindings (a separate plugin), Kotlin, SpEL, links from XML `ref`/`method` to the bean, `BindingBuilder` routing.
+Kotlin sources are indexed too (array literals, `suspend` and expression-bodied functions), except the nested `queuesToDeclare`/`bindings` annotations, which are read in Java only.
+
+Not ported: broker connection and live topics, Spring Cloud Stream bindings (a separate plugin), SpEL, links from XML `ref`/`method` to the bean, `BindingBuilder` routing.
 
 ```sh
 cargo test

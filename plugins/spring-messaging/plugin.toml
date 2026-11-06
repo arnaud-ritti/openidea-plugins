@@ -8,14 +8,14 @@ change-notes = "0.1.0 (first release): Kafka/RabbitMQ/JMS destination index, con
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-view:messaging"]
+activation = ["on-language:java", "on-language:kotlin", "on-view:messaging"]
 
 [capabilities]
 required = ["project.read"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
-languages = ["java", "xml"]
+languages = ["java", "kotlin", "xml"]
 
 [[contributes.views]]
 id = "messaging"

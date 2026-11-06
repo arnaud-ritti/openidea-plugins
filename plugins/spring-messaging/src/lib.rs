@@ -9,7 +9,7 @@ use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Range, host
 use spring_text::index::{COMMAND_BUDGET, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::{config, xml};
 use spring_text::java::{self, Annotation, Arg, Call, CallArg, JavaFile, Str, Tok};
-use spring_text::range;
+use spring_text::{parse_source, range, source_calls};
 use spring_text::tree::Expansion;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -313,7 +313,7 @@ pub fn parse(path: &str, text: &str) -> Option<Vec<Endpoint>> {
     if !HINTS.iter().any(|h| text.contains(h)) {
         return None;
     }
-    let file = java::parse(text);
+    let file = parse_source(path, text);
     let mut collector = Collector { text, out: Vec::new() };
     for t in &file.types {
         for a in &t.annotations {
@@ -331,7 +331,7 @@ pub fn parse(path: &str, text: &str) -> Option<Vec<Endpoint>> {
             }
         }
     }
-    for c in java::calls(text) {
+    for c in source_calls(path, text) {
         collector.call(&c, &file);
     }
     let mut out = collector.out;
@@ -448,7 +448,7 @@ const CONFIG_GLOBS: [&str; 6] = [
 impl Default for Messaging {
     fn default() -> Self {
         Self {
-            index: Indexes::new(&["**/*.java", "**/*.xml"], parse),
+            index: Indexes::new(&["**/*.java", "**/*.kt", "**/*.xml"], parse),
             config: Indexes::new(&CONFIG_GLOBS, parse_config),
             expansion: Expansion::default() }
     }
@@ -701,6 +701,62 @@ class Mailer {
             .filter(|e| !e.name.contains("${"))
             .map(|e| (e.broker, e.space, e.name, e.role, e.via))
             .collect()
+    }
+
+    const KOTLIN: &str = r#"package com.acme.orders
+
+@Component
+class KtEvents(private val kafkaTemplate: KafkaTemplate<String, String>, val rabbit: RabbitTemplate) {
+    @KafkaListener(topics = ["orders", "audit"], groupId = "g")
+    @SendTo("replies")
+    suspend fun onOrder(msg: String): String = msg
+
+    @RabbitListener(queues = [QUEUE])
+    fun onMail(msg: String) {}
+
+    @JmsListener(destination = "invoices")
+    fun onInvoice(msg: String) = Unit
+
+    fun publish() = kafkaTemplate.send("orders", "x")
+
+    fun mail() { rabbit.convertAndSend("mails", "x") }
+
+    companion object {
+        const val QUEUE = "mails"
+    }
+}
+"#;
+
+    #[test]
+    fn kotlin_kafka_listener_is_indexed() {
+        use Broker::{Jms, Kafka, Rabbit};
+        let found: Vec<_> = parse("K.kt", KOTLIN)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.broker, e.space, e.name, e.role, e.via))
+            .collect();
+        assert_eq!(found, [
+            (Kafka, "topic", "orders".into(), Role::Consumer, "@KafkaListener".into()),
+            (Kafka, "topic", "audit".into(), Role::Consumer, "@KafkaListener".into()),
+            (Kafka, "topic", "replies".into(), Role::Producer, "@SendTo".into()),
+            (Jms, "destination", "invoices".into(), Role::Consumer, "@JmsListener".into()),
+            (Kafka, "topic", "orders".into(), Role::Producer, "send".into()),
+            (Rabbit, "queue", "mails".into(), Role::Producer, "convertAndSend".into()),
+        ]);
+        assert_eq!(names(KAFKA).len(), 5);
+
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/orders/KtEvents.kt", KOTLIN);
+        let mut m = Messaging::default();
+        let kt = Document {
+            path: "/project/src/main/kotlin/com/acme/orders/KtEvents.kt".into(),
+            language: "kotlin".into(),
+            version: 1,
+            text: KOTLIN.into(),
+        };
+        let tips: Vec<_> = m.line_markers(&kt).into_iter().map(|x| (x.line, x.tooltip)).collect();
+        assert!(tips.iter().any(|(l, t)| *l == 4 && t.contains("OrderEvents.java:8 (send), KtEvents.kt:15 (send)")), "{tips:?}");
+        assert!(tips.iter().any(|(l, t)| *l == 14 && t.contains("OrderEvents.java:13 (@KafkaListener), KtEvents.kt:5 (@KafkaListener)")), "{tips:?}");
     }
 
     #[test]
