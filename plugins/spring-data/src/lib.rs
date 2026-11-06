@@ -1,7 +1,7 @@
 //! Spring Data Tools for OpenIDEA: checks derived query method names of
 //! Spring Data repositories against the domain class, completes them, links
 //! repositories to their entities and checks `@Query` parameters.
-//! Text-based: types match by simple name among the project's Java sources.
+//! Text-based: types match by simple name among the project's Java and Kotlin sources.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
@@ -189,13 +189,26 @@ fn class(text: &str, t: &TypeDecl, kotlin: bool) -> Class {
     Class { name: t.name.clone(), range: range(text, t.at, t.at + t.name.len()), parent, props, entity }
 }
 
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ca != *cb)).min(above + 1).min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
 /// The project's classes by simple name.
 struct Model<'a> {
     by_name: BTreeMap<&'a str, Vec<(&'a str, &'a Class)>>,
     /// `@Entity` classes by entity name.
     entities: BTreeMap<&'a str, &'a Class>,
-    /// Every project file has been read.
-    complete: bool,
 }
 
 impl<'a> Model<'a> {
@@ -210,7 +223,13 @@ impl<'a> Model<'a> {
                 }
             }
         }
-        Self { by_name, entities, complete: index.complete() }
+        Self { by_name, entities }
+    }
+
+    /// The known entity or class name that `name` is probably a typo of.
+    fn near_miss(&self, name: &str) -> Option<&'a str> {
+        let known = self.entities.keys().chain(self.by_name.keys()).copied();
+        known.filter(|k| k.eq_ignore_ascii_case(name) || edit_distance(k, name) <= 2).min_by_key(|k| edit_distance(k, name))
     }
 
     fn class(&self, name: &str) -> Option<(&'a str, &'a Class)> {
@@ -465,6 +484,7 @@ fn walk(model: &Model, ty: &str, segments: &[&str]) -> Walk {
 /// The type of each identification variable (lower-cased) of a query's declarations.
 fn alias_types(model: &Model, declarations: &[jpql::Decl]) -> BTreeMap<String, String> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
+    let mut conflicting = Vec::new();
     for decl in declarations {
         let Some(alias) = decl.alias else { continue };
         let ty = if decl.is_path() {
@@ -477,7 +497,15 @@ fn alias_types(model: &Model, declarations: &[jpql::Decl]) -> BTreeMap<String, S
         } else {
             model.entities.get(decl.target.s).map_or_else(|| decl.target.s.to_owned(), |c| c.name.clone())
         };
-        out.insert(alias.to_ascii_lowercase(), ty);
+        let key = alias.to_ascii_lowercase();
+        if out.get(&key).is_some_and(|known| *known != ty) {
+            conflicting.push(key);
+            continue;
+        }
+        out.insert(key, ty);
+    }
+    for key in conflicting {
+        out.remove(&key);
     }
     out
 }
@@ -495,12 +523,13 @@ fn query_problems(model: &Model, query: &str, domain_in_project: bool) -> Vec<Qu
     let words = jpql::words(query);
     let declarations = jpql::declarations(&words);
     let mut out = Vec::new();
-    if domain_in_project && model.complete {
+    if domain_in_project {
         for decl in declarations.iter().filter(|d| !d.is_path()) {
             if model.entities.contains_key(decl.target.s) || model.class(decl.target.s).is_some() {
                 continue;
             }
-            let message = format!("`{}` is not an entity of this project.", decl.target.s);
+            let Some(known) = model.near_miss(decl.target.s) else { continue };
+            let message = format!("`{}` is not an entity of this project. Did you mean `{known}`?", decl.target.s);
             out.push(QueryProblem { from: decl.target.at, to: decl.target.at + decl.target.s.len(), code: "unknown-query-entity", message });
         }
     }
@@ -999,18 +1028,6 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     @Query("select u from User u join u.owner o where o.whatever = 1 and u.owner.name.first = 1")
     List<User> libraryTypes();
-
-    @Query(value = "select * from usr u where u.nope = 1", nativeQuery = true)
-    List<User> nativeOne();
-
-    @NativeQuery("select * from usr u where u.nope = 1")
-    List<User> nativeTwo();
-
-    @Query("select u from User u where u.age = :#{#a.b.nope}")
-    List<User> spel(String a);
-
-    @Query("select u from User u " + "where u.nope = 1")
-    List<User> concatenated();
 }
 "#;
 
@@ -1051,10 +1068,69 @@ public interface UserRepository extends JpaRepository<User, Long> {
         assert!(query_diagnostics(library).is_empty());
     }
 
+    const QUIET_REPO: &str = r#"package com.acme;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    @Query(value = "select * from Usr u where u.nope = 1", nativeQuery = true)
+    List<User> nativeOne();
+
+    @NativeQuery("select * from Usr u where u.nope = 1")
+    List<User> nativeTwo();
+
+    @Query("select u from User u where u.age = :#{u.nope}")
+    List<User> spel(String a);
+
+    @Query("select u from Usr u " + "where u.age = 1")
+    List<User> concatenated();
+
+    @Query("select u from User u join AuditEvent e on e.user = u where e.kind = 1")
+    List<User> unrelatedEntity();
+
+    @Query("select u from User u where u.age > 1 and exists (select 1 from Order u where u.number = '1')")
+    List<User> aliasReusedInSubquery();
+
+    @Query("select extract(year from current_date), trim(both from u.firstName), substring(u.lastName from 2) from User u")
+    List<Object[]> functionFrom();
+}
+"#;
+
     #[test]
     fn query_native_spel_and_concatenation_are_quiet() {
-        let found = query_diagnostics(QUERY_REPO);
-        assert!(!found.iter().any(|(_, t)| t == "nope"), "{found:?}");
+        let found = query_diagnostics(QUIET_REPO);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn query_unrelated_entity_name_is_quiet() {
+        let text = "package com.acme;\ninterface UserRepository extends JpaRepository<User, Long> {\n    @Query(\"select u from User u, AuditEvent e where e.kind = 1\")\n    List<User> q();\n}\n";
+        assert!(query_diagnostics(text).is_empty());
+    }
+
+    #[test]
+    fn function_from_is_not_an_entity() {
+        let words = jpql::words("select extract(year from current_date), trim(both from n), substring(x from 2) from User u where exists (select 1 from Order o)");
+        let targets: Vec<_> = jpql::declarations(&words).into_iter().map(|d| d.target.s).collect();
+        assert_eq!(targets, ["User", "Order"]);
+    }
+
+    #[test]
+    fn query_joins_resolve_fields_of_other_entities() {
+        let text = "package com.acme;\ninterface UserRepository extends JpaRepository<User, Long> {\n    @Query(\"select u from User u join Order o on o.number = u.firstName where o.nmbr = 1\")\n    List<User> a();\n    @Query(\"select u from User u join fetch u.orders o where o.totl = 1 and o.total = 2\")\n    List<User> b();\n}\n";
+        let found: Vec<_> = query_diagnostics(text).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(found, ["nmbr", "totl"]);
+    }
+
+    #[test]
+    fn kotlin_query_is_checked() {
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/Person.kt", "package com.acme\n\n@Entity\nclass Person(@Id val id: Long, var name: String)\n");
+        let repo = "package com.acme\n\ninterface PersonRepository : JpaRepository<Person, Long> {\n    @Query(\"select p from Person p where p.nmae = :name\")\n    fun byName(name: String): List<Person>\n}\n";
+        let kt = Document { path: "/project/src/main/kotlin/com/acme/PersonRepository.kt".into(), language: "kotlin".into(), version: 1, text: repo.into() };
+        let mut tools = DataTools::default();
+        tools.line_markers(&kt);
+        let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/PersonRepository.kt"];
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].message, "`Person` has no property `nmae`.");
     }
 
     fn complete_in(text: &str, marker: &str) -> Vec<CompletionItem> {

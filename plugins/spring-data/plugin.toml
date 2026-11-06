@@ -1,7 +1,7 @@
 id = "aritti.spring-data"
 name = "Spring Data Tools"
 version = "0.1.0"
-description = "Spring Data repositories in Java: checks derived query method names (findByAddressZipCodeOrderByAgeDesc…) against the domain class and the method's parameter count, completes them with the entity's properties and operator keywords, links repositories to their entity and custom implementation, opens the entity field from a method name with Go to Definition, and checks @Query named parameters and @Modifying without @Query. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "Spring Data repositories in Java and Kotlin: checks derived query method names (findByAddressZipCodeOrderByAgeDesc…) against the domain class and the method's parameter count, completes them with the entity's properties and operator keywords, links repositories to their entity and custom implementation, opens the entity field from a method name with Go to Definition, checks @Query named parameters and @Modifying without @Query, and completes and checks entity names and alias properties in JPQL queries. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0 (first release): derived query validation and completion, repository → entity navigation, @Query parameter and @Modifying checks."
