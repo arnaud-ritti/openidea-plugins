@@ -37,7 +37,7 @@
     },
     "springBeans.checkAop": {
       "type": "boolean",
-      "title": "Report incomplete AOP configuration (aop:config, pointcuts, aspects, advisors, advice) in Spring XML files",
+      "title": "Report incomplete AOP configuration (aop:config, pointcuts, aspects, advisors, advice) in Spring XML files, and pointcut designators Spring AOP does not support in XML and Java @Aspect classes",
       "default": true
     },
     "springBeans.checkInjectionAnnotations": {
@@ -67,7 +67,7 @@
     },
     "springBeans.checkXml": {
       "type": "boolean",
-      "title": "Run the other checks on Spring XML configuration files",
+      "title": "Check Spring XML bean files: bean attributes, injected values, scopes, references to abstract beans, and value/ref style hints",
       "default": true
     }
   }
