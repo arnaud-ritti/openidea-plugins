@@ -293,33 +293,40 @@ Rules (JPA 3.1 §2.1 and §3.5):
 - **Review Focus:** every line maps to tests in Tasks 1 to 9 (option injection: 2, 3; wrong namespace: 3; plain files: 1, 4, 6; mock vs host: 4, 6, 9; stale diagnostics: all).
 - **Proportion:** nine tasks, tests as names and assertions, no implementation bodies.
 
-## Ledger (fill during execution)
+## Ledger
 
-### Rulings
-
-| Row | Ruling | Confirmed at execution |
-|---|---|---|
-| kube-explorer Refresh | already done | |
-| kube-explorer Chart.yaml (requirements.yaml) | narrowed | |
-| kube-explorer excessive trim | narrowed rule | |
-| jpa-assist row 2 | subsumed by row 3 | |
-| jpa-assist row 10 | part only | |
-| jpa-assist row 12 | narrowed | |
-| devcontainer completion | `jsonc` id unverified | |
-| devcontainer folder structure | path-only | |
-| flyway row 6 | producer only | |
-| openapi reload | wiring-only test, manual check | |
+Execution: subagent-driven; one implementer and one task review per task, scoped re-review per fix round, one final opus whole-branch review and one fix wave (scoped re-review clean). Final head `fe8420d`.
 
 ### Per-task status
 
-| Task | Plugin | Status | Commit | Doc notes written |
+| Task | Plugin | Status | Commits | Doc notes |
 |---|---|---|---|---|
-| 1 | kube-explorer manifest checks | | | |
-| 2 | kube-explorer commands, CSR | | | |
-| 3 | kube-explorer all namespaces | | | |
-| 4 | openapi candidate, JSON endpoints | | | |
-| 5 | openapi templates, skeletons, reload | | | |
-| 6 | devcontainer structure, completion | | | |
-| 7 | flyway run detectors | | | |
-| 8 | jpa-assist Kotlin checks | | | |
-| 9 | jpa-assist class signature, listeners, action | | | |
+| 1 | kube-explorer manifest checks | complete, review clean | cfc6133 | 16 deprecated rows verified; chart schema; excessive trim is text based |
+| 2 | kube-explorer commands, CSR | complete, 1 fix round | 98d03b6, daaf35d | install hint only when kubectl cannot start; never shows once a context is stored |
+| 3 | kube-explorer all namespaces | complete, review clean | ff6cec1 | Create Secret and manifest writes refused in this mode (see final fix) |
+| 4 | openapi candidate, JSON endpoints | complete, 1 fix round (false positive, pinned by test) | 2cfa351, de6a13c | setting `checkSpecCandidates`; 1 MiB cap checked after read |
+| 5 | openapi templates, skeletons, reload | complete, review clean | 9e88388 | Reload button and snippet tab stops need a manual IDE check |
+| 6 | devcontainer structure, completion | complete, 1 fix round | 7d0857d, 7297bf7 | `jsonc` provider language id unverified |
+| 7 | flyway run detectors | complete, review clean | c37085b | ignores runner/arguments settings; `conf/` not detected; migrate writes to the DB |
+| 8 | jpa-assist Kotlin checks | complete, review clean | 50fe5da | only first class in a file checked |
+| 9 | jpa-assist class signature, listeners, action | complete, review clean | c1096f0 | seven "Add @X callback" actions |
+| final fix wave | kube-explorer, jpa-assist, openapi | complete, re-review clean | 97a3a00, 8dcf2fb, fe8420d | see below |
+
+### Rulings
+
+- Preflight: T5 "five ids" read as existing template ids plus the two new ones (cost: trivial test tweak).
+- T3: manifest commands left as specified (superseded by the final fix wave, which refuses apply, kustomize-apply and delete-manifest in all-namespaces mode).
+- T3: `split_scope(kind, row)` signature and 63 character namespace cap accepted.
+- T4: setting key `checkSpecCandidates` unprefixed, `Severity::Info` for "Information".
+- T9: `callback_method` returns the method edit only, import added by `lib.rs`; `parse_class` tightened to the first of class|interface|enum|record.
+- Final: doc drift (README, PARITY, LIMITATIONS) not applied; hard limit.
+
+### Deferred minors
+
+- T1: chart `version: ~` and `deprecated: yes` (fixed in final wave).
+- T2: empty helm output (fixed), Denied tree test trivial; install hint may show as Denied on a real host.
+- T3: debug_pod splits row three times; no test for single-namespace option-like names; brittle index asserts.
+- T4: JSON files read in full before the 1 MiB cap (no size API).
+- T5: weak JSON assertions in skeleton test; `swagger2-root` offered in OpenAPI 3 files.
+- T7: test manifest parser handles single-line values only.
+- T8/T9: `@Version val` warns; user-defined `List` flagged; later entity after a non-class marker not parsed; callback action on `@MappedSuperclass` unverified.
