@@ -1719,10 +1719,10 @@ fn injection_ranges_use_utf16_columns_with_multibyte_text() {
 
 #[test]
 fn profile_expression_problem_cases() {
-    for bad in ["", "  ", "a & b | c", "a | b & c", "!", "(a & b", "a & b)", "a &", "!!", "()"] {
+    for bad in ["", "  ", "a & b | c", "a | b & c", "!", "(a & b", "a & b)", "!!", "()"] {
         assert!(annotation_checks::profile_expression_problem(bad).is_some(), "{bad:?} should report");
     }
-    for good in ["a | b", "!dev", "(a & b) | c", "a", " a & b ", "!(a | b)", "a & (b | c)", "((a))", "a&b&c", "!a & !b"] {
+    for good in ["a | b", "!dev", "(a & b) | c", "a", " a & b ", "!(a | b)", "a & (b | c)", "((a))", "a&b&c", "!a & !b", "a &", "a |", "a && b", "a !b", "(a)(b)"] {
         assert_eq!(annotation_checks::profile_expression_problem(good), None, "{good:?} should be quiet");
     }
 }
@@ -1793,4 +1793,14 @@ fn switched_off_profile_and_async_groups_are_quiet() {
     assert_eq!(findings(&host, &mut Navigator::default(), "Subject.java", text), [pair("async-return-type", "String")]);
     host.set_setting("springBeans.checkAsync", "false");
     assert!(findings(&host, &mut Navigator::default(), "Subject.java", text).is_empty());
+}
+
+#[test]
+fn async_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\nclass A {\n    @Named(\"é\") @Async String a() { return null; }\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let diagnostic = host.diagnostics()[&document.path].iter().find(|d| d.code.as_deref() == Some("async-return-type")).unwrap().clone();
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 23));
 }

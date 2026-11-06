@@ -46,24 +46,31 @@ fn tokens(value: &str) -> Vec<Token> {
 }
 
 /// What is wrong with a profile expression such as `a & !b`, if anything.
+/// Repeated or trailing operators and juxtaposed operands stay quiet: Spring's
+/// own parser may accept them.
 pub fn profile_expression_problem(value: &str) -> Option<&'static str> {
     let tokens = tokens(value);
     if tokens.is_empty() {
-        return Some("A profile name can't be empty: Spring rejects the value when the class is loaded.");
+        return Some("A profile name can't be empty: Spring rejects the value when the context is built.");
     }
     let mut at = 0;
     if let Err(problem) = expression(&tokens, &mut at) {
-        return Some(problem);
+        return problem;
     }
-    (at < tokens.len()).then_some("A profile expression has a closing parenthesis without an opening one.")
+    (tokens.get(at) == Some(&Token::Close)).then_some(STRAY_CLOSE)
 }
 
-fn expression(tokens: &[Token], at: &mut usize) -> Result<(), &'static str> {
+const STRAY_CLOSE: &str = "A profile expression has a closing parenthesis without an opening one.";
+
+/// `Err(None)` is a shape Spring may still accept.
+type Parsed = Result<(), Option<&'static str>>;
+
+fn expression(tokens: &[Token], at: &mut usize) -> Parsed {
     term(tokens, at)?;
     let mut operator = None;
     while let Some(&op) = tokens.get(*at).filter(|t| matches!(t, Token::And | Token::Or)) {
         if operator.is_some_and(|first| first != op) {
-            return Err("A profile expression can't mix & and | at one level: wrap one of them in parentheses, as in (a & b) | c.");
+            return Err(Some("A profile expression can't mix & and | at one level: wrap one of them in parentheses, as in (a & b) | c."));
         }
         operator = Some(op);
         *at += 1;
@@ -72,23 +79,32 @@ fn expression(tokens: &[Token], at: &mut usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn term(tokens: &[Token], at: &mut usize) -> Result<(), &'static str> {
+fn term(tokens: &[Token], at: &mut usize) -> Parsed {
     let token = tokens.get(*at).copied();
     *at += 1;
     match token {
         Some(Token::Name) => Ok(()),
-        Some(Token::Not) => term(tokens, at).map_err(|_| "A ! in a profile expression needs a profile name or a parenthesised expression after it."),
-        Some(Token::Open) => {
-            expression(tokens, at)?;
-            let closed = tokens.get(*at) == Some(&Token::Close);
-            *at += 1;
-            if closed {
-                return Ok(());
+        Some(Token::Not) => {
+            if !matches!(tokens.get(*at), Some(Token::Name | Token::Not | Token::Open)) {
+                return Err(Some("A ! in a profile expression needs a profile name or a parenthesised expression after it."));
             }
-            Err("A profile expression has an opening parenthesis without a closing one.")
+            term(tokens, at)
         }
-        Some(Token::Close) => Err("A profile expression has a closing parenthesis without an opening one."),
-        _ => Err("A profile expression ends where an operand is expected: add a profile name."),
+        Some(Token::Open) => {
+            if tokens.get(*at) == Some(&Token::Close) {
+                return Err(Some("A profile expression has empty parentheses: put a profile name inside."));
+            }
+            expression(tokens, at)?;
+            match tokens.get(*at) {
+                Some(Token::Close) => {
+                    *at += 1;
+                    Ok(())
+                }
+                None => Err(Some("A profile expression has an opening parenthesis without a closing one.")),
+                Some(_) => Err(None),
+            }
+        }
+        _ => Err(None),
     }
 }
 
