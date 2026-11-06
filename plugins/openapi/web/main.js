@@ -20,7 +20,9 @@ const show = (text) => {
 };
 let timer = 0;
 let latest = "";
-const id = crypto.randomUUID();
+const id = globalThis.crypto?.getRandomValues
+  ? Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("")
+  : Math.random().toString(36).slice(2);
 let known = "";
 const render = (text) => {
   latest = text;
