@@ -961,3 +961,45 @@ fn eloquent_findings_use_utf16_columns_and_crlf() {
     let result = apply_rewrite(&mut plugin, path, "php", body, "orderBy('created");
     assert_eq!(result, "<?php\r\n// é日本😀\r\n$x = 'é日'; Post::latest();\r\n");
 }
+
+#[test]
+fn rule_array_becomes_string() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/PostController.php";
+    let text = "<?php\n$request->validate([\n    'email' => ['required', 'email', 'max:255'],\n    'a' => [\"x\", \"y\"],\n]);\n";
+
+    let result = apply_rewrite(&mut plugin, path, "php", text, "'required'");
+    assert!(result.contains("'email' => 'required|email|max:255',"));
+    let result = apply_rewrite(&mut plugin, path, "php", text, "\"x\"");
+    assert!(result.contains("'a' => \"x|y\","));
+}
+
+#[test]
+fn rule_array_with_objects_or_regex_is_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let titles = |plugin: &mut Main, text: &str, marker: &str| rewrite_titles(plugin, path, "php", text, marker);
+
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', new Uppercase]]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', fn ($v) => true]]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', 'regex:/a|b/']]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', 'not_regex:/a{1,2}/']]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => ['required', Rule::in(['x'])]]);\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$x = ['a' => ['required', 'email']];\n", "'required'").is_empty());
+    assert!(titles(&mut plugin, "<?php\n$request->validate(['a' => 'required'], ['a.required' => ['x', 'y']]);\n", "'x'").is_empty());
+}
+
+#[test]
+fn intentions_are_offered_only_at_the_caret() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/PostController.php";
+    let text = "<?php\n$request->validate(['email' => ['required', 'email']]);\n$y = Post::orderBy('created_at');\n";
+
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", text, "required").len(), 1);
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", text, "orderBy").len(), 1);
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "validate(").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "$y").is_empty());
+}

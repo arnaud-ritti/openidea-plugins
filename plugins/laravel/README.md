@@ -57,7 +57,9 @@ in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
 - Quick fix (⌥⏎) on a missing `file.key` translation key: add `'key' => 'key'`
   to the main locale's lang file.
 - Intentions (⌥⏎): `'required|email'` in a validation call or `rules()` becomes
-  `['required', 'email']` (not offered when a rule is `regex:`);
+  `['required', 'email']` (not offered when a rule is `regex:`) and back: a list of
+  plain string rules becomes `'required|email'` (not offered when an element is
+  a `Rule` object, closure or contains `|`, or a regex rule contains `,`);
   `'UserController@index'` becomes `[UserController::class, 'index']` when the
   file is in `App\Http\Controllers` or already imports the class (no import is
   added); in a `.blade.php` file `{{ $x }}` and `{!! $x !!}` toggle.
