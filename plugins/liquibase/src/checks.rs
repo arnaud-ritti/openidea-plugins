@@ -8,7 +8,14 @@ use spring_text::range;
 use std::collections::HashMap;
 
 /// The problems of `log` (parsed from `text`), sorted by where they start.
-pub fn problems(path: &str, text: &str, log: &Changelog, target: &dyn Fn(&Include) -> Target) -> Vec<Diagnostic> {
+/// `defined` says whether the project can supply a property the changelog does not declare (`true` when unsure); `None` turns the property check off.
+pub fn problems(
+    path: &str,
+    text: &str,
+    log: &Changelog,
+    target: &dyn Fn(&Include) -> Target,
+    defined: Option<&dyn Fn(&str) -> bool>,
+) -> Vec<Diagnostic> {
     let mut out: Vec<(usize, Diagnostic)> = Vec::new();
 
     if log.format == Format::Sql && !log.header {
@@ -69,6 +76,35 @@ pub fn problems(path: &str, text: &str, log: &Changelog, target: &dyn Fn(&Includ
         out.push((include.at, diagnostic.code("unresolved-include")));
     }
 
+    if let Some(defined) = defined {
+        for (start, end, name) in placeholders(text, log.format) {
+            if name.starts_with("database.") || log.properties.iter().any(|p| p == name) || defined(name) {
+                continue;
+            }
+            let message = format!("Property `{name}` is not declared in this changelog or the changelogs it includes, nor set as a parameter in the project's Liquibase configuration.");
+            out.push((start, Diagnostic::new(range(text, start, end), Severity::Warning, message).code("unresolved-property")));
+        }
+    }
+
     out.sort_by_key(|(start, _)| *start);
     out.into_iter().map(|(_, diagnostic)| diagnostic).collect()
+}
+
+/// `${name}` placeholders as `(start, end, name)`; names with other characters (`${:name}`, nested) are dynamic and skipped.
+/// YAML comment lines are skipped.
+fn placeholders(text: &str, format: Format) -> Vec<(usize, usize, &str)> {
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices("${") {
+        let Some(close) = text[at..].find('}') else {
+            continue;
+        };
+        let name = &text[at + 2..at + close];
+        let plain = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'));
+        let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        if !plain || (format == Format::Yaml && text[line_start..at].trim_start().starts_with('#')) {
+            continue;
+        }
+        out.push((at, at + close + 1, name));
+    }
+    out
 }

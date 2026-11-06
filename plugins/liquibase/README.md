@@ -39,6 +39,7 @@ Changelogs are checked as you type, without saving.
 | `incomplete-changeset` | error | A changeset without an id, without an author, or without both. In SQL the message shows `--changeset author:id`. |
 | `unknown-change-type` | warning | A YAML entry under `changes:` that isn't a built-in Liquibase change type (`createTabel`). |
 | `unresolved-include` | error | An `include` file or an `includeAll` directory that can't be found. Not reported when `errorIfMissing` (`errorIfMissingOrEmpty` for `includeAll`) is `false`. |
+| `unresolved-property` | warning | A `${name}` placeholder that the changelog, the changelogs it includes and the project's `liquibase.properties` / `application.*` (`liquibase.parameters.<name>`, `spring.liquibase.parameters.<name>`) do not declare. `database.*` names are built in. Quiet when none of those config files can be read, when an `includeAll` or a `property file=` is involved, and for `${:name}` or other dynamic names. Setting `checkProperties`. Parameters from `-D`, the environment or a defaults file elsewhere are invisible: add them to the project's properties or turn the check off. |
 | `missing-header` | warning | A formatted SQL changelog whose first non-blank line isn't `--liquibase formatted sql`. |
 
 A quoted SQL author with spaces (`--changeset "Jane Doe":2`) is one author.

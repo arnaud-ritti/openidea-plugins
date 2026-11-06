@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "checkProperties": {
+      "type": "boolean",
+      "title": "Warn about ${property} placeholders that no changelog or project configuration declares",
+      "default": true
+    }
+  }
+}
