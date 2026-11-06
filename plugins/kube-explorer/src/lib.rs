@@ -91,6 +91,8 @@ pub struct KubeExplorer {
     context: Option<String>,
     namespace: Option<String>,
     current_context: Option<String>,
+    /// The context lookup failed for another reason than a denied permission.
+    kubectl_failed: bool,
     /// Children of the tree's expandable keys (`ctx`, `ns`, `kind:<kind>`).
     children: BTreeMap<String, Result<Vec<String>, String>>,
     expanded: BTreeSet<String>,
@@ -293,6 +295,7 @@ impl KubeExplorer {
     fn reload(&mut self) {
         self.children.clear();
         self.current_context = None;
+        self.kubectl_failed = false;
         for key in self.expanded.clone() {
             let loaded = self.load(&key);
             self.children.insert(key, loaded);
@@ -482,7 +485,10 @@ impl KubeExplorer {
                 Err(Error::Denied(_)) => {
                     return Ok(View::message("Kube Explorer needs permission to run kubectl. Grant it in Settings › Plugins."));
                 }
-                Err(_) => Some("(kubectl unavailable)".into()),
+                Err(_) => {
+                    self.kubectl_failed = true;
+                    Some("(kubectl unavailable)".into())
+                }
             };
         }
         let context = self.context.as_ref().or(self.current_context.as_ref()).cloned().unwrap_or_default();
@@ -497,8 +503,12 @@ impl KubeExplorer {
 
         self.push_custom_resources(&mut items);
 
-        let view = View::new(Body::Tree(items)).status("Double-click a context or namespace to switch");
-        Ok(self.actions(view.button(Button::new("refresh", "Refresh").icon("refresh"))))
+        let mut view = View::new(Body::Tree(items)).status("Double-click a context or namespace to switch");
+        view = view.button(Button::new("refresh", "Refresh").icon("refresh"));
+        if self.kubectl_failed {
+            view = view.button(Button::new("how-to-install-kubectl", "How to Install kubectl").icon("help"));
+        }
+        Ok(self.actions(view))
     }
 
     fn push_custom_resources(&self, items: &mut Vec<TreeItem>) {
@@ -659,6 +669,10 @@ impl KubeExplorer {
             self.reload();
             return Ok(());
         }
+        if button == "how-to-install-kubectl" {
+            notify_install_hint();
+            return Ok(());
+        }
         match button {
             "back" => {
                 self.details = None;
@@ -774,6 +788,50 @@ fn resource(key: &str) -> Option<(String, String)> {
     let (parent, name) = key.split_once('/')?;
     let kind = parent.strip_prefix("kind:")?;
     Some((kind.to_owned(), name.to_owned()))
+}
+
+const KUBECTL_INSTALL_HINT: &str = "Kube Explorer could not run kubectl: it is not installed, or not on the PATH the IDE was started with. \
+Install it, restart the IDE if needed, then click Refresh.\n\
+Install guide: https://kubernetes.io/docs/tasks/tools/\n\
+macOS: brew install kubectl\n\
+Windows: winget install -e --id Kubernetes.kubectl\n\
+Linux: your distribution's package manager, or the binary download on that page.";
+
+fn notify_install_hint() {
+    host::notify(NotificationLevel::Info, "How to Install kubectl", KUBECTL_INSTALL_HINT);
+}
+
+/// Fixed: nothing from the project, the editor or the command argument goes in.
+fn helm_repo_update_args() -> Vec<String> {
+    vec!["repo".into(), "update".into()]
+}
+
+fn helm_repo_update() -> Result<(), Error> {
+    let _task = host::begin_task("Updating Helm repositories", false);
+    let out = match host::run_process(HELM, &helm_repo_update_args(), None) {
+        Err(Error::Denied(_)) => {
+            host::notify(
+                NotificationLevel::Warning,
+                "Helm repositories not updated",
+                "Kube Explorer is not allowed to run helm. Allow it in Settings › Plugins.",
+            );
+            return Ok(());
+        }
+        out => out?,
+    };
+    if out.status != Some(0) {
+        return Err(failure(HELM, &out.stderr, out.status));
+    }
+    host::notify(NotificationLevel::Info, "Helm repositories updated", &output_tail(&out.stdout));
+    Ok(())
+}
+
+/// The last 20 lines, at most 2000 characters (the end is kept).
+fn output_tail(text: &str) -> String {
+    let lines: Vec<&str> = text.trim().lines().collect();
+    let tail = lines[lines.len().saturating_sub(20)..].join("\n");
+    let extra = tail.chars().count().saturating_sub(2000);
+    tail.chars().skip(extra).collect()
 }
 
 fn failure(program: &str, stderr: &str, status: Option<i32>) -> Error {
@@ -981,6 +1039,14 @@ impl Plugin for KubeExplorer {
 
     /// The IDE drops a command's result text: it is shown in a notification.
     fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        match id {
+            "helm-repo-update" => return helm_repo_update().map(|()| None),
+            "how-to-install-kubectl" => {
+                notify_install_hint();
+                return Ok(None);
+            }
+            _ => {}
+        }
         let (working, done) = match id {
             "apply" => ("Applying manifest", "Manifest applied"),
             "dry-run" => ("Validating manifest", "Manifest validated"),
@@ -1390,6 +1456,158 @@ mod tests {
         assert!(page(&mut kube, &host).contains("kind: Service"));
     }
 
+    type Recorded = std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, Option<String>)>>>;
+
+    fn helm_host(caps: &[&str], output: Result<ProcessOutput, Error>) -> (MockHost, Recorded) {
+        let host = MockHost::install().with_capabilities(caps);
+        let recorded = Recorded::default();
+        let seen = recorded.clone();
+        host.on_process(HELM, move |args, stdin| {
+            seen.borrow_mut().push((args.to_vec(), stdin.map(str::to_owned)));
+            output.clone()
+        });
+        (host, recorded)
+    }
+
+    fn repo_update(host: &MockHost, arg: Option<&str>) -> Result<Option<String>, Error> {
+        KubeExplorer::default().run_command("helm-repo-update", &host.invocation(), arg)
+    }
+
+    #[test]
+    fn repo_update_runs_exactly_helm_repo_update() {
+        let (host, recorded) = helm_host(&["process:helm"], ok("Update Complete.\n"));
+
+        repo_update(&host, None).unwrap();
+
+        assert_eq!(helm_repo_update_args(), ["repo", "update"]);
+        let runs = host.process_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!((runs[0].program.as_str(), runs[0].args.clone(), runs[0].cwd.clone()), (HELM, helm_repo_update_args(), None));
+        assert_eq!(recorded.borrow()[0], (helm_repo_update_args(), None));
+        assert_eq!(host.notifications()[0].body, "Update Complete.");
+    }
+
+    #[test]
+    fn repo_update_ignores_the_command_argument() {
+        for arg in ["--debug", "../../etc", "-rf"] {
+            let (host, _) = helm_host(&["process:helm"], ok(""));
+
+            repo_update(&host, Some(arg)).unwrap();
+
+            assert_eq!(host.process_runs()[0].args, ["repo", "update"], "{arg}");
+        }
+    }
+
+    #[test]
+    fn repo_update_does_not_read_the_open_file() {
+        let (host, _) = helm_host(&["process:helm"], ok(""));
+        host.open_editor("-rf/../x.yaml", "yaml", "--set=evil", &[]);
+
+        repo_update(&host, None).unwrap();
+
+        assert_eq!(host.process_runs()[0].args, ["repo", "update"]);
+        assert!(host.notifications().iter().all(|n| !n.body.contains("evil") && !n.body.contains("-rf")));
+    }
+
+    #[test]
+    fn repo_update_without_helm_capability_notifies_instead_of_failing() {
+        let (host, _) = helm_host(&["editor.read"], ok(""));
+
+        assert_eq!(repo_update(&host, None), Ok(None));
+
+        let note = &host.notifications()[0];
+        assert_eq!(note.level, NotificationLevel::Warning);
+        assert!(note.body.contains("helm") && note.body.contains("Settings"), "{}", note.body);
+    }
+
+    #[test]
+    fn repo_update_failure_reports_stderr() {
+        let failed = Ok(ProcessOutput { status: Some(1), stdout: String::new(), stderr: "Error: no repositories found\n".into() });
+        let (host, _) = helm_host(&["process:helm"], failed);
+
+        assert_eq!(repo_update(&host, None), Err(Error::Failed("Error: no repositories found".into())));
+    }
+
+    #[test]
+    fn repo_update_needs_no_open_editor() {
+        let (host, _) = helm_host(&["process:helm"], ok("Update Complete.\n"));
+
+        assert_eq!(repo_update(&host, None), Ok(None));
+
+        assert_eq!(host.process_runs().len(), 1);
+    }
+
+    #[test]
+    fn repo_update_reports_only_the_tail_of_its_output() {
+        let lines: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        let (host, _) = helm_host(&["process:helm"], ok(&lines));
+        repo_update(&host, None).unwrap();
+        let body = host.notifications()[0].body.clone();
+        assert!(body.starts_with("line 11\n") && body.ends_with("line 30"), "{body}");
+
+        let (host, _) = helm_host(&["process:helm"], ok(&"é".repeat(5000)));
+        repo_update(&host, None).unwrap();
+        assert_eq!(host.notifications()[0].body.chars().count(), 2000);
+    }
+
+    #[test]
+    fn install_hint_spawns_no_process() {
+        let host = host();
+
+        KubeExplorer::default().run_command("how-to-install-kubectl", &host.invocation(), Some("--kubeconfig=/x")).unwrap();
+
+        assert!(host.process_runs().is_empty());
+        assert!(host.terminals().is_empty());
+    }
+
+    #[test]
+    fn install_hint_text_is_static() {
+        let host = host();
+        host.set_setting("kubeconfig", "\"; rm -rf ~\"");
+        let mut kube = KubeExplorer { context: Some("-evil".into()), ..KubeExplorer::default() };
+
+        kube.run_command("how-to-install-kubectl", &host.invocation(), None).unwrap();
+
+        assert_eq!(host.notifications()[0].body, KUBECTL_INSTALL_HINT);
+        for expected in ["PATH", "https://kubernetes.io/docs/tasks/tools/", "brew install kubectl", "winget install -e --id Kubernetes.kubectl", "Linux"] {
+            assert!(KUBECTL_INSTALL_HINT.contains(expected), "{expected}");
+        }
+        assert!(host.process_runs().is_empty());
+    }
+
+    #[test]
+    fn install_hint_needs_no_open_editor() {
+        let host = MockHost::install().with_capabilities(&[]);
+
+        assert_eq!(KubeExplorer::default().run_command("how-to-install-kubectl", &host.invocation(), None), Ok(None));
+
+        assert_eq!(host.notifications().len(), 1);
+    }
+
+    fn toolbar(view: &View) -> Vec<String> {
+        view.toolbar.iter().map(|b| b.id.clone()).collect()
+    }
+
+    #[test]
+    fn tree_offers_the_install_hint_only_when_kubectl_fails() {
+        let missing = MockHost::install().with_capabilities(&["process:kubectl", "editor.read", "storage"]);
+        missing.on_process(KUBECTL, |_, _| Err(Error::Failed("kubectl: not found".into())));
+        let mut kube = KubeExplorer::default();
+        assert!(toolbar(&kube.render_tree().unwrap()).contains(&"how-to-install-kubectl".to_owned()));
+        let runs = missing.process_runs().len();
+        kube.button("how-to-install-kubectl").unwrap();
+        assert_eq!(missing.notifications()[0].body, KUBECTL_INSTALL_HINT);
+        assert_eq!(missing.process_runs().len(), runs);
+        drop(missing);
+
+        let _working = host();
+        assert!(!toolbar(&KubeExplorer::default().render_tree().unwrap()).contains(&"how-to-install-kubectl".to_owned()));
+        drop(_working);
+
+        let _denied = MockHost::install().with_capabilities(&["editor.read", "storage"]);
+        assert!(!toolbar(&KubeExplorer::default().render_tree().unwrap()).contains(&"how-to-install-kubectl".to_owned()));
+    }
+
     #[test]
     fn resources_carry_the_icon_of_their_kind() {
         let host = host();
@@ -1582,10 +1800,10 @@ mod tests {
     #[test]
     fn every_template_is_registered_and_exists() {
         let templates = registered_templates();
-        assert_eq!(templates.len(), 15);
+        assert_eq!(templates.len(), 16);
         let ids: BTreeSet<_> = templates.iter().map(|t| &t.0).collect();
         let names: BTreeSet<_> = templates.iter().map(|t| &t.1).collect();
-        assert_eq!((ids.len(), names.len()), (15, 15));
+        assert_eq!((ids.len(), names.len()), (16, 16));
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/");
         let mut on_disk = std::fs::read_dir(format!("{dir}templates")).unwrap().count();
         for (id, _, path) in &templates {

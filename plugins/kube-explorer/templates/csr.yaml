@@ -1,0 +1,10 @@
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: $NAME$
+spec:
+  # The PEM certificate request, base64 encoded on one line.
+  request: $END$
+  signerName: kubernetes.io/kube-apiserver-client
+  usages:
+    - client auth
