@@ -90,6 +90,17 @@ the Maven plugin honours `outputType`; `flyway` is the reliable runner.
 - In `flyway.toml`: keys under `[flyway]`, and the connection keys under
   `[environments.<name>]`, written as `key = `.
 
+## Templates and icons
+
+New menu: Flyway SQL Migration, Flyway Java Migration, Flyway Kotlin Migration,
+Flyway Java Callback and Flyway SQL Callback. The class is named after the file
+you create (`V2__Add_users`), so name the file first. A template cannot fill in
+the version, so take it from Flyway: Copy Next Migration Version. The Java and
+Kotlin templates have no `package` line; add it, or move the file into place.
+`V*__*.sql`, `U*__*.sql` and `R__*.sql` files get the Flyway icon. Not verified
+in the IDE: that `$NAME$` is the file name without extension, and that the icon
+patterns match.
+
 ## Not supported
 
 Anything that needs the database: applied-migration status, SQL execution,

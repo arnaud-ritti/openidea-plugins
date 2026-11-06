@@ -806,4 +806,19 @@ mod tests {
         let migrate = detectors.iter().find(|d| d["id"] == "migrate").unwrap();
         assert_eq!(migrate["name"], "Flyway: migrate (writes to the database)");
     }
+
+    #[test]
+    fn every_declared_template_and_icon_exists() {
+        let manifest = include_str!("../plugin.toml");
+        let paths: Vec<&str> = manifest
+            .lines()
+            .filter_map(|l| l.strip_prefix("path = \"").or_else(|| l.strip_prefix("icon = \"")))
+            .map(|l| l.trim_end_matches('"'))
+            .collect();
+        assert!(paths.iter().filter(|p| p.starts_with("templates/")).count() == 5);
+        for path in paths {
+            let full = format!("{}/{path}", env!("CARGO_MANIFEST_DIR"));
+            assert!(std::path::Path::new(&full).is_file(), "{path}");
+        }
+    }
 }
