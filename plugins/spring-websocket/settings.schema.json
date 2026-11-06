@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "springWebsocket.checkBrokerPrefixes": {
+      "type": "boolean",
+      "title": "Warn when a @SendTo or messaging template destination is outside the configured broker prefixes",
+      "default": true
+    }
+  }
+}

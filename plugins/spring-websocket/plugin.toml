@@ -16,3 +16,7 @@ required = ["project.read"]
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
 languages = ["java", "kotlin", "javascript", "javascriptreact", "typescript", "typescriptreact", "vue"]
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Spring WebSocket"
