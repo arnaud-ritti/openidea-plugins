@@ -861,25 +861,25 @@ fn eloquent_snippets(text: &str, files: &'static [(&'static str, &'static str)])
 #[test]
 fn guarded_attribute_assigned_through_fill_warns() {
     static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
-    let found = eloquent_snippets("<?php\n(new Post)->fill($request->all());\nPost::create($request->all());\nPost::create($request->validated());\n", &FILES);
+    let found = eloquent_snippets("<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\n(new Post)->fill($request->all());\nPost::create($request->all());\nPost::create($request->validated());\n", &FILES);
     assert_eq!(found, [("guarded-attribute-assignment", "$request->all()".into()), ("guarded-attribute-assignment", "$request->all()".into())]);
 
     static FILLABLE: [(&str, &str); 1] = [FILLABLE_POST];
-    let found = eloquent_snippets("<?php\nPost::create(['title' => 'a', 'role' => 'admin', 'body' => 'b']);\nPost::create($request->all());\n", &FILLABLE);
+    let found = eloquent_snippets("<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create(['title' => 'a', 'role' => 'admin', 'body' => 'b']);\nPost::create($request->all());\n", &FILLABLE);
     assert_eq!(found, [("guarded-attribute-assignment", "role".into())]);
 }
 
 #[test]
 fn guarded_attribute_assignment_is_quiet_for_library_or_dynamic_name() {
     static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
-    let text = "<?php\nCollection::create($request->all());\n$model::create($request->all());\nstatic::create($request->all());\nPost::create($request->only('a'));\n$post->fill($request->all());\n";
+    let text = "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nCollection::create($request->all());\n$model::create($request->all());\nstatic::create($request->all());\nPost::create($request->only('a'));\n$post->fill($request->all());\n";
     assert!(eloquent_snippets(text, &FILES).is_empty());
 
     static FILLABLE: [(&str, &str); 1] = [FILLABLE_POST];
-    assert!(eloquent_snippets("<?php\nPost::create(['title' => 1, $key => 2, ...$rest]);\nPost::create(['title' => 1, 'body' => 2]);\n", &FILLABLE).is_empty());
+    assert!(eloquent_snippets("<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create(['title' => 1, $key => 2, ...$rest]);\nPost::create(['title' => 1, 'body' => 2]);\n", &FILLABLE).is_empty());
 
     static CUSTOM: [(&str, &str); 1] = [("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $fillable = ['a'];\n    public function getFillable() {}\n}\n")];
-    assert!(eloquent_snippets("<?php\nPost::create(['zzz' => 1]);\n", &CUSTOM).is_empty());
+    assert!(eloquent_snippets("<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create(['zzz' => 1]);\n", &CUSTOM).is_empty());
 }
 
 #[test]
@@ -928,7 +928,7 @@ fn simplify_order_by_is_quiet_for_library_or_dynamic_name() {
 #[test]
 fn eloquent_checks_publish_and_clear_when_the_file_is_fixed() {
     let host = MockHost::install();
-    let mut plugin = activated_with(&host, &[("app/Models/Post.php", UNGUARDED_POST.1), ("app/Http/Controllers/C.php", "<?php\nPost::create($request->all());\n")]);
+    let mut plugin = activated_with(&host, &[("app/Models/Post.php", UNGUARDED_POST.1), ("app/Http/Controllers/C.php", "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create($request->all());\n")]);
     let path = "/project/app/Http/Controllers/C.php";
 
     plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
@@ -936,11 +936,11 @@ fn eloquent_checks_publish_and_clear_when_the_file_is_fixed() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].code.as_deref(), Some("guarded-attribute-assignment"));
 
-    host.add_file("app/Http/Controllers/C.php", "<?php\nPost::create($request->validated());\n");
+    host.add_file("app/Http/Controllers/C.php", "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create($request->validated());\n");
     plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
     assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
 
-    host.add_file("app/Http/Controllers/C.php", "<?php\nPost::create($request->all());\n");
+    host.add_file("app/Http/Controllers/C.php", "<?php\nnamespace App\\Http;\nuse App\\Models\\Post;\nPost::create($request->all());\n");
     host.set_setting("checkEloquent", "false");
     plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
     assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
@@ -1028,4 +1028,48 @@ fn imported_project_model_still_warns() {
     ] {
         assert_eq!(eloquent_snippets(text, &FILES).len(), 1, "{text}");
     }
+}
+
+#[test]
+fn app_internal_non_model_class_sharing_a_model_name_is_quiet() {
+    static FILES: [(&str, &str); 2] = [UNGUARDED_POST, ("app/Services/Post.php", "<?php\nnamespace App\\Services;\nclass Post\n{\n    public static function create($data) {}\n}\n")];
+    let text = "<?php\nnamespace App\\Http;\nuse App\\Services\\Post;\nPost::create($request->all());\n";
+    assert!(eloquent_snippets(text, &FILES).is_empty());
+}
+
+#[test]
+fn unimported_name_in_controller_namespace_is_quiet() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http\\Controllers;\nPost::create($request->all());\n";
+    assert!(eloquent_snippets(text, &FILES).is_empty());
+}
+
+#[test]
+fn namespaceless_file_with_unimported_name_is_quiet() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    assert!(eloquent_snippets("<?php\nPost::create($request->all());\n", &FILES).is_empty());
+}
+
+#[test]
+fn group_import_of_vendor_class_is_quiet() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http;\nuse Vendor\\{Post, Comment};\nuse function Foo\\bar;\nPost::create($request->all());\n";
+    assert!(eloquent_snippets(text, &FILES).is_empty());
+}
+
+#[test]
+fn group_import_of_project_model_still_warns() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http;\nuse App\\Models\\{\n    Post,\n    Comment,\n};\nPost::create($request->all());\n";
+    assert_eq!(eloquent_snippets(text, &FILES).len(), 1);
+}
+
+#[test]
+fn group_import_alias_resolves() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nnamespace App\\Http;\nuse App\\Models\\{Post as Article};\nArticle::create($request->all());\n";
+    assert_eq!(eloquent_snippets(text, &FILES).len(), 1);
+
+    let nested = "<?php\nnamespace App\\Http;\nuse App\\{Models\\Post};\nPost::create($request->all());\n";
+    assert_eq!(eloquent_snippets(nested, &FILES).len(), 1);
 }

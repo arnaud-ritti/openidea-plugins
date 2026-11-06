@@ -79,15 +79,28 @@ pub fn order_by(masked: &str) -> Vec<Finding> {
     found
 }
 
+/// `class Name extends Model` (or another Eloquent base such as `Authenticatable` or `Pivot`).
+fn extends_model(masked: &str, class: &str) -> bool {
+    let Some(at) = masked.find(&format!("class {class}")) else { return false };
+    let rest = masked[at + 6 + class.len()..].trim_start();
+    let Some(parent) = rest.strip_prefix("extends ") else { return false };
+    let parent = parent.split(|c: char| c.is_whitespace() || c == '{').next().unwrap_or_default();
+    let parent = parent.rsplit('\\').next().unwrap_or_default();
+
+    matches!(parent, "Model" | "Authenticatable" | "Pivot" | "MorphPivot" | "User") || parent.ends_with("Model")
+}
+
 struct Model {
     fillable: Vec<String>,
     guarded_nothing: bool,
 }
 
-fn model(read: &dyn Fn(&str) -> Option<String>, class: &str) -> Option<Model> {
-    let text = [format!("app/Models/{class}.php"), format!("app/{class}.php")].iter().find_map(|path| read(path))?;
+fn model(read: &dyn Fn(&str) -> Option<String>, full: &str) -> Option<Model> {
+    let relative = full.strip_prefix("App\\")?.replace('\\', "/");
+    let text = read(&format!("app/{relative}.php"))?;
+    let class = full.rsplit('\\').next()?;
     let masked = php::mask_comments(&text);
-    if !masked.contains(&format!("class {class}")) || UNGUARDED_MARKERS.iter().any(|marker| masked.contains(marker)) {
+    if !extends_model(&masked, class) || UNGUARDED_MARKERS.iter().any(|marker| masked.contains(marker)) {
         return None;
     }
 
@@ -151,7 +164,7 @@ fn mass_assignment(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<F
         }
 
         let Some(first) = php::arguments(masked, open).into_iter().next() else { continue };
-        let Some(short) = project_class(masked, &class) else { continue };
+        let Some(full) = project_class(masked, &class) else { continue };
 
         let argument = php::trimmed(masked, first.clone());
         let all_input = ALL_INPUT.contains(&&masked[argument.clone()]);
@@ -160,8 +173,8 @@ fn mass_assignment(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<F
             continue;
         }
 
-        let class = short;
-        let Some(model) = model(read, &class) else { continue };
+        let Some(model) = model(read, &full) else { continue };
+        let class = full.rsplit('\\').next().unwrap_or_default().to_owned();
 
         if all_input {
             if model.guarded_nothing && model.fillable.is_empty() {
@@ -202,46 +215,64 @@ fn mass_assignment(masked: &str, read: &dyn Fn(&str) -> Option<String>) -> Vec<F
     found
 }
 
-/// The short name of `class` when it is a project class: imported from or
-/// written in `App\`, or, without an import, used in a file of that namespace.
-fn project_class(masked: &str, class: &str) -> Option<String> {
-    let short = class.rsplit('\\').next()?.to_owned();
-    let mut namespace = None;
-    let mut imports: Vec<(String, String)> = Vec::new();
+/// The imports of a file as (alias, full name); `None` when one cannot be expanded.
+fn imports(masked: &str) -> Option<Vec<(String, String)>> {
+    let mut found = Vec::new();
 
-    for line in masked.lines().map(str::trim) {
-        if let Some(name) = line.strip_prefix("namespace ") {
-            namespace = Some(name.trim_end_matches(';').trim().to_owned());
-        }
-
-        let Some(import) = line.strip_prefix("use ").and_then(|rest| rest.strip_suffix(';')) else { continue };
-        if import.contains(['{', ',']) {
+    for (at, _) in masked.match_indices("use ") {
+        let line_start = masked[..at].rfind('\n').map_or(0, |n| n + 1);
+        if !masked[line_start..at].trim().is_empty() {
             continue;
         }
 
-        let (path, alias) = import.split_once(" as ").unwrap_or((import, ""));
-        let path = path.trim().trim_start_matches('\\');
-        let alias = if alias.is_empty() { path.rsplit('\\').next().unwrap_or_default() } else { alias.trim() };
-        imports.push((alias.to_owned(), path.to_owned()));
+        let statement = masked[at + 4..].split(';').next().unwrap_or_default().trim();
+        if statement.starts_with("function ") || statement.starts_with("const ") || statement.starts_with('(') {
+            continue;
+        }
+
+        let mut entries = Vec::new();
+        match statement.split_once('{') {
+            Some((prefix, rest)) => {
+                let inner = rest.trim_end().strip_suffix('}')?;
+                if inner.contains(['{', '}']) {
+                    return None;
+                }
+                let prefix = prefix.trim();
+                entries.extend(inner.split(',').map(str::trim).filter(|part| !part.is_empty()).map(|part| format!("{prefix}{part}")));
+            }
+            None => entries.extend(statement.split(',').map(|part| part.trim().to_owned())),
+        }
+
+        for entry in entries {
+            let (path, alias) = entry.split_once(" as ").unwrap_or((entry.as_str(), ""));
+            let path = path.trim().trim_start_matches('\\');
+            let alias = if alias.trim().is_empty() { path.rsplit('\\').next().unwrap_or_default() } else { alias.trim() };
+            found.push((alias.to_owned(), path.to_owned()));
+        }
     }
 
-    let is_project = |full: &str| full == "App" || full.starts_with("App\\");
-    let first = class.trim_start_matches('\\').split('\\').next().unwrap_or_default();
+    Some(found)
+}
 
-    if class.starts_with('\\') {
-        return is_project(class.trim_start_matches('\\')).then_some(short);
+/// The full name of `class` when it lives in `App\`: written, imported, or
+/// next to the file's namespace. `None` for library classes and unknowns.
+fn project_class(masked: &str, class: &str) -> Option<String> {
+    let namespace = masked.lines().map(str::trim).find_map(|line| line.strip_prefix("namespace ")).map(|name| name.trim_end_matches(';').trim().to_owned());
+    let is_project = |full: &str| full.starts_with("App\\");
+
+    if let Some(absolute) = class.strip_prefix('\\') {
+        return is_project(absolute).then(|| absolute.to_owned());
     }
 
-    if let Some((_, path)) = imports.iter().find(|(alias, _)| alias == first) {
-        let rest = class.strip_prefix(first).unwrap_or_default();
-        let full = format!("{path}{rest}");
-        return is_project(&full).then(|| full.rsplit('\\').next().unwrap_or_default().to_owned());
+    let first = class.split('\\').next().unwrap_or_default();
+    if let Some((_, path)) = imports(masked)?.into_iter().find(|(alias, _)| alias == first) {
+        let full = format!("{path}{}", &class[first.len()..]);
+        return is_project(&full).then_some(full);
     }
 
     match namespace {
-        Some(namespace) => is_project(&format!("{namespace}\\{class}")).then_some(short),
-        None if class.contains('\\') => is_project(class).then_some(short),
-        None => Some(short),
+        Some(namespace) => Some(format!("{namespace}\\{class}")).filter(|full| is_project(full)),
+        None => class.contains('\\').then(|| class.to_owned()).filter(|full| is_project(full)),
     }
 }
 
