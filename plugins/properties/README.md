@@ -14,15 +14,20 @@ from JetBrains' [Properties plugin](https://plugins.jetbrains.com/plugin/11594-p
   from every locale, sort the file or the whole bundle.
 - Properties: Find Unused Properties searches the project's other files
   (`.properties` files excluded) for each key of the open file and fades the
-  keys it doesn't find.
+  keys it doesn't find. The setting "Mark unused keys when a bundle file opens
+  or saves" (off by default) does it live, as hints, over at most 2000 files
+  under 256 KiB; keys built at run time look unused.
 - Properties: Reformat File applies the code style settings (delimiter
   spacing, alignment, blank lines).
 - Properties Structure tool window: keys grouped by dotted prefix, flat or
   sorted. Double-click a key to go to it.
 - Open With › Resource Bundle: a table of keys × locales. Edit keys and this
-  file's values, and insert or delete rows. Other locales are read-only.
+  file's values, and insert or delete rows. Editing another locale's cell
+  opens that file at the key (a plugin can't write to a file that isn't the
+  focused editor). Show Incomplete Only keeps the keys some locale lacks.
 - Go to Declaration on a key: the same key in the parent locale
-  (`messages_fr_CA` → `messages_fr` → `messages`); on a Java/Kotlin string:
+  (`messages_fr_CA` → `messages_fr` → `messages`) and in every other locale
+  of the bundle that declares it; on a Java/Kotlin string:
   every declaration of that key; also on `#{a.b}` in `.html` (Thymeleaf),
   `.xhtml` and JSP, and on `<spring:message code>` / `<fmt:message key>`.
 - Problems in code: a literal key in `messageSource.getMessage("a.b", …)`,

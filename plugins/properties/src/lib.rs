@@ -140,11 +140,14 @@ pub struct Properties {
     locales: HashMap<String, usize>,
     /// Keys the last Find Unused Properties found no mention of, per file.
     unused: HashMap<String, HashSet<String>>,
+    /// Files whose `unused` came from the live setting, shown as hints.
+    live_unused: HashSet<String>,
     /// Keys of the project's `.properties` files, for Java/Kotlin strings.
     index: Option<KeyIndex>,
     /// Files with missing-key warnings published, to clear them when the setting is turned off.
     code_diagnostics: HashSet<String>,
     bundle: Option<BundleFiles>,
+    bundle_incomplete_only: bool,
     structure_flat: bool,
     structure_sorted: bool,
     /// Prefix groups of the structure view the user collapsed.
@@ -179,7 +182,8 @@ impl Properties {
 
         if let Some(unused) = self.unused.get(path) {
             for p in props.iter().filter(|p| unused.contains(&p.unescaped_key(&text))) {
-                let mut d = Diagnostic::new(range_of(&text, &p.key), Severity::Warning, "Unused property");
+                let severity = if self.live_unused.contains(path) { Severity::Hint } else { Severity::Warning };
+                let mut d = Diagnostic::new(range_of(&text, &p.key), severity, "Unused property");
                 d.code = Some("UnusedProperty".into());
                 d.unnecessary = true;
                 diagnostics.push(d);
@@ -239,43 +243,70 @@ impl Properties {
         Ok(None)
     }
 
-    /// `UnusedPropertyInspection`, run on demand: keys of the open file that no
-    /// other project file mentions.
-    // ponytail: text search over at most 20 000 files; a key built at run time ("error." + code) looks unused, as in IntelliJ.
-    fn find_unused(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
-        let editor = properties_editor(ctx)?;
-        let path = editor.path();
-        let text = editor.document()?.text;
-        let project = project_for(&path)?;
-
-        let mut unused = if implicitly_used(&path) { HashSet::new() } else { keys(&text) };
-        let task = host::begin_task("Searching for unused properties", true);
-        let files = project.find_files("**/*", 20_000)?;
+    /// `UnusedPropertyInspection`: keys of `path` that no other project file mentions.
+    // ponytail: text search over at most `max_files` files; a key built at run time ("error." + code) looks unused, as in IntelliJ.
+    fn scan_unused(path: &str, text: &str, max_files: u32, max_file_bytes: usize, task: Option<&host::Task>) -> Result<HashSet<String>, Error> {
+        let project = project_for(path)?;
+        let mut unused = if implicitly_used(path) { HashSet::new() } else { keys(text) };
+        let files = project.find_files("**/*", max_files)?;
         for (n, file) in files.iter().enumerate() {
             if unused.is_empty() {
                 break;
             }
-            if task.is_cancelled() {
-                return Err(Error::Cancelled);
+            if let Some(task) = task {
+                if task.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                task.report(n as u32, Some(files.len() as u32), Some(file_name(file)));
             }
             if file.ends_with(".properties") {
                 continue;
             }
-            task.report(n as u32, Some(files.len() as u32), Some(file_name(file)));
             if let Ok(source) = project.read_file(file) {
-                mark_used(&source, &mut unused);
+                if source.len() <= max_file_bytes {
+                    mark_used(&source, &mut unused);
+                }
             }
         }
+        Ok(unused)
+    }
+
+    fn find_unused(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let editor = properties_editor(ctx)?;
+        let path = editor.path();
+        let text = editor.document()?.text;
+
+        let task = host::begin_task("Searching for unused properties", true);
+        let unused = Self::scan_unused(&path, &text, 20_000, usize::MAX, Some(&task))?;
 
         let summary = match unused.len() {
             0 => format!("No unused properties in {}.", file_name(&path)),
             1 => format!("1 unused property in {}, marked as a warning in the file.", file_name(&path)),
             n => format!("{n} unused properties in {}, marked as warnings in the file.", file_name(&path)),
         };
+        self.live_unused.remove(&path);
         self.unused.insert(path.clone(), unused);
         self.inspect(&path)?;
         host::notify(NotificationLevel::Info, "Properties", &summary);
         Ok(None)
+    }
+
+    fn refresh_live_unused(&mut self, path: &str) {
+        if !host::setting_bool("unusedProperties.live").unwrap_or(false) {
+            if self.live_unused.remove(path) {
+                self.unused.remove(path);
+            }
+            return;
+        }
+
+        let Ok(text) = project_for(path).and_then(|p| p.read_file(path)) else { return };
+        match Self::scan_unused(path, &text, 2_000, 256 * 1024, None) {
+            Ok(unused) => {
+                self.unused.insert(path.to_owned(), unused);
+                self.live_unused.insert(path.to_owned());
+            }
+            Err(e) => host::log(LogLevel::Warn, &format!("scanning unused keys of {path}: {e}")),
+        }
     }
 
     fn reformat(&self, ctx: &Invocation) -> Result<Option<String>, Error> {
@@ -443,6 +474,7 @@ impl Plugin for Properties {
         }
 
         for path in &inspect {
+            self.refresh_live_unused(path);
             if let Err(e) = self.inspect(path) {
                 host::log(LogLevel::Warn, &format!("inspecting {path}: {e}"));
             }
@@ -513,6 +545,7 @@ impl Providers for Properties {
         let key = prop.unescaped_key(text);
         let Ok(project) = project_for(&doc.path) else { return Vec::new() };
 
+        let mut found: Vec<Location> = Vec::new();
         let (base, mut locale) = split_locale(stem(&doc.path));
         while !locale.is_empty() {
             locale = locale.rfind('_').map_or("", |i| &locale[..i]);
@@ -521,11 +554,22 @@ impl Providers for Properties {
             let Ok(parent_text) = project.read_file(&parent) else { continue };
 
             if let Some(p) = parse(&parent_text).into_iter().find(|p| p.unescaped_key(&parent_text) == key) {
-                return vec![Location { path: parent, range: range_of(&parent_text, &p.key) }];
+                found.push(Location { path: parent, range: range_of(&parent_text, &p.key) });
+                break;
             }
         }
 
-        Vec::new()
+        for other in bundle_siblings(&project, &doc.path).unwrap_or_default() {
+            if found.iter().any(|l| l.path == other) {
+                continue;
+            }
+            let Ok(other_text) = project.read_file(&other) else { continue };
+            if let Some(p) = parse(&other_text).into_iter().find(|p| p.unescaped_key(&other_text) == key) {
+                found.push(Location { path: other, range: range_of(&other_text, &p.key) });
+            }
+        }
+
+        found
     }
 
     /// `SimpleLoggerPropertiesCompletionContributor` in `simplelogger.properties`;
@@ -892,6 +936,44 @@ mod tests {
         assert_eq!(unused.len(), 1);
         assert_eq!(unused[0].range.start, Position::new(1, 0));
         assert_eq!(host.notifications()[0].body, "1 unused property in messages.properties, marked as a warning in the file.");
+    }
+
+    #[test]
+    fn live_unused_keys_are_hints_and_follow_the_setting() {
+        let host = MockHost::install();
+        host.add_file("/project/src/App.java", "bundle.getString(\"used.key\");");
+        let path = "/project/src/messages.properties";
+        host.add_file(path, "used.key=1\nunused.key=2\n");
+        let mut plugin = Properties::default();
+        let event = [Event::FileSaved(path.into())];
+
+        plugin.handle_events(&event, &host.invocation());
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.iter().all(|d| !d.unnecessary)));
+
+        host.set_setting("unusedProperties.live", "true");
+        plugin.handle_events(&event, &host.invocation());
+        let marked: Vec<(Severity, Position)> =
+            host.diagnostics()[path].iter().filter(|d| d.unnecessary).map(|d| (d.severity, d.range.start)).collect();
+        assert_eq!(marked, [(Severity::Hint, Position::new(1, 0))]);
+
+        host.set_setting("unusedProperties.live", "false");
+        plugin.handle_events(&event, &host.invocation());
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.iter().all(|d| !d.unnecessary)));
+    }
+
+    #[test]
+    fn go_to_declaration_lists_every_locale() {
+        let host = MockHost::install();
+        host.add_file("/project/messages.properties", "hi=Hi\n");
+        host.add_file("/project/messages_fr.properties", "hi=Salut\n");
+        host.add_file("/project/messages_de.properties", "x=1\n");
+        host.add_file("/project/messages_es.properties", "hi=Hola\n");
+        let doc = doc("/project/messages.properties", "properties", "hi=Hi\n");
+
+        let paths: Vec<String> = Properties::default().definition(&doc, Position::new(0, 1)).into_iter().map(|l| l.path).collect();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"/project/messages_fr.properties".to_owned()));
+        assert!(paths.contains(&"/project/messages_es.properties".to_owned()));
     }
 
     #[test]
