@@ -4,7 +4,7 @@
 
 **Goal:** Spring shows five tool windows (Endpoints, Structure, Beans, Runtime, Initializr) with distinct icons; `aritti.spring-web` and `aritti.spring-integration` absorb seven other Spring plugins; `spring-beans` folds its three windows into sections.
 
-**Architecture:** Each absorbed module stays a library crate (`rlib`) with a cargo feature `embedded` that disables its own `register_plugin!`. The surviving plugin owns a struct holding the module structs and implements `Providers`, `Views` and `Plugin` by delegating to them: provider results are concatenated, modules that don't apply to the project are skipped, view calls go to the module owning the active section. A shared section switcher lives in `crates/spring-text`.
+**Architecture:** Each absorbed module stays a library crate (`rlib`) with a cargo feature `embedded` that disables its own `register_plugin!`. The surviving plugin owns a struct holding the module structs and implements `Providers`, `Views` and `Plugin` by delegating to them: provider results are concatenated, modules that don't apply to the project are skipped, view calls go to the module owning the active section. A shared section switcher lives in the new `crates/ui-kit` (also used by the route lists, see `2026-11-07-route-lists.md`).
 
 **Tech Stack:** Rust, `openidea-plugin` SDK v0.1.38 (API 1.2), `crates/spring-text`, `MockHost` tests, `openidea-plugin build`/`check`.
 
@@ -33,21 +33,20 @@
 
 ---
 
-### Task 1: Shared section switcher in `spring-text`
+### Task 1: Shared section switcher in `crates/ui-kit`
 
 **Files:**
-- Create: `crates/spring-text/src/sections.rs`
-- Modify: `crates/spring-text/src/lib.rs` (export)
+- Create: `crates/ui-kit/Cargo.toml`, `crates/ui-kit/src/lib.rs`, `crates/ui-kit/src/sections.rs` (a library crate depending on `openidea-plugin` v0.1.38, own `[workspace]`, like `spring-text`)
 - Test: unit tests in `sections.rs`
 
 **Interfaces:**
 - Produces: `pub struct SectionDef { pub id: &'static str, pub label: &'static str }`; `pub struct Switcher { /* defs, active */ }` with `Switcher::new(storage_key: &'static str, defs: &'static [SectionDef]) -> Switcher` (loads the stored id, falls back to the first), `fn active(&self) -> &'static str`, `fn set(&mut self, id: &str) -> bool` (stores, false if unknown), `fn buttons(&self, view: View, badges: &[(&str, String)]) -> View` (prepends one `Button` per section, id `section:<id>`, active one marked, badge appended to the label), `fn handle(&mut self, event: &ViewEvent) -> bool` (true when it consumed a `section:` button).
 
 - [ ] **Step 1: Write failing tests**: `new_falls_back_to_the_first_section_for_an_unknown_stored_id`, `set_stores_the_active_section`, `buttons_mark_the_active_section_and_show_badges`, `handle_consumes_only_section_buttons`.
-- [ ] **Step 2: Run** `cargo test sections` in `crates/spring-text`; expect FAIL.
+- [ ] **Step 2: Run** `cargo test sections` in `crates/ui-kit`; expect FAIL.
 - [ ] **Step 3: Implement** `sections.rs` as specified.
-- [ ] **Step 4: Run** `cargo test` in `crates/spring-text`; expect pass.
-- [ ] **Step 5: Commit** `feat(spring-text): add a section switcher for multi-section windows`.
+- [ ] **Step 4: Run** `cargo test` in `crates/ui-kit`; expect pass.
+- [ ] **Step 5: Commit** `feat(ui-kit): add a section switcher for multi-section windows`.
 
 ### Task 2: Make modules embeddable
 
@@ -92,7 +91,7 @@
 
 **Interfaces:**
 - Produces: `pub struct Endpoints { web: WebTools, websocket: WebSocketTools, messaging: …, graphql: …, webflow: …, cloud: …, sections: Switcher }` with the same `Providers`/`Views`/`Plugin` delegation as `Structure` (Task 3); one view `endpoints`, sections `http`, `websocket`, `messaging`, `graphql`, `webflow`, `feign`; the web module's endpoints tree is the `http` section and keeps its `viewItem.context` menu (`view` becomes `endpoints`, and `when` clauses keep working through the item key).
-- Consumes: Tasks 1-3 patterns.
+- Consumes: Tasks 1-3 patterns, and the route list of `2026-11-07-route-lists.md` Task 1 for the `http` section (flat list with controller filter, flat/tree toggle, row actions); the web module's own endpoints tree is replaced by it.
 
 - [ ] **Step 1: Make the five modules embeddable** (repeat Task 2 per module: feature `embedded`, `applies`, `refresh`, prefixes) with the failing `refresh_goes_to_the_owner_window_when_embedded` test first; commit `feat(spring-*): make the endpoint modules embeddable`.
 - [ ] **Step 2: Write failing tests** in `endpoints.rs` (the same five as Task 3, over six modules) and `endpoints_item_menu_still_targets_the_endpoints_view`.

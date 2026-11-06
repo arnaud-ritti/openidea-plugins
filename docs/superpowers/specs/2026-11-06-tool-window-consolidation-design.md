@@ -26,7 +26,7 @@ Source: the user, after looking at the real IDE (OpenIDEA 0.1.38) with `ma-stati
 
 4. **Every remaining window icon is distinct**: the family logo plus a small glyph for its function (list, arrows, info, diff, commit, files, pipeline for GitLab; globe, structure, beans for Spring). The two surviving GitLab list windows also differ from each other.
 
-5. **One route list everywhere** (added after the user pointed at the HTTP Client article). A shared library crate `crates/route-list` renders routes as a flat list: one row per route with a per-method icon, the path first, then the method and the handler in grey (`/stations [GET] FuelStationsController`). It serves the Spring Endpoints window (section HTTP), the Routes group of the Symfony and Laravel windows (today a tree of their index) and the OpenAPI Endpoints window.
+5. **One route list everywhere** (added after the user pointed at the HTTP Client article). A shared library crate `crates/ui-kit` (also home of the section switcher) renders routes as a flat list: one row per route with a per-method icon, the path first, then the method and the handler in grey (`/stations [GET] FuelStationsController`). It serves the Spring Endpoints window (section HTTP), the Routes group of the Symfony and Laravel windows (today a tree of their index) and the OpenAPI Endpoints window.
    - **Find a route by controller** (the user's choice): a `Filter…` button asks with `pick_many` which handler classes to show; the active filter is shown in the status line ("18 endpoints · controller: AuthController") and a button clears it. Text search stays the tree's speed search.
    - **Flat or tree:** a toggle button switches between the flat list and the list grouped by controller (today's tree).
    - **Row actions** (context menu on a row): open the handler (also on double-click), Copy as curl, Create HTTP Request File (written under `http/` with `process:tee`, clipboard fallback). The base URL is asked with `input`, prefilled per framework (`http://localhost:8080` Spring, `http://localhost:8000` Symfony and Laravel).
@@ -34,7 +34,7 @@ Source: the user, after looking at the real IDE (OpenIDEA 0.1.38) with `ma-stati
 
 ## Non-goals
 
-- Other plugins' windows (kube-explorer, jpa-assist, flyway, liquibase, openapi, devcontainer, ideolog, symfony, laravel, ignore, tasks, dependency-audit) are out of this round.
+- Other plugins' windows (kube-explorer, jpa-assist, flyway, liquibase, devcontainer, ideolog, ignore, tasks, dependency-audit) are out of this round. Symfony, Laravel and OpenAPI are in only for their route lists (goal 5), not for any other change.
 - `spring-boot`, `spring-data`, `spring-security`, `spring-osgi`, `spring-shell`, `spring-ws` have no windows and are not merged.
 - One plugin for all of Spring is not wanted.
 - No upstream change to OpenIDEA is required. View groups and view visibility conditions (`when`) would help but aren't needed here; they stay a possible separate request to `l0ng-ai/openidea`.
@@ -78,10 +78,15 @@ Source: the user, after looking at the real IDE (OpenIDEA 0.1.38) with `ma-stati
 - **Create Merge Request failures:** a dismissed prompt anywhere cancels with no effect. If the GitLab call fails after all prompts, the plugin shows the error and offers "Open on GitLab"; it doesn't keep the answers.
 - **References to old window ids:** a repository-wide grep of manifests, commands, status item actions, menus and docs is enough; the plan lists the hits before editing.
 
-- **Where the crate lives:** `crates/route-list`, next to `spring-text`; plugins depend on it by path. Method icons (GET, POST, PUT, DELETE, PATCH, other) are small SVGs each plugin ships in its own `icons/` (a package can only reference its own files).
+- **Where the crate lives:** `crates/ui-kit`, next to `spring-text`; plugins depend on it by path. Method icons (GET, POST, PUT, DELETE, PATCH, other) are small SVGs each plugin ships in its own `icons/` (a package can only reference its own files).
 - **Handler text:** Spring `FuelStationsController`, Symfony `UserController::show`, Laravel `FamilyController@show`, OpenAPI the first tag or `operationId`; route names (`app_user_show`, `families.show`) follow in the same grey text.
 - **Order of work:** the crate and Spring first (inside the Endpoints merge, Task 4 of the Spring plan), then Symfony, Laravel, OpenAPI.
 - **Not in scope:** Run/Services "Actuator" mapping actions ("Run HTTP request" on a Spring Runtime mapping) are a separate follow-up; the `.http` editor and the gutter icon belong to OpenIDEA's core client, whose gap list goes to the upstream requests.
+- **Route data model:** the crate is rendering and text generation only; each plugin maps its own routes into a shared `Route { method, path, handler: Handler, name: Option<String>, location: Option<Location> }` with `Handler { class: String, member: Option<String> }`. The filter key is `handler.class`: the controller class for Spring, Symfony and Laravel; for OpenAPI the first tag (or "(no tag)"). "Open the handler" opens the controller method; for OpenAPI it opens the operation in the spec.
+- **Symfony and Laravel windows** become sectioned like the others: sections `Routes` (the flat list) and `Index` (today's tree, unchanged). The Filter, Clear and Flat/Tree buttons show only in the Routes section; the toolbar is built per section.
+- **Scope of goal 5:** Spring, Symfony and Laravel are in; OpenAPI is in last and can be dropped if it slows the rest.
+- **`pick_many` limits** (host source, `wit_host.rs`): at most 5000 items, each key at most 256 bytes; a controller list fits. The route list itself is capped at 5000 rows with a status line saying so.
+- **Capabilities:** `process:tee` and `clipboard` are `optional` in every plugin that uses the row actions. The `.http` file goes under `http/` at the project root (next to the spec for OpenAPI); an existing file is opened untouched, never overwritten (the behaviour `spring-web` has today).
 
 ## Left to the builder
 
