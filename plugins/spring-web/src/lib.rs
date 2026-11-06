@@ -6,13 +6,13 @@
 use endpoints::{FileInfo, Handler};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
-use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
+use openidea_plugin::views::{Body, Button, ListItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
     Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range, Severity, TextEdit, host, register_plugin,
 };
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, JavaFile, Param, Str};
-use spring_text::tree::Expansion;
+use ui_kit::routes::{self, Handler as RouteHandler, Route, RouteEvent, RouteList};
 use spring_text::{SOURCE_GLOBS, config, contains, is_kotlin, parse_source, range, source_calls};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -310,7 +310,7 @@ pub struct WebTools {
     endpoints: Indexes<FileInfo>,
     settings: Indexes<Vec<(String, String)>>,
     versioning: Indexes<checks::Versioning>,
-    expansion: Expansion,
+    routes: Option<RouteList>,
     /// Glob → when listed and the files.
     listings: BTreeMap<String, (Instant, Vec<String>)>,
 }
@@ -321,7 +321,7 @@ impl Default for WebTools {
             endpoints: Indexes::new(SOURCE_GLOBS, endpoints::file_info),
             settings: Indexes::new(CONFIG_GLOBS, view_settings),
             versioning: Indexes::new(VERSIONING_GLOBS, checks::versioning),
-            expansion: Expansion::default(),
+            routes: None,
             listings: BTreeMap::new(),
         }
     }
@@ -792,102 +792,58 @@ impl Providers for WebTools {
 }
 
 impl WebTools {
-    fn endpoints_view(&mut self, view: &str, project: &Project, budget: Duration) -> View {
+    fn route_list(&mut self) -> &mut RouteList {
+        self.routes.get_or_insert_with(|| RouteList::new("spring.routes", "aritti.spring-web"))
+    }
+
+    fn routes(&mut self, project: &Project, budget: Duration) -> (Vec<Route>, bool) {
         let index = self.endpoints.get(project, budget);
-        let complete = index.complete();
+        let mut routes = Vec::new();
+        for (path, info) in index.iter() {
+            for e in &info.endpoints {
+                let class = info
+                    .methods
+                    .iter()
+                    .find(|m| m.range == e.range)
+                    .map(|m| m.ty.clone())
+                    .or_else(|| e.handler.as_ref().and_then(|h| h.ty.clone()))
+                    .unwrap_or_else(|| path.rsplit(['/', '\\']).next().unwrap_or(path).split('.').next().unwrap_or_default().to_owned());
+                routes.push(Route {
+                    method: if e.verb.is_empty() { "GET".into() } else { e.verb.clone() },
+                    path: e.path.clone(),
+                    handler: RouteHandler { class, member: e.handler.as_ref().map(|h| h.method.clone()) },
+                    name: None,
+                    location: Some(Location { path: path.to_owned(), range: e.range }),
+                });
+            }
+        }
+        routes.sort_by(|a, b| (&a.path, &a.method, &a.handler.class).cmp(&(&b.path, &b.method, &b.handler.class)));
+        (routes, index.complete())
+    }
+
+    fn endpoints_view(&mut self, view: &str, project: &Project, budget: Duration) -> View {
+        let (routes, complete) = self.routes(project, budget);
         if !complete {
             host::refresh_view(view);
         }
 
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
-        let mut files: Vec<(&str, Vec<&endpoints::Endpoint>)> = index
-            .iter()
-            .filter(|(_, info)| !info.endpoints.is_empty())
-            .map(|(path, info)| {
-                let mut endpoints: Vec<_> = info.endpoints.iter().collect();
-                endpoints.sort_by(|a, b| (&a.path, &a.verb).cmp(&(&b.path, &b.verb)));
-                (path, endpoints)
-            })
-            .collect();
-        files.sort_by_key(|(path, _)| *path);
-
-        if files.is_empty() {
+        if routes.is_empty() {
             let text = if complete { "No Spring endpoints found." } else { "Scanning…" };
             return View::message(text).button(refresh);
         }
 
-        let mut items = Vec::new();
-        let mut total = 0;
-        for (path, endpoints) in files {
-            let file_key = format!("f:{path}");
-            total += endpoints.len();
-            items.push(TreeItem::new(&file_key, file_name(path)).detail(&endpoints.len().to_string()).icon("file"));
-            for e in endpoints {
-                let key = format!("e:{}:{}:{path}", e.range.start.line, e.range.start.character);
-                let verb = if e.verb.is_empty() { "ANY" } else { e.verb.as_str() };
-                let detail = format!("{}:{}", file_name(path), e.range.start.line + 1);
-                items.push(TreeItem::new(&key, &format!("{verb} {}", e.path)).parent(&file_key).detail(&detail).icon("send"));
-            }
+        let list = self.route_list();
+        list.set_routes(routes);
+        let mut view = list.render(View::new(Body::List(Vec::new())).button(refresh));
+        if !complete {
+            view.status = view.status.map(|status| format!("{status} · scanning…"));
         }
-        self.expansion.apply(&mut items);
-
-        let status = if complete { format!("{total} endpoints") } else { format!("{total} endpoints · scanning…") };
-        View::new(Body::Tree(items)).button(refresh).status(&status)
+        view
     }
 }
 
 const DEFAULT_BASE_URL: &str = "http://localhost:8080";
-
-fn curl_command(endpoint: &endpoints::Endpoint, base: &str) -> String {
-    let url = format!("{}/{}", base.trim().trim_end_matches('/'), endpoint.path.trim_start_matches('/'));
-    let quoted = format!("'{}'", url.replace('\'', "'\\''"));
-    match endpoint.verb.as_str() {
-        "" | "GET" => format!("curl {quoted}"),
-        verb => format!("curl -X {verb} {quoted}"),
-    }
-}
-
-fn http_request(endpoint: &endpoints::Endpoint, base: &str) -> String {
-    let verb = if endpoint.verb.is_empty() { "GET" } else { endpoint.verb.as_str() };
-    let url = format!("{}/{}", base.trim().trim_end_matches('/'), endpoint.path.trim_start_matches('/'));
-    format!("### {verb} {}\n{verb} {url}\n", endpoint.path)
-}
-
-fn http_file_name(endpoint: &endpoints::Endpoint) -> String {
-    let verb = if endpoint.verb.is_empty() { "ANY" } else { endpoint.verb.as_str() };
-    let slug: String = endpoint.path.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-    let slug = slug.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
-    format!("{}-{}.http", verb.to_ascii_lowercase(), if slug.is_empty() { "root" } else { slug.as_str() })
-}
-
-impl WebTools {
-    /// Writes `http/<verb>-<path>.http` under the project root and opens it; an existing file is opened untouched.
-    fn open_http_request(&self, project: &Project, request: &str, file: &str) -> Result<(), Error> {
-        let path = format!("{}/http/{file}", project.root()?.trim_end_matches('/'));
-        if project.read_file(&path).is_err() {
-            let out = host::run_process("tee", &[path.clone()], Some(request))?;
-            if out.status != Some(0) {
-                return Err(Error::Invalid(format!("tee failed: {}", out.stderr.trim())));
-            }
-        }
-        host::open_location(&path, 0, 0)
-    }
-
-    fn endpoint_of(&mut self, project: &Project, key: &str) -> Option<endpoints::Endpoint> {
-        let mut parts = key.splitn(4, ':');
-        let (Some("e"), Some(line), Some(column), Some(path)) = (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            return None;
-        };
-        let (line, column): (u32, u32) = (line.parse().ok()?, column.parse().ok()?);
-        let info = self.endpoints.get(project, COMMAND_BUDGET).files().get(path)?;
-        info.endpoints.iter().find(|e| e.range.start.line == line && e.range.start.character == column).cloned()
-    }
-}
-
-fn file_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
 
 impl Views for WebTools {
     fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
@@ -899,30 +855,27 @@ impl Views for WebTools {
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
-        if self.expansion.handle(&event) {
+        if let ViewEvent::Button(b) = &event
+            && b == "refresh"
+        {
+            if let Some(project) = ctx.project()
+                && self.endpoints.get(&project, Duration::ZERO).complete()
+            {
+                self.endpoints.reset();
+            }
             host::refresh_view(view);
             return Ok(());
         }
 
-        match event {
-            ViewEvent::Button(b) if b == "refresh" => {
-                if let Some(project) = ctx.project()
-                    && self.endpoints.get(&project, Duration::ZERO).complete()
-                {
-                    self.endpoints.reset();
-                }
-                host::refresh_view(view);
-            }
-            ViewEvent::Activate(key) => {
-                let mut parts = key.splitn(4, ':');
-                if let (Some("e"), Some(line), Some(column), Some(path)) =
-                    (parts.next(), parts.next(), parts.next(), parts.next())
-                    && let (Ok(line), Ok(column)) = (line.parse(), column.parse())
-                {
-                    host::open_location(path, line, column)?;
+        match self.route_list().handle(&event) {
+            RouteEvent::Changed => host::refresh_view(view),
+            RouteEvent::Open(route) => {
+                if let Some(location) = route.location {
+                    let start = location.range.start;
+                    host::open_location(&location.path, start.line, start.character)?;
                 }
             }
-            _ => {}
+            RouteEvent::Ignored => {}
         }
 
         Ok(())
@@ -930,34 +883,16 @@ impl Views for WebTools {
 }
 
 impl Plugin for WebTools {
-    fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(&mut self, id: &str, _ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
         if id != "copy-endpoint-curl" && id != "create-endpoint-http" {
             return Err(Error::NotFound(format!("command {id}")));
         }
-        let Some(project) = ctx.project() else { return Ok(None) };
-        let Some(endpoint) = arg.and_then(|key| self.endpoint_of(&project, key)) else { return Ok(None) };
-        let Some(base) = host::input("Base URL of the running application", Some(DEFAULT_BASE_URL))? else {
-            return Ok(None);
-        };
+        let Some(route) = arg.and_then(|key| self.route_list().route(key).cloned()) else { return Ok(None) };
         if id == "create-endpoint-http" {
-            let request = http_request(&endpoint, &base);
-            match self.open_http_request(&project, &request, &http_file_name(&endpoint)) {
-                Err(Error::Denied(_)) => match host::copy_to_clipboard(&request) {
-                    Err(Error::Denied(_)) => host::notify(
-                        NotificationLevel::Warning,
-                        "Spring Web",
-                        "Creating the .http file needs the tee process capability; copying it needs the clipboard capability.",
-                    ),
-                    result => {
-                        result?;
-                        host::notify(NotificationLevel::Info, "Spring Web", "The tee capability is not granted; the request is on the clipboard.");
-                    }
-                },
-                result => result?,
-            }
+            routes::create_http_file(&route, DEFAULT_BASE_URL, None)?;
             return Ok(None);
         }
-        match host::copy_to_clipboard(&curl_command(&endpoint, &base)) {
+        match routes::copy_as_curl(&route, DEFAULT_BASE_URL) {
             Err(Error::Denied(_)) => host::notify(
                 NotificationLevel::Warning,
                 "Spring Web",
@@ -1439,11 +1374,16 @@ class Users {
 }
 "#;
 
-    fn tree(view: View) -> Vec<TreeItem> {
+    fn rows(view: View) -> Vec<ListItem> {
         match view.body {
-            Body::Tree(items) => items,
-            _ => panic!("not a tree"),
+            Body::List(items) => items,
+            _ => panic!("not a list"),
         }
+    }
+
+    fn row_key(host: &MockHost, tools: &mut WebTools, path: &str, detail: &str) -> String {
+        let rows = rows(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
+        rows.iter().find(|i| i.label == path && i.detail.as_deref() == Some(detail)).unwrap().key.clone()
     }
 
     fn message(view: &View) -> &str {
@@ -1454,21 +1394,42 @@ class Users {
     }
 
     #[test]
-    fn view_lists_annotated_and_functional_endpoints() {
+    fn endpoints_view_lists_routes_flat_with_controller_detail() {
         let host = MockHost::install();
         host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
         host.add_file("src/main/java/com/acme/Routes.java", JAVA_ROUTES);
         let mut tools = WebTools::default();
         let view = tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap();
         assert_eq!(view.status.as_deref(), Some("6 endpoints"));
-        let items = tree(view);
-        let labels: Vec<_> = items.iter().map(|i| (i.key.as_str(), i.label.as_str(), i.detail.as_deref())).collect();
-        assert_eq!(labels[0], ("f:/project/src/main/java/com/acme/Routes.java", "Routes.java", Some("2")));
-        assert_eq!(labels[1].1, "GET /api/users");
-        assert_eq!(labels[1].2, Some("Routes.java:8"));
-        assert!(labels.iter().any(|l| l.1 == "ANY /api/any" && l.2 == Some("Users.java:13")));
-        let users: Vec<_> = items.iter().filter(|i| i.parent.as_deref() == Some("f:/project/src/main/java/com/acme/Users.java")).map(|i| i.label.as_str()).collect();
-        assert_eq!(users, ["ANY /api/any", "GET /api/odd:name/{id}", "GET /api/users", "POST /api/users"]);
+        let rows = rows(view);
+        let labels: Vec<_> = rows.iter().map(|i| (i.label.as_str(), i.detail.as_deref())).collect();
+        assert_eq!(
+            labels,
+            [
+                ("/api/any", Some("[GET] Users")),
+                ("/api/odd:name/{id}", Some("[GET] Users")),
+                ("/api/users", Some("[GET] Handler")),
+                ("/api/users", Some("[GET] Users")),
+                ("/api/users", Some("[POST] Users")),
+                ("/x", Some("[GET] Routes")),
+            ]
+        );
+        assert_eq!(rows[4].icon.as_deref(), Some("ext:fileIcon/aritti.spring-web/route-post"));
+    }
+
+    #[test]
+    fn controller_filter_narrows_the_endpoints() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        host.add_file("src/main/java/com/acme/Routes.java", JAVA_ROUTES);
+        let mut tools = WebTools::default();
+        tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap();
+        host.answer_next_prompt(Some(&["Routes"]));
+        tools.handle(ENDPOINT_VIEW, ViewEvent::Button("routes:filter".into()), &host.invocation()).unwrap();
+        assert_eq!(host.refreshed_views(), [ENDPOINT_VIEW]);
+        let view = tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap();
+        assert_eq!(view.status.as_deref(), Some("1 endpoints \u{b7} controller: Routes"));
+        assert_eq!(rows(view).len(), 1);
     }
 
     #[test]
@@ -1496,30 +1457,29 @@ class Users {
         let host = MockHost::install();
         host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
         let mut tools = WebTools::default();
-        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
-        let create = items.iter().find(|i| i.label == "POST /api/users").unwrap();
-        tools.handle(ENDPOINT_VIEW, ViewEvent::Activate(create.key.clone()), &host.invocation()).unwrap();
+        let key = row_key(&host, &mut tools, "/api/users", "[POST] Users");
+        tools.handle(ENDPOINT_VIEW, ViewEvent::Activate(key), &host.invocation()).unwrap();
         assert_eq!(host.opened_locations().len(), 1);
         assert_eq!(host.opened_locations()[0].0, "/project/src/main/java/com/acme/Users.java");
         assert_eq!(host.opened_locations()[0].1, 6);
     }
 
-    fn curl_of(host: &MockHost, tools: &mut WebTools, label: &str) -> Option<String> {
-        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
-        let key = items.iter().find(|i| i.label == label).unwrap().key.clone();
+    fn curl_of(host: &MockHost, tools: &mut WebTools, path: &str, detail: &str) -> Option<String> {
+        let key = row_key(host, tools, path, detail);
         tools.run_command("copy-endpoint-curl", &host.invocation(), Some(&key)).unwrap();
         host.clipboard()
     }
 
     #[test]
-    fn copies_an_endpoint_as_curl() {
+    fn curl_row_action_still_copies_the_old_text() {
         let host = MockHost::install();
         host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
         let mut tools = WebTools::default();
         host.answer_next_prompt(Some(&["http://localhost:9000/"]));
-        assert_eq!(curl_of(&host, &mut tools, "POST /api/users").as_deref(), Some("curl -X POST 'http://localhost:9000/api/users'"));
-        host.answer_next_prompt(Some(&["http://h"]));
-        assert_eq!(curl_of(&host, &mut tools, "GET /api/users").as_deref(), Some("curl 'http://h/api/users'"));
+        assert_eq!(
+            curl_of(&host, &mut tools, "/api/users", "[POST] Users").as_deref(),
+            Some("curl -X POST 'http://localhost:9000/api/users'")
+        );
     }
 
     #[test]
@@ -1533,8 +1493,7 @@ class Users {
             Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
         });
         let mut tools = WebTools::default();
-        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
-        let key = items.iter().find(|i| i.label == "POST /api/users").unwrap().key.clone();
+        let key = row_key(&host, &mut tools, "/api/users", "[POST] Users");
         host.answer_next_prompt(Some(&["http://localhost:9000"]));
         tools.run_command("create-endpoint-http", &host.invocation(), Some(&key)).unwrap();
         let run = host.process_runs().remove(0);
@@ -1544,19 +1503,12 @@ class Users {
     }
 
     #[test]
-    fn http_file_names_come_from_verb_and_path() {
-        let endpoint = |verb: &str, path: &str| endpoints::Endpoint { verb: verb.into(), path: path.into(), range: Range::default(), handler: None };
-        assert_eq!(http_file_name(&endpoint("GET", "/users/{id}")), "get-users-id.http");
-        assert_eq!(http_file_name(&endpoint("", "/")), "any-root.http");
-    }
-
-    #[test]
     fn dismissed_curl_prompt_copies_nothing() {
         let host = MockHost::install();
         host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
         let mut tools = WebTools::default();
         host.answer_next_prompt(None);
-        assert_eq!(curl_of(&host, &mut tools, "POST /api/users"), None);
+        assert_eq!(curl_of(&host, &mut tools, "/api/users", "[POST] Users"), None);
     }
 
     #[test]
@@ -1565,7 +1517,7 @@ class Users {
         host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
         let mut tools = WebTools::default();
         host.answer_next_prompt(Some(&["http://h"]));
-        assert_eq!(curl_of(&host, &mut tools, "POST /api/users"), None);
+        assert_eq!(curl_of(&host, &mut tools, "/api/users", "[POST] Users"), None);
         assert_eq!(host.notifications().len(), 1);
     }
 
@@ -1573,7 +1525,7 @@ class Users {
     fn malformed_key_is_ignored() {
         let host = MockHost::install();
         let mut tools = WebTools::default();
-        for key in ["e:x:y:/a.java", "e:1", "f:/a.java", "", "e:1:2"] {
+        for key in ["route:x", "route:99", "e:1", ""] {
             tools.handle(ENDPOINT_VIEW, ViewEvent::Activate(key.into()), &host.invocation()).unwrap();
         }
         assert!(host.opened_locations().is_empty());
@@ -1600,20 +1552,18 @@ class Users {
         let host = MockHost::install();
         host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
         let mut tools = WebTools::default();
-        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
-        assert!(items.iter().all(|i| !i.label.contains("PATH")));
-        assert_eq!(items.iter().filter(|i| i.key.starts_with("e:")).count(), 4);
+        let rows = rows(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
+        assert!(rows.iter().all(|i| !i.label.contains("PATH")));
+        assert_eq!(rows.len(), 4);
     }
 
     #[test]
-    fn paths_with_colons_survive_the_key() {
+    fn paths_with_colons_open_their_file() {
         let host = MockHost::install();
         host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
         let mut tools = WebTools::default();
-        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
-        let odd = items.iter().find(|i| i.label == "GET /api/odd:name/{id}").unwrap();
-        assert!(odd.key.ends_with(":/project/src/main/java/com/acme/Users.java"));
-        tools.handle(ENDPOINT_VIEW, ViewEvent::Activate(odd.key.clone()), &host.invocation()).unwrap();
+        let key = row_key(&host, &mut tools, "/api/odd:name/{id}", "[GET] Users");
+        tools.handle(ENDPOINT_VIEW, ViewEvent::Activate(key), &host.invocation()).unwrap();
         assert_eq!(host.opened_locations()[0].0, "/project/src/main/java/com/acme/Users.java");
     }
 }
