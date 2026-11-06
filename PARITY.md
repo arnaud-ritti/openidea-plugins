@@ -70,6 +70,25 @@ Ratings moved only where a listed main gap closed: `twig` (Low to Low-Medium), `
 - the host language ids `jsp`, `vue`, `javascriptreact` and `typescriptreact`, used by activation and provider languages of several plugins;
 - indexing cost of the added `**/*.kt` and script globs on large projects.
 
+## Audit update 2026-11-06: originals compared, what is still feasible
+
+After the parity pass above, the originals were compared again (public source for the open-licence ones, feature inventories for the proprietary ones) and each remaining gap was checked against the plugin API. Evidence, verdicts and limits: [docs/audit-2026-11-06.md](docs/audit-2026-11-06.md). Classes: **F** feasible now, **F\*** feasible with a stated risk (including the items the Status section lists as unverified in the IDE), **B** blocked by an upstream API (Track U).
+
+| Plugin | Still open and feasible | Blocked |
+|---|---|---|
+| `spring-beans` | F: `@Transactional`/`@Async`/`@Cacheable` on private, final or static methods, scheduled method signature, duplicate bean names, `@Configuration` proxy methods. F\*: self-invocation, unresolved `@DependsOn`, component-scan package (library beans are invisible). Today the plugin has one check against about 64 inspections in the original | diagrams as IDE format, generate-dependency actions (U2) |
+| `spring-security`, `spring-data`, `spring-web`, `spring-cloud`, `spring-graphql`, `spring-batch`, `spring-boot`, `jpa-assist` | F: matcher order and `anyRequest` ordering, debug flag; API versioning and `@InitBinder`; unmatched GraphQL mapping; stream channel and bootstrap checks; test constructor autowire; missing entity id, listener signature | JPA console and ER diagram, inlays, wizard |
+| `gitlab` | F: `.gitlab-ci.yml` inspections (undefined job, undefined stage, duplicate job usage, single-quoted shell variable) and `needs`/`extends`/stage navigation. F\*: Open in Worktree, Update Branch | self-hosted servers |
+| `quarkus` | F: duplicate, missing-separator, unassigned and invalid-value property checks, `${}` expressions. F\*: required properties | LSP4MP, Qute, project wizard |
+| `symfony` | F: about 20 further text inspections (controller method missing, deprecated route/service settings, XML parameter keys, Twig asset/route/translation), New-menu templates (F\*: placeholders unconfirmed) | type-aware checks (U4), generators with names (U2, U5) |
+| `laravel`, `blade` | F: Eloquent inspections (guarded assignment, unscheduled prunable, simplify `orderBy`), Blade directive-pair and parenthesis inspections. F\*: Inertia/Ziggy completion in JS/TS, Pest navigation | types (U4), generators with prompts (U2, U5), database, rule-string-to-object and scope-to-attribute intentions |
+| `kube-explorer` | F: deprecated `apiVersion`, duplicate env, missing keys, multi-document intentions, `kubectl debug` in a terminal, 15 templates (F\*). F\*: secrets view | streaming logs, Go-template language, unknown-key checks without schemas |
+| `devcontainer` | F: unknown-property and features checks | open in container, dashboard |
+| `flyway`, `liquibase`, `openapi` | F: changelog and OpenAPI templates | DB-backed actions, Project view badges |
+| `ignore`, `dotenv`, `spring-osgi`, `ideolog`, `properties`, `tasks` | none feasible for parity | rename and safe delete (U1), bundle creation (U2), self-hosted trackers, hide/highlight/selection in Ideolog |
+
+Of 44 verdict rows in the audit: 8 were already done by the pass above, 19 are open and feasible, 17 are blocked.
+
 ## Cross-cutting gaps (largest effect first)
 
 These explain most of the "Medium" and "Low" ratings. Each is an OpenIDEA API gap, not a plugin bug.
@@ -84,6 +103,8 @@ These explain most of the "Medium" and "Low" ratings. Each is an OpenIDEA API ga
 8. **Fixed capabilities.** `net:` hosts and `process:` programs are pinned in the manifest: no self-hosted trackers or GitLab, no `./mvnw`/`./gradlew`, no user-chosen `kubectl` path.
 9. **No streaming processes or background work.** Provider budget 50 ms, commands 5 s; no log tailing, no async indexing.
 10. **Single-target gutter markers with a fixed icon set.** Multi-candidate beans/listeners open only the first.
+11. **Inspections are the widest gap, and mostly not an API gap.** The proprietary originals register about 130 Spring inspections and 16 Kubernetes inspections; ours implement a small fraction. Most missing ones are text-matchable and need only `publish_diagnostics`.
+12. **Provider declarations are per language id.** A check for one file name (`.gitlab-ci.yml`, a Kubernetes manifest) loads the plugin for every file of that language; path filtering happens inside the plugin (U6 would add patterns).
 
 ## Not covered by any plugin here
 
