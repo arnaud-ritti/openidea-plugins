@@ -1,5 +1,10 @@
 {
   "properties": {
+    "specGlobs": {
+      "type": "string",
+      "title": "Extra file name globs treated as OpenAPI files for completion and go to definition (comma separated, for example api/*.yaml)",
+      "default": ""
+    },
     "checkSpecCandidates": {
       "type": "boolean",
       "title": "Hint at a YAML or JSON file with an OpenAPI paths object but no openapi or swagger key",

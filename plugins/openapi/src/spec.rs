@@ -101,6 +101,29 @@ pub fn operations(text: &str, keys: &[Key]) -> Vec<Operation> {
         .collect()
 }
 
+/// For each operation, the first local `$ref` inside it that resolves, with the pointer as written.
+pub fn operation_schema_refs<'k>(text: &str, keys: &'k [Key]) -> Vec<(Operation, String, &'k Key)> {
+    let ops = operations(text, keys);
+    let all_refs = refs(text);
+    let index = Index::new(keys);
+
+    ops.into_iter()
+        .filter_map(|op| {
+            let start = keys.iter().position(|k| k.at == op.at && k.key == op.key)?;
+            let stop = keys[start + 1..]
+                .iter()
+                .find(|k| !k.key.starts_with(&format!("{}.", op.key)) && !k.key.starts_with(&format!("{}[", op.key)))
+                .map_or(text.len(), |k| k.at);
+            let (target, key) = all_refs
+                .iter()
+                .filter(|r| r.at >= op.at && r.at < stop && r.target.starts_with('#'))
+                .find_map(|r| index.target(&r.target[1..]).map(|key| (r.target.clone(), key)))?;
+
+            Some((op, target, key))
+        })
+        .collect()
+}
+
 pub struct Ref {
     pub target: String,
     pub at: usize,

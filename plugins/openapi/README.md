@@ -79,6 +79,8 @@ referenced files again (not verified in a live IDE).
   Swagger UI. Only one level is loaded (files referenced from those files are
   not), at most 50 files and 512 KiB in total; larger ones are skipped. The
   files are re-sent only when they changed.
+- A Redoc button switches the preview to Redoc 2.5.4 (and back). Redoc loads on first use and has its search
+  turned off (it needs a worker). Not verified in a live IDE.
 - There is no Try it out: the frame has no network.
 - The dark theme is a colour inversion of the light one.
 
@@ -98,6 +100,40 @@ In an OpenAPI or Swagger file, completion offers three skeletons: `openapi-path`
 anywhere in the file (`swagger2-root` also in an OpenAPI 3 file), and the tab
 stops are not verified in a live IDE.
 
+## Keyword and enum completion
+
+In an OpenAPI 3 YAML file in block style, completion on a blank or partly typed key offers the keys of the
+object at that indentation (`info`, `paths`, a path item's methods, an operation's `summary`, `parameters`,
+`responses` with common status codes, schema keywords, and so on), taken from a fixed tree of the OpenAPI
+Specification. After `key: ` it offers the enum values of `in`, `style`, `type`, `format`, `scheme`, the
+booleans, and so on (`null` as a type only for 3.1). It is quiet in JSON, Swagger 2, flow style, inside a
+multi-line scalar, and under keys it doesn't know (such as `x-` extensions, `example`, `callbacks`).
+Keys already present in the object are offered again. The skeletons stay available next to the keys.
+
+## Extract, bundle and copy
+
+- Code action "Extract inline schema to components/schemas", with the caret on the line of a `schema:`,
+  `items:`, `additionalProperties:` or a property name whose value is an inline block mapping. The block
+  moves to `components.schemas` (created if missing) under a generated name (`ListPetsResponse`, `Owner`;
+  a number is appended when taken) and is replaced by a `$ref`. YAML only; rename the new schema afterwards.
+- "OpenAPI: Copy Self-Contained Spec" copies the file with every `$ref` to another file replaced by a pointer
+  into `components` and the referenced objects copied there (including what they reference, recursively;
+  a recursive reference is copied once). YAML only; the target must be a block mapping. An object
+  that is not under `/components/<section>/` lands in `schemas`.
+- "OpenAPI: Copy Reference to the Key at the Caret" copies `$ref: '#/components/schemas/Pet'` (or the JSON form)
+  for the key on the caret's line.
+- "OpenAPI: Compare With Last Revision" compares the open file with its version in `HEAD` in the
+  OpenAPI Changes view. It needs the optional `git` permission and a committed file.
+
+## Markers, icons and detection
+
+Every operation whose body has a local `$ref` that resolves gets a gutter marker that opens the first such
+target. `openapi.*` and `swagger.*` files (and `*.openapi.*`, `*.swagger.*`) get the OpenAPI icon. The setting
+`specGlobs` (comma-separated, for example `api/*.yaml, *.contract.json`; a pattern without `/` matches the file
+name, with `/` the end of the path) makes completion and go to definition work in more files, including
+fragments without an `openapi` key. Problems and the endpoints view still need a real root key. The icon and
+marker behaviour is not verified in a live IDE.
+
 ## Templates
 
 New › Swagger 2.0 (YAML) and Swagger 2.0 (JSON) create a minimal Swagger 2.0 document too. New › OpenAPI 3.1 (YAML), OpenAPI 3.1 (JSON) and AsyncAPI 3.0 (YAML) create a minimal valid document:
@@ -107,7 +143,7 @@ preview leave them alone.
 
 ## Licences
 
-The plugin code is MIT. It bundles Swagger UI (Apache-2.0), whose licence and
+The plugin code is MIT. It bundles Swagger UI (Apache-2.0) and Redoc (MIT), whose licence and
 notice files are in `web/vendor/`; see `NOTICE.md`.
 
 ## Limits
@@ -123,7 +159,7 @@ notice files are in `web/vendor/`; see `NOTICE.md`.
   (`#/components/schemas/com` when `com.acme.Error` exists).
 - No rename, find usages, hover or structure view.
 - The endpoints view re-scans the project on each render.
-- The schema modeline is YAML only; JSON specs get no schema validation.
+- The schema modeline, keyword completion, extract and bundle are YAML only; JSON specs get no schema validation.
 - The endpoints view reads a JSON file in full before the 1 MiB cap applies.
 - The preview isn't opened automatically for other file names, and loads only
   the files the open document references directly.
