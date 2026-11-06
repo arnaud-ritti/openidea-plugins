@@ -35,6 +35,8 @@ pub enum Kind {
     Column,
     /// `'update'` in `$user->can('update', $post)`.
     Ability,
+    /// `'Posts/Index'` in `Inertia::render('Posts/Index')`.
+    Inertia,
 }
 
 /// A name in the document and what kind of thing it names.
@@ -477,6 +479,11 @@ fn classify(text: &str, language: &str, literal: &Literal, site: &Site) -> Optio
         return Some((Kind::Livewire, None));
     }
 
+    if site.is_static(&["Inertia"], &["render"]) && direct(0) || site.is_function(&["inertia"]) && direct(0) || site.is_static(&["Route"], &["inertia"]) && direct(1)
+    {
+        return Some((Kind::Inertia, None));
+    }
+
     if (site.is_method(&["can", "cannot", "cant", "authorize"]) || site.is_static(&["Gate"], &["allows", "denies", "check", "authorize", "inspect"]))
         && direct(0)
         || site.is_static(&["Gate"], &["any", "none"]) && site.string_or_list(0)
@@ -594,6 +601,69 @@ fn tag_reference(text: &str, at: usize) -> Option<Reference> {
     };
 
     Some(Reference { kind, start, end, class: None, closed: true })
+}
+
+/// Blade and HTML comments blanked out, so the byte offsets stay the same.
+fn without_comments(text: &str) -> String {
+    let mut out = text.as_bytes().to_vec();
+
+    for (open, close) in [("{{--", "--}}"), ("<!--", "-->")] {
+        let mut from = 0;
+        while let Some(start) = text[from..].find(open).map(|n| from + n) {
+            let end = text[start..].find(close).map_or(text.len(), |n| start + n + close.len());
+            for b in &mut out[start..end] {
+                if *b != b'\n' {
+                    *b = b' ';
+                }
+            }
+            from = end;
+        }
+    }
+
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Every `<x-name` and `<livewire:name` of a Blade document, except the ones
+/// that live in a package namespace (`<x-package::name>`) or aren't names
+/// (`<x-slot:title>`, `<x-{{ $name }}>`).
+pub fn tag_references(text: &str) -> Vec<Reference> {
+    let masked = without_comments(text);
+    let bytes = masked.as_bytes();
+    let mut found = Vec::new();
+
+    for (prefix, kind) in [("<x-", Kind::Component), ("<livewire:", Kind::Livewire)] {
+        for (at, _) in masked.match_indices(prefix) {
+            let start = at + prefix.len();
+            let end = (start..bytes.len()).find(|&i| !(bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'.' | b'-' | b'_'))).unwrap_or(bytes.len());
+
+            if end == start || bytes.get(end) == Some(&b':') || bytes.get(end) == Some(&b'{') {
+                continue;
+            }
+
+            found.push(Reference { kind, start, end, class: None, closed: true });
+        }
+    }
+
+    found.sort_by_key(|r| r.start);
+    found
+}
+
+/// The class of every `Class::factory(` call.
+pub fn factory_classes(text: &str) -> Vec<Range<usize>> {
+    let masked = php::mask_comments(text);
+    let bytes = masked.as_bytes();
+    let mut found = Vec::new();
+
+    for (at, _) in masked.match_indices("::factory(") {
+        let start = (0..at).rev().find(|&i| !(is_identifier(bytes[i]) || bytes[i] == b'\\')).map_or(0, |i| i + 1);
+        let before = start.checked_sub(1).map(|i| bytes[i]);
+
+        if start < at && !matches!(before, Some(b'$' | b'>' | b':')) {
+            found.push(start..at);
+        }
+    }
+
+    found
 }
 
 /// Ranges of a Blade document that are code: echoes, directive arguments.

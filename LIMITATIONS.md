@@ -230,7 +230,7 @@ Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus feat
 
 - **Blocks:** highlighting and completion of `Blade::directive('name', …)` directives; components registered with `Blade::component()` or by a package (`<x-package::alert>`); the slots and attributes a component accepts (`<x-slot:title>`, `:prop`).
 - **Why:** a directive or alias exists only in the PHP that registers it, which a plugin can't evaluate, and the plugin has no PHP class index to read a component's constructor.
-- **Workaround in the plugins:** only Laravel's and Livewire's own directives are known. Components are found by Laravel's naming convention (`resources/views/components`, `app/View/Components`, `app/Livewire`).
+- **Workaround in the plugins:** only Laravel's and Livewire's own directives are known. Components are found by Laravel's naming convention (`resources/views/components`, `app/View/Components`, `app/Livewire`) and by the literal aliases of `Blade::component()` in `app/Providers`. A missing component, Livewire component, Inertia page (`resources/js/Pages`, `resources/js/pages`) or `Model::factory()` target is reported; package namespaces (`<x-package::alert>`) are skipped, and so is every component when a provider calls `anonymousComponentPath()` or `componentNamespace()`. Inertia pages are only checked once the project has some, so a custom `page_paths` in `config/inertia.php` can give false warnings; each check has its own setting.
 
 ### Route names that packages register can't be checked
 

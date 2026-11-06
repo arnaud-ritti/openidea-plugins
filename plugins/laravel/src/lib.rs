@@ -47,6 +47,9 @@ fn affects_index(relative: &str) -> bool {
         "app/Models/",
         "database/migrations/",
         "app/Providers/",
+        "database/factories/",
+        "resources/js/Pages/",
+        "resources/js/pages/",
     ];
     directory.iter().any(|d| relative.starts_with(d))
         || matches!(relative, "composer.json" | ".env" | ".env.example" | "bootstrap/app.php" | "app/Http/Kernel.php" | "app/Http/routes.php")
@@ -133,6 +136,7 @@ fn candidates<'a>(index: &'a Index, doc: &Document, reference: &Reference) -> Co
         Kind::Component => Cow::Borrowed(&index.components),
         Kind::Livewire => Cow::Borrowed(&index.livewire),
         Kind::Vite => Cow::Borrowed(&index.vite),
+        Kind::Inertia => Cow::Borrowed(&index.inertia_pages),
         Kind::Rule => Cow::Borrowed(&index.rules),
         Kind::Ability => Cow::Borrowed(&index.abilities),
         Kind::Column => {
@@ -165,6 +169,7 @@ fn completion_kind(kind: Kind) -> CompletionKind {
         Kind::Middleware => CompletionKind::Module,
         Kind::Controller | Kind::Component | Kind::Livewire => CompletionKind::Class,
         Kind::Vite => CompletionKind::File,
+        Kind::Inertia => CompletionKind::File,
         Kind::Column => CompletionKind::Field,
         Kind::Rule => CompletionKind::Keyword,
         Kind::Ability => CompletionKind::Value,
@@ -178,9 +183,9 @@ fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '$', '*']) || name.ends_with('.')
 }
 
-fn problem(text: &str, reference: &Reference, code: &str, severity: Severity, message: String) -> Diagnostic {
+fn problem(text: &str, range: std::ops::Range<usize>, code: &str, severity: Severity, message: String) -> Diagnostic {
     Diagnostic {
-        range: range_of(text, reference.start, reference.end),
+        range: range_of(text, range.start, range.end),
         severity,
         message,
         code: Some(code.into()),
@@ -204,22 +209,78 @@ pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -
 
         match reference.kind {
             Kind::View if !name.contains("::") && !index.views.is_empty() && !index.views.contains_key(name) => {
-                found.push(problem(text, &reference, "missing-view", Severity::Warning, format!("View \"{name}\" does not exist.")));
+                found.push(problem(text, reference.start..reference.end, "missing-view", Severity::Warning, format!("View \"{name}\" does not exist.")));
             }
             Kind::Config if missing_config(index, name) => {
-                found.push(problem(text, &reference, "missing-config", Severity::Info, format!("Config key \"{name}\" is not defined.")));
+                found.push(problem(text, reference.start..reference.end, "missing-config", Severity::Info, format!("Config key \"{name}\" is not defined.")));
             }
             Kind::Translation if missing_translation(index, name) => {
-                found.push(problem(text, &reference, "missing-translation", Severity::Info, format!("Translation key \"{name}\" is missing.")));
+                found.push(problem(text, reference.start..reference.end, "missing-translation", Severity::Info, format!("Translation key \"{name}\" is missing.")));
             }
             Kind::Route if check_routes && !index.routes.contains_key(name) => {
-                found.push(problem(text, &reference, "missing-route", Severity::Warning, format!("Route \"{name}\" is not defined.")));
+                found.push(problem(text, reference.start..reference.end, "missing-route", Severity::Warning, format!("Route \"{name}\" is not defined.")));
+            }
+            Kind::Inertia if unknown_inertia_page(index, name) && enabled("reportUnknownInertiaPages") => {
+                found.push(problem(text, reference.start..reference.end, "laravel.unknown-inertia-page", Severity::Warning, format!("Inertia page \"{name}\" does not exist.")));
+            }
+            Kind::Livewire if unknown_livewire(index, name) && enabled("reportUnknownLivewireDirectives") => {
+                found.push(problem(text, reference.start..reference.end, "laravel.unknown-livewire-directive", Severity::Warning, format!("Livewire component \"{name}\" does not exist.")));
             }
             _ => {}
         }
     }
 
+    if language == "blade" {
+        for reference in refs::tag_references(text) {
+            let name = &text[reference.start..reference.end];
+            let range = reference.start..reference.end;
+
+            match reference.kind {
+                Kind::Component if unknown_component(index, name) && enabled("reportUnknownComponents") => {
+                    found.push(problem(text, range, "laravel.unknown-component", Severity::Warning, format!("Blade component \"{name}\" does not exist.")));
+                }
+                Kind::Livewire if unknown_livewire(index, name) && enabled("reportUnknownLivewire") => {
+                    found.push(problem(text, range, "laravel.unknown-livewire", Severity::Warning, format!("Livewire component \"{name}\" does not exist.")));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if language == "php" && enabled("reportUnknownFactories") {
+        for range in refs::factory_classes(text) {
+            let class = text[range.clone()].rsplit('\\').next().unwrap_or_default();
+            if unknown_factory(index, class) {
+                found.push(problem(text, range, "laravel.unknown-factory", Severity::Warning, format!("Model {class} has no factory.")));
+            }
+        }
+    }
+
+    found.sort_by_key(|d| (d.range.start.line, d.range.start.character));
     found
+}
+
+fn enabled(setting: &str) -> bool {
+    host::setting_bool(setting).unwrap_or(true)
+}
+
+fn unknown_component(index: &Index, name: &str) -> bool {
+    !index.open_components && !matches!(name, "slot" | "dynamic-component") && !index.components.contains_key(name)
+}
+
+fn unknown_livewire(index: &Index, name: &str) -> bool {
+    !matches!(name, "is" | "styles" | "scripts" | "dynamic-component") && !index.livewire.contains_key(name) && !index.views.contains_key(&format!("livewire.{name}"))
+}
+
+fn unknown_inertia_page(index: &Index, name: &str) -> bool {
+    !index.inertia_pages.is_empty() && !name.contains("::") && !name.ends_with('/') && !index.inertia_pages.contains_key(name)
+}
+
+fn unknown_factory(index: &Index, class: &str) -> bool {
+    !matches!(class, "static" | "self" | "parent")
+        && index.models.contains_key(class)
+        && !index.factories.contains(&format!("{class}Factory"))
+        && !index.factory_overrides.contains(class)
 }
 
 /// A key below an array (or config file) of the project that doesn't have it.

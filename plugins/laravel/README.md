@@ -58,8 +58,21 @@ and the first seven reindex afterwards. Saving a file under `routes/`,
 `composer.json` also rebuilds the index.
 
 A project counts as Laravel when it has an `artisan` file or requires
-`laravel/framework`. Settings: problems on/off, route problems, extra view
+`laravel/framework`. Settings: problems on/off, route problems, one switch each
+for unknown Blade components, Livewire components (tag and `@livewire`),
+Inertia pages and `Model::factory()` without a factory, extra view
 directories, main locale, public directory.
+
+Problems for names that don't exist (warnings): `<x-name>` with no file under
+`resources/views/components` or class under `app/View/Components`;
+`<livewire:name>` / `@livewire('name')` with no class under `app/Livewire` and
+no `livewire.name` view; `Inertia::render('Page')`, `inertia('Page')` and
+`Route::inertia()` naming a page missing from `resources/js/Pages` or
+`resources/js/pages` (`vue`, `jsx`, `tsx`, `svelte`); `Model::factory()` of a
+model of the project without `database/factories/<Model>Factory.php`. Names in
+a package namespace (`<x-package::alert>`), names built at run time, and
+projects where a provider registers component paths or namespaces
+(`anonymousComponentPath`, `componentNamespace`) stay quiet.
 
 ## Not ported
 

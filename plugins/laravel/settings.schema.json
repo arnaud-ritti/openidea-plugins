@@ -24,6 +24,31 @@
       "type": "string",
       "title": "Public directory that asset() paths start from (project-relative)",
       "default": "public"
+    },
+    "reportUnknownComponents": {
+      "type": "boolean",
+      "title": "Report <x-\u2026> Blade components that have no file or class",
+      "default": true
+    },
+    "reportUnknownLivewire": {
+      "type": "boolean",
+      "title": "Report <livewire:\u2026> components that have no class or view",
+      "default": true
+    },
+    "reportUnknownLivewireDirectives": {
+      "type": "boolean",
+      "title": "Report @livewire('\u2026') components that have no class or view",
+      "default": true
+    },
+    "reportUnknownInertiaPages": {
+      "type": "boolean",
+      "title": "Report Inertia pages that have no file under resources/js/Pages",
+      "default": true
+    },
+    "reportUnknownFactories": {
+      "type": "boolean",
+      "title": "Report Model::factory() calls of models without a factory",
+      "default": true
     }
   }
 }

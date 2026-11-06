@@ -364,3 +364,111 @@ fn ignores_projects_without_laravel() {
     assert_eq!(plugin.run_command("reindex", &host.invocation(), None).unwrap(), None);
     assert_eq!(host.notifications()[0].body, "No Laravel project is open.");
 }
+
+fn activated_with(host: &MockHost, files: &[(&str, &str)]) -> Main {
+    laravel_project(host);
+    for (path, text) in files {
+        host.add_file(path, text);
+    }
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+    plugin
+}
+
+fn codes(plugin: &Main, language: &str, text: &str) -> Vec<String> {
+    let index = plugin.index_for("/project/x").unwrap();
+    problems(index, language, text, false).into_iter().map(|d| d.code.unwrap()).collect()
+}
+
+#[test]
+fn unknown_blade_component_warns() {
+    let host = MockHost::install();
+    let plugin = activated(&host);
+
+    assert_eq!(codes(&plugin, "blade", "<x-nope />\n<x-card>a</x-card>\n<x-forms.input-field />\n<x-panel />"), ["laravel.unknown-component"]);
+    assert!(codes(&plugin, "blade", "{{-- <x-nope /> --}}\n<x-slot name=\"a\"></x-slot>\n<x-slot:title>t</x-slot:title>\n<x-dynamic-component :component=\"$c\" />\n<x-{{ $name }} />").is_empty());
+}
+
+#[test]
+fn registered_blade_components_are_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(
+        &host,
+        &[("app/Providers/AppServiceProvider.php", "<?php\nBlade::component('package-alert', Alert::class);\n"), ("resources/views/components/card/card.blade.php", "")],
+    );
+
+    assert!(codes(&plugin, "blade", "<x-package-alert /><x-card />").is_empty());
+
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("app/Providers/AppServiceProvider.php", "<?php\nBlade::anonymousComponentPath(__DIR__.'/x');\n")]);
+    assert!(codes(&plugin, "blade", "<x-nope />").is_empty());
+}
+
+#[test]
+fn package_component_namespace_is_skipped() {
+    let host = MockHost::install();
+    let plugin = activated(&host);
+
+    assert!(codes(&plugin, "blade", "<x-package::alert />").is_empty());
+    assert!(codes(&plugin, "blade", "<livewire:package::alert />").is_empty());
+}
+
+#[test]
+fn unknown_livewire_component_warns() {
+    let host = MockHost::install();
+    let plugin = activated(&host);
+
+    assert_eq!(codes(&plugin, "blade", "<livewire:nope />"), ["laravel.unknown-livewire"]);
+    assert_eq!(codes(&plugin, "blade", "@livewire('nope')"), ["laravel.unknown-livewire-directive"]);
+    assert!(codes(&plugin, "blade", "<livewire:styles /><livewire:scripts /><livewire:is :component=\"$c\" />@livewire($name)").is_empty());
+}
+
+#[test]
+fn known_livewire_component_is_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("resources/views/livewire/volt-counter.blade.php", "")]);
+
+    assert!(codes(&plugin, "blade", "<livewire:counter />\n@livewire('counter')\n<livewire:volt-counter />").is_empty());
+}
+
+#[test]
+fn unknown_inertia_page_warns() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("resources/js/Pages/Posts/Index.vue", ""), ("resources/js/pages/Home.tsx", "")]);
+
+    let php = "<?php\nInertia::render('Missing/Page');\nInertia::render('Posts/Index');\ninertia('Home');\nRoute::inertia('/x', 'Nope');\nInertia::render('Posts/' . $x);\n";
+    assert_eq!(codes(&plugin, "php", php), ["laravel.unknown-inertia-page", "laravel.unknown-inertia-page"]);
+
+    let bare = MockHost::install();
+    let plugin = activated(&bare);
+    assert!(codes(&plugin, "php", "<?php\nInertia::render('Missing/Page');").is_empty());
+}
+
+#[test]
+fn unknown_factory_for_model_warns() {
+    let host = MockHost::install();
+    let plugin = activated_with(
+        &host,
+        &[
+            ("database/factories/ArticleFactory.php", "<?php\nclass ArticleFactory {}\n"),
+            ("app/Models/Tag.php", "<?php\nclass Tag extends Model\n{\n    protected static function newFactory() {}\n}\n"),
+        ],
+    );
+
+    let php = "<?php\nPost::factory()->create();\nArticle::factory();\nTag::factory();\nUnknown::factory();\nstatic::factory();\n";
+    let found = problems(plugin.index_for("/project/x").unwrap(), "php", php, false);
+    assert_eq!(found.iter().map(|d| d.code.clone().unwrap()).collect::<Vec<_>>(), ["laravel.unknown-factory"]);
+    assert_eq!((found[0].range.start.line, found[0].range.start.character, found[0].range.end.character), (1, 0, 4));
+}
+
+#[test]
+fn switched_off_checks_are_quiet() {
+    let host = MockHost::install();
+    let plugin = activated(&host);
+    for key in ["reportUnknownComponents", "reportUnknownLivewire", "reportUnknownLivewireDirectives", "reportUnknownInertiaPages", "reportUnknownFactories"] {
+        host.set_setting(key, "false");
+    }
+
+    assert!(codes(&plugin, "blade", "<x-nope /><livewire:nope />@livewire('nope')").is_empty());
+    assert!(codes(&plugin, "php", "<?php\nPost::factory();").is_empty());
+}
