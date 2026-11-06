@@ -51,6 +51,8 @@ pub struct Bean {
     pub profiles: Vec<String>,
     /// `@Qualifier`/`@Named` values on the declaration.
     pub qualifiers: Vec<String>,
+    /// Carries a `@Conditional*` annotation: it may not exist at run time.
+    pub conditional: bool,
     pub range: Range,
 }
 
@@ -163,6 +165,10 @@ pub fn push_injection(
     });
 }
 
+pub fn is_conditional(annotations: &[Annotation]) -> bool {
+    annotations.iter().any(|a| a.name.starts_with("Conditional"))
+}
+
 /// A class bean's declaration from its annotations; `None` when it isn't one.
 pub fn class_bean(text: &str, name: &str, at: usize, annotations: &[Annotation], repository: bool) -> Option<Bean> {
     let stereotype = annotations.iter().find(|a| java::STEREOTYPES.contains(&a.name.as_str()));
@@ -178,6 +184,7 @@ pub fn class_bean(text: &str, name: &str, at: usize, annotations: &[Annotation],
         primary: annotations.iter().any(|a| a.name == "Primary"),
         profiles: values(annotations, &["Profile"]),
         qualifiers: values(annotations, &["Qualifier", "Named"]),
+        conditional: is_conditional(annotations),
         range: range(text, at, at + name.len()),
     })
 }
@@ -195,6 +202,7 @@ pub fn method_bean(text: &str, name: &str, at: usize, ty: &str, annotations: &[A
         primary: annotations.iter().any(|a| a.name == "Primary"),
         profiles: if profiles.is_empty() { class.to_vec() } else { profiles },
         qualifiers: values(annotations, &["Qualifier", "Named"]),
+        conditional: is_conditional(annotations),
         range: range(text, at, at + name.len()),
     }
 }
@@ -218,6 +226,7 @@ fn java_model(text: &str) -> FileModel {
         let repository = is_repository(&t.kind, supers.iter().map(String::as_str));
         let bean = if t.kind == "@interface" { None } else { class_bean(text, &t.name, t.at, &t.annotations, repository) };
         let class_profiles = bean.as_ref().map(|b| b.profiles.clone()).unwrap_or_default();
+        let class_conditional = bean.as_ref().is_some_and(|b| b.conditional);
         let owner = bean.map(|b| {
             out.beans.push(b);
             out.beans.len() - 1
@@ -237,7 +246,9 @@ fn java_model(text: &str) -> FileModel {
                 }
                 MemberKind::Method if m.has(&["Bean"]) => {
                     let ty = m.ty.as_ref().map(|t| t.name.as_str()).unwrap_or_default();
-                    out.beans.push(method_bean(text, &m.name, m.at, ty, &m.annotations, &class_profiles));
+                    let mut bean = method_bean(text, &m.name, m.at, ty, &m.annotations, &class_profiles);
+                    bean.conditional |= class_conditional;
+                    out.beans.push(bean);
                     let bean = Some(out.beans.len() - 1);
                     for p in &m.params {
                         push_injection(text, &mut out, &p.ty, &p.name, &p.annotations, bean, None);
@@ -321,6 +332,7 @@ fn xml_model(text: &str) -> FileModel {
                 primary: e.value("primary") == Some("true"),
                 profiles,
                 qualifiers: Vec::new(),
+                conditional: false,
                 range: at,
             });
             owners[i] = Some(out.beans.len() - 1);

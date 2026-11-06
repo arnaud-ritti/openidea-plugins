@@ -610,9 +610,10 @@ fn with_other(other: &str) -> (MockHost, Navigator) {
 
 #[test]
 fn duplicate_bean_names_across_files_warn_on_both() {
-    let (host, mut n) = with_other("@Component(\"dispatcher\")\nclass Other {}\n");
-    assert_eq!(findings(&host, &mut n, "Subject.java", DUPLICATE), [pair("duplicate-bean-name", "SmtpMailer")]);
     let other = "@Component(\"dispatcher\")\nclass Other {}\n";
+    let (host, mut n) = with_other(other);
+    host.add_file("src/main/java/com/acme/Subject.java", DUPLICATE);
+    assert_eq!(findings(&host, &mut n, "Subject.java", DUPLICATE), [pair("duplicate-bean-name", "SmtpMailer")]);
     assert_eq!(findings(&host, &mut n, "Other.java", other), [pair("duplicate-bean-name", "Other")]);
 }
 
@@ -633,6 +634,25 @@ fn duplicate_bean_name_is_quiet_for_library_or_dynamic_name() {
     assert!(findings(&host, &mut n, "Subject.java", conditional).is_empty());
     let library = "@Service(\"mailSender\")\nclass Sender {}\n";
     assert!(findings(&host, &mut n, "Subject.java", library).is_empty());
+}
+
+#[test]
+fn conditional_bean_clash_is_quiet_on_either_side() {
+    let conditional = "@Configuration(proxyBeanMethods = false)\nclass Other {\n    @Bean @ConditionalOnMissingBean\n    Stopwatch stopwatch() { return null; }\n}\n";
+    let plain = "@Configuration(proxyBeanMethods = false)\nclass Subject {\n    @Bean\n    Stopwatch stopwatch() { return null; }\n}\n";
+    let (host, mut n) = with_other(conditional);
+    host.add_file("src/main/java/com/acme/Subject.java", plain);
+    assert!(findings(&host, &mut n, "Subject.java", plain).is_empty(), "the other side is conditional");
+    assert!(findings(&host, &mut n, "Other.java", conditional).is_empty(), "this side is conditional");
+    let (host, mut n) = with_other(plain.replace("Subject", "Other").as_str());
+    assert_eq!(findings(&host, &mut n, "Subject.java", plain), [pair("duplicate-bean-name", "stopwatch")]);
+}
+
+#[test]
+fn activation_succeeds_when_file_events_are_denied() {
+    let host = MockHost::install().with_capabilities(&["project.read"]);
+    assert_eq!(Navigator::default().activate(&host.context("aritti.spring-beans")), Ok(()));
+    assert!(host.logs().iter().any(|(level, _)| *level == LogLevel::Warn));
 }
 
 #[test]
@@ -671,6 +691,10 @@ fn configuration_proxy_method_is_quiet_for_library_or_dynamic_name() {
 fn capitalised_component_name_gets_a_hint() {
     let text = "@Service(\"UserService\")\nclass UserServiceImpl {}\n";
     assert_eq!(found(text), [pair("bean-name-convention", "UserService")]);
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    assert_eq!(host.diagnostics()[&document.path][0].severity, Severity::Hint);
     let method = "@Configuration(proxyBeanMethods = false)\nclass C {\n    @Bean(\"Clock\")\n    Clock clock() { return null; }\n}\n";
     assert_eq!(found(method), [pair("bean-name-convention", "Clock")]);
 }

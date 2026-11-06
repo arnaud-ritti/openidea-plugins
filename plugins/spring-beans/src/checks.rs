@@ -4,7 +4,7 @@
 
 use crate::model::{Bean, class_bean, method_bean};
 use crate::{World, file_name};
-use openidea_plugin::host;
+use openidea_plugin::{Severity, host};
 use spring_text::finding::Finding;
 use spring_text::java::{self, Annotation, JavaFile, Member, STEREOTYPES, TypeDecl};
 
@@ -187,15 +187,11 @@ fn naming(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     let declared = stereotype.map(|a| (a, &["value"][..])).into_iter().chain(methods.map(|a| (a, &["name", "value"][..])));
     for (annotation, keys) in declared {
         for name in annotation.strings(keys).into_iter().filter(|n| capitalised(&n.value)) {
-            out.push(Finding::new(
-                name.at,
-                name.end,
-                "bean-name-convention",
-                format!(
-                    "Bean names conventionally start with a lowercase letter (\"{}\"), as the default names Spring derives do.",
-                    spring_text::decapitalize(&name.value)
-                ),
-            ));
+            let message = format!(
+                "Bean names conventionally start with a lowercase letter (\"{}\"), as the default names Spring derives do.",
+                spring_text::decapitalize(&name.value)
+            );
+            out.push(Finding::new(name.at, name.end, "bean-name-convention", message).with_severity(Severity::Hint));
         }
     }
 }
@@ -214,9 +210,8 @@ fn profiles_overlap(a: &[String], b: &[String]) -> bool {
     a.iter().any(|p| b.contains(p))
 }
 
-fn unconditional(annotations: &[Annotation], keys: &[&str]) -> bool {
-    let conditional = annotations.iter().any(|a| a.name.starts_with("Conditional"));
-    !conditional && !annotations.iter().any(|a| is_dynamic(a, keys))
+fn static_name(annotations: &[Annotation], keys: &[&str]) -> bool {
+    !annotations.iter().any(|a| is_dynamic(a, keys))
 }
 
 fn duplicate_names(path: &str, file: &JavaFile, ty: &TypeDecl, text: &str, world: &World, out: &mut Vec<Finding>) {
@@ -224,24 +219,26 @@ fn duplicate_names(path: &str, file: &JavaFile, ty: &TypeDecl, text: &str, world
     let stereotype = STEREOTYPES.iter().any(|s| spring(file, &ty.annotations, s).is_some());
     let class = stereotype.then(|| class_bean(text, &ty.name, ty.at, &ty.annotations, false)).flatten();
     let class_profiles = class.as_ref().map(|b| b.profiles.clone()).unwrap_or_default();
-    if let Some(bean) = class.filter(|_| unconditional(&ty.annotations, &["value"])) {
+    let class_conditional = class.as_ref().is_some_and(|b| b.conditional);
+    if let Some(bean) = class.filter(|_| static_name(&ty.annotations, &["value"])) {
         mine.push((bean, ty.at, ty.at + ty.name.len()));
     }
     for method in ty.methods().filter(|m| spring(file, &m.annotations, "Bean").is_some()) {
-        if !unconditional(&method.annotations, &["name", "value"]) || !unconditional(&ty.annotations, &["value"]) {
+        if !static_name(&method.annotations, &["name", "value"]) || !static_name(&ty.annotations, &["value"]) {
             continue;
         }
         let returns = method.ty.as_ref().map(|t| t.name.as_str()).unwrap_or_default();
-        let bean = method_bean(text, &method.name, method.at, returns, &method.annotations, &class_profiles);
+        let mut bean = method_bean(text, &method.name, method.at, returns, &method.annotations, &class_profiles);
+        bean.conditional |= class_conditional;
         let (start, end) = name_span(method);
         mine.push((bean, start, end));
     }
-    for (bean, start, end) in mine {
+    for (bean, start, end) in mine.into_iter().filter(|(b, _, _)| !b.conditional) {
         let clash = world.beans().find(|(other_path, other)| {
             let same = *other_path == path && other.range == bean.range;
             let overload = *other_path == path && other.kind == "@Bean" && bean.kind == "@Bean" && other.name == bean.name;
             let shares_name = names_of(other).any(|n| names_of(&bean).any(|m| m == n));
-            !same && !overload && shares_name && profiles_overlap(&bean.profiles, &other.profiles)
+            !same && !overload && !other.conditional && shares_name && profiles_overlap(&bean.profiles, &other.profiles)
         });
         let Some((other_path, other)) = clash else { continue };
         out.push(Finding::new(

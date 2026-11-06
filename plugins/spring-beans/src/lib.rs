@@ -15,7 +15,7 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Context, Diagnostic, Error, Event, EventKind, Invocation, Location, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
+    Context, Diagnostic, Error, Event, EventKind, Invocation, Location, LogLevel, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
 };
 use sites::{Hit, Site, Word};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
@@ -304,6 +304,15 @@ fn braces_balanced(text: &str) -> bool {
         }
     }
     depth == 0
+}
+
+/// Events only refresh diagnostics on open and save, which the providers publish anyway.
+fn subscribe_to_file_events() {
+    for kind in [EventKind::FileSaved, EventKind::FileOpened] {
+        if let Err(error) = host::subscribe(kind) {
+            host::log(LogLevel::Warn, &format!("File events unavailable, checks run from the editor only: {error:?}"));
+        }
+    }
 }
 
 pub struct Navigator {
@@ -671,9 +680,7 @@ impl Views for Navigator {
 
 impl Plugin for Navigator {
     fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
-        for kind in [EventKind::FileSaved, EventKind::FileOpened] {
-            host::subscribe(kind)?;
-        }
+        subscribe_to_file_events();
         Ok(())
     }
 

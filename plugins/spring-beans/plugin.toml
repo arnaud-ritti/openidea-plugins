@@ -11,7 +11,8 @@ wasm = "dist/plugin.wasm"
 activation = ["on-language:java", "on-language:kotlin", "on-language:xml", "on-event:file-opened", "on-event:file-saved"]
 
 [capabilities]
-required = ["project.read", "events"]
+required = ["project.read"]
+optional = ["events"]
 
 [[contributes.providers]]
 kinds = ["definition", "line-markers", "completion", "code-actions"]
