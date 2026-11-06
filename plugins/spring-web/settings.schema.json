@@ -1,0 +1,14 @@
+{
+  "properties": {
+    "springWeb.checkApiVersioning": {
+      "type": "boolean",
+      "title": "Warn when a request mapping uses the version attribute but the project configures no API versioning",
+      "default": true
+    },
+    "springWeb.checkInitBinder": {
+      "type": "boolean",
+      "title": "Warn when an @InitBinder method returns a value or takes no WebDataBinder",
+      "default": true
+    }
+  }
+}
