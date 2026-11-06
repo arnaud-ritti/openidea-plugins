@@ -1,6 +1,7 @@
 //! OpenAPI: editing support for OpenAPI 3 and Swagger 2 files.
 
 mod checks;
+mod diff;
 mod http;
 mod json;
 mod spec;
@@ -10,13 +11,15 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, ListItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Project, Range,
+    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, PickItem, Plugin, Position, Project, Range,
     TextEdit, host, register_plugin,
 };
 
 #[derive(Default)]
 pub struct OpenApi {
     project_files: Vec<String>,
+    /// Status line and changes of the last comparison.
+    comparison: Option<(String, Vec<ListItem>)>,
 }
 
 fn project_for(path: &str) -> Result<Project, Error> {
@@ -192,6 +195,42 @@ impl OpenApi {
     }
 }
 
+impl OpenApi {
+    fn compare_specs(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let editor = ctx.editor().ok_or("No file is open.")?;
+        let path = editor.path();
+        let revision = editor.document()?.text;
+        if spec::parse(&revision).is_none() {
+            return Err("The current file is not an OpenAPI document.".into());
+        }
+        let project = project_for(&path)?;
+        self.refresh_project_files(&project);
+        let root = project.root()?;
+        let mut candidates = Vec::new();
+        for file in self.project_files.iter().filter(|file| **file != path) {
+            let Ok(text) = project.read_file(file) else { continue };
+            if text.len() <= MAX_SCANNED_FILE_BYTES && spec::parse(&text).is_some() {
+                let relative = file.strip_prefix(root.trim_end_matches('/')).unwrap_or(file).trim_start_matches('/');
+                candidates.push(PickItem::new(file, relative));
+            }
+        }
+        if candidates.is_empty() {
+            host::notify(NotificationLevel::Info, "OpenAPI", "No other OpenAPI file in this project to compare with.");
+            return Ok(None);
+        }
+        let Some(base_path) = host::pick("Compare the current spec with (base)", &candidates)? else { return Ok(None) };
+        let base = project.read_file(&base_path)?;
+        let changes = diff::compare(&base_path, &base, &path, &revision);
+        let name = |p: &str| p.rsplit('/').next().unwrap_or(p).to_owned();
+        let status = format!("{} to {}: {} changes", name(&base_path), name(&path), changes.len());
+        let items = changes.iter().map(|c| ListItem::new(&c.location, &c.label).detail(&c.detail)).collect();
+        self.comparison = Some((status, items));
+        host::refresh_view(COMPARE);
+        host::reveal_view(COMPARE)?;
+        Ok(None)
+    }
+}
+
 impl Plugin for OpenApi {
     fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
         let mut paths: Vec<&str> = events
@@ -218,6 +257,9 @@ impl Plugin for OpenApi {
     }
 
     fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        if id == "compare-specs" {
+            return self.compare_specs(ctx);
+        }
         if id != "copy-http-requests" {
             return Err(Error::NotFound(format!("command {id}")));
         }
@@ -410,6 +452,7 @@ impl Providers for OpenApi {
 const MAX_SCANNED_FILE_BYTES: usize = 1 << 20;
 
 pub const ENDPOINTS: &str = "endpoints";
+pub const COMPARE: &str = "compare";
 
 // ponytail: re-scans the project on every render; cache per file version if large projects make it slow.
 fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
@@ -448,7 +491,14 @@ fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
 }
 
 impl Views for OpenApi {
-    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+    fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        if view == COMPARE {
+            return Ok(match &self.comparison {
+                None => View::message("Run OpenAPI: Compare With Another Spec…"),
+                Some((status, items)) if items.is_empty() => View::message("No differences.").status(status),
+                Some((status, items)) => View::new(Body::List(items.clone())).status(status),
+            });
+        }
         let Some(project) = ctx.project() else {
             return Ok(View::message("Open a project to list its endpoints."));
         };
@@ -644,6 +694,39 @@ mod tests {
         assert_eq!(host.opened_locations(), [("/project/api/openapi.yaml".to_owned(), 21, 4)]);
         OpenApi::default().handle(ENDPOINTS, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
         assert_eq!(host.refreshed_views(), [ENDPOINTS]);
+    }
+
+    #[test]
+    fn compares_with_the_picked_spec_and_opens_a_change() {
+        let host = MockHost::install();
+        let revision = PETSTORE.replace("listPets", "listAllPets");
+        host.add_file("/project/old/openapi.yaml", PETSTORE);
+        host.add_file("/project/api.yaml", &revision);
+        host.open_editor("/project/api.yaml", "yaml", &revision, &[(0, 0, 0, 0)]);
+        let mut openapi = OpenApi::default();
+
+        host.answer_next_prompt(Some(&["/project/old/openapi.yaml"]));
+        openapi.run_command("compare-specs", &host.invocation(), None).unwrap();
+        assert_eq!(host.revealed_views(), [COMPARE]);
+        let view = openapi.render(COMPARE, None, &host.invocation()).unwrap();
+        let Body::List(items) = view.body else { panic!("expected a list") };
+        assert_eq!(items[0].label, "~ GET /pets");
+        openapi.handle(COMPARE, ViewEvent::Activate(items[0].key.clone()), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations()[0].0, "/project/api.yaml");
+    }
+
+    #[test]
+    fn dismissing_the_second_spec_chooser_compares_nothing() {
+        let host = MockHost::install();
+        host.add_file("/project/old/openapi.yaml", PETSTORE);
+        host.add_file("/project/api.yaml", PETSTORE);
+        host.open_editor("/project/api.yaml", "yaml", PETSTORE, &[(0, 0, 0, 0)]);
+        let mut openapi = OpenApi::default();
+
+        host.answer_next_prompt(None);
+        openapi.run_command("compare-specs", &host.invocation(), None).unwrap();
+        assert!(host.revealed_views().is_empty());
+        assert!(openapi.comparison.is_none());
     }
 
     #[test]

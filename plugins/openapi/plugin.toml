@@ -4,9 +4,9 @@ version = "0.1.0" # x-release-please-version
 description = "Editing support for OpenAPI 3 and Swagger 2 files in YAML and JSON: $ref completion and navigation, problems for unresolved references, duplicate operationIds and path parameters, the official schema for validation, an endpoints tool window, a Swagger UI preview beside the text, and requests for the HTTP client. Independent implementation, not affiliated with JetBrains or SmartBear."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT AND Apache-2.0"
-change-notes = "0.1.0: first release, with $ref completion and go to definition, problems on open and save, the OpenAPI schema modeline, the endpoints tool window, the Swagger UI preview (bundles Swagger UI 5.34.1, Apache-2.0) and Copy Requests for the HTTP Client."
+change-notes = "OpenAPI: Compare With Another Spec… lists added, removed and changed operations, schemas and sections against a spec you pick, in the OpenAPI Changes view. 0.1.0: first release, with $ref completion and go to definition, problems on open and save, the OpenAPI schema modeline, the endpoints tool window, the Swagger UI preview (bundles Swagger UI 5.34.1, Apache-2.0) and Copy Requests for the HTTP Client."
 categories = ["languages", "tools"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 
 activation = ["on-event:file-opened", "on-event:file-saved", "on-view:endpoints"]
@@ -24,6 +24,17 @@ id = "endpoints"
 title = "OpenAPI Endpoints"
 icon = "web"
 location = "right"
+
+[[contributes.views]]
+id = "compare"
+title = "OpenAPI Changes"
+icon = "icons/openapiinitiative.svg"
+location = "bottom"
+
+[[contributes.commands]]
+id = "compare-specs"
+title = "OpenAPI: Compare With Another Spec…"
+category = "OpenAPI"
 
 [[contributes.commands]]
 id = "copy-http-requests"
