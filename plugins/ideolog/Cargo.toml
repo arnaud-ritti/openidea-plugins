@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 fancy-regex = "0.20.0"
-openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.37" }
+openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.38" }
 
 [profile.release]
 opt-level = "s"
