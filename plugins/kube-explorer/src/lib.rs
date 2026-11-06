@@ -11,6 +11,7 @@ mod checks;
 mod convert;
 mod manifest;
 mod schema;
+mod secrets;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, RandomState};
@@ -102,6 +103,18 @@ pub struct KubeExplorer {
     forward: Option<(String, String)>,
     /// The manifest whose resources the shown dry run would delete.
     pending_delete: Option<String>,
+    /// A revealed Secret: name and decoded values. Dropped by Back.
+    revealed: Option<(String, Vec<(String, String)>)>,
+    /// A Secret being created. Dropped by Back and by submitting.
+    draft: Option<Draft>,
+}
+
+#[derive(Default)]
+pub struct Draft {
+    name: String,
+    key: String,
+    value: String,
+    entries: Vec<(String, String)>,
 }
 
 /// `describe`, YAML or diff output.
@@ -155,6 +168,74 @@ impl KubeExplorer {
         let target = first.as_deref().map(str::trim).ok().filter(|t| !t.is_empty());
         let args = self.debug_args(pod, image, target)?;
         host::open_terminal(&format!("Debug: {pod}"), KUBECTL, &args)
+    }
+
+    fn show_secret(&mut self, name: &str) -> Result<(), Error> {
+        if host::setting_bool("allowRevealSecrets") != Some(true) {
+            host::notify(
+                NotificationLevel::Warning,
+                "Secret values are hidden",
+                "To show them, turn on \"Allow Show Secret\" (allowRevealSecrets) in Settings › Plugins › Kube Explorer.",
+            );
+            return Ok(());
+        }
+        if name.starts_with('-') {
+            return Err("Refusing a secret name that starts with '-'.".into());
+        }
+        let entries = secrets::data_entries(&self.kubectl(&["get", "secret", name, "-o", "json", REQUEST_TIMEOUT], None)?)?;
+        let values = entries.iter().map(|(key, bytes)| (key.clone(), secrets::display(bytes))).collect();
+        self.revealed = Some((name.to_owned(), values));
+        self.details = None;
+        host::refresh_view(TREE);
+        Ok(())
+    }
+
+    fn create_secret(&mut self) -> Result<(), Error> {
+        let Some(draft) = &self.draft else {
+            return Ok(());
+        };
+        let mut entries = draft.entries.clone();
+        if !draft.key.is_empty() || !draft.value.is_empty() {
+            entries.push((draft.key.clone(), draft.value.clone()));
+        }
+        let name = draft.name.clone();
+        let manifest = secrets::manifest(&name, &entries)?;
+        self.draft = None;
+        host::refresh_view(TREE);
+        let out = host::run_process(KUBECTL, &self.args(&["apply", "-f", "-"]), Some(&manifest))?;
+        if out.status != Some(0) {
+            return Err(failure(KUBECTL, &secrets::redact(&out.stderr, &entries), out.status));
+        }
+        host::notify(NotificationLevel::Info, "Secret applied", &format!("{name} in {}", self.target()));
+        self.reload();
+        Ok(())
+    }
+
+    fn render_revealed(&self, name: &str, values: &[(String, String)]) -> View {
+        let body = match values.is_empty() {
+            true => Body::Message("This secret has no data.".into()),
+            false => Body::Form(
+                values.iter().map(|(key, value)| Field::new(key, key, FieldValue::Multiline(value.clone()))).collect(),
+            ),
+        };
+        View::new(body)
+            .status(&format!("Secret {name}: values are shown here only; Back clears them"))
+            .button(Button::new("back", "Back").icon("arrow-left"))
+    }
+
+    fn render_draft(&self, draft: &Draft) -> View {
+        // ponytail: the Form API has no masked field, so values are visible while typed.
+        let fields = vec![
+            Field::new("secret-name", "Secret name", FieldValue::Text(draft.name.clone())),
+            Field::new("secret-key", "Key", FieldValue::Text(draft.key.clone())),
+            Field::new("secret-value", "Value", FieldValue::Multiline(draft.value.clone())),
+        ];
+        let keys = draft.entries.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
+        View::new(Body::Form(fields))
+            .status(&format!("New Opaque Secret; keys added: {}", if keys.is_empty() { "none" } else { &keys }))
+            .button(Button::new("back", "Back").icon("arrow-left"))
+            .button(Button::new("add-secret-key", "Add Key").icon("add"))
+            .button(Button::new("submit-secret", "Create").icon("check"))
     }
 
     fn kubectl(&self, rest: &[&str], stdin: Option<&str>) -> Result<String, Error> {
@@ -359,6 +440,12 @@ impl KubeExplorer {
         if let Some((target, ports)) = &self.forward {
             return Ok(self.render_forward(target, ports));
         }
+        if let Some(draft) = &self.draft {
+            return Ok(self.render_draft(draft));
+        }
+        if let Some((name, values)) = &self.revealed {
+            return Ok(self.render_revealed(name, values));
+        }
         if let Some(details) = &self.details {
             return Ok(self.render_details(details));
         }
@@ -441,6 +528,8 @@ impl KubeExplorer {
             .button(Button::new("logs", "Logs").icon("file-log").enabled(logs))
             .button(Button::new("shell", "Shell").icon("terminal").enabled(pod_selected))
             .button(Button::new("attach", "Attach").icon("attach-to-process").enabled(pod_selected))
+            .button(Button::new("show-secret", "Show Secret").icon("eye").enabled(kind == "secrets"))
+            .button(Button::new("create-secret", "Create Secret").icon("add"))
             .button(Button::new("debug", "Debug").icon("debug").enabled(pod_selected))
             .button(Button::new("port-forward", "Port Forward").icon("external-link").enabled(forwardable))
             .button(Button::new("delete", &delete).icon("trash").enabled(self.selected.is_some()))
@@ -511,6 +600,15 @@ impl KubeExplorer {
                 }
             },
             ViewEvent::Button(button) => self.button(&button)?,
+            ViewEvent::Field(key, value) if key.starts_with("secret-") => {
+                if let Some(draft) = &mut self.draft {
+                    match key.as_str() {
+                        "secret-name" => draft.name = value,
+                        "secret-key" => draft.key = value,
+                        _ => draft.value = value,
+                    }
+                }
+            }
             ViewEvent::Field(key, value) if key == "ports" => {
                 if let Some((_, ports)) = &mut self.forward {
                     *ports = value;
@@ -539,9 +637,30 @@ impl KubeExplorer {
                 self.details = None;
                 self.forward = None;
                 self.pending_delete = None;
+                self.revealed = None;
+                self.draft = None;
                 host::refresh_view(TREE);
                 return Ok(());
             }
+            "create-secret" => {
+                self.draft = Some(Draft::default());
+                host::refresh_view(TREE);
+                return Ok(());
+            }
+            "add-secret-key" => {
+                if let Some(draft) = &mut self.draft {
+                    let entry = (std::mem::take(&mut draft.key), std::mem::take(&mut draft.value));
+                    if !secrets::valid_key(&entry.0) {
+                        draft.key = entry.0;
+                        draft.value = entry.1;
+                        return Err("Enter a key (letters, digits, '-', '_' and '.') before adding it.".into());
+                    }
+                    draft.entries.push(entry);
+                    host::refresh_view(TREE);
+                }
+                return Ok(());
+            }
+            "submit-secret" => return self.create_secret(),
             "start-forward" => {
                 let Some((target, ports)) = &self.forward else {
                     return Ok(());
@@ -587,6 +706,7 @@ impl KubeExplorer {
             )?,
             "attach" => host::open_terminal(&format!("Attach: {name}"), KUBECTL, &self.args(&["attach", "-it", &name]))?,
             "debug" => self.debug_pod(&name)?,
+            "show-secret" if kind == "secrets" => self.show_secret(&name)?,
             "port-forward" => self.start_port_forward(&kind, &name)?,
             "shell" => host::open_terminal(
                 &format!("Shell: {name}"),
@@ -1502,5 +1622,148 @@ mod tests {
         kube.button("debug").unwrap();
         let terminal = &host.terminals()[0];
         assert_eq!(terminal.args, ["debug", "-it", "web-1", "--image=alpine:3", "--target=app"]);
+    }
+
+    type Runs = std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, Option<String>)>>>;
+
+    fn secret_json(entries: &[(&str, &[u8])]) -> String {
+        let data: Vec<String> = entries.iter().map(|(k, v)| format!("\"{k}\":\"{}\"", secrets::b64_encode(v))).collect();
+        format!(
+            "{{\"apiVersion\":\"v1\",\"data\":{{{}}},\"kind\":\"Secret\",\"metadata\":{{\"annotations\":{{\"a\":\"{{\\\"data\\\":{{\\\"x\\\":\\\"!\\\"}}}}\"}},\"name\":\"db\"}},\"type\":\"Opaque\"}}",
+            data.join(",")
+        )
+    }
+
+    fn secret_host(allow: bool, json: String, apply_stderr: &'static str) -> (MockHost, Runs) {
+        let host = MockHost::install().with_capabilities(&["process:kubectl", "editor.read", "storage"]);
+        if allow {
+            host.set_setting("allowRevealSecrets", "true");
+        }
+        let runs: Runs = Default::default();
+        let seen = runs.clone();
+        host.on_process(KUBECTL, move |args, stdin| {
+            seen.borrow_mut().push((args.to_vec(), stdin.map(str::to_owned)));
+            match args.iter().find(|a| !a.starts_with("--")).map(String::as_str) {
+                Some("get") => ok(&json),
+                Some("apply") if !apply_stderr.is_empty() => {
+                    Ok(ProcessOutput { status: Some(1), stdout: String::new(), stderr: apply_stderr.into() })
+                }
+                _ => ok("secret/db created\n"),
+            }
+        });
+        (host, runs)
+    }
+
+    fn selected_secret() -> KubeExplorer {
+        KubeExplorer { selected: Some(("secrets".into(), "db".into())), ..Default::default() }
+    }
+
+    fn drafting(name: &str, key: &str, value: &str) -> KubeExplorer {
+        let draft = Draft { name: name.into(), key: key.into(), value: value.into(), entries: Vec::new() };
+        KubeExplorer { draft: Some(draft), namespace: Some("shop".into()), ..Default::default() }
+    }
+
+    #[test]
+    fn secret_values_are_base64_decoded() {
+        let (_host, _) = secret_host(true, secret_json(&[("password", b"pa\"ss\nw\xc3\xa9"), ("user", b"admin")]), "");
+        let mut kube = selected_secret();
+        kube.button("show-secret").unwrap();
+        let Body::Form(fields) = kube.render_tree().unwrap().body else { panic!("not a form") };
+        let shown: Vec<_> = fields.iter().map(|f| (f.key.as_str(), f.value.clone())).collect();
+        assert_eq!(
+            shown,
+            [
+                ("password", FieldValue::Multiline("pa\"ss\nwé".into())),
+                ("user", FieldValue::Multiline("admin".into())),
+            ]
+        );
+        kube.button("back").unwrap();
+        assert!(kube.revealed.is_none());
+        assert!(matches!(kube.render_tree().unwrap().body, Body::Tree(_)));
+    }
+
+    #[test]
+    fn secret_reveal_is_denied_when_setting_off() {
+        let (host, runs) = secret_host(false, secret_json(&[("password", b"hunter2")]), "");
+        let mut kube = selected_secret();
+        kube.button("show-secret").unwrap();
+        assert!(kube.revealed.is_none());
+        let notes = host.notifications();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].body.contains("allowRevealSecrets"));
+        assert!(runs.borrow().is_empty());
+    }
+
+    #[test]
+    fn create_secret_passes_values_on_stdin_not_args() {
+        let value = "s3cr\"et\n\u{2713} 'x'";
+        let (_host, runs) = secret_host(true, String::new(), "");
+        let mut kube = drafting("db", "password", value);
+        kube.button("submit-secret").unwrap();
+        let runs = runs.borrow();
+        let (args, stdin) = &runs[0];
+        assert_eq!(args, &["--namespace=shop", "apply", "-f", "-"]);
+        let encoded = secrets::b64_encode(value.as_bytes());
+        assert!(args.iter().all(|a| !a.contains(value) && !a.contains(&encoded)));
+        let manifest = stdin.as_deref().unwrap();
+        assert!(manifest.contains(&format!("\"password\": {encoded}\n")));
+        assert!(manifest.contains("kind: Secret") && manifest.contains("type: Opaque"));
+        assert!(kube.draft.is_none());
+    }
+
+    #[test]
+    fn secret_values_never_reach_notifications_or_logs() {
+        let value = "hunter2-top-secret";
+        let encoded = secrets::b64_encode(value.as_bytes());
+        let (host, runs) = secret_host(true, secret_json(&[("password", value.as_bytes())]), "");
+        let mut kube = selected_secret();
+        kube.button("show-secret").unwrap();
+        kube.button("back").unwrap();
+        let (failing, _) = secret_host(true, String::new(), "invalid: hunter2-top-secret rejected");
+        let mut creating = drafting("db", "password", value);
+        let error = format!("{:?}", creating.button("submit-secret").unwrap_err());
+        assert!(!error.contains(value) && !error.contains(&encoded) && error.contains("***"));
+        let mut creating = drafting("db", "password", value);
+        let (ok_host, _) = secret_host(true, String::new(), "");
+        creating.button("submit-secret").unwrap();
+        for host in [&host, &failing, &ok_host] {
+            let seen = format!(
+                "{:?} {:?} {:?} {:?} {:?} {:?}",
+                host.notifications(),
+                host.logs(),
+                host.storage(),
+                host.clipboard(),
+                host.terminals(),
+                host.process_runs()
+            );
+            assert!(!seen.contains(value) && !seen.contains(&encoded), "{seen}");
+        }
+        assert!(runs.borrow().iter().all(|(args, _)| args.iter().all(|a| !a.contains(value))));
+    }
+
+    #[test]
+    fn create_secret_rejects_invalid_keys() {
+        let (_host, runs) = secret_host(true, String::new(), "");
+        for key in ["", "bad key", "a/b", "..", ".", "k\u{e9}y", "k=v"] {
+            assert!(drafting("db", key, "v").button("submit-secret").is_err(), "{key:?}");
+        }
+        for name in ["", "Db", "db_1", "-db", "db-", "a b"] {
+            assert!(drafting(name, "k", "v").button("submit-secret").is_err(), "{name:?}");
+        }
+        let mut twice = drafting("db", "k", "v");
+        twice.draft.as_mut().unwrap().entries.push(("k".into(), "w".into()));
+        assert!(twice.button("submit-secret").is_err());
+        assert!(drafting("db", "-k_1.x", "v").button("add-secret-key").is_ok());
+        assert!(runs.borrow().is_empty());
+    }
+
+    #[test]
+    fn binary_secret_value_is_shown_as_base64_not_garbage() {
+        let bytes: &[u8] = &[0xff, 0xfe, 0x00, 0x80];
+        let (_host, _) = secret_host(true, secret_json(&[("blob", bytes)]), "");
+        let mut kube = selected_secret();
+        kube.button("show-secret").unwrap();
+        let (_, values) = kube.revealed.unwrap();
+        assert_eq!(values, [("blob".to_owned(), "(binary, base64) //4AgA==".to_owned())]);
     }
 }

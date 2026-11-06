@@ -10,6 +10,11 @@
       "title": "Image of the ephemeral debug container (Debug button on a pod)",
       "default": "busybox:stable"
     },
+    "allowRevealSecrets": {
+      "type": "boolean",
+      "title": "Allow Show Secret to decode and display secret values (off: values are never shown)",
+      "default": false
+    },
     "checkDeprecatedApiVersions": {
       "type": "boolean",
       "title": "Report removed or deprecated apiVersions (extensions/v1beta1, batch/v1beta1, ...)",
