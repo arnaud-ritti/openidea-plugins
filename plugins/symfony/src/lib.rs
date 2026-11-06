@@ -6,6 +6,7 @@
 //! Brault; MIT), see README.md for what was and wasn't ported.
 
 mod index;
+mod profiler;
 mod refs;
 mod twig;
 
@@ -13,7 +14,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
-use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
+use openidea_plugin::views::{Body, Button, Table, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, Position, Range, Severity, TextEdit};
 use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, host, register_plugin, text};
 
@@ -22,6 +23,7 @@ use index::{Entry, Names, Sink};
 use refs::{Kind, Reference};
 
 const VIEW: &str = "symfony";
+const PROFILER_VIEW: &str = "symfony-profiler";
 const SOURCE: &str = "Symfony";
 const DEFAULT_DOMAIN: &str = "messages";
 const CHECKED_LANGUAGES: &[(&str, &str)] = &[(".php", "php"), (".twig", "twig"), (".yaml", "yaml"), (".yml", "yaml"), (".xml", "xml")];
@@ -376,6 +378,11 @@ impl Plugin for Main {
                 host::notify(NotificationLevel::Info, SOURCE, &self.summary());
                 Ok(None)
             }
+            "show-profiler" => {
+                host::refresh_view(PROFILER_VIEW);
+                host::notify(NotificationLevel::Info, SOURCE, "The latest requests are in the Symfony Profiler tool window.");
+                Ok(None)
+            }
             "cache-warmup" => self.console(ctx, "cache:warmup"),
             "cache-clear" => self.console(ctx, "cache:clear"),
             _ => Err(Error::NotFound(format!("command {id}"))),
@@ -643,8 +650,40 @@ impl Main {
     }
 }
 
+/// The profiler's recent requests; the file is read when the view is shown
+/// (a missing one is `NotFound` in the mock and `Invalid` in the host).
+fn profiler_view(ctx: &Invocation) -> View {
+    let refresh = Button::new("refresh-profiler", "Refresh").icon("refresh");
+    let Some(project) = ctx.project() else {
+        return View::message("No project is open.").button(refresh);
+    };
+    let Ok(text) = project.read_file(profiler::INDEX_FILE) else {
+        return View::message(&format!("No {} yet: open a page of the app in dev mode with the web profiler enabled.", profiler::INDEX_FILE))
+            .button(refresh);
+    };
+
+    let requests = profiler::rows(&text);
+    let rows: Vec<Vec<String>> = requests
+        .iter()
+        .map(|r| vec![profiler::timestamp(r.time), r.method.clone(), r.status.clone(), r.url.clone(), r.ip.clone(), r.token.clone()])
+        .collect();
+    let table = Table {
+        columns: ["Time (UTC)", "Method", "Status", "URL", "IP", "Token"].map(String::from).to_vec(),
+        total_rows: rows.len() as u32,
+        first_row: 0,
+        rows,
+        editable: false,
+    };
+
+    View::new(Body::Table(table)).button(refresh).status(&format!("{} latest requests", requests.len()))
+}
+
 impl Views for Main {
-    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+    fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        if view == PROFILER_VIEW {
+            return Ok(profiler_view(ctx));
+        }
+
         let reindex = Button::new("reindex", "Reindex").icon("refresh");
         let Some(index) = self.view_index(ctx) else {
             return Ok(View::message("This project is not a Symfony application.").button(reindex));
@@ -681,6 +720,7 @@ impl Views for Main {
                     host::open_location(&entry.path, entry.at.line, entry.at.character)?;
                 }
             }
+            ViewEvent::Button(id) if id == "refresh-profiler" => host::refresh_view(PROFILER_VIEW),
             ViewEvent::Button(id) => {
                 self.run_command(&id, ctx, None)?;
                 host::refresh_view(view);
@@ -993,5 +1033,29 @@ mod tests {
         assert!(offered.contains(&"@pdf/invoice.html.twig".to_owned()));
         assert!(offered.contains(&"p.html.twig".to_owned()));
         assert!(offered.contains(&"base.html.twig".to_owned()));
+    }
+
+    #[test]
+    fn profiler_view_lists_requests_latest_first() {
+        let host = MockHost::install();
+        host.add_file(profiler::INDEX_FILE, "a,1.1.1.1,GET,/old,1700000000,,200\nb,1.1.1.1,POST,/new,1700000500,,500\n");
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+
+        let View { body: Body::Table(table), .. } = plugin.render(PROFILER_VIEW, None, &ctx).unwrap() else { panic!("not a table") };
+        assert_eq!(table.rows[0], ["2023-11-14 22:21:40", "POST", "500", "/new", "1.1.1.1", "b"]);
+        assert_eq!(table.rows.len(), 2);
+
+        plugin.run_command("show-profiler", &ctx, None).unwrap();
+        assert!(host.refreshed_views().contains(&PROFILER_VIEW.to_owned()));
+    }
+
+    #[test]
+    fn profiler_view_without_index_explains() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+
+        let View { body, .. } = plugin.render(PROFILER_VIEW, None, &host.invocation()).unwrap();
+        assert!(matches!(body, Body::Message(_)));
     }
 }

@@ -54,6 +54,11 @@ _Symfony: Reindex Project_ rebuilds the index. Saving a file under `config/`,
 `templates/` or `translations/`, a PHP file under `src/`, `composer.json`,
 `webpack.config.js` or `importmap.php` also rebuilds it.
 
+The _Symfony Profiler_ tool window (command _Symfony: Show Profiler_) lists the
+latest 100 requests, newest first, from `var/cache/dev/profiler/index.csv`
+(time in UTC, method, status, URL, IP, token); sub-requests are left out, rows
+cannot be opened.
+
 A project counts as Symfony when it has `symfony.lock` or requires
 `symfony/framework-bundle` or `symfony/symfony` in `composer.json`. Twig files
 need the `aritti.twig` plugin (the IDE has no Twig language). Settings: the
@@ -69,7 +74,7 @@ which the OpenIDEA plugin API has no equivalent for:
   serializer, event dispatcher, constraint validators;
 - the remaining inspections (service arguments, deprecated Twig, YAML
   quoting, …) and intentions (they need resolved PHP types);
-- refactorings, find usages, Symfony profiler, MCP tools;
+- refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing
   files.
 
