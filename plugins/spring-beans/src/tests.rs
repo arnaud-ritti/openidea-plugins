@@ -427,3 +427,24 @@ fn p_and_c_namespace_refs_are_followed() {
     assert!(n_definition(&mut n, &xml, after(text, "p:name=\"lit", 1)).is_empty());
     assert!(n_definition(&mut n, &xml, after(text, "x:thing-ref=\"gua", 1)).is_empty());
 }
+
+#[test]
+fn kotlin_bean_fun_without_return_type_uses_expression_type_when_obvious() {
+    let text = r#"package com.acme.kt
+
+@Configuration
+class C {
+    @Bean fun a() = Foo()
+    @Bean fun b(x: X) = FooImpl(x, 1)
+    @Bean fun c() = someCall()
+    @Bean fun d() = foo.bar()
+    @Bean fun e() = Foo().with(1)
+    @Bean fun f() = if (x) A() else B()
+    @Bean fun g() = com.acme.Foo()
+    @Bean fun h(): Typed = Other()
+}
+"#;
+    let model = parse("C.kt", text).unwrap();
+    let types: Vec<_> = model.beans.iter().skip(1).map(|b| (b.name.as_str(), b.ty.as_str())).collect();
+    assert_eq!(types, [("a", "Foo"), ("b", "FooImpl"), ("c", ""), ("d", ""), ("e", ""), ("f", ""), ("g", ""), ("h", "Typed")]);
+}

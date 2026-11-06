@@ -3,7 +3,7 @@
 //! Declarations only; function bodies are skipped.
 
 use crate::model::{self, FileModel, INJECT, Pointcut, TypeInfo};
-use spring_text::java::{Annotation, Tok, annotation, closing, split_commas, tokens, type_ref};
+use spring_text::java::{Annotation, Tok, TypeRef, annotation, closing, split_commas, tokens, type_ref};
 use spring_text::range;
 
 const MODIFIERS: [&str; 21] = [
@@ -186,6 +186,8 @@ pub fn model(text: &str) -> FileModel {
                     let end = type_end(&toks, j + 1);
                     ret = type_ref(text, &toks[j + 1..end]);
                     j = end;
+                } else if toks.get(j).is_some_and(|t| t.s == "=") {
+                    ret = constructor_call_type(text, &toks, j + 1);
                 }
                 let class = classes.last();
                 let has = |n: &[&str]| anns.iter().any(|a| n.contains(&a.name.as_str()));
@@ -244,4 +246,17 @@ pub fn model(text: &str) -> FileModel {
         i += 1;
     }
     out
+}
+
+/// The type of an expression body `= Foo(…)`: only a bare constructor call of
+/// a capitalised name that ends the declaration, never a chain or other expression.
+fn constructor_call_type(text: &str, toks: &[Tok], at: usize) -> Option<TypeRef> {
+    toks.get(at).filter(|t| t.is_ident() && t.s.starts_with(|c: char| c.is_ascii_uppercase()))?;
+    toks.get(at + 1).filter(|t| t.s == "(")?;
+    let next = toks.get(closing(toks, at + 1) + 1);
+    let ends = next.is_none_or(|t| matches!(t.s, "@" | "}") || DECLARATIONS.contains(&t.s) || MODIFIERS.contains(&t.s));
+    if !ends {
+        return None;
+    }
+    type_ref(text, &toks[at..at + 1])
 }
