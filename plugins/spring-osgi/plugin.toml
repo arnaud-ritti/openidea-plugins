@@ -4,15 +4,26 @@ version = "0.1.0" # x-release-please-version
 description = "Spring Dynamic Modules (Spring OSGi) support for Spring XML files. Checks <osgi:service>, <osgi:reference>, <osgi:list>/<osgi:set> and their listeners: conflicting declarations, service beans that don't implement the exported interfaces, listener methods with a wrong signature, and listeners that don't implement OsgiServiceLifecycleListener. Adds Go to Definition and completion for bean references, exported interfaces and listener methods. Port of JetBrains' Spring OSGi plugin (Apache-2.0) by JetBrains s.r.o. and contributors: com.intellij.spring.osgi 253.28294.218, from intellij-obsolete-plugins/spring-osgi at revision 07887c0596764e16977fd4570c2234bfc81dde49."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "Apache-2.0"
-change-notes = "0.1.0 (first release): port of the Spring OSGi inspections (elements inconsistency, service, listener) and of reference navigation and completion, from JetBrains' com.intellij.spring.osgi 253.28294.218 (intellij-obsolete-plugins@07887c0596764e16977fd4570c2234bfc81dde49)."
+change-notes = "Generate OSGi Service/Reference Bean command in the XML editor context menu. 0.1.0 (first release): port of the Spring OSGi inspections (elements inconsistency, service, listener) and of reference navigation and completion, from JetBrains' com.intellij.spring.osgi 253.28294.218 (intellij-obsolete-plugins@07887c0596764e16977fd4570c2234bfc81dde49)."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:xml"]
 
 [capabilities]
-required = ["project.read"]
+required = ["project.read", "editor.read", "editor.write"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
 languages = ["xml"]
+
+[[contributes.commands]]
+id = "generate-osgi-bean"
+title = "Generate OSGi Service or Reference Bean"
+category = "Spring OSGi"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "generate-osgi-bean"
+when = "editorLangId == xml"

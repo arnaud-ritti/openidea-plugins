@@ -6,7 +6,9 @@
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
-use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
+use openidea_plugin::{
+    Diagnostic, Error, Invocation, Location, PickItem, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
+};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET};
 use spring_text::xml::{self, Attr, Element};
 use spring_text::{beans, java, range};
@@ -557,9 +559,58 @@ impl Providers for SpringOsgi {
 }
 
 impl Plugin for SpringOsgi {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        match id {
+            "generate-osgi-bean" => generate_osgi_bean(ctx),
+            _ => Err(Error::NotFound(format!("command {id}"))),
+        }
     }
+}
+
+fn osgi_prefix(text: &str) -> Option<&'static str> {
+    if text.contains(&format!("xmlns:osgi=\"{OSGI}\"")) {
+        return Some("osgi:");
+    }
+
+    text.contains(&format!("xmlns=\"{OSGI}\"")).then_some("")
+}
+
+fn generate_osgi_bean(ctx: &Invocation) -> Result<Option<String>, Error> {
+    let editor = ctx.editor().ok_or("Open the Spring XML file to add the bean to.")?;
+    let doc = editor.document()?;
+    let Some(prefix) = osgi_prefix(&doc.text) else {
+        return Err("Declare the Spring OSGi namespace (xmlns:osgi) in this file first.".into());
+    };
+
+    let items = [PickItem::new("service", "osgi:service"), PickItem::new("reference", "osgi:reference")];
+    let Some(kind) = host::pick("Generate OSGi bean", &items)? else { return Ok(None) };
+    let Some(interface) = host::input("Interface (fully qualified class name)", None)? else { return Ok(None) };
+    let interface = interface.trim().to_owned();
+    if interface.is_empty() {
+        return Ok(None);
+    }
+
+    let element = if kind == "service" {
+        let Some(target) = host::input("Bean to export (ref)", None)? else { return Ok(None) };
+        format!("<{prefix}service ref=\"{}\" interface=\"{}\"/>", escape(target.trim()), escape(&interface))
+    } else {
+        let id = interface.rsplit('.').next().unwrap_or(&interface);
+        let id = format!("{}{}Reference", id[..1].to_lowercase(), &id[1..]);
+        format!("<{prefix}reference id=\"{id}\" interface=\"{}\"/>", escape(&interface))
+    };
+
+    let at = editor.selections()?.first().map_or(Position::new(0, 0), |r| Position::new(r.start.line, 0));
+    let line = doc.text.lines().nth(at.line as usize).unwrap_or("");
+    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let newline = if doc.text.contains("\r\n") { "\r\n" } else { "\n" };
+    let edit = TextEdit { range: Range::new(at, at), text: format!("{indent}{element}{newline}") };
+    editor.apply_edits(doc.version, &[edit])?;
+
+    Ok(Some(format!("Added {kind} bean.")))
+}
+
+fn escape(value: &str) -> String {
+    value.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;")
 }
 
 register_plugin!(SpringOsgi, providers);
@@ -894,5 +945,44 @@ public class AuditListener implements OsgiServiceLifecycleListener {
         p.line_markers(&doc("plain.xml", beans));
         assert!(host.diagnostics().get(&format!("{ROOT}resources/META-INF/spring/plain.xml")).is_none_or(Vec::is_empty));
         assert!(p.completion(&doc("plain.xml", beans), after(beans, "ref=\""), None).is_empty());
+    }
+
+    const EMPTY_CONTEXT: &str = "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:osgi=\"http://www.springframework.org/schema/osgi\">\n  <bean id=\"a\" class=\"A\"/>\n</beans>\n";
+
+    fn generate(host: &MockHost, text: &str, answers: &[Option<&[&str]>]) -> Result<Option<String>, Error> {
+        host.open_editor("/project/ctx.xml", "xml", text, &[(2, 2, 2, 2)]);
+        for a in answers {
+            host.answer_next_prompt(*a);
+        }
+        SpringOsgi::default().run_command("generate-osgi-bean", &host.invocation(), None)
+    }
+
+    #[test]
+    fn generates_a_service_before_the_selected_line() {
+        let host = MockHost::install();
+        generate(&host, EMPTY_CONTEXT, &[Some(&["service"]), Some(&["com.acme.Api"]), Some(&["a"])]).unwrap();
+        assert!(host.editor_text().contains("  <osgi:service ref=\"a\" interface=\"com.acme.Api\"/>\n  <bean id=\"a\""));
+    }
+
+    #[test]
+    fn generates_a_reference() {
+        let host = MockHost::install();
+        generate(&host, EMPTY_CONTEXT, &[Some(&["reference"]), Some(&["com.acme.Greeter"])]).unwrap();
+        assert!(host.editor_text().contains("<osgi:reference id=\"greeterReference\" interface=\"com.acme.Greeter\"/>"));
+    }
+
+    #[test]
+    fn dismissed_prompts_leave_the_file_alone() {
+        let host = MockHost::install();
+        for answers in [vec![None], vec![Some(&["service"][..]), None], vec![Some(&["service"][..]), Some(&["X"][..]), None]] {
+            assert_eq!(generate(&host, EMPTY_CONTEXT, &answers).unwrap(), None);
+            assert_eq!(host.editor_text(), EMPTY_CONTEXT);
+        }
+    }
+
+    #[test]
+    fn refuses_a_file_without_the_osgi_namespace() {
+        let host = MockHost::install();
+        assert!(generate(&host, "<beans/>", &[]).is_err());
     }
 }
