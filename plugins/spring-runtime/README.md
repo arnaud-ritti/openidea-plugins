@@ -19,7 +19,7 @@ Settings › Plugins › Spring Runtime Insight:
 | `timeoutMs` | `2000` | Timeout per endpoint request, kept between 100 and 30000 ms. |
 | `autoRefresh` | `false` | Refresh from Actuator every minute. |
 
-Without `actuatorAuth`, requests carry no credentials. An endpoint that answers 401 or 403 adds "needs authentication: set actuatorAuth and the actuator-token secret" to the status line. An endpoint that answers 404 or anything other than JSON with status 200 is listed as not available, and the rest are still read. If the first endpoint (`beans`) cannot be reached at all, the refresh stops with an error. The plugin requires `net:localhost`. `net:127.0.0.1` is optional; without it, a URL on `127.0.0.1` fails with a message.
+Without `actuatorAuth`, requests carry no credentials. An endpoint that answers 401 or 403 adds "needs authentication: check actuatorAuth and the actuator-token secret" to the status line. An endpoint that answers 404 or anything other than JSON with status 200 is listed as not available, and the rest are still read. If the first endpoint (`beans`) cannot be reached at all, the refresh stops with an error. The plugin requires `net:localhost`. `net:127.0.0.1` is optional; without it, a URL on `127.0.0.1` fails with a message.
 
 The plugin uses the network only on Refresh (the command, the tool window button or auto-refresh). The result is kept in memory and in plugin storage until Clear. When it is larger than about 900 KiB, only beans and environment are stored (loggers and caches are kept in memory only) and the status line says so.
 
@@ -35,7 +35,7 @@ The status line shows when and from which URL the data was read, the endpoints t
 - Configuration properties (`configprops`): each `@ConfigurationProperties` bean by prefix, with its bound properties and values. The bean opens its class, a property its key in the configuration files.
 - Scheduled tasks (`scheduledtasks`): each task's target method with its kind (`cron`, `fixedDelay`, `fixedRate`, `custom`) and expression, interval or trigger. Opens the method.
 - Loggers (`loggers`): `ROOT` and each logger with a configured level, with its configured and effective level.
-- Caches (`caches`): each cache as `manager / cache` with its target type. Opens the type.
+- Caches (`caches`): each cache as `manager / cache` with its target type.
 
 ## Editor markers
 
