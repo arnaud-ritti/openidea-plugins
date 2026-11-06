@@ -3,8 +3,12 @@
 //! the chosen options. OpenIDEA has no new-project API: the browser downloads
 //! the zip.
 
+mod starters;
+
 use openidea_plugin::views::{Body, Button, Field, FieldValue, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Error, Invocation, NotificationLevel, Plugin, host, register_plugin};
+use openidea_plugin::{Error, Invocation, NotificationLevel, PickItem, Plugin, TextEdit, host, register_plugin};
+use openidea_plugin::Range;
+use openidea_plugin::text::position;
 use std::collections::BTreeMap;
 
 const START: &str = "https://start.spring.io";
@@ -218,6 +222,77 @@ impl Launcher {
         }
     }
 
+    fn warn(message: &str) {
+        host::notify(NotificationLevel::Warning, "Spring Initializr", message);
+    }
+
+    /// The server's catalogue, only for the default server (the manifest allows no other host).
+    fn catalogue(&mut self, load: impl FnOnce() -> Result<Vec<PickItem>, Error>) -> Option<Vec<PickItem>> {
+        if self.get("server").trim_end_matches('/') != START {
+            Self::warn("The pick lists are only available for https://start.spring.io; type the value for another server.");
+            return None;
+        }
+
+        match load() {
+            Ok(items) => Some(items),
+            Err(Error::Denied(_)) => {
+                Self::warn("The pick lists need the net:start.spring.io capability.");
+                None
+            }
+            Err(error) => {
+                Self::warn(&format!("Could not load the catalogue: {error}"));
+                None
+            }
+        }
+    }
+
+    fn pick_dependencies(&mut self) -> Result<(), Error> {
+        let Some(items) = self.catalogue(starters::dependency_items) else { return Ok(()) };
+        let Some(chosen) = host::pick_many("Spring Initializr dependencies", &items)? else { return Ok(()) };
+        let current = self.get("dependencies");
+        let mut ids: Vec<&str> = current.split([',', ' ']).filter(|d| !d.is_empty()).collect();
+        for id in &chosen {
+            if !ids.contains(&id.as_str()) {
+                ids.push(id);
+            }
+        }
+        let joined = ids.join(",");
+        self.set("dependencies", &joined);
+        Ok(())
+    }
+
+    fn pick_boot_version(&mut self) -> Result<(), Error> {
+        let Some(items) = self.catalogue(starters::boot_version_items) else { return Ok(()) };
+        if let Some(version) = host::pick("Spring Boot version", &items)? {
+            self.set("bootVersion", &version);
+        }
+        Ok(())
+    }
+
+    /// Inserts the picked starters into the open pom.xml or build.gradle(.kts).
+    fn add_starters(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let editor = ctx.editor().ok_or("Open a pom.xml, build.gradle or build.gradle.kts to add starters to.")?;
+        let path = editor.path();
+        let doc = editor.document()?;
+        if !starters::supports(&path) {
+            return Err("Open a pom.xml, build.gradle or build.gradle.kts to add starters to.".into());
+        }
+        let Some(items) = self.catalogue(starters::dependency_items) else { return Ok(None) };
+        let Some(ids) = host::pick_many("Add Spring Boot starters", &items)? else { return Ok(None) };
+        if ids.is_empty() {
+            return Ok(None);
+        }
+
+        let (found, skipped) = starters::coordinates(&ids, &self.get("bootVersion"))?;
+        let (offset, text) = starters::insertion(&path, &doc.text, &found)?;
+        let at = position(&doc.text, offset);
+        editor.apply_edits(doc.version, &[TextEdit { range: Range::new(at, at), text }])?;
+        if !skipped.is_empty() {
+            Self::warn(&format!("Not added, they need a BOM or repository: {}.", skipped.join(", ")));
+        }
+        Ok(Some(format!("Added {} starters.", found.len())))
+    }
+
     /// The project zip.
     pub fn starter_url(&mut self) -> String {
         format!("{}/starter.zip?{}", self.get("server").trim_end_matches('/'), self.query())
@@ -254,6 +329,8 @@ impl Views for Launcher {
             .button(Button::new("generate", "Generate Project").icon("export").enabled(problem.is_none()))
             .button(Button::new("cli", "Generate with Spring Boot CLI").icon("terminal").enabled(problem.is_none()))
             .button(Button::new("explore", "Explore in Browser").icon("external-link").enabled(problem.is_none()))
+            .button(Button::new("pickBoot", "Pick Spring Boot Version").icon("list"))
+            .button(Button::new("pickDependencies", "Pick Dependencies").icon("list"))
             .button(Button::new("reset", "Reset").icon("revert"))
             .status(&status))
     }
@@ -262,6 +339,8 @@ impl Views for Launcher {
         match event {
             ViewEvent::Field(key, value) if FIELDS.iter().any(|f| f.0 == key) => self.set(&key, &value),
             ViewEvent::Button(b) if b == "reset" => self.reset(),
+            ViewEvent::Button(b) if b == "pickBoot" => self.pick_boot_version()?,
+            ViewEvent::Button(b) if b == "pickDependencies" => self.pick_dependencies()?,
             ViewEvent::Button(b) if self.problem().is_none() && b == "generate" => host::open_url(&self.starter_url())?,
             ViewEvent::Button(b) if self.problem().is_none() && b == "cli" => self.generate_with_cli()?,
             ViewEvent::Button(b) if self.problem().is_none() && b == "explore" => host::open_url(&self.explore_url())?,
@@ -273,8 +352,9 @@ impl Views for Launcher {
 }
 
 impl Plugin for Launcher {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         match id {
+            "add-starters" => self.add_starters(ctx),
             "open-start" => {
                 host::open_url(START)?;
                 Ok(None)
@@ -365,7 +445,7 @@ mod tests {
         assert_eq!((fresh.get("groupId"), fresh.get("type")), ("com.example".into(), "maven-project".into()));
         let view = fresh.render(VIEW, None, &host.invocation()).unwrap();
         let icons: Vec<_> = view.toolbar.iter().map(|b| (b.label.as_str(), b.icon.as_deref().unwrap())).collect();
-        assert_eq!(icons, [("Generate Project", "export"), ("Generate with Spring Boot CLI", "terminal"), ("Explore in Browser", "external-link"), ("Reset", "revert")]);
+        assert_eq!(icons, [("Generate Project", "export"), ("Generate with Spring Boot CLI", "terminal"), ("Explore in Browser", "external-link"), ("Pick Spring Boot Version", "list"), ("Pick Dependencies", "list"), ("Reset", "revert")]);
     }
 
     #[test]
@@ -375,7 +455,7 @@ mod tests {
         field(&mut l, &host, "server", "ftp://start.spring.io");
         let view = l.render(VIEW, None, &host.invocation()).unwrap();
         assert!(view.status.unwrap().starts_with("The server URL must start with http:// or https://"));
-        assert!(view.toolbar.iter().filter(|b| b.id != "reset").all(|b| !b.enabled));
+        assert!(view.toolbar.iter().filter(|b| b.id != "reset" && !b.id.starts_with("pick")).all(|b| !b.enabled));
         click(&mut l, &host, "generate");
         assert!(host.opened_urls().is_empty());
 
@@ -484,5 +564,106 @@ mod tests {
         click(&mut l, &host, "cli");
         assert_eq!(host.terminals().len(), 1);
         assert!(host.notifications().is_empty());
+    }
+
+    const NET: &[&str] = &["storage", "editor.read", "editor.write", "net:start.spring.io"];
+
+    fn serve(host: &MockHost) {
+        host.on_fetch(|req| {
+            let body = if req.url.contains("/metadata/client") {
+                r#"{"dependencies":{"values":[{"name":"Web","values":[{"id":"web","name":"Spring Web","description":"MVC"}]},
+                    {"name":"SQL","values":[{"id":"data-jpa","name":"JPA"},{"id":"flyway","name":"Flyway"}]}]},
+                    "bootVersion":{"values":[{"id":"3.5.16","name":"3.5.16"},{"id":"4.0.0","name":"4.0.0"}]}}"#
+            } else {
+                r#"{"dependencies":{"web":{"groupId":"org.springframework.boot","artifactId":"spring-boot-starter-web"},
+                    "data-jpa":{"groupId":"org.springframework.boot","artifactId":"spring-boot-starter-data-jpa","scope":"runtime"},
+                    "flyway":{"groupId":"org.flywaydb","artifactId":"flyway-core","bom":"x"}}}"#
+            };
+            Ok(openidea_plugin::HttpResponse { status: 200, body: body.as_bytes().to_vec(), ..Default::default() })
+        });
+    }
+
+    #[test]
+    fn picks_dependencies_and_boot_version() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve(&host);
+        let mut l = Launcher::default();
+        field(&mut l, &host, "dependencies", "web");
+        host.answer_next_prompt(Some(&["web", "data-jpa"]));
+        click(&mut l, &host, "pickDependencies");
+        assert_eq!(l.get("dependencies"), "web,data-jpa");
+        host.answer_next_prompt(Some(&["4.0.0"]));
+        click(&mut l, &host, "pickBoot");
+        assert_eq!(l.get("bootVersion"), "4.0.0");
+    }
+
+    #[test]
+    fn dismissed_picks_change_nothing() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve(&host);
+        let mut l = Launcher::default();
+        host.answer_next_prompt(None);
+        click(&mut l, &host, "pickDependencies");
+        host.answer_next_prompt(None);
+        click(&mut l, &host, "pickBoot");
+        assert_eq!((l.get("dependencies"), l.get("bootVersion")), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn picks_need_the_default_server_and_the_net_capability() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve(&host);
+        let mut l = Launcher::default();
+        field(&mut l, &host, "server", "http://localhost:8080");
+        click(&mut l, &host, "pickBoot");
+        assert_eq!(host.requests().len(), 0);
+        assert_eq!(host.notifications().len(), 1);
+
+        let host = MockHost::install().with_capabilities(&["storage"]);
+        click(&mut Launcher::default(), &host, "pickBoot");
+        assert!(host.notifications()[0].body.contains("net:start.spring.io"));
+    }
+
+    const POM: &str = "<project>\n  <dependencyManagement>\n    <dependencies>\n    </dependencies>\n  </dependencyManagement>\n  <dependencies>\n    <dependency>\n      <groupId>g</groupId>\n      <artifactId>spring-boot-starter-web</artifactId>\n    </dependency>\n  </dependencies>\n  <build/>\n</project>\n";
+
+    fn add(host: &MockHost, path: &str, text: &str, answer: Option<&[&str]>) -> Result<Option<String>, Error> {
+        host.open_editor(path, "xml", text, &[(0, 0, 0, 0)]);
+        host.answer_next_prompt(answer);
+        Launcher::default().run_command("add-starters", &host.invocation(), None)
+    }
+
+    #[test]
+    fn adds_starters_to_a_pom() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve(&host);
+        add(&host, "/project/pom.xml", POM, Some(&["web", "data-jpa", "flyway"])).unwrap();
+        let text = host.editor_text();
+        assert_eq!(text.matches("spring-boot-starter-web").count(), 1, "already present");
+        assert!(text.contains("  </dependencyManagement>\n  <dependencies>"));
+        assert!(text.contains("    </dependency>\n    <dependency>\n      <groupId>org.springframework.boot</groupId>\n      <artifactId>spring-boot-starter-data-jpa</artifactId>\n      <scope>runtime</scope>\n    </dependency>\n  </dependencies>\n  <build/>"));
+        assert!(!text.contains("flyway-core"));
+        assert_eq!(host.notifications().len(), 1);
+    }
+
+    #[test]
+    fn adds_starters_to_gradle_files() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve(&host);
+        add(&host, "/project/build.gradle.kts", "plugins {\n}\ndependencies {\n    implementation(\"x:y\")\n}\n", Some(&["web", "data-jpa"])).unwrap();
+        assert_eq!(
+            host.editor_text(),
+            "plugins {\n}\ndependencies {\n    implementation(\"x:y\")\n    implementation \"org.springframework.boot:spring-boot-starter-web\"\n    runtimeOnly \"org.springframework.boot:spring-boot-starter-data-jpa\"\n}\n"
+        );
+    }
+
+    #[test]
+    fn dismissed_or_unsupported_starters_leave_the_file_alone() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve(&host);
+        assert_eq!(add(&host, "/project/pom.xml", POM, None).unwrap(), None);
+        assert_eq!(add(&host, "/project/pom.xml", POM, Some(&[])).unwrap(), None);
+        assert_eq!(host.editor_text(), POM);
+        assert!(add(&host, "/project/readme.md", "x", Some(&["web"])).is_err());
+        assert!(add(&host, "/project/pom.xml", "<project/>", Some(&["web"])).is_err());
     }
 }
