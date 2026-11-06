@@ -12,6 +12,7 @@ use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::{beans, config, contains, java, range, xml};
 use std::collections::BTreeSet;
 
+mod scope;
 mod xml_rules;
 
 const NAMESPACE: &str = "http://www.springframework.org/schema/batch";
@@ -533,9 +534,14 @@ impl Providers for Batch {
                     found.extend(chunk_problems(&doc.text));
                 }
                 found.extend(xml_rules::problems(&doc.text));
+                found.extend(scope::xml_problems(&doc.text));
                 found
             }
-            Some("java") => java_problems(&doc.text, all(index).any(|(_, n)| n.kind == Kind::BootApp)),
+            Some("java") => {
+                let mut found = java_problems(&doc.text, all(index).any(|(_, n)| n.kind == Kind::BootApp));
+                found.extend(scope::java_problems(&doc.text));
+                found
+            }
             _ => config_problems(doc, index),
         };
         let _ = host::publish_diagnostics(&doc.path, &problems);
