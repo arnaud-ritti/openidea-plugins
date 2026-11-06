@@ -1,6 +1,6 @@
 id = "aritti.spring-osgi"
 name = "Spring OSGi"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Spring Dynamic Modules (Spring OSGi) support for Spring XML files. Checks <osgi:service>, <osgi:reference>, <osgi:list>/<osgi:set> and their listeners: conflicting declarations, service beans that don't implement the exported interfaces, listener methods with a wrong signature, and listeners that don't implement OsgiServiceLifecycleListener. Adds Go to Definition and completion for bean references, exported interfaces and listener methods. Port of JetBrains' Spring OSGi plugin (Apache-2.0) by JetBrains s.r.o. and contributors: com.intellij.spring.osgi 253.28294.218, from intellij-obsolete-plugins/spring-osgi at revision 07887c0596764e16977fd4570c2234bfc81dde49."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "Apache-2.0"

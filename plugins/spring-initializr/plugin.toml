@@ -1,6 +1,6 @@
 id = "aritti.spring-initializr"
 name = "Spring Initializr Launcher"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Starts a Spring Boot project from a tool window. Pick the build, language, Spring Boot and Java versions, coordinates, packaging and dependencies. Generate Project then downloads the project zip from a Spring Initializr server (start.spring.io or your own) in the browser, and Explore in Browser opens the server's web page with the same options, and Generate with Spring Boot CLI runs `spring init` in an IDE terminal when the Spring Boot CLI is allowed. The plugin remembers the form. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

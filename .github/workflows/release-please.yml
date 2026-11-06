@@ -1,0 +1,32 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Build and publish released plugins
+        if: steps.rp.outputs.releases_created == 'true'
+        run: |
+          jq -r '.[]' <<< "$PATHS" | while read -r path; do
+            tag=$(jq -r --arg k "$path--tag_name" '.[$k]' <<< "$OUTPUTS")
+            gh workflow run release.yml --ref "$tag"
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATHS: ${{ steps.rp.outputs.paths_released }}
+          OUTPUTS: ${{ toJSON(steps.rp.outputs) }}

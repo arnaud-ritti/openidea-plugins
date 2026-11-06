@@ -1,6 +1,6 @@
 id = "aritti.spring-modulith"
 name = "Spring Modulith Tools"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Spring Modulith support for Java projects. Treats each package directly under the @SpringBootApplication or @Modulithic package as an application module, warns when a module imports another module's internal types or a dependency its allowedDependencies doesn't list, completes and checks allowedDependencies in package-info.java, offers a quick fix to make a module open, and lists the modules with their named interfaces and dependencies in a Modules tool window. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

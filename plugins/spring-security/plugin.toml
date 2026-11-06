@@ -1,6 +1,6 @@
 id = "aritti.spring-security"
 name = "Spring Security Tools"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Spring Security checks for Java. Flags WebSecurityConfigurerAdapter, @EnableGlobalMethodSecurity, antMatchers/mvcMatchers/regexMatchers and authorizeRequests (removed or deprecated in Spring Security 6), redundant ROLE_ prefixes in hasRole/hasAnyRole, NoOpPasswordEncoder and {noop} passwords, with quick fixes where the change is mechanical. Completes security expressions and the project's role names in @PreAuthorize, @PostAuthorize, @PreFilter and @PostFilter. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

@@ -1,6 +1,6 @@
 id = "aritti.laravel"
 name = "Laravel"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = """Laravel support in PHP and Blade files. Completion and go to definition for routes, views, config keys, \
 translations, env keys, middleware, assets, controllers and controller actions, Blade and Livewire components, Vite \
 entries, validation rules, gate abilities and Eloquent columns from migrations, and for the sections and stacks of the layouts a Blade view extends. Reports views, config keys and translation keys that don't exist, with a quick fix \

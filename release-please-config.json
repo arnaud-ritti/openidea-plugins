@@ -1,0 +1,227 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "659ea1ad008ab4ad37dc31a4994e4bc6e3bdc7cd",
+  "release-type": "simple",
+  "include-component-in-tag": true,
+  "include-v-in-tag": true,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "packages": {
+    "plugins/blade": {
+      "component": "blade",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/dependency-audit": {
+      "component": "dependency-audit",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/devcontainer": {
+      "component": "devcontainer",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/dotenv": {
+      "component": "dotenv",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/flyway": {
+      "component": "flyway",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/gitlab": {
+      "component": "gitlab",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/ideolog": {
+      "component": "ideolog",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/ignore": {
+      "component": "ignore",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/jpa-assist": {
+      "component": "jpa-assist",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/kube-explorer": {
+      "component": "kube-explorer",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/laravel": {
+      "component": "laravel",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/liquibase": {
+      "component": "liquibase",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/openapi": {
+      "component": "openapi",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/properties": {
+      "component": "properties",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/quarkus": {
+      "component": "quarkus",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-batch": {
+      "component": "spring-batch",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-beans": {
+      "component": "spring-beans",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-boot": {
+      "component": "spring-boot",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-cloud": {
+      "component": "spring-cloud",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-data": {
+      "component": "spring-data",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-graphql": {
+      "component": "spring-graphql",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-initializr": {
+      "component": "spring-initializr",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-integration": {
+      "component": "spring-integration",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-messaging": {
+      "component": "spring-messaging",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-modulith": {
+      "component": "spring-modulith",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-osgi": {
+      "component": "spring-osgi",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-runtime": {
+      "component": "spring-runtime",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-security": {
+      "component": "spring-security",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-shell": {
+      "component": "spring-shell",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-web": {
+      "component": "spring-web",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-webflow": {
+      "component": "spring-webflow",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-websocket": {
+      "component": "spring-websocket",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/spring-ws": {
+      "component": "spring-ws",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/symfony": {
+      "component": "symfony",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/tasks": {
+      "component": "tasks",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    },
+    "plugins/twig": {
+      "component": "twig",
+      "extra-files": [
+        "plugin.toml"
+      ]
+    }
+  }
+}

@@ -1,6 +1,6 @@
 id = "aritti.spring-batch"
 name = "Spring Batch Tools"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Spring Batch job configuration: Go to Definition, completion and checks for XML jobs (step/flow/decision transitions, parent steps, tasklet/chunk/listener bean references), job names in spring.batch.job.name, and Spring Batch 5 migration hints in Java (deprecated JobBuilderFactory/StepBuilderFactory, @EnableBatchProcessing next to Spring Boot). Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

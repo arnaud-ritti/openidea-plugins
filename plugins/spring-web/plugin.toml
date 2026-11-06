@@ -1,6 +1,6 @@
 id = "aritti.spring-web"
 name = "Spring Web Tools"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Spring MVC helpers for Java controllers. Checks @PathVariable parameters against the URI templates of their request mappings, with a quick fix for a misnamed variable, and links the view names a @Controller returns to their template files (Thymeleaf, FreeMarker, Mustache, Pebble, JTE, JSP) with gutter arrows, Go to Definition and completion, and links functional routes (RouterFunctions, Kotlin router DSL) and test URLs to their handlers. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

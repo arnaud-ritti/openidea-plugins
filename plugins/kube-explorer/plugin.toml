@@ -1,6 +1,6 @@
 id = "aritti.kube-explorer"
 name = "Kube Explorer"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Browse a Kubernetes cluster with kubectl. Switch context and namespace, list workloads, services, config, storage, events and nodes, then describe a resource, edit its YAML with schema completion (saving applies it), stream its logs, open a shell, attach, forward ports or delete it. Commands on the open file apply, validate (server dry run), diff or delete a manifest, render or apply a Kustomization, and run helm template, lint and dependency update. Never changes your kubeconfig."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT AND Apache-2.0"

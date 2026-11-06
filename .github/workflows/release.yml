@@ -1,0 +1,119 @@
+name: release
+
+on:
+  push:
+    tags: ["*-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REGISTRY: l0ng-ai/openidea-plugins
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse tag
+        run: |
+          echo "NAME=${GITHUB_REF_NAME%-v*}" >> "$GITHUB_ENV"
+          echo "VERSION=${GITHUB_REF_NAME##*-v}" >> "$GITHUB_ENV"
+
+      - name: Check tag matches plugin.toml
+        run: |
+          grep -qx "id = \"aritti.$NAME\"" "plugins/$NAME/plugin.toml"
+          grep -q "^version = \"$VERSION\"" "plugins/$NAME/plugin.toml"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/${{ env.NAME }}
+
+      - name: Install openidea-plugin
+        run: |
+          gh release download -R l0ng-ai/openidea --pattern openidea-plugin-linux-x86_64.gz
+          gunzip openidea-plugin-linux-x86_64.gz
+          install -m 755 openidea-plugin-linux-x86_64 /usr/local/bin/openidea-plugin
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Fill change-notes from commits since the previous release
+        run: |
+          previous=$(git describe --tags --abbrev=0 --match "$NAME-v*" "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          [ -n "$previous" ] || exit 0
+          subjects=$(git log --no-merges --format=%s "$previous..$GITHUB_REF_NAME" -- "plugins/$NAME" \
+            | sed -E 's/^[a-z]+(\([^)]*\))?!?: //' | paste -sd ';' - | sed 's/;/; /g; s/\\/\\\\/g; s/"/\\"/g')
+          [ -n "$subjects" ] || exit 0
+          LINE="change-notes = \"$VERSION: $subjects\"" awk '/^change-notes = /{print ENVIRON["LINE"]; next} {print}' \
+            "plugins/$NAME/plugin.toml" > "$RUNNER_TEMP/plugin.toml"
+          mv "$RUNNER_TEMP/plugin.toml" "plugins/$NAME/plugin.toml"
+
+      - name: Test and build
+        working-directory: plugins/${{ env.NAME }}
+        run: |
+          if [ -f Cargo.toml ]; then cargo test; fi
+          openidea-plugin build
+
+      - name: Pack and check
+        run: |
+          key="$RUNNER_TEMP/publisher.key"
+          (umask 077; printf '%s\n' "$OIPLUGIN_KEY" > "$key")
+          openidea-plugin pack "plugins/$NAME" --key "$key" --publisher aritti
+          rm -f "$key"
+          openidea-plugin check "aritti.$NAME-$VERSION.oiplugin"
+        env:
+          OIPLUGIN_KEY: ${{ secrets.OIPLUGIN_KEY }}
+
+      - name: Create GitHub release
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "aritti.$NAME-$VERSION.oiplugin" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "aritti.$NAME-$VERSION.oiplugin" \
+              --title "$NAME $VERSION" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Open registry pull request
+        run: |
+          sha=$(sha256sum "aritti.$NAME-$VERSION.oiplugin" | cut -d' ' -f1)
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/aritti.$NAME-$VERSION.oiplugin"
+          branch="aritti.$NAME-$VERSION"
+
+          gh repo fork "$REGISTRY" --clone=false
+          fork="$(gh api user -q .login)/openidea-plugins"
+          git clone "https://x-access-token:$GH_TOKEN@github.com/$fork" registry
+          cd registry
+          git remote add upstream "https://github.com/$REGISTRY"
+          git fetch upstream main
+          git checkout -b "$branch" upstream/main
+
+          entry="plugins/aritti.$NAME.toml"
+          if [ ! -f "$entry" ]; then
+            echo "repository = \"https://github.com/$GITHUB_REPOSITORY\"" > "$entry"
+          fi
+          printf '\n[[versions]]\nversion = "%s"\npackage = "%s"\nsha256 = "%s"\n' "$VERSION" "$url" "$sha" >> "$entry"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$entry"
+          git commit -m "aritti.$NAME $VERSION"
+          git push --force origin "$branch"
+
+          gh pr create -R "$REGISTRY" --head "${fork%%/*}:$branch" --title "aritti.$NAME $VERSION" --body "**Plugin:** aritti.$NAME (https://github.com/$GITHUB_REPOSITORY)
+
+          **What changed:** https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME
+
+          - [x] The package is built from the listed repository and signed with my publisher key.
+          - [x] \`openidea-plugin check\` passes (run in CI before release)."
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

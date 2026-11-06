@@ -1,6 +1,6 @@
 id = "aritti.twig"
 name = "Twig"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Twig support for .twig files: highlighting of Twig and the HTML around it, blocks and macros in the structure view, and folding of tag pairs and multi-line comments."
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"

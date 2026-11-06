@@ -1,6 +1,6 @@
 id = "aritti.ignore"
 name = ".ignore"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Support for ignore files (.gitignore, .dockerignore, .npmignore, .hgignore and 30 more). Reports duplicate, redundant, relative and malformed entries and invalid `syntax:` values, with quick fixes. Completes `syntax:` in .hgignore, opens the file an entry names on Ctrl-click and highlights ignore files the IDE does not recognise. A tool window adds github/gitignore and user templates. The status bar shows Ignored while you edit an ignored file, a notification warns about a Git project without a .gitignore, and any file gets an Add to .gitignore quick fix. Port of the .ignore plugin by Jakub Chrzanowski and JetBrains (mobi.hsz.idea.gitignore 4.5.7, Apache-2.0). Templates from github/gitignore (CC0-1.0)."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "Jakub Chrzanowski (original .ignore plugin)", "JetBrains s.r.o. (original .ignore plugin)"]
 homepage = "https://github.com/JetBrains/idea-gitignore"

@@ -1,6 +1,6 @@
 id = "aritti.properties"
 name = "Properties"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Inspections and editing tools for .properties files. Reports duplicate keys, broken \\u escapes, trailing spaces, delimiters that don't match the code style, translations missing from other locales and unused keys, with quick fixes. Also removes a key from every locale, sorts and reformats files, groups keys by prefix in a structure view, edits a resource bundle as a table (Open With › Resource Bundle), goes to declaration in the parent locale or from Java/Kotlin strings, completes keys in i18n calls and simplelogger.properties, and copies a property's key or value. Ported from JetBrains' Properties plugin (com.intellij.properties) by JetBrains s.r.o., Apache-2.0."
 authors = ["Arnaud Ritti", "JetBrains s.r.o. (original Properties plugin)"]
 license = "Apache-2.0"

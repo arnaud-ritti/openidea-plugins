@@ -1,6 +1,6 @@
 id = "aritti.spring-integration"
 name = "Spring Integration Tools"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Spring Integration message channels for Java and XML: indexes channel beans, MessageChannels and DSL flows, <int:channel> declarations and the endpoints that read from or send to them (@ServiceActivator, @Transformer, @Router, @MessagingGateway…, IntegrationFlow.from, input-channel/output-channel). Go to Definition and completion on channel names and XML bean refs, gutter arrows between producers and consumers, and a warning when messages go to a channel nothing consumes. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

@@ -1,6 +1,6 @@
 id = "aritti.spring-webflow"
 name = "Spring Web Flow Tools"
-version = "0.1.0"
+version = "0.1.0" # x-release-please-version
 description = "Spring Web Flow 2 and 3 XML flow definitions: Go to Definition and completion for transition targets, decision then/else, start-state, subflow and parent flows or states (flow ids from file names or the flow registry), checks for unknown or duplicate states and unknown subflows, and a Web Flow tool window drawing the states and transitions of the open flow. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
