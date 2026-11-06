@@ -5,7 +5,7 @@ description = "Support for ignore files (.gitignore, .dockerignore, .npmignore, 
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "Jakub Chrzanowski (original .ignore plugin)", "JetBrains s.r.o. (original .ignore plugin)"]
 homepage = "https://github.com/JetBrains/idea-gitignore"
 license = "Apache-2.0"
-change-notes = "Unreleased: path completion of entries in glob-syntax ignore files (visible files and folders only). Add Selected Paths asks which ignore file (the open one or a root .gitignore, .dockerignore…) to add to; a file that is not open is opened first and the command run again. 0.2.0: Add Selected Paths to the Open Ignore File in the Project view menu. Needs OpenIDEA API 1.2. 0.1.0: first release, ported from .ignore 4.5.7 (JetBrains/idea-gitignore commit 860a6855) with github/gitignore templates at 53cf2971. Not ported because the plugin API has no equivalent: directory gutter markers, path completion, Close Ignored Editors, hiding ignored files in the Project view."
+change-notes = "Unreleased: New Ignore File command (Project view, Tools) that creates a dot-named ignore file of the chosen type through tee (clipboard fallback when denied); Unignore Selected Paths command; both commands also in the editor context menu (the current file when nothing is selected); results are notifications instead of dropped return strings. path completion of entries in glob-syntax ignore files (visible files and folders only). Add Selected Paths asks which ignore file (the open one or a root .gitignore, .dockerignore…) to add to; a file that is not open is opened first and the command run again. 0.2.0: Add Selected Paths to the Open Ignore File in the Project view menu. Needs OpenIDEA API 1.2. 0.1.0: first release, ported from .ignore 4.5.7 (JetBrains/idea-gitignore commit 860a6855) with github/gitignore templates at 53cf2971. Not ported because the plugin API has no equivalent: directory gutter markers, path completion, Close Ignored Editors, hiding ignored files in the Project view."
 categories = ["vcs", "linters"]
 icon = "icon.svg"
 engines.openidea = "^1.2"
@@ -14,6 +14,7 @@ activation = ["on-event:file-opened", "on-event:file-saved", "on-event:editor-fo
 
 [capabilities]
 required = ["project.read", "editor.read", "editor.write", "events", "storage"]
+optional = ["process:tee", "clipboard"]
 
 # Ignore files the IDE doesn't know yet; .gitignore, .dockerignore, .npmignore…
 # are the built-in `ignore` language.
@@ -34,9 +35,39 @@ id = "add-selected"
 title = "Add Selected Paths to the Open Ignore File"
 category = "Ignore"
 
+[[contributes.commands]]
+id = "unignore-selected"
+title = "Unignore Selected Paths in the Open Ignore File"
+category = "Ignore"
+
+[[contributes.commands]]
+id = "new-file"
+title = "New Ignore File"
+category = "Ignore"
+
 [[contributes.menus]]
 menu = "projectView.context"
 command = "add-selected"
+
+[[contributes.menus]]
+menu = "projectView.context"
+command = "unignore-selected"
+
+[[contributes.menus]]
+menu = "projectView.context"
+command = "new-file"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "add-selected"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "unignore-selected"
+
+[[contributes.menus]]
+menu = "tools"
+command = "new-file"
 
 [[contributes.views]]
 id = "templates"

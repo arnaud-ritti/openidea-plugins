@@ -29,6 +29,7 @@ commit `860a6855`, Apache-2.0) by Jakub Chrzanowski and JetBrains.
   templates (kept in storage) are listed in a _Starred_ group.
 - Settings › Plugins › .ignore: turn off the warning, the status or the unignore
   variant of the quick fix (`unignoreActions`), and insert templates at the caret.
+- _New Ignore File_ (Project view, Tools): pick .gitignore, .dockerignore… and the file is created at the project root (or the selected folder) with `tee`; needs the optional `tee` permission, otherwise the name is copied. _Unignore Selected Paths_ adds `!/path` entries. Both and _Add Selected Paths_ are also in the editor context menu (the current file when nothing is selected). Results show as notifications.
 - Adding an entry to a file with CRLF line endings keeps them CRLF.
 
 The redundant-entry check compares patterns. The original matched them against
