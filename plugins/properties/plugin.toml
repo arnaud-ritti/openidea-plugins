@@ -6,7 +6,7 @@ authors = ["Arnaud Ritti", "JetBrains s.r.o. (original Properties plugin)"]
 license = "Apache-2.0"
 change-notes = "0.1.0: first release, with inspections and quick fixes, unused keys, reformat and sort, the structure view, the resource bundle editor, and navigation and completion from Java/Kotlin. Ported from com.intellij.properties 263.7307.108 (source: intellij-community tag idea/263.7307.112, ff0ce573f67655be431312bebb00fecda756960b)."
 categories = ["languages", "linters"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved"]
 
