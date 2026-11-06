@@ -17,7 +17,7 @@
     },
     "springBeans.checkConfiguration": {
       "type": "boolean",
-      "title": "Warn about private or final @Bean methods in proxied @Configuration classes",
+      "title": "Warn about private or final @Bean methods in proxied @Configuration classes, @Bean calls in proxyBeanMethods = false classes, and initMethod/destroyMethod names a project class lacks",
       "default": true
     },
     "springBeans.checkNaming": {
@@ -32,7 +32,7 @@
     },
     "springBeans.checkUnresolvedReferences": {
       "type": "boolean",
-      "title": "Warn about @DependsOn names no project bean defines and @ComponentScan packages without sources (beans from libraries and auto-configuration are invisible, so this may over-report)",
+      "title": "Warn about names and files no project source defines (@DependsOn, @Lookup, @Scheduled scheduler, @ComponentScan, @PropertySource and similar paths, XML ref/depends-on/placeholders). Library beans are invisible, so it may over-report",
       "default": false
     },
     "springBeans.checkAop": {
@@ -42,7 +42,7 @@
     },
     "springBeans.checkInjectionAnnotations": {
       "type": "boolean",
-      "title": "Report @Autowired, @Value, @Inject and @Resource on static members and conflicting @Autowired constructors",
+      "title": "Report @Autowired, @Value, @Inject and @Resource on static members, conflicting @Autowired constructors, and @Required outside a setter",
       "default": true
     },
     "springBeans.checkProfiles": {
@@ -57,17 +57,17 @@
     },
     "springBeans.checkCache": {
       "type": "boolean",
-      "title": "Report cache annotations without a cache name, on interfaces, or combining @Cacheable with @CachePut",
+      "title": "Report cache annotations without a cache name, on interfaces, combined @Cacheable and @CachePut, unbalanced SpEL brackets, and key with keyGenerator (or cacheManager with cacheResolver)",
       "default": true
     },
     "springBeans.checkKotlinSpringPlugin": {
       "type": "boolean",
-      "title": "Report Kotlin classes Spring must proxy when the kotlin-spring compiler plugin is missing",
+      "title": "Kotlin: missing kotlin-spring plugin, redundant open modifiers when it is on, router pathVariable names no path declares, and ::class.java arguments that reified extensions replace",
       "default": true
     },
     "springBeans.checkXml": {
       "type": "boolean",
-      "title": "Check Spring XML bean files: bean attributes, injected values, scopes, references to abstract beans, and value/ref style hints",
+      "title": "Check Spring XML: bean attributes, values, scopes, abstract references, style hints, component-scan filters, missing imports, and project bean classes (abstract, factory-method, constructor-arg, init/destroy, @Required)",
       "default": true
     }
   }

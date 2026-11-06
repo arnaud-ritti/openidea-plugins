@@ -11,6 +11,7 @@ use openidea_plugin::{Position, Severity};
 use spring_text::finding::Finding;
 use spring_text::range;
 use spring_text::xml;
+use spring_text::xml_check::{self, Rule};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const BEANS_NS: &str = "http://www.springframework.org/schema/beans";
@@ -24,7 +25,7 @@ pub fn check_xml(path: &str, text: &str, world: &World, groups: Groups) -> Vec<F
         return Vec::new();
     }
     let mut out = Vec::new();
-    let by_name = if groups.duplicate_names || groups.xml { beans_by_name(world) } else { ByName::new() };
+    let by_name = if groups.duplicate_names || groups.xml || groups.unresolved_references { beans_by_name(world) } else { ByName::new() };
     let children = children_of(&els);
     if groups.aop {
         aop_structure(&els, &mut out);
@@ -37,6 +38,16 @@ pub fn check_xml(path: &str, text: &str, world: &World, groups: Groups) -> Vec<F
         duplicate_names(path, &els, &by_name, &mut out);
     }
     if groups.xml {
+        out.extend(xml_check::check(&els, SCAN_RULES, |_| true));
+        scan_filters(&els, &children, &mut out);
+        import_resources(path, &els, groups, &mut out);
+        inactive_profiles(&els, &mut out);
+    }
+    if groups.unresolved_references && world.complete {
+        unresolved_references(&els, &by_name, &mut out);
+        unresolved_placeholders(path, &els, &mut out);
+    }
+    if groups.xml {
         abstract_references(&els, &by_name, &mut out);
         bean_attributes(&els, &mut out);
         injection_values(&els, &children, &mut out);
@@ -45,6 +56,24 @@ pub fn check_xml(path: &str, text: &str, world: &World, groups: Groups) -> Vec<F
     }
     out
 }
+
+const FILTER_TYPES: &[&str] = &["annotation", "assignable", "aspectj", "regex", "custom"];
+const FILTER_RULE: Rule = Rule { required: &["type", "expression"], enums: &[("type", FILTER_TYPES)], ..Rule::new("include-filter") };
+const SCAN_RULES: &[Rule] = &[
+    Rule { required: &["base-package"], ..Rule::new("component-scan") },
+    FILTER_RULE,
+    Rule { required: &["type", "expression"], enums: &[("type", FILTER_TYPES)], ..Rule::new("exclude-filter") },
+];
+const REF_RULES: &[Rule] = &[
+    Rule { refs: &["ref"], ..Rule::new("property") },
+    Rule { refs: &["ref"], ..Rule::new("constructor-arg") },
+    Rule { refs: &["parent", "factory-bean"], ..Rule::new("bean") },
+    Rule { refs: &["bean"], ..Rule::new("ref") },
+    Rule { refs: &["bean"], ..Rule::new("idref") },
+    Rule { refs: &["key-ref", "value-ref"], ..Rule::new("entry") },
+    Rule { refs: &["name"], ..Rule::new("alias") },
+];
+const CONTAINER_BEANS: [&str; 6] = ["environment", "systemProperties", "systemEnvironment", "messageSource", "applicationEventMulticaster", "lifecycleProcessor"];
 
 /// The project's beans under every name they answer to, as `World::named` finds them.
 type ByName<'a> = BTreeMap<&'a str, Vec<Found<'a>>>;
@@ -385,4 +414,128 @@ pub fn style_fix(text: &str, cursor: Position) -> Option<(&'static str, TextEdit
         .find(|(_, c)| els[*c].at <= at && at <= els[*c].at + els[*c].name.len())?;
     let title = if els[child].local() == "value" { "Use the value attribute" } else { "Use the ref attribute" };
     Some((title, style_edit(text, &els, parent, child)?))
+}
+
+fn scan_filters(els: &[xml::Element], children: &[Vec<usize>], out: &mut Vec<Finding>) {
+    for (i, e) in els.iter().enumerate().filter(|(_, e)| e.local() == "component-scan") {
+        let filtered = children[i].iter().any(|&c| els[c].local() == "include-filter");
+        if e.value("use-default-filters") == Some("false") && !filtered {
+            let message = "use-default-filters=\"false\" without an include-filter: this scan registers no component.";
+            out.push(Finding::new(e.at, e.at + e.name.len(), "xml-component-scan-filters", message));
+        }
+    }
+}
+
+/// Nothing is reported for a file that imports others: the bean may be defined there.
+fn unresolved_references(els: &[xml::Element], by_name: &ByName, out: &mut Vec<Finding>) {
+    if beans_elements(els, "import").next().is_some() {
+        return;
+    }
+    let known = |name: &str| by_name.contains_key(name) || CONTAINER_BEANS.contains(&name);
+    out.extend(xml_check::check(els, REF_RULES, known).into_iter().map(|f| f.with_severity(Severity::Info)));
+    for (_, e) in beans_elements(els, "bean") {
+        let Some(attr) = e.attr("depends-on").filter(|a| !dynamic(&a.value)) else { continue };
+        for (at, name) in name_tokens(&attr.value).filter(|(_, n)| !known(n)) {
+            let start = attr.value_at + at;
+            let message = format!("No bean named \"{name}\" is defined in the project.");
+            out.push(Finding::new(start, start + name.len(), "unresolved-reference", message).with_severity(Severity::Info));
+        }
+    }
+}
+
+fn import_resources(path: &str, els: &[xml::Element], groups: Groups, out: &mut Vec<Finding>) {
+    for (_, e) in beans_elements(els, "import") {
+        let Some(attr) = e.attr("resource").filter(|a| !dynamic(&a.value) && !a.value.contains(['*', '?'])) else { continue };
+        let location = attr.value.trim();
+        let missing = if let Some(rest) = location.strip_prefix("classpath:") {
+            groups.unresolved_references && matches!(crate::target_checks::read_classpath(path, rest.trim_start_matches('/')), Some(None))
+        } else if location.contains(':') || location.starts_with('/') {
+            false
+        } else {
+            matches!(sibling_exists(path, location), Some(false))
+        };
+        if missing {
+            let message = format!("No file \"{location}\" to import. A build step can still generate it.");
+            out.push(Finding::new(attr.value_at, attr.value_end, "xml-import-missing", message));
+        }
+    }
+}
+
+/// Whether `relative` exists next to `path`: in the same classpath folder for a resource, else on disk. None when it escapes the project.
+fn sibling_exists(path: &str, relative: &str) -> Option<bool> {
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop();
+    for part in relative.split('/') {
+        match part {
+            "." | "" => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    let joined = parts.join("/");
+    for marker in ["/src/main/resources/", "/src/test/resources/"] {
+        if let Some((_, tail)) = joined.split_once(marker) {
+            return crate::target_checks::read_classpath(path, tail).map(|found| found.is_some());
+        }
+    }
+    let project = spring_text::index::project_of(path)?;
+    Some(project.read_file(&joined).is_ok())
+}
+
+fn inactive_profiles(els: &[xml::Element], out: &mut Vec<Finding>) {
+    let active = crate::commands::active_profiles();
+    if active.is_empty() {
+        return;
+    }
+    for (_, e) in beans_elements(els, "beans").filter(|(_, e)| e.parent.is_some()) {
+        let Some(attr) = e.attr("profile").filter(|a| !dynamic(&a.value)) else { continue };
+        let profiles: Vec<String> = name_tokens(&attr.value).map(|(_, p)| p.to_owned()).collect();
+        if profiles.is_empty() || crate::checks::enabled(&profiles, &active) {
+            continue;
+        }
+        let message = format!("Profile {} is not among the active profiles (Change Active Spring Profiles).", profiles.join(", "));
+        out.push(Finding::new(attr.value_at, attr.value_end, "xml-inactive-profile", message).with_severity(Severity::Hint));
+    }
+}
+
+/// `${key}` placeholders no file of the one `<context:property-placeholder>` defines. System properties and
+/// the environment also resolve them, hence Info; quiet unless every location is a readable classpath file.
+fn unresolved_placeholders(path: &str, els: &[xml::Element], out: &mut Vec<Finding>) {
+    let mut holders = els.iter().filter(|e| e.local() == "property-placeholder");
+    let (Some(holder), None) = (holders.next(), holders.next()) else { return };
+    let configurer = els.iter().any(|e| e.value("class").is_some_and(|c| c.ends_with("PlaceholderConfigurer")));
+    let unusual = ["properties-ref", "ignore-unresolvable", "local-override", "system-properties-mode"].iter().any(|a| holder.attr(a).is_some());
+    let Some(location) = holder.value("location").filter(|l| !dynamic(l)) else { return };
+    if configurer || unusual {
+        return;
+    }
+    let mut keys = BTreeSet::new();
+    for file in name_tokens(location).map(|(_, f)| f) {
+        let Some(relative) = file.strip_prefix("classpath:") else { return };
+        let Some(Some(text)) = crate::target_checks::read_classpath(path, relative.trim_start_matches('/')) else { return };
+        keys.extend(property_keys(&text));
+    }
+    for attr in els.iter().flat_map(|e| e.attrs.iter()).filter(|a| !a.name.starts_with("xmlns")) {
+        let mut rest = attr.value.as_str();
+        while let Some(open) = rest.find("${") {
+            let Some(close) = rest[open..].find('}') else { break };
+            let key = &rest[open + 2..open + close];
+            let at = attr.value_at + (attr.value.len() - rest.len()) + open + 2;
+            rest = &rest[open + close + 1..];
+            if key.is_empty() || key.contains(['$', '{', ':', '#']) || key.starts_with("env.") || keys.contains(key) {
+                continue;
+            }
+            let message = format!("\"{key}\" is not defined in {location}. System properties and the environment can still provide it.");
+            out.push(Finding::new(at, at + key.len(), "xml-placeholder-unresolved", message).with_severity(Severity::Info));
+        }
+    }
+}
+
+fn property_keys(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.lines().map(str::trim_start).filter(|l| !l.is_empty() && !l.starts_with(['#', '!'])).map(|line| {
+        let end = line.find(['=', ':']).into_iter().chain(line.find(char::is_whitespace)).min().unwrap_or(line.len());
+        line[..end].trim_end().to_owned()
+    })
 }

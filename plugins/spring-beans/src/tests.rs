@@ -2317,3 +2317,433 @@ fn active_profiles_are_chosen_stored_and_narrow_duplicate_names() {
     Navigator::default().run_command("change-active-profiles", &host.invocation(), None).unwrap();
     assert_eq!(commands::active_profiles(), ["prod"]);
 }
+
+#[test]
+fn overloads_all_carrying_the_annotation_are_self_invocations() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkSelfInvocation", "true");
+    let both = SELF_CALL.replace("    public void run", "    @Transactional\n    public void save(int x) {}\n    public void run");
+    assert_eq!(self_invocation(&host, &both), [pair("self-invocation", "save"), pair("self-invocation", "save")]);
+}
+
+const LITE_CONFIG: &str = "@Configuration(proxyBeanMethods = false)\nclass C {\n    @Bean\n    Clock clock() { return null; }\n    @Bean\n    Mailer mailer() { return new Mailer(clock()); }\n    Mailer plain() { return new Mailer(clock()); }\n}\n";
+
+#[test]
+fn bean_call_without_proxying_is_reported() {
+    assert_eq!(found(LITE_CONFIG), [pair("unproxied-bean-method-call", "clock")]);
+    let overloaded = LITE_CONFIG.replace("    @Bean\n    Mailer mailer", "    @Bean\n    Clock clock(int n) { return null; }\n    @Bean\n    Mailer mailer");
+    assert_eq!(found(&overloaded), [pair("unproxied-bean-method-call", "clock")]);
+}
+
+#[test]
+fn bean_call_is_quiet_with_proxying_or_a_plain_callee() {
+    assert!(found(&LITE_CONFIG.replace("(proxyBeanMethods = false)", "")).is_empty());
+    assert!(found(&LITE_CONFIG.replace("    @Bean\n    Clock clock", "    Clock clock")).is_empty());
+    let partly = LITE_CONFIG.replace("    @Bean\n    Mailer mailer", "    Clock clock(int n) { return null; }\n    @Bean\n    Mailer mailer");
+    assert!(found(&partly).is_empty(), "an overload without @Bean may be the one called");
+    assert!(found(&LITE_CONFIG.replace("@Configuration", "@Component")).is_empty());
+}
+
+#[test]
+fn cache_expressions_with_unbalanced_brackets_are_errors() {
+    let text = "@Service\nclass A {\n    @Cacheable(cacheNames = \"c\", key = \"#id.toString(\", condition = \"#id > 'x\", unless = \"#result == null\")\n    Object find(long id) { return null; }\n}\n";
+    assert_eq!(found(text), [pair("cache-spel-syntax", "#id.toString("), pair("cache-spel-syntax", "#id > 'x")]);
+    assert!(found(&text.replace("#id.toString(\"", "#id\"").replace("#id > 'x", "#id > 1")).is_empty());
+}
+
+#[test]
+fn cache_key_and_key_generator_together_are_errors() {
+    let text = "@Service\nclass A {\n    @Cacheable(cacheNames = \"c\", key = \"#id\", keyGenerator = \"gen\")\n    Object find(long id) { return null; }\n}\n";
+    assert_eq!(found(text), [pair("cache-attribute-conflict", "\"gen\"")]);
+    let library = format!("import com.acme.Cacheable;\n{text}");
+    assert!(found(&library).is_empty());
+}
+
+fn project_findings(text: &str, extra: &[(&str, &str)]) -> Vec<(String, String)> {
+    let host = setup();
+    host.set_setting("springBeans.checkUnresolvedReferences", "true");
+    for (name, content) in extra {
+        host.add_file(name, content);
+    }
+    findings(&host, &mut Navigator::default(), "Subject.java", text)
+}
+
+const WORKER: (&str, &str) = ("src/main/java/com/acme/Worker.java", "package com.acme;\npublic class Worker {\n    public void start() {}\n}\n");
+
+#[test]
+fn init_method_missing_from_a_project_class_is_reported() {
+    let text = "package com.acme;\n@Configuration\nclass C {\n    @Bean(initMethod = \"boot\", destroyMethod = \"stop\")\n    Worker worker() { return new Worker(); }\n}\n";
+    assert_eq!(project_findings(text, &[WORKER]), [pair("bean-method-missing", "boot"), pair("bean-method-missing", "stop")]);
+    let known = text.replace("\"boot\"", "\"start\"").replace(", destroyMethod = \"stop\"", ", destroyMethod = \"(inferred)\"");
+    assert!(project_findings(&known, &[WORKER]).is_empty());
+}
+
+#[test]
+fn init_method_is_quiet_for_library_abstract_or_subtyped_classes() {
+    let text = "package com.acme;\n@Configuration\nclass C {\n    @Bean(initMethod = \"boot\")\n    Worker worker() { return new Worker(); }\n}\n";
+    assert!(project_findings(text, &[]).is_empty(), "type from a library");
+    let sub = ("src/main/java/com/acme/Sub.java", "package com.acme;\nclass Sub extends Worker { void boot() {} }\n");
+    assert!(project_findings(text, &[WORKER, sub]).is_empty());
+    let library_parent = ("src/main/java/com/acme/Worker.java", "package com.acme;\npublic class Worker extends Thread {}\n");
+    assert!(project_findings(text, &[library_parent]).is_empty());
+    let lombok = ("src/main/java/com/acme/Worker.java", "package com.acme;\n@Getter\npublic class Worker {}\n");
+    assert!(project_findings(text, &[lombok]).is_empty());
+}
+
+#[test]
+fn init_method_reads_project_constants() {
+    let constants = ("src/main/java/com/acme/Names.java", "package com.acme;\nclass Names { static final String BOOT = \"boot\"; }\n");
+    let text = "package com.acme;\n@Configuration\nclass C {\n    @Bean(initMethod = Names.BOOT)\n    Worker worker() { return null; }\n}\n";
+    assert_eq!(project_findings(text, &[WORKER, constants]), [pair("bean-method-missing", "Names.BOOT")]);
+}
+
+#[test]
+fn test_bean_method_must_exist_in_the_test_class() {
+    let text = "class T {\n    @TestBean(methodName = \"fake\")\n    Clock clock;\n    static Clock other() { return null; }\n}\n";
+    assert_eq!(found(text), [pair("bean-method-missing", "fake")]);
+    assert!(found(&text.replace("other", "fake")).is_empty());
+    assert!(found(&text.replace("class T", "class T extends Base")).is_empty());
+}
+
+#[test]
+fn required_outside_a_setter_is_reported() {
+    let text = "class A {\n    @Required\n    void setClock(Clock c) {}\n    @Required\n    void configure(Clock c) {}\n}\n";
+    assert_eq!(found(text), [pair("required-not-setter", "@Required")]);
+}
+
+#[test]
+fn lookup_scheduler_and_spy_names_must_be_beans() {
+    let text = "package com.acme;\nclass A {\n    @Lookup(\"nope\")\n    Clock clock() { return null; }\n    @Scheduled(fixedRate = 5, scheduler = \"ticker\")\n    void run() {}\n    @Lookup(\"clock\")\n    Clock fine() { return null; }\n}\n";
+    assert_eq!(project_findings(text, &[]), [pair("unresolved-bean-name", "nope"), pair("unresolved-bean-name", "ticker")]);
+    let spy = "package com.acme;\nclass T {\n    @MockitoSpyBean(name = \"gone\")\n    Clock c;\n}\n";
+    assert_eq!(project_findings(spy, &[]), [pair("unresolved-bean-name", "gone")]);
+    assert!(found(text).is_empty(), "off by default");
+    assert!(project_findings(&text.replace("@Lookup(\"nope\")", "@Lookup(\"${x}\")"), &[]).iter().all(|f| f.1 != "${x}"));
+}
+
+#[test]
+fn resource_locations_are_checked_against_the_resource_folders() {
+    let text = "package com.acme;\n@ImportResource(\"classpath:beans.xml\")\n@PropertySource({\"classpath:missing.properties\", \"classpath*:any.properties\", \"file:/etc/x\"})\n@ContextConfiguration(locations = \"Test-context.xml\")\nclass A {\n    @Sql(\"/db/none.sql\")\n    void t() {}\n}\n";
+    assert_eq!(
+        project_findings(text, &[]),
+        [pair("resource-not-found", "classpath:missing.properties"), pair("resource-not-found", "Test-context.xml"), pair("resource-not-found", "/db/none.sql")]
+    );
+    let present = [("src/test/resources/com/acme/Test-context.xml", "<beans/>"), ("src/main/resources/missing.properties", "a=b"), ("src/test/resources/db/none.sql", "")];
+    assert!(project_findings(text, &present).is_empty());
+    let optional = text.replace("@PropertySource(", "@PropertySource(ignoreResourceNotFound = true, value = ");
+    assert!(!project_findings(&optional, &[]).iter().any(|f| f.1.contains("missing.properties")));
+}
+
+fn xml_with_setting(body: &str, unresolved: bool, files: &[(&str, &str)]) -> Vec<(String, String)> {
+    let host = MockHost::install();
+    if unresolved {
+        host.set_setting("springBeans.checkUnresolvedReferences", "true");
+    }
+    for (name, content) in files {
+        host.add_file(name, content);
+    }
+    xml_findings(&host, &beans_xml(body))
+}
+
+const WIRED: &str = "<bean id=\"a\" class=\"x.A\" depends-on=\"b, gone\"><property name=\"p\" ref=\"nope\"/><constructor-arg ref=\"a\"/></bean><bean id=\"b\" parent=\"missing\"/>";
+
+#[test]
+fn unresolved_xml_references_are_info_and_opt_in() {
+    let found = xml_with_setting(WIRED, true, &[]);
+    assert_eq!(
+        found,
+        [pair("unresolved-reference", "nope"), pair("unresolved-reference", "missing"), pair("unresolved-reference", "gone")]
+    );
+    assert!(xml_with_setting(WIRED, false, &[]).is_empty());
+}
+
+#[test]
+fn unresolved_xml_references_are_quiet_with_imports_dynamic_or_container_names() {
+    let imported = format!("<import resource=\"other.xml\"/>{WIRED}");
+    let files = [("src/main/resources/other.xml", "<beans/>")];
+    assert!(xml_with_setting(&imported, true, &files).is_empty());
+    let quiet = "<bean id=\"a\" class=\"x.A\" depends-on=\"${dep}\"><property name=\"p\" ref=\"environment\"/><property name=\"q\" ref=\"${r}\"/></bean>";
+    assert!(xml_with_setting(quiet, true, &[]).is_empty());
+}
+
+#[test]
+fn unresolved_xml_references_see_beans_of_other_files_and_code() {
+    let body = "<bean id=\"a\" class=\"x.A\"><property name=\"p\" ref=\"users\"/><property name=\"q\" ref=\"clock\"/></bean>";
+    let host = setup();
+    host.set_setting("springBeans.checkUnresolvedReferences", "true");
+    assert!(xml_findings(&host, &beans_xml(body)).is_empty(), "stereotype and @Bean beans of the project");
+}
+
+#[test]
+fn component_scan_filters_are_checked() {
+    let body = "<context:component-scan use-default-filters=\"false\"><context:include-filter type=\"bogus\"/></context:component-scan><context:component-scan base-package=\"a\" use-default-filters=\"false\"/>";
+    assert_eq!(
+        xml_with_setting(body, false, &[]),
+        [
+            pair("missing-attribute", "context:component-scan"),
+            pair("missing-attribute", "context:include-filter"),
+            pair("invalid-attribute-value", "bogus"),
+            pair("xml-component-scan-filters", "context:component-scan"),
+        ]
+    );
+    let fine = "<context:component-scan base-package=\"a\"><context:exclude-filter type=\"regex\" expression=\".*\"/></context:component-scan>";
+    assert!(xml_with_setting(fine, false, &[]).is_empty());
+}
+
+#[test]
+fn import_of_a_missing_file_is_reported() {
+    let body = "<import resource=\"gone.xml\"/><import resource=\"here.xml\"/><import resource=\"sub/../here.xml\"/><import resource=\"classpath:lib.xml\"/><import resource=\"file:/x.xml\"/><import resource=\"${p}.xml\"/>";
+    let files = [("src/main/resources/here.xml", "<beans/>")];
+    assert_eq!(xml_with_setting(body, false, &files), [pair("xml-import-missing", "gone.xml")]);
+    assert_eq!(
+        xml_with_setting(body, true, &files),
+        [pair("xml-import-missing", "gone.xml"), pair("xml-import-missing", "classpath:lib.xml")]
+    );
+}
+
+#[test]
+fn inactive_profile_blocks_are_hinted_once_profiles_are_chosen() {
+    let body = "<beans profile=\"dev\"/><beans profile=\"prod\"/><beans profile=\"!prod\"/>";
+    assert!(xml_with_setting(body, false, &[]).is_empty());
+    let host = MockHost::install();
+    openidea_plugin::host::storage::set("activeProfiles", "prod").unwrap();
+    let found = xml_findings(&host, &beans_xml(body));
+    assert_eq!(found, [pair("xml-inactive-profile", "dev"), pair("xml-inactive-profile", "!prod")]);
+}
+
+#[test]
+fn placeholders_are_checked_against_the_property_placeholder_files() {
+    let body = "<context:property-placeholder location=\"classpath:app.properties\"/><bean id=\"a\" class=\"x.A\"><property name=\"p\" value=\"${db.url}\"/><property name=\"q\" value=\"${db.user:sa}\"/><property name=\"r\" value=\"${db.nope}\"/></bean>";
+    let files = [("src/main/resources/app.properties", "# c\ndb.url = jdbc:x\ndb.user: u\n")];
+    assert_eq!(xml_with_setting(body, true, &files), [pair("xml-placeholder-unresolved", "db.nope")]);
+    assert!(xml_with_setting(body, true, &[]).is_empty(), "an unreadable location says nothing");
+    assert!(xml_with_setting(body, false, &files).is_empty());
+}
+
+const POOL: (&str, &str) = (
+    "src/main/java/com/acme/Pool.java",
+    "package com.acme;\npublic class Pool {\n    public Pool(int size) {}\n    @Required\n    public void setUrl(String url) {}\n    public void setMaxSize(int n) {}\n    public void open() {}\n    public static Pool create() { return null; }\n    public Pool copy() { return null; }\n}\n",
+);
+const SHAPE: (&str, &str) = ("src/main/java/com/acme/Shape.java", "package com.acme;\npublic abstract class Shape {}\n");
+
+fn class_findings(body: &str, files: &[(&str, &str)]) -> Vec<(String, String)> {
+    let host = MockHost::install();
+    for (name, content) in files {
+        host.add_file(name, content);
+    }
+    xml_findings(&host, &beans_xml(body))
+}
+
+#[test]
+fn factory_method_must_exist_and_be_static() {
+    let body = "<bean class=\"com.acme.Pool\" factory-method=\"create\"/><bean class=\"com.acme.Pool\" factory-method=\"copy\"/><bean class=\"com.acme.Pool\" factory-method=\"nope\"/>";
+    let found = class_findings(body, &[POOL]);
+    assert_eq!(found, [pair("xml-factory-method", "copy"), pair("xml-factory-method", "nope")]);
+    let with_factory_bean = "<bean class=\"com.acme.Pool\" factory-bean=\"f\" factory-method=\"nope\"/>";
+    assert!(class_findings(with_factory_bean, &[POOL]).iter().all(|f| f.0 != "xml-factory-method"));
+}
+
+#[test]
+fn abstract_classes_cannot_be_instantiated() {
+    let body = "<bean id=\"a\" class=\"com.acme.Shape\"/><bean id=\"b\" class=\"com.acme.Shape\" abstract=\"true\"/><bean id=\"c\" class=\"com.acme.Shape\"><lookup-method name=\"x\" bean=\"y\"/></bean>";
+    assert_eq!(class_findings(body, &[SHAPE]), [pair("xml-abstract-class", "com.acme.Shape")]);
+}
+
+#[test]
+fn constructor_arguments_must_fit_a_constructor() {
+    let two = "<bean class=\"com.acme.Pool\"><constructor-arg value=\"1\"/><constructor-arg value=\"2\"/></bean>";
+    assert_eq!(class_findings(two, &[POOL]), [pair("xml-constructor-args", "com.acme.Pool")]);
+    let one = "<bean class=\"com.acme.Pool\"><constructor-arg value=\"1\"/></bean>";
+    assert!(class_findings(one, &[POOL]).is_empty());
+    assert!(class_findings(&two.replace("<bean ", "<bean autowire=\"constructor\" "), &[POOL]).is_empty());
+    let lombok = ("src/main/java/com/acme/Pool.java", "package com.acme;\n@AllArgsConstructor\npublic class Pool {}\n");
+    assert!(class_findings(two, &[lombok]).is_empty());
+    let implicit = ("src/main/java/com/acme/Pool.java", "package com.acme;\npublic class Pool {}\n");
+    assert_eq!(class_findings(one, &[implicit]), [pair("xml-constructor-args", "com.acme.Pool")]);
+}
+
+#[test]
+fn lifecycle_methods_of_xml_beans_must_exist() {
+    let body = "<bean class=\"com.acme.Pool\" init-method=\"open\" destroy-method=\"close\"/>";
+    assert_eq!(class_findings(body, &[POOL]), [pair("bean-method-missing", "close")]);
+}
+
+#[test]
+fn required_setters_must_be_set_when_annotations_are_enforced() {
+    let enforced = "<context:annotation-config/><bean class=\"com.acme.Pool\"><constructor-arg value=\"1\"/></bean>";
+    assert_eq!(class_findings(enforced, &[POOL]), [pair("xml-required-property", "bean")]);
+    let set = enforced.replace("</bean>", "<property name=\"url\" value=\"u\"/></bean>");
+    assert!(class_findings(&set, &[POOL]).is_empty());
+    let attribute = enforced.replace("<bean ", "<bean xmlns:p=\"http://www.springframework.org/schema/p\" p:url=\"u\" ");
+    assert!(class_findings(&attribute, &[POOL]).is_empty());
+    assert!(class_findings(&enforced.replace("<context:annotation-config/>", ""), &[POOL]).is_empty());
+}
+
+#[test]
+fn classes_with_library_parents_are_skipped() {
+    let child = ("src/main/java/com/acme/Child.java", "package com.acme;\npublic class Child extends Lib {\n    public Child(int a) {}\n}\n");
+    let body = "<bean class=\"com.acme.Child\" factory-method=\"nope\" init-method=\"x\"/>";
+    assert!(class_findings(body, &[child]).is_empty());
+}
+
+#[test]
+fn property_names_complete_and_navigate_to_setters() {
+    let host = MockHost::install();
+    host.add_file(POOL.0, POOL.1);
+    let xml = beans_xml("<bean class=\"com.acme.Pool\"><property name=\"max\"/></bean>");
+    let document = doc(XML_PATH, &xml);
+    let mut n = Navigator::default();
+    let at = after(&xml, "name=\"max", 1);
+    let labels: Vec<String> = n.completion(&document, at, None).into_iter().map(|i| i.label).collect();
+    assert_eq!(labels, ["url", "maxSize"]);
+    let full = beans_xml("<bean class=\"com.acme.Pool\"><property name=\"maxSize\"/></bean>");
+    let found = n.definition(&doc(XML_PATH, &full), after(&full, "name=\"max", 1));
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].path.as_str(), found[0].range.start.line), ("/project/src/main/java/com/acme/Pool.java", 5));
+}
+
+fn meta_findings(host: &MockHost, relative: &str, text: &str) -> Vec<(String, String)> {
+    host.add_file(relative, text);
+    let path = format!("/project/{relative}");
+    let mut navigator = Navigator::default();
+    navigator.handle_events(&[Event::FileOpened(path.clone())], &host.invocation());
+    host.diagnostics()
+        .get(&path)
+        .into_iter()
+        .flatten()
+        .map(|d| {
+            let (from, to) = (offset(text, d.range.start).unwrap(), offset(text, d.range.end).unwrap());
+            (d.code.clone().unwrap(), text[from..to].to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn spring_handlers_must_name_project_classes() {
+    let host = setup();
+    let text = "http\\://acme/ns=com.acme.UserServiceImpl\nhttp\\://acme/two=com.acme.Gone\nhttp\\://lib/ns=org.lib.Handler\n";
+    assert_eq!(meta_findings(&host, "src/main/resources/META-INF/spring.handlers", text), [pair("spring-handler-class-missing", "com.acme.Gone")]);
+}
+
+#[test]
+fn spring_schemas_must_name_existing_files() {
+    let host = setup();
+    host.add_file("src/main/resources/META-INF/acme.xsd", "<xs/>");
+    let text = "http\\://acme/a.xsd=META-INF/acme.xsd\nhttp\\://acme/b.xsd=META-INF/gone.xsd\n";
+    assert_eq!(meta_findings(&host, "src/main/resources/META-INF/spring.schemas", text), [pair("spring-schema-file-missing", "META-INF/gone.xsd")]);
+}
+
+const SPRING_KTS: &str = "plugins {\n    kotlin(\"jvm\") version \"1.9.24\"\n    kotlin(\"plugin.spring\") version \"1.9.24\"\n}\n";
+
+fn kt_codes(host: &MockHost, text: &str, code: &str) -> Vec<String> {
+    let document = doc(KT_PATH, text);
+    Navigator::default().line_markers(&document);
+    host.diagnostics()
+        .get(&document.path)
+        .into_iter()
+        .flatten()
+        .filter(|d| d.code.as_deref() == Some(code))
+        .map(|d| text[offset(text, d.range.start).unwrap()..offset(text, d.range.end).unwrap()].to_owned())
+        .collect()
+}
+
+#[test]
+fn open_is_redundant_when_the_spring_plugin_opens_the_class() {
+    let text = "@Service\nopen class Billing {\n    @Transactional\n    open fun charge() {}\n    fun other() {}\n}\n\nopen class Plain\n\n@Named(\"open\") class Odd\n";
+    let host = kt_host(Some(("build.gradle.kts", SPRING_KTS)));
+    assert_eq!(kt_codes(&host, text, "kotlin-redundant-open"), ["open", "open"]);
+    let without_plugin = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    assert!(kt_codes(&without_plugin, text, "kotlin-redundant-open").is_empty());
+    let allopen_only = kt_host(Some(("build.gradle", "plugins { id 'org.jetbrains.kotlin.plugin.allopen' }")));
+    assert!(kt_codes(&allopen_only, text, "kotlin-redundant-open").is_empty());
+    assert!(kt_codes(&kt_host(None), text, "kotlin-redundant-open").is_empty());
+}
+
+const ROUTES: &str = "fun routes() = router {\n    GET(\"/users/{id}\") { req -> ok().body(req.pathVariable(\"id\")) }\n    GET(\"/orders\") { req -> ok().body(req.pathVariable(\"oid\")) }\n}\n";
+
+#[test]
+fn router_path_variables_must_appear_in_a_route_path() {
+    let host = kt_host(None);
+    assert_eq!(kt_codes(&host, ROUTES, "router-path-variable"), ["oid"]);
+    let nested = ROUTES.replace("GET(\"/orders\")", "GET(\"/orders/{oid:[0-9]+}\")");
+    assert!(kt_codes(&host, &nested, "router-path-variable").is_empty());
+    let not_a_router = "fun f(req: Request) = req.pathVariable(\"oid\")\n";
+    assert!(kt_codes(&host, not_a_router, "router-path-variable").is_empty());
+    let computed = ROUTES.replace("\"oid\"", "name");
+    assert!(kt_codes(&host, &computed, "router-path-variable").is_empty());
+}
+
+#[test]
+fn class_java_arguments_get_a_reified_extension_hint() {
+    let host = kt_host(None);
+    let text = "fun f(ctx: ApplicationContext, rest: RestTemplate) {\n    ctx.getBean(Foo::class.java)\n    ctx.getBean(\"foo\", Foo::class.java)\n    rest.getForObject(\"/u\", User::class.java)\n    getBean(Foo::class.java)\n    ctx.getBean(Foo::class)\n}\n";
+    assert_eq!(kt_codes(&host, text, "kotlin-reified-extension"), ["Foo::class.java", "Foo::class.java", "User::class.java"]);
+}
+
+#[test]
+fn check_configuration_collects_problems_into_the_report_view() {
+    let host = setup();
+    host.add_file("src/main/java/com/acme/Bad.java", "package com.acme;\n@Service\nclass Bad {\n    @Transactional\n    private void save() {}\n}\n");
+    let mut n = Navigator::default();
+    n.run_command("check-spring-configuration", &host.invocation(), None).unwrap();
+    assert_eq!(host.revealed_views(), [REPORT_VIEW]);
+    let shown = n.render(REPORT_VIEW, None, &host.invocation()).unwrap();
+    let Body::Tree(items) = shown.body else { panic!("tree expected") };
+    let bad = items.iter().find(|i| i.label == "Bad.java").unwrap();
+    assert!(items.iter().any(|i| i.parent.as_deref() == Some(&bad.key) && i.detail.as_deref() == Some("line 5 · non-proxyable-method")));
+    let problem = items.iter().find(|i| i.parent.is_some() && i.detail.as_deref().is_some_and(|d| d.ends_with("non-proxyable-method"))).unwrap();
+    n.handle(REPORT_VIEW, ViewEvent::Activate(problem.key.clone()), &host.invocation()).unwrap();
+    assert_eq!(host.opened_locations(), [(format!("{ROOT}/Bad.java"), 4, 17)]);
+    assert!(host.notifications().last().unwrap().body.contains("problems in"));
+}
+
+#[test]
+fn check_configuration_says_when_nothing_is_wrong() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Fine.java", "package com.acme;\n@Service\nclass Fine {}\n");
+    let mut n = Navigator::default();
+    n.run_command("check-spring-configuration", &host.invocation(), None).unwrap();
+    let Body::Message(text) = n.render(REPORT_VIEW, None, &host.invocation()).unwrap().body else { panic!("message expected") };
+    assert_eq!(text, "No problems found.");
+}
+
+#[test]
+fn dump_configuration_lists_the_beans() {
+    let host = setup();
+    let mut n = Navigator::default();
+    n.run_command("dump-spring-configuration", &host.invocation(), None).unwrap();
+    let Body::Html(page) = n.render(REPORT_VIEW, None, &host.invocation()).unwrap().body else { panic!("html expected") };
+    assert!(page.contains("@Service") && page.contains("users") && page.contains("UserServiceImpl.java:8"), "{page}");
+    assert!(page.contains("[profiles: dev, prod]") && page.contains("[primary]"));
+}
+
+const SCHEDULED: &str = "package com.acme;\npublic class Jobs {\n    @Scheduled(cron = \"0 0 * * * *\")\n    void run() {}\n}\n";
+
+fn externalize_host(text: &str, line: u32, column: u32) -> MockHost {
+    let host = MockHost::install();
+    host.open_editor("/project/src/main/java/com/acme/Jobs.java", "java", text, &[(line, column, line, column)]);
+    host
+}
+
+#[test]
+fn annotation_string_moves_to_a_placeholder_and_the_property_line_is_copied() {
+    let host = externalize_host(SCHEDULED, 2, 24);
+    host.add_file("src/main/resources/application.properties", "a=1\n");
+    run(&host, "externalize-annotation-string", &[&["/project/src/main/resources/application.properties"], &["jobs.cron"]]).unwrap();
+    assert!(host.editor_text().contains("@Scheduled(cron = \"${jobs.cron}\")"), "{}", host.editor_text());
+    assert_eq!(host.clipboard().as_deref(), Some("jobs.cron=0 0 * * * *"));
+    assert!(host.notifications().last().unwrap().body.contains("application.properties"));
+}
+
+#[test]
+fn externalizing_is_refused_outside_annotation_strings_and_for_known_keys() {
+    let host = externalize_host(SCHEDULED, 3, 6);
+    assert!(run(&host, "externalize-annotation-string", &[]).is_err());
+    let host = externalize_host(SCHEDULED, 2, 24);
+    host.add_file("src/main/resources/application.properties", "jobs.cron=x\n");
+    let result = run(&host, "externalize-annotation-string", &[&["/project/src/main/resources/application.properties"], &["jobs.cron"]]);
+    assert!(result.is_err());
+    assert_eq!(host.editor_text(), SCHEDULED);
+    let placeholder = SCHEDULED.replace("0 0 * * * *", "${x}");
+    assert!(run(&externalize_host(&placeholder, 2, 24), "externalize-annotation-string", &[]).is_err());
+}

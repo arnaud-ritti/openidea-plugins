@@ -4,7 +4,7 @@ version = "0.1.0" # x-release-please-version
 description = "Spring Framework beans for Java, Kotlin and XML configuration: finds stereotype classes, @Bean methods, Spring Data repositories and <bean> definitions; links injection points to the beans Spring would pick (by type through the project's type hierarchy, @Qualifier, @Primary, parameter name) and beans to where they are injected; navigates and completes bean names in qualifiers, XML references, SpEL @bean references and named pointcuts; completes SpEL #variables and pointcut designators; lists beans in a Spring Beans tool window, draws their dependencies in a Spring Bean Graph, and turns field injection into constructor injection. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "Unreleased: Generate Setter, Constructor, Autowired Dependency and Event Listener editor commands; Change Active Spring Profiles (narrows the duplicate bean name check); gutter markers between event publishers and listeners and between classes and their XML beans, with a chooser for several targets, following the project's type hierarchy across files. Also: project-wide Go to Declaration and gutter markers from the host's document index (bean names, aliases, qualifiers, injection points by type), without the provider time budget. 0.2.0: Kotlin and XML bean configuration; bean names, aliases, @Qualifier, @Primary and @Profile; candidates through the whole type hierarchy; gutter icons from beans to their injection points; SpEL and AspectJ pointcut completion and navigation; Spring Bean Graph; Use constructor injection quick fix. 0.1.0 (first release): bean index, injection navigation, Spring Beans tool window, field injection warning."
+change-notes = "Unreleased: Check Spring Configuration and Dump Spring Configuration commands (results in a Spring Configuration Report view), Move Annotation String to Property command, file templates for components, services, configurations, Boot applications and tests, and configuration properties (Java and Kotlin); inspections for unproxied @Bean calls, @Cacheable SpEL syntax and attribute conflicts, @Bean initMethod/destroyMethod, @TestBean and @Required targets, same-class overloads in self-invocation, unresolved @Lookup/@Scheduled/@MockitoSpyBean names and missing @ImportResource/@PropertySource/@ContextConfiguration/@Sql files (opt in), XML component-scan filters, missing imports, unresolved ref/parent/depends-on and placeholders (opt in), inactive profile blocks, and checks of bean classes (abstract, factory-method, constructor-arg count, init/destroy, @Required); setter completion and navigation for <property name>; document-index links for profiles, resource files, packages and @Value placeholders; META-INF/spring.handlers and spring.schemas checks; Kotlin redundant open, router pathVariable and reified extension hints. Also: Generate Setter, Constructor, Autowired Dependency and Event Listener editor commands; Change Active Spring Profiles (narrows the duplicate bean name check); gutter markers between event publishers and listeners and between classes and their XML beans, with a chooser for several targets, following the project's type hierarchy across files. Also: project-wide Go to Declaration and gutter markers from the host's document index (bean names, aliases, qualifiers, injection points by type), without the provider time budget. 0.2.0: Kotlin and XML bean configuration; bean names, aliases, @Qualifier, @Primary and @Profile; candidates through the whole type hierarchy; gutter icons from beans to their injection points; SpEL and AspectJ pointcut completion and navigation; Spring Bean Graph; Use constructor injection quick fix. 0.1.0 (first release): bean index, injection navigation, Spring Beans tool window, field injection warning."
 categories = ["frameworks"]
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
@@ -43,6 +43,21 @@ id = "change-active-profiles"
 title = "Change Active Spring Profiles"
 category = "Spring"
 
+[[contributes.commands]]
+id = "check-spring-configuration"
+title = "Check Spring Configuration"
+category = "Spring"
+
+[[contributes.commands]]
+id = "dump-spring-configuration"
+title = "Dump Spring Configuration"
+category = "Spring"
+
+[[contributes.commands]]
+id = "externalize-annotation-string"
+title = "Move Annotation String to Property"
+category = "Spring"
+
 [[contributes.menus]]
 menu = "editor.context"
 command = "generate-setter"
@@ -64,11 +79,96 @@ command = "generate-event-listener"
 when = "editorLangId == java"
 
 [[contributes.menus]]
+menu = "editor.context"
+command = "externalize-annotation-string"
+when = "editorLangId == java"
+
+[[contributes.menus]]
 menu = "tools"
 command = "change-active-profiles"
 
+[[contributes.menus]]
+menu = "tools"
+command = "check-spring-configuration"
+
+[[contributes.menus]]
+menu = "tools"
+command = "dump-spring-configuration"
+
+[[contributes.fileTemplates]]
+id = "spring-component-java"
+name = "Spring Component"
+extension = "java"
+path = "templates/Component.java"
+
+[[contributes.fileTemplates]]
+id = "spring-component-kotlin"
+name = "Spring Component (Kotlin)"
+extension = "kt"
+path = "templates/Component.kt"
+
+[[contributes.fileTemplates]]
+id = "spring-service-java"
+name = "Spring Service"
+extension = "java"
+path = "templates/Service.java"
+
+[[contributes.fileTemplates]]
+id = "spring-service-kotlin"
+name = "Spring Service (Kotlin)"
+extension = "kt"
+path = "templates/Service.kt"
+
+[[contributes.fileTemplates]]
+id = "spring-configuration-java"
+name = "Spring Configuration"
+extension = "java"
+path = "templates/Configuration.java"
+
+[[contributes.fileTemplates]]
+id = "spring-configuration-kotlin"
+name = "Spring Configuration (Kotlin)"
+extension = "kt"
+path = "templates/Configuration.kt"
+
+[[contributes.fileTemplates]]
+id = "spring-application-java"
+name = "Spring Boot Application"
+extension = "java"
+path = "templates/Application.java"
+
+[[contributes.fileTemplates]]
+id = "spring-application-kotlin"
+name = "Spring Boot Application (Kotlin)"
+extension = "kt"
+path = "templates/Application.kt"
+
+[[contributes.fileTemplates]]
+id = "spring-boot-test-java"
+name = "Spring Boot Test"
+extension = "java"
+path = "templates/SpringBootTest.java"
+
+[[contributes.fileTemplates]]
+id = "spring-boot-test-kotlin"
+name = "Spring Boot Test (Kotlin)"
+extension = "kt"
+path = "templates/SpringBootTest.kt"
+
+[[contributes.fileTemplates]]
+id = "spring-configuration-properties-java"
+name = "Spring Configuration Properties"
+extension = "java"
+path = "templates/ConfigurationProperties.java"
+
+[[contributes.fileTemplates]]
+id = "spring-configuration-properties-kotlin"
+name = "Spring Configuration Properties (Kotlin)"
+extension = "kt"
+path = "templates/ConfigurationProperties.kt"
+
 [[contributes.documentIndexers]]
-extensions = ["java", "kt", "xml"]
+extensions = ["java", "kt", "xml", "properties", "yml", "yaml", "sql"]
 
 [[contributes.views]]
 id = "beans"
@@ -79,6 +179,12 @@ location = "left"
 [[contributes.views]]
 id = "bean-graph"
 title = "Spring Bean Graph"
+icon = "icons/spring.svg"
+location = "bottom"
+
+[[contributes.views]]
+id = "spring-report"
+title = "Spring Configuration Report"
 icon = "icons/spring.svg"
 location = "bottom"
 

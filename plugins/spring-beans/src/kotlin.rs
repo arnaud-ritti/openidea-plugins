@@ -4,6 +4,7 @@
 
 use crate::model::{self, FileModel, INJECT, Pointcut, TypeInfo};
 use spring_text::java::{Annotation, Tok, TypeRef, annotation, closing, split_commas, tokens, type_ref};
+use spring_text::finding::Finding;
 use spring_text::range;
 
 const MODIFIERS: [&str; 21] = [
@@ -144,6 +145,10 @@ pub fn model(text: &str) -> FileModel {
                     qualified,
                     supers: supers.clone(),
                     range: range(text, name.at, name.end()),
+                    is_abstract: false,
+                    members_known: false,
+                    methods: Vec::new(),
+                    ctors: Vec::new(),
                 });
                 let kind = if t.s == "interface" { "interface" } else { "class" };
                 let repository = model::is_repository(kind, supers.iter().map(String::as_str));
@@ -259,4 +264,53 @@ fn constructor_call_type(text: &str, toks: &[Tok], at: usize) -> Option<TypeRef>
         return None;
     }
     type_ref(text, &toks[at..at + 1])
+}
+
+const ROUTE_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+const REIFIED_CALLS: [&str; 7] = ["getBean", "getBeansOfType", "getBeanProvider", "getForObject", "getForEntity", "postForObject", "postForEntity"];
+
+/// The names inside `{name}` and `{name:regex}` of a path.
+fn path_variables(path: &str) -> impl Iterator<Item = &str> {
+    path.split('{').skip(1).filter_map(|rest| rest.split(['}', ':']).next()).map(str::trim)
+}
+
+/// `pathVariable("x")` in a router DSL file when no path of the file has `{x}`.
+pub fn router_path_variables(text: &str) -> Vec<Finding> {
+    if !text.contains("router") && !text.contains("coRouter") && !text.contains("RouterFunction") {
+        return Vec::new();
+    }
+    let declared: Vec<String> = tokens(text)
+        .iter()
+        .filter_map(|t| t.string())
+        .filter(|s| s.value.starts_with('/'))
+        .flat_map(|s| path_variables(&s.value).map(str::to_owned).collect::<Vec<_>>())
+        .collect();
+    let routes = spring_text::kotlin::calls(text).into_iter().any(|c| ROUTE_METHODS.contains(&c.name.as_str()) || c.name == "path");
+    if !routes {
+        return Vec::new();
+    }
+    spring_text::kotlin::calls(text)
+        .into_iter()
+        .filter(|c| c.name == "pathVariable" && c.receiver.is_some())
+        .filter_map(|c| c.args.into_iter().next().and_then(|a| a.string))
+        .filter(|name| !name.value.contains('$') && !declared.contains(&name.value))
+        .map(|name| {
+            let message = format!("No route path of this file has a {{{}}} variable.", name.value);
+            Finding::new(name.at, name.end, "router-path-variable", message)
+        })
+        .collect()
+}
+
+/// `bean.getBean(Foo::class.java)` where Spring's Kotlin extension `getBean<Foo>()` reads better.
+pub fn reified_extension_hints(text: &str) -> Vec<Finding> {
+    spring_text::kotlin::calls(text)
+        .into_iter()
+        .filter(|c| c.receiver.is_some() && REIFIED_CALLS.contains(&c.name.as_str()))
+        .filter_map(|c| {
+            let last = c.args.last()?;
+            let ty = last.text.trim().strip_suffix("::class.java")?;
+            let message = format!("Spring's Kotlin extension {}<{ty}>(…) takes the type as a type argument instead of {ty}::class.java.", c.name);
+            Some(Finding::new(last.at, last.end, "kotlin-reified-extension", message).with_severity(openidea_plugin::Severity::Hint))
+        })
+        .collect()
 }

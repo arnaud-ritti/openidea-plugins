@@ -1,9 +1,9 @@
 //! Editor commands that add a bean dependency or an event listener to the class at the
 //! caret, and the active profiles the plugin's own profile-scoped checks consider.
 
-use crate::{Navigator, World, describe, file_name, indent_of, merge_into};
+use crate::{Navigator, REPORT_VIEW, Report, World, describe, file_name, indent_of, merge_into, problems_of};
 use openidea_plugin::text::offset;
-use openidea_plugin::{Error, Invocation, NotificationLevel, PickItem, TextEdit, TextEditor, host};
+use openidea_plugin::{Error, Invocation, NotificationLevel, PickItem, Severity, TextEdit, TextEditor, host};
 use spring_text::index::COMMAND_BUDGET;
 use spring_text::java::{self, JavaFile, MemberKind, TypeDecl};
 use spring_text::{decapitalize, range};
@@ -13,6 +13,8 @@ const ACTIVE_PROFILES: &str = "activeProfiles";
 const AUTOWIRED: &str = "org.springframework.beans.factory.annotation.Autowired";
 const EVENT_LISTENER: &str = "org.springframework.context.event.EventListener";
 const MAX_CHOICES: usize = 500;
+const MAX_CHECKED: usize = 1000;
+const MAX_PROPERTY_FILES: u32 = 100;
 const TITLE: &str = "Spring Beans";
 
 #[derive(Clone, Copy)]
@@ -243,4 +245,133 @@ fn insertions(text: &str, mut inserts: Vec<(usize, String)>) -> Vec<TextEdit> {
 fn capitalize(name: &str) -> String {
     let mut chars = name.chars();
     chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+pub fn check_configuration(nav: &mut Navigator, ctx: &Invocation) -> Result<Option<String>, Error> {
+    let project = ctx.project().ok_or("Open a project first.")?;
+    let index = nav.indexes.get(&project, COMMAND_BUDGET);
+    let complete = index.complete();
+    let world = World::new(index);
+    let mut found = Vec::new();
+    for path in world.files.keys().take(MAX_CHECKED) {
+        let language = match path.rsplit('.').next() {
+            Some("kt") => "kotlin",
+            Some("xml") => "xml",
+            _ => "java",
+        };
+        let Ok(text) = project.read_file(path) else { continue };
+        let mut problems = problems_of(path, language, &text, Some(&world));
+        problems.retain(|p| p.severity != Severity::Hint);
+        if !problems.is_empty() {
+            found.push((path.clone(), problems));
+        }
+    }
+    drop(world);
+
+    let total: usize = found.iter().map(|(_, problems)| problems.len()).sum();
+    let partial = if complete { "" } else { " The project is still being scanned, so the result is partial." };
+    let message = if total == 0 { format!("No problems found.{partial}") } else { format!("{total} problems in {} files.{partial}", found.len()) };
+    nav.report = Report::Problems(found);
+    host::notify(NotificationLevel::Info, TITLE, &message);
+    host::reveal_view(REPORT_VIEW)?;
+    host::refresh_view(REPORT_VIEW);
+    Ok(None)
+}
+
+pub fn dump_configuration(nav: &mut Navigator, ctx: &Invocation) -> Result<Option<String>, Error> {
+    let project = ctx.project().ok_or("Open a project first.")?;
+    let world = World::new(nav.indexes.get(&project, COMMAND_BUDGET));
+    let mut lines: Vec<String> = world
+        .beans()
+        .map(|(path, bean)| {
+            let mut line = format!("{:<24} {}", bean.kind, bean.name);
+            if !bean.aliases.is_empty() {
+                line += &format!(" (aliases: {})", bean.aliases.join(", "));
+            }
+            if !bean.ty.is_empty() {
+                line += &format!(" : {}", bean.ty);
+            }
+            if bean.primary {
+                line += " [primary]";
+            }
+            if !bean.profiles.is_empty() {
+                line += &format!(" [profiles: {}]", bean.profiles.join(", "));
+            }
+            if bean.conditional {
+                line += " [conditional]";
+            }
+            format!("{line}  {}:{}", file_name(path), bean.range.start.line + 1)
+        })
+        .collect();
+    lines.sort();
+    let report = format!("{} beans of the project (library and auto-configured beans are not listed)\n\n{}\n", lines.len(), lines.join("\n"));
+    drop(world);
+    nav.report = Report::Dump(report);
+    host::reveal_view(REPORT_VIEW)?;
+    host::refresh_view(REPORT_VIEW);
+    Ok(None)
+}
+
+/// Replaces the annotation string at the caret with `${key}`; the `key=value` line goes to the clipboard,
+/// because a plugin can only edit the open editor.
+pub fn externalize_string(ctx: &Invocation) -> Result<Option<String>, Error> {
+    let editor = ctx.editor().ok_or("Open a Java class first.")?;
+    if !editor.path().ends_with(".java") {
+        return Err("Open a Java class first.".into());
+    }
+    let doc = editor.document()?;
+    let caret = editor.selections()?.first().and_then(|r| offset(&doc.text, r.start)).ok_or("No caret in the editor.")?;
+    let file = java::parse(&doc.text);
+    let annotations = file.types.iter().flat_map(|t| t.annotations.iter().chain(t.members.iter().flat_map(|m| m.annotations.iter().chain(m.params.iter().flat_map(|p| p.annotations.iter())))));
+    let literal = annotations
+        .flat_map(|a| a.args.iter().flat_map(move |arg| arg.strings.iter().map(move |s| (a, s))))
+        .find(|(_, s)| s.at <= caret && caret <= s.end)
+        .ok_or("Put the caret in a string of an annotation such as @Value or @Scheduled.")?;
+    let (annotation, string) = literal;
+    if string.value.contains("${") || string.value.contains("#{") {
+        return Err("The string already holds a placeholder.".into());
+    }
+
+    let project = ctx.project().ok_or("Open a project first.")?;
+    let files = project.find_files("**/*.properties", MAX_PROPERTY_FILES).unwrap_or_default();
+    let candidates: Vec<&String> = files.iter().filter(|f| !f.contains("/target/") && !f.contains("/build/")).collect();
+    let chosen = if candidates.is_empty() {
+        None
+    } else {
+        let items: Vec<PickItem> = candidates.iter().map(|f| PickItem { key: (*f).clone(), label: file_name(f).to_owned(), description: Some((*f).clone()) }).collect();
+        match host::pick("Properties file that will hold the value", &items)? {
+            Some(file) => Some(file),
+            None => return Ok(None),
+        }
+    };
+
+    let suggestion = format!("{}.{}", decapitalize(file.types.first().map_or("app", |t| t.name.as_str())), annotation.args.iter().find(|a| a.strings.iter().any(|s| s.at == string.at)).map_or("value", |a| a.name.as_str()));
+    let Some(key) = host::input("Property key", Some(&suggestion))? else { return Ok(None) };
+    let key = key.trim().to_owned();
+    if key.is_empty() || key.contains(char::is_whitespace) || key.contains(['$', '{', '}', '=']) {
+        return Err(format!("{key:?} is not a property key.").into());
+    }
+    if let Some(file) = &chosen {
+        let existing = project.read_file(file).unwrap_or_default();
+        if spring_text::config::properties(&existing).iter().any(|k| k.key == key) {
+            return Err(format!("{} already defines {key}.", file_name(file)).into());
+        }
+    }
+
+    let edit = TextEdit { range: range(&doc.text, string.at, string.end), text: format!("${{{key}}}") };
+    match editor.apply_edits(doc.version, &[edit]) {
+        Ok(_) => {}
+        Err(Error::Denied(_)) => {
+            host::notify(NotificationLevel::Warning, TITLE, "Allow editor changes for Spring Beans in Settings › Plugins to replace the string.");
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    }
+    let line = format!("{key}={}", string.value);
+    let target = chosen.as_deref().map_or("your properties file".to_owned(), |f| file_name(f).to_owned());
+    match host::copy_to_clipboard(&line) {
+        Ok(()) => host::notify(NotificationLevel::Info, TITLE, &format!("Copied \"{line}\": paste it into {target}.")),
+        Err(_) => host::notify(NotificationLevel::Info, TITLE, &format!("Add this line to {target}: {line}")),
+    }
+    Ok(None)
 }

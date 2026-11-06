@@ -3,12 +3,13 @@
 //! Quiet when the module has no build file or already names the plugin.
 
 use crate::checks::{BUILD_FILES, build_module, spring};
-use openidea_plugin::TextEdit;
+use openidea_plugin::{Severity, TextEdit};
 use spring_text::finding::Finding;
-use spring_text::java::{JavaFile, TypeDecl};
+use spring_text::java::{JavaFile, STEREOTYPES, TypeDecl, tokens};
 use spring_text::range;
 
 const OPEN_MODIFIERS: [&str; 8] = ["open", "abstract", "sealed", "data", "enum", "inner", "annotation", "value"];
+const OPENED_BY_PLUGIN: [&str; 5] = ["Component", "Async", "Transactional", "Cacheable", "SpringBootTest"];
 const OPENING_ANNOTATIONS: [&str; 6] = ["Transactional", "Async", "Cacheable", "CacheEvict", "CachePut", "Retryable"];
 const PLUGIN_MARKERS: [&str; 4] = ["kotlin-spring", "kotlin.spring", "plugin.spring", "allopen"];
 const KTS_JVM_MARKERS: [&str; 2] = ["kotlin(\"jvm\")", "\"org.jetbrains.kotlin.jvm\""];
@@ -42,6 +43,35 @@ pub fn missing_spring_plugin(path: &str, file: &JavaFile) -> Vec<Finding> {
             )
         })
         .collect()
+}
+
+/// `open` modifiers the `kotlin-spring` plugin makes redundant: on a class it opens and on that class's members.
+pub fn redundant_open(path: &str, file: &JavaFile, text: &str) -> Vec<Finding> {
+    let opened_by = |ty: &TypeDecl| {
+        ty.annotations
+            .iter()
+            .map(|a| a.name.as_str())
+            .find(|name| OPENED_BY_PLUGIN.contains(name) || STEREOTYPES.contains(name))
+            .filter(|name| spring(file, &ty.annotations, name).is_some())
+            .map(str::to_owned)
+    };
+    let candidates: Vec<(&TypeDecl, String)> = file.types.iter().filter(|t| t.kind == "class").filter_map(|t| Some((t, opened_by(t)?))).collect();
+    if candidates.is_empty() || !module_builds(path).iter().any(|(_, build)| names_spring_plugin(build)) {
+        return Vec::new();
+    }
+    let open_in = |from: usize, to: usize| {
+        let head = text.get(from..to)?;
+        tokens(head).into_iter().find(|t| t.s == "open").map(|t| (from + t.at, from + t.end()))
+    };
+    let mut out = Vec::new();
+    for (ty, annotation) in candidates {
+        let class = open_in(ty.start, ty.at).map(|at| (at, format!("The kotlin-spring plugin already opens classes annotated with @{annotation}, so open is redundant.")));
+        let members = ty.members.iter().filter_map(|m| open_in(m.start, m.at)).map(|at| (at, format!("The kotlin-spring plugin already opens the members of classes annotated with @{annotation}, so open is redundant.")));
+        for ((from, to), message) in class.into_iter().chain(members) {
+            out.push(Finding::new(from, to, "kotlin-redundant-open", message).with_severity(Severity::Hint));
+        }
+    }
+    out
 }
 
 fn needs_plugin(file: &JavaFile, ty: &TypeDecl) -> bool {
@@ -91,7 +121,12 @@ fn is_jvm_line(line: &str, kotlin_dsl: bool) -> bool {
 }
 
 fn names_plugin(build: &str) -> bool {
-    if PLUGIN_MARKERS.iter().any(|m| build.contains(m)) {
+    PLUGIN_MARKERS.iter().any(|m| build.contains(m)) || names_spring_plugin(build)
+}
+
+/// The `kotlin-spring` plugin itself (not just any `allopen` setup).
+fn names_spring_plugin(build: &str) -> bool {
+    if PLUGIN_MARKERS[..3].iter().any(|m| build.contains(m)) {
         return true;
     }
     let Some(from) = build.find("compilerPlugins") else { return false };

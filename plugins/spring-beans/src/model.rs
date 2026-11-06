@@ -3,6 +3,7 @@
 
 use crate::kotlin;
 use openidea_plugin::Range;
+use spring_text::constants::Constants;
 use spring_text::java::{self, Annotation, MemberKind, TypeRef};
 use spring_text::{decapitalize, range, xml};
 
@@ -90,11 +91,28 @@ pub struct Injection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MethodInfo {
+    pub name: String,
+    pub params: usize,
+    pub is_static: bool,
+    /// Carries `@Required`.
+    pub required: bool,
+    pub range: Range,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeInfo {
     pub name: String,
     pub qualified: String,
     pub supers: Vec<String>,
     pub range: Range,
+    /// An abstract class or an interface.
+    pub is_abstract: bool,
+    /// `methods` and `ctors` list every member: false for Kotlin, enums, records and Lombok classes.
+    pub members_known: bool,
+    pub methods: Vec<MethodInfo>,
+    /// The parameter count of each declared constructor.
+    pub ctors: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +130,8 @@ pub struct FileModel {
     pub pointcuts: Vec<Pointcut>,
     /// Declares `@SpringBootApplication` or `@EnableAutoConfiguration`.
     pub auto_configuration: bool,
+    /// `Type.NAME` and the value of each `static final` string constant that resolves.
+    pub constants: Vec<(String, String)>,
 }
 
 /// The model of a Java, Kotlin or Spring XML file (`None`: nothing to keep).
@@ -240,18 +260,58 @@ pub fn is_repository<'a>(kind: &str, mut supers: impl Iterator<Item = &'a str>) 
     kind == "interface" && supers.any(|s| s.ends_with("Repository"))
 }
 
+const LOMBOK: [&str; 10] =
+    ["Data", "Value", "Getter", "Setter", "Builder", "SuperBuilder", "AllArgsConstructor", "NoArgsConstructor", "RequiredArgsConstructor", "With"];
+
+fn type_info(file: &java::JavaFile, index: usize, text: &str) -> TypeInfo {
+    let t = &file.types[index];
+    let modifier = |m: &java::Member, name: &str| m.modifiers.iter().any(|x| x == name);
+    let methods = t
+        .methods()
+        .map(|m| MethodInfo {
+            name: m.name.clone(),
+            params: m.params.len(),
+            is_static: modifier(m, "static"),
+            required: m.annotations.iter().any(|a| a.name == "Required"),
+            range: range(text, m.at, m.at + m.name.len()),
+        })
+        .collect();
+    let ctors = t.members.iter().filter(|m| m.kind == MemberKind::Constructor).map(|m| m.params.len()).collect();
+    TypeInfo {
+        name: t.name.clone(),
+        qualified: file.qualified(index),
+        supers: t.supers().map(|s| s.name.clone()).collect(),
+        range: range(text, t.at, t.at + t.name.len()),
+        is_abstract: t.kind == "interface" || t.modifiers.iter().any(|m| m == "abstract"),
+        members_known: matches!(t.kind.as_str(), "class" | "interface") && !t.has(&LOMBOK),
+        methods,
+        ctors,
+    }
+}
+
+fn constants_of(file: &java::JavaFile, text: &str) -> Vec<(String, String)> {
+    let mut known = Constants::default();
+    known.add(file, text);
+    let mut out = Vec::new();
+    for t in &file.types {
+        for field in t.fields().filter(|f| f.modifiers.iter().any(|m| m == "static") && f.modifiers.iter().any(|m| m == "final")) {
+            let key = format!("{}.{}", t.name, field.name);
+            if let Some(value) = known.resolve(&key, None) {
+                out.push((key, value));
+            }
+        }
+    }
+    out
+}
+
 fn java_model(text: &str) -> FileModel {
     let file = java::parse(text);
     let mut out = FileModel::default();
+    out.constants = constants_of(&file, text);
     out.auto_configuration = file.types.iter().any(|t| t.has(&["SpringBootApplication", "EnableAutoConfiguration"]));
     for (index, t) in file.types.iter().enumerate() {
         let supers: Vec<String> = t.supers().map(|s| s.name.clone()).collect();
-        out.types.push(TypeInfo {
-            name: t.name.clone(),
-            qualified: file.qualified(index),
-            supers: supers.clone(),
-            range: range(text, t.at, t.at + t.name.len()),
-        });
+        out.types.push(type_info(&file, index, text));
         let repository = is_repository(&t.kind, supers.iter().map(String::as_str));
         let bean = if t.kind == "@interface" { None } else { class_bean(text, &t.name, &short_name(&file, t), t.at, &t.annotations, repository) };
         let class_profiles = bean.as_ref().map(|b| b.profiles.clone()).unwrap_or_default();
