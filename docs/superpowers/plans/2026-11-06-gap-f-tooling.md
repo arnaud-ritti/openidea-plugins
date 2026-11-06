@@ -213,19 +213,39 @@ Unless a task says otherwise: write the named failing tests in the plugin's test
 - **Type consistency:** `NewMergeRequest`, `SnippetDraft`, `Namespace`, `Award`, `Commit`, `Job` and the `safe::*` names are defined once and used under the same names later; `create_snippet` and `create_project` change signature in Tasks 3 and 4, and their callers are listed there.
 - **Proportion:** signatures, test names and ordering decisions only; bodies are left to the implementer.
 
-## Ledger (fill during execution)
+## Ledger
 
 | Item | Status | Commit | Notes |
 |---|---|---|---|
-| Ruling: gitlab 23 downgraded to B | decided | | |
-| Task 1 guards and secret hygiene | | | |
-| Task 2 Create MR form | | | |
-| Task 3 Create Snippet form | | | |
-| Task 4 Share Project form | | | |
-| Task 5 note edit/delete, emoji | | | |
-| Task 6 MR commits | | | |
-| Task 7 pipeline and jobs | | | |
-| Task 8 ignore settings, CRLF | | | |
-| Task 9 properties template | | | |
-| Unverified in the IDE | | | `ctx.editor()` inside a view click; `open_terminal` argument joining; empty file template; form field events on `Choice` |
-| Doc notes for `PARITY.md` / `LIMITATIONS.md` | | | |
+| Ruling: gitlab 23 downgraded to B | decided | | no task |
+| Task 1 guards and secret hygiene | complete, review clean | e86d3cd | added `safe::clone_url`; hex_sha capped at 40 |
+| Task 2 Create MR form | complete, review clean | 04791b6 | |
+| Task 3 Create Snippet form | complete after 1 fix round | 207ae2d, 5718d22 | public confirm bound to the (path, content) shown |
+| Task 4 Share Project form | complete, review clean | 18615bb | `share_with(ctx, &form, namespace_id, confirmed)`; branch.rs checkout/fetch/worktree guarded |
+| Task 5 note edit/delete, emoji | complete, review clean | e61f5f2 | |
+| Task 6 MR commits | complete, review clean | 83458e6 | pick by double click (Activate) |
+| Task 7 pipeline and jobs | complete, review clean | 74200d8 | newest 20 pipelines |
+| Task 8 ignore settings, CRLF | complete, review clean | d69a2e6 | |
+| Task 9 properties template | complete, review clean | a7ba491 | `check` accepted a one-newline template |
+| Final whole-branch review (opus) + one fix wave | complete, re-review clean | de7917d, 5b21e02 | commit-all race closed, draft id guard, merge/close confirm bound to iid, pipeline state reset, `me.id != 0`, stale star dropped |
+| Unverified in the IDE | | | `ctx.editor()` inside a view click; `open_terminal` argument joining; empty file template; form field events on `Choice`; `vcs_status` None without a repo; tree `Activate` on double click in a right view; icon names at runtime; star group rendering |
+
+Rulings:
+- Task 1: kept unrequested `safe::clone_url` and the `expect(dead_code)` attributes (needed for the global constraint and zero warnings; cost if wrong: a little dead code, each later task removed its attribute).
+- Task 4: extended `share_with` signature and branch.rs guards (cost if wrong: signature churn). `git checkout`/`merge` names validated but not put after `--` (git would read them as paths).
+- Final: fix wave also covered the pre-existing merge/close confirm gap (token bound to iid). Cost if wrong: small extra diff in older code.
+- Final: every other deferred minor stays deferred.
+
+Deferred minors: T1 `without_markup` drops text after a bare `<`, untitled HTML error leaks style/script text, `remote_name` 64 cap refuses long project paths on clone, SHA-256 repos (hex 7-40); T2 branch cache not keyed by project, `form_status` kept after edit, draft prefix only `draft:`, branch MR status not refreshed after create; T3 CRLF test lacks a selection cut, warning does not name a typed file-path override; T4 list drops XY codes, stale `vcs_status` retry, namespace doc comment, user namespace listed twice, `git init` runs on first click, no test of share click while confirm pending; T5 Save Edit overwrites on one click (plan mandated), stale THREAD/NOTE key after deleting last note; T6 Commits Refresh can desync status, commit list stale after push, Open on GitLab opens the MR page in commit mode; T7 stage order after retry, cancel confirm only cleared by pipeline-view events, `CONFIRMED` shared; T8 duplicated CRLF normalisation, weak missing-gitignore test; T9 test lacks `name` assertion; out of scope: `me.id == 0` still sent by "Add Me as Reviewer", `open_url(mr.web_url)` unchecked in details view (older code), `looks_secret` misses `.npmrc`/`*.p12`/`.netrc`.
+
+Doc notes for `PARITY.md` / `LIMITATIONS.md`:
+- gitlab 1 Create MR: F to B (form view: title, description, target Choice, one assignee and reviewers as usernames, labels text, draft/squash/delete-source; no pickers, no milestone; at most 1000 branches; setting `forms`).
+- gitlab 4 Create Snippet: F to B (title, description, visibility with a second click for public bound to the shown file and content, personal or project, focused file or selection as the only file; several files need U5).
+- gitlab 5 Share Project: F to B (name, namespace, description, remote, visibility, optional `git init`, optional initial commit behind a confirm bound to the listed files; secret-looking files refused; no file-selection tree; fixed message).
+- gitlab 13: F to B (edit, delete with a second click, award emoji over a fixed list of 8; own non-system notes only; edit box not prefilled; setting `noteActions`).
+- gitlab 16: F to B (commit list; double click shows the diff read-only in the Changes view; no comments or viewed marks in commit mode; setting `commitsView`).
+- gitlab 17: F to A narrowed (pipeline and job tree, retry job and pipeline, cancel with a second click, open in browser; no job log, no manual play, newest 20 pipelines; setting `pipelineView`).
+- gitlab 23: B (downgraded; project view context commands get no selection).
+- gitlab security: new `safe.rs` guards; values failing a guard are refused (branch or path outside `[A-Za-z0-9._/@+-]` cannot be pushed or cloned through the plugin).
+- ignore 10: unignore toggle (`unignoreActions`), starred templates in storage, CRLF-preserving appends.
+- properties 2: New menu entry `Properties File` (manifest only, cannot be switched off).
