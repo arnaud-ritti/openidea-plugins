@@ -15,6 +15,7 @@ mod checks;
 mod generate;
 mod model;
 mod queries;
+mod wizard;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -24,12 +25,13 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Location, Position, Project, Range, register_plugin,
+    Context, Diagnostic, Error, Event, EventKind, Invocation, NotificationLevel, PickItem, Plugin, Location, Position, Project, Range, TextEdit, register_plugin,
 };
 
 use checks::{CALLBACKS, Finding, inspect_attribute_types, inspect_class_signature, is_empty_listener, listener_references, unused_listener, inspect_callbacks, inspect_entity, inspect_kotlin_entity, inspect_repository, missing_id};
-use generate::{Dialect, Known, callback_import, callback_method, ddl, dto, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
-use model::{Class, Edit, Kind, Relation, annotations, decapitalize, has_word, import_edit, language_of, mask, parse_class, words};
+use generate::{Dialect, Known, callback_import, callback_method, ddl, dto, dto_fields, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
+use model::{Class, Edit, Kind, Relation, annotations, capitalize, decapitalize, snake_case, has_word, import_edit, language_of, mask, parse_class, words};
+use wizard::{AttributeSpec, EntitySpec, attribute_edits, entity_source};
 use queries::{ItemKind, Prop, complete, parse_repository};
 
 /// Time one provider call may spend reading repositories.
@@ -66,6 +68,210 @@ fn copied(text: String, what: &str) -> Result<Option<String>, Error> {
         ),
         Err(e) => return Err(e),
     }
+    Ok(None)
+}
+
+const ENTITY_KEY_PREFIX: &str = "entity:";
+
+fn choose(title: &str, items: &[PickItem]) -> Result<Option<String>, Error> {
+    match host::pick(title, items) {
+        Err(Error::Invalid(_)) => Ok(items.first().map(|i| i.key.clone())),
+        answer => answer,
+    }
+}
+
+fn choose_many(title: &str, items: &[PickItem]) -> Result<Option<Vec<String>>, Error> {
+    match host::pick_many(title, items) {
+        Err(Error::Invalid(_)) => Ok(Some(items.iter().map(|i| i.key.clone()).collect())),
+        answer => answer,
+    }
+}
+
+fn choose_dialect() -> Result<Option<Dialect>, Error> {
+    let configured = host::setting_string("ddlDialect");
+    let mut items = vec![PickItem::new("postgresql", "PostgreSQL"), PickItem::new("mysql", "MySQL")];
+    if Dialect::from_setting(configured.as_deref()) == Dialect::MySql {
+        items.reverse();
+    }
+    items[0].description = Some("default".into());
+
+    Ok(choose("SQL dialect", &items)?.map(|key| Dialect::from_setting(Some(&key))))
+}
+
+fn choose_entity_language() -> Result<Option<bool>, Error> {
+    let mut items = vec![PickItem::new("java", "Java"), PickItem::new("kotlin", "Kotlin")];
+    if host::setting_string("entityLanguage").as_deref() == Some("kotlin") {
+        items.reverse();
+    }
+    items[0].description = Some("default".into());
+
+    Ok(choose("Entity language", &items)?.map(|key| key == "kotlin"))
+}
+
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn package_of(path: &str) -> Option<String> {
+    let dir = format!("{}/", path.rsplit_once('/')?.0);
+    let (at, marker) = ["/java/", "/kotlin/"].into_iter().filter_map(|m| dir.rfind(m).map(|i| (i, m))).max()?;
+    let package = dir[at + marker.len()..].trim_end_matches('/').replace('/', ".");
+
+    (!package.is_empty()).then_some(package)
+}
+
+fn ask_identifier(prompt: &str) -> Result<Option<String>, Error> {
+    let Some(answer) = host::input(prompt, None)? else { return Ok(None) };
+    let answer = answer.trim();
+    if !is_identifier(answer) {
+        return Err(format!("\"{answer}\" isn't a valid name.").into());
+    }
+
+    Ok(Some(answer.to_owned()))
+}
+
+fn ask_basic_type() -> Result<Option<(String, bool)>, Error> {
+    let names = ["String", "Long", "Integer", "BigDecimal", "LocalDate", "LocalDateTime", "UUID", "Boolean"];
+    let mut items: Vec<PickItem> = names.iter().map(|n| PickItem::new(n, n)).collect();
+    items.push(PickItem::new("enum", "Enum"));
+    items.push(PickItem::new("other", "Other type"));
+
+    let Some(key) = choose("Attribute type", &items)? else { return Ok(None) };
+    if key == "enum" || key == "other" {
+        let Some(ty) = ask_identifier(if key == "enum" { "Enum type" } else { "Type" })? else { return Ok(None) };
+        return Ok(Some((ty, key == "enum")));
+    }
+
+    Ok(Some((key, false)))
+}
+
+fn deliver_edits(editor: &openidea_plugin::TextEditor, version: u64, edits: &[TextEdit], what: &str) -> Result<(), Error> {
+    match editor.apply_edits(version, edits) {
+        Ok(_) => host::notify(NotificationLevel::Info, "JPA Assist", &format!("{what} added.")),
+        Err(Error::Denied(_)) => host::notify(
+            NotificationLevel::Warning,
+            "JPA Assist",
+            "Allow editor changes for JPA Assist in Settings › Plugins to add code.",
+        ),
+        Err(e) => return Err(e),
+    }
+
+    Ok(())
+}
+
+fn new_entity(ctx: &Invocation) -> Result<Option<String>, Error> {
+    let Some(name) = ask_identifier("Entity class name")? else { return Ok(None) };
+    let name = capitalize(&name);
+    let Some(table) = host::input("Table name", Some(&snake_case(&name)))? else { return Ok(None) };
+
+    let ids = [("none", "Assigned"), ("IDENTITY", "IDENTITY"), ("SEQUENCE", "SEQUENCE"), ("AUTO", "AUTO"), ("UUID", "UUID")];
+    let items: Vec<PickItem> = ids.iter().map(|(k, l)| PickItem::new(k, l)).collect();
+    let Some(id) = choose("ID strategy", &items)? else { return Ok(None) };
+
+    let extras = [("auditing", "Auditing fields (createdAt, updatedAt)"), ("version", "Version field"), ("equals", "equals() and hashCode()")];
+    let items: Vec<PickItem> = extras.iter().map(|(k, l)| PickItem::new(k, l)).collect();
+    let Some(extras) = host::pick_many("Extras", &items).or_else(|e| match e {
+        Error::Invalid(_) => Ok(Some(Vec::new())),
+        e => Err(e),
+    })?
+    else {
+        return Ok(None);
+    };
+
+    let editor = ctx.editor();
+    let path = editor.as_ref().map(|e| e.path());
+    let kotlin = path
+        .as_deref()
+        .and_then(language_of)
+        .unwrap_or_else(|| host::setting_string("entityLanguage").as_deref() == Some("kotlin"));
+    let table = table.trim();
+    let source = entity_source(&EntitySpec {
+        table: if table.is_empty() { snake_case(&name) } else { table.to_owned() },
+        package: path.as_deref().and_then(package_of),
+        kotlin,
+        id,
+        auditing: extras.iter().any(|e| e == "auditing"),
+        version: extras.iter().any(|e| e == "version"),
+        equals: extras.iter().any(|e| e == "equals"),
+        name: name.clone(),
+    });
+
+    copied(source.clone(), &name)?;
+
+    let Some(editor) = editor else { return Ok(None) };
+    let doc = editor.document()?;
+    if doc.text.trim().is_empty() {
+        let edit = Edit { start: 0, end: doc.text.len(), text: source };
+        deliver_edits(&editor, doc.version, &[edit.to_text_edit(&doc.text)], &name)?;
+    }
+
+    Ok(None)
+}
+
+fn new_attribute(ctx: &Invocation) -> Result<Option<String>, Error> {
+    let editor = ctx.editor().ok_or("Open an entity class first.")?;
+    let path = editor.path();
+    let entity = |text: &str| parse_class(text, &path).filter(|c| c.kind == Kind::Entity).ok_or("The open file isn't a JPA entity.");
+    entity(&editor.document()?.text)?;
+
+    let Some(name) = ask_identifier("Attribute name")? else { return Ok(None) };
+    let name = decapitalize(&name);
+
+    let relations = [("none", "None (basic attribute)"), ("ManyToOne", "ManyToOne"), ("OneToMany", "OneToMany"), ("OneToOne", "OneToOne"), ("ManyToMany", "ManyToMany")];
+    let items: Vec<PickItem> = relations.iter().map(|(k, l)| PickItem::new(k, l)).collect();
+    let Some(kind) = choose("Association", &items)? else { return Ok(None) };
+    let relation = match kind.as_str() {
+        "ManyToOne" => Relation::ManyToOne,
+        "OneToMany" => Relation::OneToMany,
+        "OneToOne" => Relation::OneToOne,
+        "ManyToMany" => Relation::ManyToMany,
+        _ => Relation::None,
+    };
+
+    let (ty, enumerated) = if relation == Relation::None {
+        let Some(chosen) = ask_basic_type()? else { return Ok(None) };
+        chosen
+    } else {
+        let Some(target) = ask_identifier("Target entity")? else { return Ok(None) };
+        (capitalize(&target), false)
+    };
+
+    let mut options = vec![PickItem::new("cascade", "Cascade all")];
+    if !relation.to_many() {
+        options.insert(0, PickItem::new("notNull", "Not null"));
+    }
+    if relation == Relation::None {
+        options.remove(options.len() - 1);
+        options.push(PickItem::new("unique", "Unique"));
+    } else {
+        let label = if relation.to_one() { "Lazy fetch" } else { "Eager fetch" };
+        options.push(PickItem::new("fetch", label));
+    }
+    let Some(chosen) = choose_many("Options", &options)? else { return Ok(None) };
+    let has = |key: &str| chosen.iter().any(|c| c == key);
+
+    let doc = editor.document()?;
+    let class = entity(&doc.text)?;
+    if class.attributes.iter().any(|a| a.name == name) {
+        return Err(format!("{} already has an attribute named {name}.", class.name).into());
+    }
+
+    let spec = AttributeSpec {
+        name: name.clone(),
+        ty,
+        relation,
+        enumerated,
+        not_null: has("notNull"),
+        unique: has("unique"),
+        cascade: has("cascade"),
+        fetch: has("fetch"),
+    };
+    let edits = attribute_edits(&class, &doc.text, &mask(&doc.text), &spec).ok_or("The class has no body to add an attribute to.")?;
+    let edits: Vec<TextEdit> = edits.iter().map(|e| e.to_text_edit(&doc.text)).collect();
+
+    deliver_edits(&editor, doc.version, &edits, &format!("Attribute {name}"))?;
+
     Ok(None)
 }
 
@@ -387,6 +593,17 @@ impl JpaAssist {
         entities
     }
 
+    /// The entity right-clicked in JPA Structure, else the one open in the editor.
+    fn entity_of(&mut self, ctx: &Invocation, item: Option<&str>) -> Result<Class, Error> {
+        let Some(path) = item.and_then(|key| key.strip_prefix(ENTITY_KEY_PREFIX)) else {
+            return self.current_entity(ctx);
+        };
+        let project = ctx.project().ok_or("Open a project first.")?;
+        self.scan(&project)?;
+
+        self.entities().into_iter().find(|c| c.path == path).cloned().ok_or_else(|| "That entity is no longer in the project.".into())
+    }
+
     /// The entity open in the editor, with the classes it refers to loaded.
     fn current_entity(&mut self, ctx: &Invocation) -> Result<Class, Error> {
         let editor = ctx.editor().ok_or("Open an entity class first.")?;
@@ -404,13 +621,27 @@ impl JpaAssist {
     }
 }
 
-impl Plugin for JpaAssist {
-    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        let dialect = Dialect::from_setting(host::setting_string("ddlDialect").as_deref());
+fn publish_context(path: Option<&str>) {
+    let text = path.and_then(|p| project_of(p)?.read_file(p).ok()).unwrap_or_default();
+    let is_entity = path.is_some_and(|p| parse_class(&text, p).is_some_and(|c| c.kind == Kind::Entity));
+    let has_create_table = path.is_some_and(|p| p.ends_with(".sql")) && text.to_lowercase().contains("create table");
 
+    let _ = host::set_context("isEntity", is_entity);
+    let _ = host::set_context("hasCreateTable", has_create_table);
+}
+
+impl Plugin for JpaAssist {
+    fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
+        let _ = host::subscribe(EventKind::EditorFocused);
+
+        Ok(())
+    }
+
+    fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
         match id {
             "copy-ddl" => {
-                let class = self.current_entity(ctx)?;
+                let class = self.entity_of(ctx, arg)?;
+                let Some(dialect) = choose_dialect()? else { return Ok(None) };
                 let known = |n: &str| self.class(n);
                 copied(ddl(&[&class], &known, dialect), &format!("DDL of {}", class.name))
             }
@@ -423,29 +654,50 @@ impl Plugin for JpaAssist {
                     return Ok(None);
                 }
 
+                let Some(dialect) = choose_dialect()? else { return Ok(None) };
+
                 let known = |n: &str| self.class(n);
                 copied(ddl(&entities, &known, dialect), &format!("DDL of {}", entities_count(entities.len())))
             }
             "copy-dto" => {
-                let class = self.current_entity(ctx)?;
+                let class = self.entity_of(ctx, arg)?;
                 let known = |n: &str| self.class(n);
-                copied(dto(&class, &known), &format!("{}Dto", class.name))
+                let items: Vec<PickItem> =
+                    dto_fields(&class, &known).iter().map(|(name, ty)| PickItem::new(name, name).description(ty)).collect();
+                let Some(chosen) = choose_many("Fields of the DTO", &items)? else { return Ok(None) };
+                if chosen.is_empty() {
+                    host::notify(NotificationLevel::Info, "JPA Assist", "No field chosen, nothing copied.");
+                    return Ok(None);
+                }
+
+                copied(dto(&class, &known, Some(&chosen)), &format!("{}Dto", class.name))
             }
             "copy-entity" => {
                 let editor = ctx.editor().ok_or("Open a SQL file first.")?;
                 let doc = editor.document()?;
                 let caret = editor.selections()?.first().map_or(Position::new(0, 0), |s| s.start);
                 let at = offset(&doc.text, caret).unwrap_or(doc.text.len());
-                let kotlin = host::setting_string("entityLanguage").as_deref() == Some("kotlin");
+                let Some(kotlin) = choose_entity_language()? else { return Ok(None) };
                 let entity = entity_from_ddl(&doc.text, at, kotlin).ok_or("Put the caret in a CREATE TABLE statement.")?;
                 copied(entity, "Entity")
             }
+            "new-entity" => new_entity(ctx),
+            "new-attribute" => new_attribute(ctx),
             _ => Err(Error::NotFound(format!("command {id}"))),
         }
     }
 
     fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
         for event in events {
+            match event {
+                Event::EditorFocused(path) => {
+                    publish_context(path.as_deref());
+                    continue;
+                }
+                Event::FileOpened(path) | Event::FileSaved(path) => publish_context(Some(path)),
+                _ => continue,
+            }
+
             let (Event::FileOpened(path) | Event::FileSaved(path)) = event else { continue };
             let Some(kotlin) = language_of(path) else { continue };
             let Some(project) = project_of(path) else { continue };
@@ -580,7 +832,7 @@ impl Views for JpaAssist {
         let entities = self.entities();
 
         for entity in &entities {
-            let key = entity.path.clone();
+            let key = format!("{ENTITY_KEY_PREFIX}{}", entity.path);
             let item = TreeItem::new(&key, &entity.name).icon("db-table").detail(&table_name(entity));
             items.push(if entity.attributes.is_empty() { item } else { item.expandable(self.expanded.contains(&key)) });
             locations.insert(key.clone(), (entity.path.clone(), entity.pos));
@@ -592,7 +844,7 @@ impl Views for JpaAssist {
                     r if r.to_many() => "db-columns",
                     _ => "db-column",
                 };
-                let attribute_key = format!("{key}#{}", a.name);
+                let attribute_key = format!("attribute:{}#{}", entity.path, a.name);
                 items.push(TreeItem::new(&attribute_key, &a.name).parent(&key).icon(icon).detail(&a.ty));
                 locations.insert(attribute_key, (entity.path.clone(), a.pos));
             }
@@ -937,18 +1189,24 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         let mut plugin = JpaAssist::default();
         host.open_editor("/project/src/shop/Order.java", "java", ORDER, &[(0, 0, 0, 0)]);
 
+        host.answer_next_prompt(Some(&["postgresql"]));
         plugin.run_command("copy-ddl", &host.invocation(), None).unwrap();
         let sql = host.clipboard().unwrap();
         assert!(sql.contains("CREATE TABLE order\n"), "{sql}");
         assert!(sql.contains("REFERENCES customer (id)"), "{sql}");
 
+        host.answer_next_prompt(Some(&["number", "customerId"]));
         plugin.run_command("copy-dto", &host.invocation(), None).unwrap();
-        assert!(host.clipboard().unwrap().contains("public record OrderDto("));
+        let dto = host.clipboard().unwrap();
+        assert!(dto.contains("public record OrderDto("), "{dto}");
+        assert!(dto.contains("String number") && dto.contains("customerId") && !dto.contains("Long id"), "{dto}");
 
+        host.answer_next_prompt(Some(&["postgresql"]));
         plugin.run_command("copy-ddl-all", &host.invocation(), None).unwrap();
         assert_eq!(host.notifications().last().unwrap().body, "DDL of 2 entities copied to the clipboard.");
 
         host.open_editor("/project/db.sql", "sql", "create table tag (id bigint primary key, label text);", &[(0, 20, 0, 20)]);
+        host.answer_next_prompt(Some(&["java"]));
         plugin.run_command("copy-entity", &host.invocation(), None).unwrap();
         assert!(host.clipboard().unwrap().contains("public class Tag {"));
     }
@@ -986,6 +1244,173 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         assert!(plugin.line_markers(&doc).is_empty(), "a saved repository is read again");
     }
 
+    const EMPTY_JAVA: &str = "/project/src/main/java/shop/Tag.java";
+
+    fn wizard_host(path: &str, language: &str, text: &str) -> MockHost {
+        let host = MockHost::install().with_capabilities(&["project.read", "editor.read", "editor.write", "storage", "clipboard"]);
+        host.open_editor(path, language, text, &[(0, 0, 0, 0)]);
+        host
+    }
+
+    fn answers(host: &MockHost, all: &[&[&str]]) {
+        all.iter().for_each(|a| host.answer_next_prompt(Some(a)));
+    }
+
+    #[test]
+    fn new_entity_goes_to_the_clipboard_and_the_empty_file() {
+        let host = wizard_host(EMPTY_JAVA, "java", "");
+        answers(&host, &[&["Tag"], &["tags"], &["IDENTITY"], &["version", "equals"]]);
+        JpaAssist::default().run_command("new-entity", &host.invocation(), None).unwrap();
+
+        let source = host.clipboard().unwrap();
+        assert_eq!(host.editor_text(), source);
+        for expected in [
+            "package shop;",
+            "import jakarta.persistence.Version;",
+            "@Table(name = \"tags\")",
+            "public class Tag {",
+            "@GeneratedValue(strategy = GenerationType.IDENTITY)",
+            "private Long id;",
+            "public Long getId()",
+            "private Long version;",
+            "public boolean equals(Object o)",
+        ] {
+            assert!(source.contains(expected), "{expected}\n{source}");
+        }
+        assert!(!source.contains("AuditingEntityListener"));
+        assert!(parse_class(&source, "Tag.java").is_some_and(|c| c.kind == Kind::Entity));
+    }
+
+    #[test]
+    fn new_entity_in_kotlin_uses_vars_and_the_uuid_type() {
+        let host = wizard_host("/project/src/main/kotlin/shop/Tag.kt", "kotlin", "\n");
+        answers(&host, &[&["tag"], &["tag"], &["UUID"], &["auditing", "equals"]]);
+        JpaAssist::default().run_command("new-entity", &host.invocation(), None).unwrap();
+
+        let source = host.clipboard().unwrap();
+        for expected in [
+            "package shop\n",
+            "import java.time.Instant\n",
+            "@EntityListeners(AuditingEntityListener::class)",
+            "@GeneratedValue(strategy = GenerationType.UUID)",
+            "var id: UUID? = null",
+            "var createdAt: Instant? = null",
+            "override fun hashCode()",
+        ] {
+            assert!(source.contains(expected), "{expected}\n{source}");
+        }
+        assert!(!source.contains(';') && !source.contains("private "), "{source}");
+        assert_eq!(host.editor_text(), source);
+    }
+
+    #[test]
+    fn new_entity_keeps_a_file_that_has_content_and_follows_the_setting() {
+        let host = wizard_host("/project/src/main/java/shop/Tag.java", "java", "class Tag {}");
+        answers(&host, &[&["Tag"], &["tag"], &["none"], &[]]);
+        JpaAssist::default().run_command("new-entity", &host.invocation(), None).unwrap();
+
+        assert_eq!(host.editor_text(), "class Tag {}");
+        assert!(!host.clipboard().unwrap().contains("@GeneratedValue"));
+    }
+
+    #[test]
+    fn dismissing_any_new_entity_prompt_changes_nothing() {
+        let steps: [&[&str]; 4] = [&["Tag"], &["tags"], &["UUID"], &["version"]];
+        for answered in 0..steps.len() {
+            let host = wizard_host(EMPTY_JAVA, "java", "");
+            answers(&host, &steps[..answered]);
+            JpaAssist::default().run_command("new-entity", &host.invocation(), None).unwrap();
+
+            assert_eq!(host.clipboard(), None, "dismissed at prompt {answered}");
+            assert_eq!(host.editor_text(), "");
+        }
+    }
+
+    #[test]
+    fn new_entity_rejects_a_bad_class_name() {
+        let host = wizard_host(EMPTY_JAVA, "java", "");
+        answers(&host, &[&["1 Tag"]]);
+        assert!(JpaAssist::default().run_command("new-entity", &host.invocation(), None).is_err());
+    }
+
+    #[test]
+    fn new_attribute_adds_a_typed_field_with_its_import() {
+        let host = wizard_host("/project/src/shop/Order.java", "java", ORDER);
+        answers(&host, &[&["total"], &["none"], &["BigDecimal"], &["notNull"]]);
+        JpaAssist::default().run_command("new-attribute", &host.invocation(), None).unwrap();
+
+        let text = host.editor_text();
+        assert!(text.contains("import java.math.BigDecimal;\n"), "{text}");
+        assert!(text.contains("    @Column(nullable = false)\n    private BigDecimal total;\n}"), "{text}");
+        assert!(!text.contains("getTotal"), "no accessors in a class without getters");
+        assert!(parse_class(&text, "Order.java").unwrap().attributes.iter().any(|a| a.name == "total"));
+    }
+
+    #[test]
+    fn new_attribute_adds_a_lazy_cascading_collection() {
+        let host = wizard_host("/project/src/shop/Order.java", "java", ORDER);
+        answers(&host, &[&["lines"], &["OneToMany"], &["OrderLine"], &["cascade"]]);
+        JpaAssist::default().run_command("new-attribute", &host.invocation(), None).unwrap();
+
+        let text = host.editor_text();
+        assert!(text.contains("@OneToMany(cascade = CascadeType.ALL)\n    private List<OrderLine> lines = new ArrayList<>();"), "{text}");
+        assert!(text.contains("import java.util.ArrayList;") && text.contains("import java.util.List;"), "{text}");
+    }
+
+    #[test]
+    fn new_attribute_in_kotlin_is_a_var() {
+        let kotlin = "package shop\n\nimport jakarta.persistence.*\n\n@Entity\nclass Order {\n    @Id\n    var id: Long? = null\n}\n";
+        let host = wizard_host("/project/src/shop/Order.kt", "kotlin", kotlin);
+        answers(&host, &[&["customer"], &["ManyToOne"], &["Customer"], &["notNull", "fetch"]]);
+        JpaAssist::default().run_command("new-attribute", &host.invocation(), None).unwrap();
+        answers(&host, &[&["count"], &["none"], &["Integer"], &[]]);
+        JpaAssist::default().run_command("new-attribute", &host.invocation(), None).unwrap();
+
+        let text = host.editor_text();
+        assert!(text.contains("@ManyToOne(fetch = FetchType.LAZY, optional = false)\n    var customer: Customer? = null"), "{text}");
+        assert!(text.contains("    var count: Int? = null\n}"), "{text}");
+        assert!(!text.contains(';'));
+    }
+
+    #[test]
+    fn new_attribute_marks_enums_as_string_enumerated() {
+        let host = wizard_host("/project/src/shop/Order.java", "java", ORDER);
+        answers(&host, &[&["status"], &["none"], &["enum"], &["OrderStatus"], &[]]);
+        JpaAssist::default().run_command("new-attribute", &host.invocation(), None).unwrap();
+
+        assert!(host.editor_text().contains("@Enumerated(EnumType.STRING)\n    private OrderStatus status;"));
+    }
+
+    #[test]
+    fn new_attribute_dismissed_or_outside_an_entity_edits_nothing() {
+        let steps: [&[&str]; 4] = [&["total"], &["none"], &["Long"], &["unique"]];
+        for answered in 0..steps.len() {
+            let host = wizard_host("/project/src/shop/Order.java", "java", ORDER);
+            answers(&host, &steps[..answered]);
+            JpaAssist::default().run_command("new-attribute", &host.invocation(), None).unwrap();
+            assert_eq!(host.editor_text(), ORDER, "dismissed at prompt {answered}");
+        }
+
+        let host = wizard_host("/project/src/notes.java", "java", "class Plain {}");
+        assert!(JpaAssist::default().run_command("new-attribute", &host.invocation(), None).is_err());
+
+        let host = wizard_host("/project/src/shop/Order.java", "java", ORDER);
+        answers(&host, &[&["number"], &["none"], &["String"], &[]]);
+        assert!(JpaAssist::default().run_command("new-attribute", &host.invocation(), None).is_err());
+        assert_eq!(host.editor_text(), ORDER);
+    }
+
+    #[test]
+    fn new_attribute_without_editor_write_shows_a_notice() {
+        let host = MockHost::install().with_capabilities(&["project.read", "editor.read", "storage"]);
+        host.open_editor("/project/src/shop/Order.java", "java", ORDER, &[(0, 0, 0, 0)]);
+        answers(&host, &[&["total"], &["none"], &["Long"], &[]]);
+        JpaAssist::default().run_command("new-attribute", &host.invocation(), None).unwrap();
+
+        assert_eq!(host.editor_text(), ORDER);
+        assert!(host.notifications()[0].body.contains("Allow editor changes"));
+    }
+
     #[test]
     fn menu_entries_have_when_clauses() {
         let value = |block: &str, key: &str| {
@@ -1002,9 +1427,10 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         assert_eq!(
             editor_menus,
             [
-                ("copy-ddl".to_owned(), "editorLangId == java || editorLangId == kotlin".to_owned()),
-                ("copy-dto".to_owned(), "editorLangId == java || editorLangId == kotlin".to_owned()),
-                ("copy-entity".to_owned(), "editorLangId == sql".to_owned()),
+                ("new-attribute".to_owned(), "(editorLangId == java || editorLangId == kotlin) && plugin.aritti.jpa-assist.isEntity".to_owned()),
+                ("copy-ddl".to_owned(), "(editorLangId == java || editorLangId == kotlin) && plugin.aritti.jpa-assist.isEntity".to_owned()),
+                ("copy-dto".to_owned(), "(editorLangId == java || editorLangId == kotlin) && plugin.aritti.jpa-assist.isEntity".to_owned()),
+                ("copy-entity".to_owned(), "editorLangId == sql && plugin.aritti.jpa-assist.hasCreateTable".to_owned()),
             ]
         );
     }
@@ -1020,7 +1446,7 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
 
         assert_eq!(view.status.as_deref(), Some("2 entities"));
 
-        plugin.handle("structure", ViewEvent::Activate("/project/src/shop/Order.java#customer".into()), &host.invocation()).unwrap();
+        plugin.handle("structure", ViewEvent::Activate("attribute:/project/src/shop/Order.java#customer".into()), &host.invocation()).unwrap();
         assert_eq!(host.opened_locations(), [("/project/src/shop/Order.java".to_owned(), 12, 21)]);
     }
 
@@ -1028,7 +1454,7 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
     fn structure_view_expands_entities_on_request() {
         let host = host();
         let mut plugin = JpaAssist::default();
-        let order = "/project/src/shop/Order.java";
+        let order = "entity:/project/src/shop/Order.java";
         let expanded = |plugin: &mut JpaAssist| {
             let Body::Tree(items) = plugin.render("structure", None, &host.invocation()).unwrap().body else { panic!() };
             let item = items.into_iter().find(|i| i.key == order).unwrap();
@@ -1048,6 +1474,7 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
     fn asks_for_the_clipboard_when_denied() {
         let host = MockHost::install().with_capabilities(&["project.read", "editor.read", "storage"]);
         host.open_editor("/project/src/shop/Order.java", "java", ORDER, &[(0, 0, 0, 0)]);
+        host.answer_next_prompt(Some(&["id"]));
         let result = JpaAssist::default().run_command("copy-dto", &host.invocation(), None).unwrap();
         assert_eq!(result, None);
         assert_eq!(
@@ -1055,6 +1482,68 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
             "Allow the clipboard for JPA Assist in Settings › Plugins to copy generated code."
         );
     }
+
+    fn context_of(host: &MockHost) -> (bool, bool) {
+        let keys = host.context_keys();
+        (keys["isEntity"] == true.into(), keys["hasCreateTable"] == true.into())
+    }
+
+    #[test]
+    fn context_keys_follow_the_file_in_focus() {
+        let host = host();
+        host.add_file("src/db.sql", "create table tag (id bigint);");
+        let mut plugin = JpaAssist::default();
+        let focus = |plugin: &mut JpaAssist, path: Option<&str>| {
+            plugin.handle_events(&[Event::EditorFocused(path.map(str::to_owned))], &host.invocation());
+            context_of(&host)
+        };
+
+        assert_eq!(focus(&mut plugin, Some("/project/src/shop/Order.java")), (true, false));
+        assert_eq!(focus(&mut plugin, Some("/project/src/notes.txt")), (false, false));
+        assert_eq!(focus(&mut plugin, Some("/project/src/db.sql")), (false, true));
+        assert_eq!(focus(&mut plugin, None), (false, false));
+
+        plugin.handle_events(&[Event::FileOpened("/project/src/shop/Customer.java".into())], &host.invocation());
+        assert_eq!(context_of(&host), (true, false));
+    }
+
+    #[test]
+    fn right_clicking_an_entity_copies_its_ddl_and_chosen_dto_fields() {
+        let host = host();
+        let mut plugin = JpaAssist::default();
+        let key = "entity:/project/src/shop/Customer.java";
+
+        host.answer_next_prompt(Some(&["mysql"]));
+        plugin.run_command("copy-ddl", &host.invocation(), Some(key)).unwrap();
+        assert!(host.clipboard().unwrap().contains("CREATE TABLE customer"));
+
+        host.answer_next_prompt(Some(&["name"]));
+        plugin.run_command("copy-dto", &host.invocation(), Some(key)).unwrap();
+        let dto = host.clipboard().unwrap();
+        assert!(dto.contains("String name") && !dto.contains("Long id"), "{dto}");
+    }
+
+    #[test]
+    fn dismissing_a_prompt_copies_nothing() {
+        let host = host();
+        let mut plugin = JpaAssist::default();
+        host.open_editor("/project/src/shop/Order.java", "java", ORDER, &[(0, 0, 0, 0)]);
+
+        for command in ["copy-ddl", "copy-dto"] {
+            plugin.run_command(command, &host.invocation(), None).unwrap();
+        }
+        assert_eq!(host.clipboard(), None);
+    }
+
+    #[test]
+    fn the_dialect_comes_from_the_prompt() {
+        let host = host();
+
+        assert_eq!(choose_dialect().unwrap(), None);
+        host.answer_next_prompt(Some(&["mysql"]));
+        assert_eq!(choose_dialect().unwrap(), Some(Dialect::MySql));
+    }
+
     fn java_codes(text: &str) -> Vec<String> {
         problems(&host(), "src/shop/J.java", text)
     }
