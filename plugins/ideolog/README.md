@@ -12,9 +12,10 @@ OpenIDEA port of JetBrains' [Ideolog](https://github.com/JetBrains/ideolog) (MIT
 - Folds multi-line events (stack traces).
 - Lists errors and warnings in the structure view.
 - **Ideolog: Jump to Source** (F7): opens the stack frame on the caret line (Java/Kotlin, Python,
-  .NET, PHP, Node, Go, Rust…), or else the source line whose string literal best matches the
+  .NET, PHP, Ruby, Dart (`file://`, `package:`), Swift, Node, Go, Rust…), or else the source line whose string literal best matches the
   event's message.
-- **Ideolog: Go to Next Error** (Shift+F7), **Go to Previous / Next Entry**.
+- **Ideolog: Go to Next Error** (Shift+F7), **Go to Next Warning**, **Go to Next Exception** (an event
+  whose text names an exception or a Python traceback), **Go to Previous / Next Entry**.
 - Cmd/Ctrl+click on a stack frame opens its file and line.
 
 Colours come from the theme's syntax colours (keyword, tag, string, number…), which are close to

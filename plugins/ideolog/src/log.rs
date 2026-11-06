@@ -379,6 +379,17 @@ fn message_severity(message: &str) -> Option<Severity> {
     words().any(|w| matches!(w.as_str(), "warn" | "warning")).then_some(Severity::Warning)
 }
 
+/// A line naming an exception (`java.io.IOException: …`, `PDOException`, `Error: …`) or a Python traceback.
+pub fn has_exception(event: &str) -> bool {
+    event.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("Traceback (most recent call last)")
+            || line.split([':', ' ']).next().is_some_and(|word| {
+                word.ends_with("Exception") || (word.ends_with("Error") && word.len() > 5) || word == "Error"
+            }) && !line.starts_with("at ")
+    })
+}
+
 /// Lines without their terminator, with their byte offset.
 pub fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     text.split_inclusive('\n').scan(0, |offset, line| {

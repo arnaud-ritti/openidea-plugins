@@ -57,7 +57,13 @@ impl Plugin for Ideolog {
         match id {
             "jump-to-source" => jump_to_source(&config, ctx, &editor),
             "next-error" => go_to(&config, &editor, "No error below the caret.", |events, at| {
-                events.iter().skip(at + 1).find(|(_, severity)| *severity == Some(Severity::Error))
+                events.iter().skip(at + 1).find(|(_, severity, _)| *severity == Some(Severity::Error))
+            }),
+            "next-warning" => go_to(&config, &editor, "No warning below the caret.", |events, at| {
+                events.iter().skip(at + 1).find(|(_, severity, _)| *severity == Some(Severity::Warning))
+            }),
+            "next-exception" => go_to(&config, &editor, "No exception below the caret.", |events, at| {
+                events.iter().skip(at + 1).find(|(_, _, exception)| *exception)
             }),
             "next-entry" => go_to(&config, &editor, "Already at the last log entry.", |events, at| events.get(at + 1)),
             "previous-entry" => go_to(&config, &editor, "Already at the first log entry.", |events, at| at.checked_sub(1).map(|i| &events[i])),
@@ -223,7 +229,7 @@ fn caret(editor: &TextEditor, text: &str) -> Result<(u32, usize), Error> {
     Ok((selection.start.line, at - line_start))
 }
 
-type Entries = [(Range<u32>, Option<Severity>)];
+type Entries = [(Range<u32>, Option<Severity>, bool)];
 
 /// Moves the caret to the start of the event `pick` chooses, given the
 /// events and the index of the one at the caret.
@@ -231,15 +237,15 @@ fn go_to(
     config: &Config,
     editor: &TextEditor,
     none: &str,
-    pick: impl FnOnce(&Entries, usize) -> Option<&(Range<u32>, Option<Severity>)>,
+    pick: impl FnOnce(&Entries, usize) -> Option<&(Range<u32>, Option<Severity>, bool)>,
 ) -> Result<Option<String>, Error> {
     let text = editor.document()?.text;
     let (line, _) = caret(editor, &text)?;
     let (format, events) = parsed_events(config, &text);
-    let entries: Vec<_> = events.iter().map(|(e, p)| (e.lines.clone(), p.severity(format))).collect();
-    let at = entries.iter().position(|(lines, _)| lines.contains(&line)).unwrap_or(entries.len().saturating_sub(1));
+    let entries: Vec<_> = events.iter().map(|(e, p)| (e.lines.clone(), p.severity(format), log::has_exception(e.text))).collect();
+    let at = entries.iter().position(|(lines, ..)| lines.contains(&line)).unwrap_or(entries.len().saturating_sub(1));
 
-    let Some((lines, _)) = pick(&entries, at) else {
+    let Some((lines, ..)) = pick(&entries, at) else {
         host::notify(NotificationLevel::Info, "Ideolog", none);
         return Ok(None);
     };
@@ -480,6 +486,22 @@ java.lang.IllegalStateException: boom
         let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
         open_log(&host, 0, 0);
         Ideolog::default().run_command("next-error", &host.invocation(), None).unwrap();
+        assert_eq!(host.opened_locations(), [("/p/logs/idea.log".to_owned(), 2, 0)]);
+    }
+
+    #[test]
+    fn next_warning_targets_the_next_warn_event() {
+        let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
+        open_log(&host, 0, 0);
+        Ideolog::default().run_command("next-warning", &host.invocation(), None).unwrap();
+        assert_eq!(host.opened_locations(), [("/p/logs/idea.log".to_owned(), 1, 0)]);
+    }
+
+    #[test]
+    fn next_exception_targets_the_next_event_with_an_exception() {
+        let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
+        open_log(&host, 0, 0);
+        Ideolog::default().run_command("next-exception", &host.invocation(), None).unwrap();
         assert_eq!(host.opened_locations(), [("/p/logs/idea.log".to_owned(), 2, 0)]);
     }
 
