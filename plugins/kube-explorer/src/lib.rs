@@ -27,6 +27,7 @@ const KUBECTL: &str = "kubectl";
 /// Writes the YAML to edit: the plugin API has no file writes.
 const TEE: &str = "tee";
 const HELM: &str = "helm";
+const DEFAULT_DEBUG_IMAGE: &str = "busybox:stable";
 /// Keeps reads under the 5 s call budget on an unreachable cluster.
 const REQUEST_TIMEOUT: &str = "--request-timeout=4s";
 /// Shows `describe`, YAML and diff output, highlighted; YAML can be edited.
@@ -129,6 +130,31 @@ impl KubeExplorer {
         }
         args.extend(rest.iter().map(|s| (*s).to_owned()));
         args
+    }
+
+    /// `kubectl debug` for a pod; names reach kubectl as arguments only, so one that
+    /// looks like an option is refused.
+    fn debug_args(&self, pod: &str, image: &str, target: Option<&str>) -> Result<Vec<String>, String> {
+        let named = [("pod", pod), ("image", image)].into_iter().chain(target.map(|t| ("container", t)));
+        for (what, value) in named {
+            if value.is_empty() || value.starts_with('-') {
+                return Err(format!("Refusing to debug: the {what} name \"{value}\" is empty or starts with '-'."));
+            }
+        }
+        let image = format!("--image={image}");
+        let target = target.map(|t| format!("--target={t}"));
+        let mut rest = vec!["debug", "-it", pod, image.as_str()];
+        rest.extend(target.as_deref());
+        Ok(self.args(&rest))
+    }
+
+    fn debug_pod(&self, pod: &str) -> Result<(), Error> {
+        let image = host::setting_string("debugImage").filter(|i| !i.trim().is_empty());
+        let image = image.as_deref().map_or(DEFAULT_DEBUG_IMAGE, str::trim);
+        let first = self.kubectl(&["get", "pod", pod, "-o", "jsonpath={.spec.containers[0].name}", REQUEST_TIMEOUT], None);
+        let target = first.as_deref().map(str::trim).ok().filter(|t| !t.is_empty());
+        let args = self.debug_args(pod, image, target)?;
+        host::open_terminal(&format!("Debug: {pod}"), KUBECTL, &args)
     }
 
     fn kubectl(&self, rest: &[&str], stdin: Option<&str>) -> Result<String, Error> {
@@ -415,6 +441,7 @@ impl KubeExplorer {
             .button(Button::new("logs", "Logs").icon("file-log").enabled(logs))
             .button(Button::new("shell", "Shell").icon("terminal").enabled(pod_selected))
             .button(Button::new("attach", "Attach").icon("attach-to-process").enabled(pod_selected))
+            .button(Button::new("debug", "Debug").icon("debug").enabled(pod_selected))
             .button(Button::new("port-forward", "Port Forward").icon("external-link").enabled(forwardable))
             .button(Button::new("delete", &delete).icon("trash").enabled(self.selected.is_some()))
     }
@@ -559,6 +586,7 @@ impl KubeExplorer {
                 &self.args(&["logs", "-f", &target, "--all-pods=true", "--all-containers", "--max-log-requests=20", "--tail=200"]),
             )?,
             "attach" => host::open_terminal(&format!("Attach: {name}"), KUBECTL, &self.args(&["attach", "-it", &name]))?,
+            "debug" => self.debug_pod(&name)?,
             "port-forward" => self.start_port_forward(&kind, &name)?,
             "shell" => host::open_terminal(
                 &format!("Shell: {name}"),
@@ -1437,5 +1465,42 @@ mod tests {
                 assert!(!text.contains(deprecated), "{id}");
             }
         }
+    }
+
+    #[test]
+    fn debug_args_include_context_namespace_and_target() {
+        let _host = host();
+        let kube = KubeExplorer { context: Some("prod".into()), namespace: Some("shop".into()), ..Default::default() };
+        let args = kube.debug_args("web-1", "busybox:stable", Some("app")).unwrap();
+        assert_eq!(
+            args,
+            ["--context=prod", "--namespace=shop", "debug", "-it", "web-1", "--image=busybox:stable", "--target=app"]
+        );
+        let args = kube.debug_args("web-1", "busybox:stable", None).unwrap();
+        assert!(!args.iter().any(|a| a.starts_with("--target")));
+    }
+
+    #[test]
+    fn debug_args_reject_option_like_names() {
+        let _host = host();
+        let kube = KubeExplorer::default();
+        assert!(kube.debug_args("--rm", "busybox", None).is_err());
+        assert!(kube.debug_args("web", "-v", None).is_err());
+        assert!(kube.debug_args("web", "busybox", Some("--privileged")).is_err());
+        assert!(kube.debug_args("", "busybox", None).is_err());
+    }
+
+    #[test]
+    fn the_debug_button_opens_a_terminal_on_the_pods_first_container() {
+        let host = host();
+        host.on_process(KUBECTL, |args, _| match args.iter().any(|a| a.starts_with("jsonpath=")) {
+            true => ok("app"),
+            false => ok(""),
+        });
+        host.set_setting("debugImage", "\"alpine:3\"");
+        let mut kube = KubeExplorer { selected: Some(("pods".into(), "web-1".into())), ..Default::default() };
+        kube.button("debug").unwrap();
+        let terminal = &host.terminals()[0];
+        assert_eq!(terminal.args, ["debug", "-it", "web-1", "--image=alpine:3", "--target=app"]);
     }
 }

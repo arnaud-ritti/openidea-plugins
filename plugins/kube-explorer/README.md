@@ -6,11 +6,16 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   to switch to it, and expand a kind to list its resources. The toolbar acts on
   the selected resource: Describe (or double-click), YAML, Logs (pods; for
   Deployments, StatefulSets, DaemonSets and Jobs, the logs of all their pods),
-  Shell, Attach, Port Forward (edit the `local:remote` ports, then Start) and
+  Shell, Attach, Debug (a pod: `kubectl debug -it` adds an ephemeral container on
+  the image of the `debugImage` setting, `busybox:stable` by default, targeting the
+  pod's first container), Port Forward (edit the `local:remote` ports, then Start) and
   Delete (click twice to confirm). Output replaces the tree until you click Back.
   **Custom Resources** lists the cluster's CRD kinds (`kubectl api-resources`,
   without core and built-in groups) by API group; expanding a kind lists its
   instances, which take Describe, YAML and Delete like any resource.
+- **New file templates** (File › New): Pod, Deployment, StatefulSet, DaemonSet, Job,
+  CronJob, Service, Ingress, ConfigMap, Secret (`stringData` placeholder), Namespace,
+  Role, RoleBinding, ClusterRole and ClusterRoleBinding, on current stable apiVersions.
 - **YAML** opens in a regular editor on `/tmp/kube-explorer-<kind>-<name>-<random>.yaml`,
   with a `yaml-language-server` schema modeline (completion, validation and
   docs from the Kubernetes JSON schemas). Every save runs `kubectl replace -f`

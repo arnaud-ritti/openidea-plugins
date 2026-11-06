@@ -5,6 +5,11 @@
       "title": "Kubeconfig file (leave empty to use KUBECONFIG or ~/.kube/config)",
       "default": ""
     },
+    "debugImage": {
+      "type": "string",
+      "title": "Image of the ephemeral debug container (Debug button on a pod)",
+      "default": "busybox:stable"
+    },
     "checkDeprecatedApiVersions": {
       "type": "boolean",
       "title": "Report removed or deprecated apiVersions (extensions/v1beta1, batch/v1beta1, ...)",
