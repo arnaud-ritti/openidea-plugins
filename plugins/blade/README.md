@@ -11,12 +11,13 @@ The structure view lists `@section`, `@push`, `@prepend` and `@fragment`
 blocks. `@if … @endif` style pairs (about 35 of Laravel's and Livewire's block
 directives) and multi-line comments fold.
 
-Only the directives Laravel and Livewire ship are known; directives registered
-with `Blade::directive()` stay plain text, since a plugin can't see the PHP
-that registers them.
+Only the directives Laravel and Livewire ship are known to the highlighter;
+directives registered with `Blade::directive()` stay plain text, since a plugin
+can't see the PHP that registers them.
 
-Route, view, config and translation completion in Blade files comes from the
-`aritti.laravel` plugin.
+Directive, route, view, config and translation completion in Blade files comes
+from the `aritti.laravel` plugin (it also completes custom directives found in
+`app/`).
 
 ```sh
 cargo test

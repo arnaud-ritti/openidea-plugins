@@ -768,3 +768,57 @@ fn migrate_fresh_runs_only_when_confirmed() {
     assert_eq!(host.notifications().len(), 3);
     assert!(host.notifications()[2].body.contains("again within"));
 }
+
+fn complete_directives(plugin: &mut Main, marked: &str) -> Vec<String> {
+    let (text, at) = cursor(marked);
+    labels(plugin.completion(&doc("/project/resources/views/posts/show.blade.php", "blade", &text), at, None))
+}
+
+#[test]
+fn completes_core_and_livewire_directives_after_at() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let all = complete_directives(&mut plugin, "<div>\n@|\n</div>");
+    for name in ["if", "foreach", "forelse", "section", "livewire", "vite", "endif"] {
+        assert!(all.contains(&name.to_owned()), "missing {name}");
+    }
+    assert!(complete_directives(&mut plugin, "@fo|").contains(&"foreach".to_owned()));
+    assert!(complete_directives(&mut plugin, "@forel|rest").contains(&"forelse".to_owned()));
+}
+
+#[test]
+fn completes_custom_directive_from_project() {
+    let host = MockHost::install();
+    let mut plugin = activated_with(
+        &host,
+        &[
+            ("app/Providers/AppServiceProvider.php", "<?php\nBlade::directive('datetime', fn ($e) => $e);\n"),
+            ("app/Support/Directives.php", "<?php\nBlade::directive(\"money\", fn ($e) => $e);\n// Blade::directive('commented', fn () => 1);\n"),
+        ],
+    );
+
+    let names = complete_directives(&mut plugin, "@dat|");
+    assert_eq!(&names[..2], ["datetime", "money"]);
+    assert!(names.contains(&"if".to_owned()) && !names.contains(&"commented".to_owned()));
+}
+
+#[test]
+fn escaped_at_is_not_completed() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    assert!(complete_directives(&mut plugin, "@@i|").is_empty());
+    assert!(complete_directives(&mut plugin, "mail user@exa|").is_empty());
+    assert!(complete_directives(&mut plugin, "user@|").is_empty());
+    assert!(complete_directives(&mut plugin, "{{ $a @fo| }}").is_empty());
+}
+
+#[test]
+fn directive_list_matches_the_blade_plugin() {
+    let source = include_str!("../../blade/src/lib.rs");
+    let region = &source[source.find("const BLOCKS").unwrap()..source.find("fn is_directive").unwrap()];
+    let in_blade: std::collections::BTreeSet<&str> = region.split('"').skip(1).step_by(2).collect();
+    let here: std::collections::BTreeSet<&str> = crate::directives::CORE.iter().copied().collect();
+    assert_eq!(here, in_blade);
+}

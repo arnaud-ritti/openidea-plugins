@@ -80,6 +80,8 @@ pub struct Index {
     pub vite: Names,
     /// Gate abilities (`Gate::define`) and policy methods.
     pub abilities: Names,
+    /// Custom Blade directives (`Blade::directive('name'`) found in `app/`.
+    pub directives: Names,
     /// Validation rule names.
     pub rules: Names,
     /// Columns by table, from the migrations.
@@ -478,6 +480,18 @@ impl Index {
                 let first = php::arguments(&masked, at + "Gate::define".len()).into_iter().next();
                 if let Some((ability, offset)) = first.and_then(|range| php::literal(&masked, range)) {
                     index.abilities.add(ability, Some("Gate::define".into()), &path, lines.position(offset), ability.len());
+                }
+            }
+        }
+
+        for path in files(&globs(&["app/**/*.php"])) {
+            let Some(text) = read(&path, &mut index) else { continue };
+            let masked = php::mask_comments(&text);
+            let lines = Lines::new(&text);
+            for (at, _) in masked.match_indices("Blade::directive(") {
+                let first = php::arguments(&masked, at + "Blade::directive".len()).into_iter().next();
+                if let Some((name, offset)) = first.and_then(|range| php::literal(&masked, range)) {
+                    index.directives.add(name, Some("Blade::directive".into()), &path, lines.position(offset), name.len());
                 }
             }
         }

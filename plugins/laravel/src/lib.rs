@@ -9,6 +9,7 @@
 mod actions;
 mod blade;
 mod controllers;
+mod directives;
 mod index;
 mod migrations;
 mod php;
@@ -492,11 +493,32 @@ impl Plugin for Main {
     }
 }
 
+fn directive_items(index: &Index, replace: Range) -> Vec<CompletionItem> {
+    let core = directives::CORE.iter().map(|name| (*name, None));
+    let custom = index.directives.iter().map(|(name, entry)| (name.as_str(), entry.detail.clone()));
+
+    let mut seen = BTreeSet::new();
+    custom
+        .chain(core)
+        .filter(|(name, _)| seen.insert(*name))
+        .map(|(name, detail)| {
+            let mut item = CompletionItem::new(name, CompletionKind::Keyword);
+            item.detail = detail;
+            item.replace = Some(replace);
+            item
+        })
+        .collect()
+}
+
 impl Providers for Main {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(language) = language_of(&doc.path, &doc.language) else { return Vec::new() };
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
+        if language == "blade" && let Some((start, end)) = directives::name_at(&doc.text, offset) {
+            return directive_items(index, range_of(&doc.text, start, end));
+        }
+
         let Some(reference) = refs::reference_at(language, &doc.text, offset) else { return Vec::new() };
 
         let replace = range_of(&doc.text, reference.start, reference.end);

@@ -12,6 +12,12 @@ everything below still works in them.
 
 ## Completion and go to definition (⌘B)
 
+Typing `@` (or `@fo`) in a Blade file completes Laravel's and Livewire's own
+directives (`@if`, `@foreach`, `@section`, `@livewire`, `@vite`, the `@end…`
+closers) and the custom ones the project registers with `Blade::directive('name'`
+in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
+`{{ }}` are left alone. Directives registered by vendor packages aren't known.
+
 | Names           | Indexed from                                                                                    | Referenced in                                                                                                                                 |
 | --------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Routes          | `->name()`, `['as' => …]`, `Route::resource` (`only`, `except`, `names`) in `routes/`, with the name prefixes of the groups around them | `route()`, `to_route()`, `redirect()->route()`, `Redirect::route()`, `URL::signedRoute()`, `Route::has()`, `routeIs()`                       |
@@ -110,7 +116,7 @@ These rely on PhpStorm's PHP PSI and type inference, which the OpenIDEA plugin
 API has no equivalent for (see `LIMITATIONS.md`):
 
 - the service container (`app('…')`, `App::make`, facade resolution, `@inject`
-  classes), custom Blade directives from `Blade::directive()`, and component
+  classes), custom Blade directives registered outside `app/`, and component
   slots and attributes;
 - Eloquent relations and attributes added by accessors, and `where('column')`
   on a query whose model is lost (`$user->posts()->where(...)`); dropped and
