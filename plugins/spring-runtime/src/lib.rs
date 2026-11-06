@@ -157,7 +157,7 @@ pub fn auth_hint(missing: &[String]) -> Option<&'static str> {
     missing
         .iter()
         .any(|m| m.ends_with("(401)") || m.ends_with("(403)"))
-        .then_some("needs authentication: set actuatorAuth and the actuator-token secret")
+        .then_some("needs authentication: check actuatorAuth and the actuator-token secret")
 }
 
 fn fetch_snapshot() -> Result<Snapshot, Error> {
@@ -175,6 +175,10 @@ fn fetch_snapshot() -> Result<Snapshot, Error> {
         let response = match host::fetch(&request) {
             Ok(r) => r,
             Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(Error::Denied(cap)) if cap == "secrets" => {
+                return Err("The actuator-token secret needs the secrets permission. Allow it in Settings › Plugins, or set actuatorAuth to none."
+                    .into());
+            }
             Err(Error::Denied(cap)) => {
                 return Err(format!("{cap} is not granted. Allow it in Settings › Plugins, or use http://localhost.").into());
             }
@@ -430,7 +434,7 @@ impl Tree<'_> {
         }
         for (i, c) in snap.caches.iter().enumerate() {
             let label = format!("{} / {}", c.manager, c.name);
-            self.leaf(&format!("cache/{i}"), "cache", &label, simple(&c.target), Some(Target::Type(c.target.clone(), None)));
+            self.leaf(&format!("cache/{i}"), "cache", &label, simple(&c.target), None);
         }
     }
 }
@@ -819,8 +823,26 @@ mod tests {
 
     #[test]
     fn authentication_failure_explains_itself() {
-        let msg = auth_hint(&["beans (401)".to_string()]).unwrap();
-        assert!(msg.contains("actuatorAuth") && msg.contains("actuator-token"));
-        assert!(!msg.contains("s3cret"));
+        let host = MockHost::install().with_capabilities(&["net:localhost"]);
+        host.on_fetch(|r| {
+            let status = if r.url.ends_with("/beans") { 401 } else { 200 };
+            Ok(HttpResponse { status, headers: vec![], body: b"{}".to_vec() })
+        });
+        let snap = fetch_snapshot().unwrap();
+        assert!(snap.missing.iter().any(|m| m == "beans (401)"), "{:?}", snap.missing);
+        let mut runtime = Runtime { snapshot: Some(snap), loaded: true, ..Runtime::default() };
+        let view = runtime.render(VIEW, None, &host.invocation()).unwrap();
+        let status = view.status.unwrap_or_default();
+        assert!(status.contains("check actuatorAuth and the actuator-token secret"), "{status}");
+        assert!(!status.contains("s3cret"));
+    }
+
+    #[test]
+    fn denied_secrets_capability_explains_itself() {
+        let host = MockHost::install().with_capabilities(&["net:localhost"]);
+        host.set_setting("actuatorAuth", "\"bearer\"");
+        let error = fetch_snapshot().unwrap_err().to_string();
+        assert!(error.contains("actuator-token") && error.contains("none"), "{error}");
+        assert!(!error.contains("http://localhost"), "{error}");
     }
 }
