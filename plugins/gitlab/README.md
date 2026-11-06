@@ -37,7 +37,7 @@ Optional permissions:
 
 ## Tool windows
 
-- **Merge Requests** (left): the project's merge requests (first 50) as
+- **Merge Requests** (left): the project's merge requests (50 per page, up to 10 pages) as
   `!iid title`, with author, branches and draft state. *Filter* cycles through
   the original's quick filters: Open, Include my changes, Need my review,
   Assigned to me (the default) and Closed. Expanding a merge request loads its
@@ -75,8 +75,8 @@ Optional permissions:
   The diff stays readable without scripts, with every file expanded.
   Binary and very large files have no diff here; open them on GitLab. Toolbar: Refresh,
   Submit Review (n), Open on GitLab.
-- **GitLab Projects** (left): the projects you're a member of (first 100,
-  most recently active first). Double-clicking one runs `git clone` in a
+- **GitLab Projects** (left): the projects you're a member of (100 per page, up to
+  10 pages, most recently active first). Double-clicking one runs `git clone` in a
   terminal, into the clone directory. Open the clone with File › Open when it
   finishes.
 
@@ -131,8 +131,8 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 
 - gitlab.com only, with one personal access token; no OAuth login and no
   multiple accounts.
-- First page only: 50 merge requests, 100 threads per merge request, 100
-  projects. Diffs are read up to 1,000 files.
+- Lists are read page by page up to 10 pages: 500 merge requests, 1,000 threads
+  per merge request, 1,000 projects, 1,000 diff files.
 - No side-by-side diff in the IDE's diff viewer, no per-commit diffs, and no
   commenting from the editor gutter.
 - Line comments, replies, resolving and Viewed in the Changes view need

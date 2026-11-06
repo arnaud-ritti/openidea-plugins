@@ -681,3 +681,30 @@ fn tree_keys_round_trip() {
     assert_eq!(Key::parse("n:7:abc:12"), Some(Key::Note(7, "abc", 12)));
     assert_eq!(Key::parse("e:7:0"), None);
 }
+
+#[test]
+fn second_page_is_fetched_when_first_is_full() {
+    let host = setup();
+    host.on_fetch(|req| {
+        let item = r#"{"iid": 1}"#;
+        let count = if req.url.contains("page=1") { 50 } else { 1 };
+
+        ok(&format!("[{}]", vec![item; count].join(",")))
+    });
+
+    let merge_requests = api::Project("g/p").merge_requests("state=opened").unwrap();
+
+    assert_eq!(merge_requests.len(), 51);
+    assert_eq!(host.requests().len(), 2);
+}
+
+#[test]
+fn paging_stops_at_the_page_cap() {
+    let host = setup();
+    host.on_fetch(|_| ok(&format!("[{}]", vec![r#"{"id": "d"}"#; 100].join(","))));
+
+    let threads = api::Project("g/p").discussions(7).unwrap();
+
+    assert_eq!(threads.len(), 1000);
+    assert_eq!(host.requests().len(), 10);
+}

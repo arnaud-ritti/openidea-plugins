@@ -303,6 +303,25 @@ fn rest(method: &str, path: &str, body: Option<Value>) -> Result<Value, Error> {
     send(method, format!("{SERVER}/api/v4{path}"), body)
 }
 
+const MAX_PAGES: usize = 10;
+
+/// Every page of a list (a short page is the last one), up to [`MAX_PAGES`] to stay within the task's time budget.
+fn paged<T: DeserializeOwned>(path: &str, per_page: usize) -> Result<Vec<T>, Error> {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    let mut all = Vec::new();
+
+    for page in 1..=MAX_PAGES {
+        let items: Vec<T> = parse(rest("GET", &format!("{path}{separator}per_page={per_page}&page={page}"), None)?)?;
+        let last = items.len() < per_page;
+        all.extend(items);
+        if last {
+            break;
+        }
+    }
+
+    Ok(all)
+}
+
 pub fn current_user() -> Result<User, Error> {
     parse(rest("GET", "/user", None)?)
 }
@@ -320,8 +339,7 @@ pub fn create_snippet(title: &str, file_path: &str, content: &str) -> Result<Str
 
 /// Projects the user is a member of, most recently active first.
 pub fn member_projects() -> Result<Vec<ProjectInfo>, Error> {
-    // ponytail: first 100 only; page when someone has more.
-    parse(rest("GET", "/projects?membership=true&simple=true&order_by=last_activity_at&per_page=100", None)?)
+    paged("/projects?membership=true&simple=true&order_by=last_activity_at", 100)
 }
 
 /// A private project in the user's own namespace (the original dialog's defaults).
@@ -343,8 +361,7 @@ impl Project<'_> {
 
     /// `query` is the filter part of the query string (`state=opened&scope=all`).
     pub fn merge_requests(&self, query: &str) -> Result<Vec<MergeRequest>, Error> {
-        // ponytail: first page only (50, newest first); add paging when lists that long matter.
-        parse(rest("GET", &self.path(&format!("/merge_requests?{query}&per_page=50")), None)?)
+        paged(&self.path(&format!("/merge_requests?{query}")), 50)
     }
 
     pub fn merge_request(&self, iid: u64) -> Result<MergeRequest, Error> {
@@ -361,24 +378,12 @@ impl Project<'_> {
 
     /// Threads, system notes included ([`Discussion::is_system`]).
     pub fn discussions(&self, iid: u64) -> Result<Vec<Discussion>, Error> {
-        // ponytail: first 100 threads; page when reviews get longer.
-        parse(rest("GET", &self.mr(iid, "/discussions?per_page=100"), None)?)
+        paged(&self.mr(iid, "/discussions"), 100)
     }
 
     /// The cumulative changes, every page.
     pub fn diffs(&self, iid: u64) -> Result<Vec<FileDiff>, Error> {
-        let mut all = Vec::new();
-
-        for page in 1..=10 {
-            let files: Vec<FileDiff> = parse(rest("GET", &self.mr(iid, &format!("/diffs?per_page=100&page={page}")), None)?)?;
-            let last = files.len() < 100;
-            all.extend(files);
-            if last {
-                break;
-            }
-        }
-
-        Ok(all)
+        paged(&self.mr(iid, "/diffs"), 100)
     }
 
     pub fn draft_notes(&self, iid: u64) -> Result<Vec<DraftNote>, Error> {
