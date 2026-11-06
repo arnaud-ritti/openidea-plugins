@@ -7,7 +7,7 @@ use openidea_plugin::{Error, Invocation, NotificationLevel};
 
 use crate::api::{self, ProjectInfo};
 use crate::branch::git_ok;
-use crate::{GitLab, PROJECTS, first_line};
+use crate::{GitLab, PROJECTS, first_line, safe};
 
 fn use_ssh() -> bool {
     host::setting_bool("cloneUsingSsh").unwrap_or(false)
@@ -79,10 +79,11 @@ impl GitLab {
 
         let project = self.projects.iter().flatten().find(|p| p.path_with_namespace == path).ok_or("The project is no longer in the list. Refresh it.")?;
         let directory = clone_directory(ctx).ok_or("Set the clone directory under Settings › Plugins › GitLab.")?;
-        let target = format!("{directory}/{}", project.path);
+        let target = format!("{directory}/{}", safe::remote_name(&project.path)?);
+        let url = safe::clone_url(clone_url(project))?;
 
         // A terminal, not a one-off process: clones outlast the 60 s call limit and may ask for credentials.
-        host::open_terminal(&format!("Clone {}", project.name), "git", &["clone".into(), clone_url(project).into(), target.clone()])?;
+        host::open_terminal(&format!("Clone {}", project.name), "git", &["clone".into(), "--".into(), url.into(), target.clone()])?;
         host::notify(NotificationLevel::Info, "Cloning from GitLab", &format!("{} → {target}\nWhen the clone finishes, open it with File › Open.", project.path_with_namespace));
 
         Ok(())
@@ -94,7 +95,7 @@ impl GitLab {
 pub fn share(ctx: &Invocation) -> Result<Option<String>, Error> {
     let project = ctx.project().ok_or("No project is open.")?;
     let status = project.vcs_status()?.ok_or("Create a git repository and commit your files first.")?;
-    let branch = status.branch.clone().ok_or("Check out a branch first.")?;
+    let branch = safe::ref_name(status.branch.as_deref().ok_or("Check out a branch first.")?)?.to_owned();
     if status.commit.is_none() {
         return Err("There is nothing to push yet. Commit your files first.".into());
     }
@@ -121,8 +122,8 @@ pub fn share(ctx: &Invocation) -> Result<Option<String>, Error> {
         true => &created.ssh_url_to_repo,
         false => &created.http_url_to_repo,
     };
-    git_ok(&project, &["remote", "add", remote, url])?;
-    host::open_terminal("Push to GitLab", "git", &["push".into(), "-u".into(), remote.into(), branch])?;
+    git_ok(&project, &["remote", "add", "--", remote, safe::clone_url(url)?])?;
+    host::open_terminal("Push to GitLab", "git", &["push".into(), "-u".into(), "--".into(), remote.into(), branch])?;
     host::notify(NotificationLevel::Info, "Shared on GitLab", &created.web_url);
 
     Ok(None)

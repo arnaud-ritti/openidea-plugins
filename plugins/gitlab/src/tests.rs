@@ -587,12 +587,137 @@ fn clones_next_to_the_current_project_in_a_terminal() {
     plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
 
     let terminal = &host.terminals()[0];
-    assert_eq!(terminal.args, ["clone", "https://gitlab.com/me/tool.git", "/tool"]);
+    assert_eq!(terminal.args, ["clone", "--", "https://gitlab.com/me/tool.git", "/tool"]);
 
     host.set_setting("cloneDirectory", r#""/src""#);
     host.set_setting("cloneUsingSsh", "true");
     plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
-    assert_eq!(host.terminals()[1].args, ["clone", "git@gitlab.com:me/tool.git", "/src/tool"]);
+    assert_eq!(host.terminals()[1].args, ["clone", "--", "git@gitlab.com:me/tool.git", "/src/tool"]);
+}
+
+#[test]
+fn clone_puts_the_url_and_target_after_double_dash() {
+    let host = setup();
+    host.set_setting("cloneDirectory", r#""/work""#);
+    let mut plugin = GitLab::default();
+    plugin.render(PROJECTS, None, &host.invocation()).unwrap();
+
+    plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
+
+    assert_eq!(host.terminals()[0].args, ["clone", "--", "https://gitlab.com/me/tool.git", "/work/tool"]);
+}
+
+fn projects_with(path: &'static str, url: &'static str) -> impl Fn(&HttpRequest) -> Result<HttpResponse, Error> {
+    move |r| match r.url.contains("membership=true") {
+        true => ok(&format!(
+            r#"[{{"name": "Tool", "path": "{path}", "path_with_namespace": "me/tool", "name_with_namespace": "Me / Tool",
+                "http_url_to_repo": "{url}", "ssh_url_to_repo": "git@gitlab.com:me/tool.git"}}]"#
+        )),
+        false => gitlab(r),
+    }
+}
+
+#[test]
+fn clone_refuses_a_project_path_starting_with_a_dash() {
+    let host = setup();
+    for (path, url) in [("-x", "https://gitlab.com/me/tool.git"), ("--upload-pack=x", "https://gitlab.com/me/tool.git"), ("tool", "https://gitlab.com/me/tool.git;rm -rf ~")] {
+        host.on_fetch(projects_with(path, url));
+        let mut plugin = GitLab::default();
+        plugin.render(PROJECTS, None, &host.invocation()).unwrap();
+
+        let result = plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation());
+
+        assert!(result.is_err(), "{path} {url}");
+    }
+    assert!(host.terminals().is_empty());
+}
+
+#[test]
+fn share_refuses_a_branch_name_that_reads_as_an_option() {
+    let host = setup();
+    host.set_vcs_status(Some(status("--upload-pack=x")));
+    host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
+    host.on_process("git", git_ok);
+
+    let result = GitLab::default().run_command("share-project", &host.invocation(), None);
+
+    assert!(result.is_err());
+    assert!(writes(&host).is_empty() && host.terminals().is_empty() && host.process_runs().is_empty());
+}
+
+#[test]
+fn reply_and_resolve_encode_the_discussion_id() {
+    let host = setup();
+    let api = api::Project("g/p");
+
+    for id in ["abc/notes", "abc?x=1", "abc#x", "..", "%2F"] {
+        assert!(api.reply(7, id, "x").is_err(), "{id}");
+        assert!(api.resolve(7, id, true).is_err(), "{id}");
+    }
+    assert!(host.requests().is_empty());
+
+    api.reply(7, "abc123", "x").unwrap();
+    api.resolve(7, "abc123", false).unwrap();
+
+    let posted = writes(&host);
+    assert_eq!(posted[0].1, "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7/discussions/abc123/notes");
+    assert_eq!(posted[1].1, "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7/discussions/abc123?resolved=false");
+}
+
+#[test]
+fn the_token_never_appears_in_requests_logs_notifications_or_views() {
+    let host = setup();
+    host.on_process("git", git_ok);
+    let mut plugin = GitLab::default();
+    let mut views = Vec::new();
+
+    views.push(format!("{:?}", plugin.render(LIST, None, &host.invocation()).unwrap()));
+    plugin.handle(LIST, ViewEvent::Select("mr:7".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(DETAILS, None, &host.invocation()).unwrap()));
+    views.push(format!("{:?}", plugin.render(CHANGES, None, &host.invocation()).unwrap()));
+    plugin.handle(DETAILS, field("comment", "LGTM"), &host.invocation()).unwrap();
+    plugin.handle(DETAILS, ViewEvent::Button("comment".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(DETAILS, None, &host.invocation()).unwrap()));
+    views.push(format!("{:?}", plugin.render(PROJECTS, None, &host.invocation()).unwrap()));
+    plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
+    host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
+    GitLab::default().run_command("share-project", &host.invocation(), None).unwrap();
+
+    assert_eq!(api::authorization(), "Bearer {{secret:token}}");
+    let requests = host.requests();
+    assert!(requests.len() >= 5, "{requests:?}");
+    for request in &requests {
+        let authorization: Vec<_> = request.headers.iter().filter(|(name, _)| name == "Authorization").collect();
+        assert_eq!(authorization, [&("Authorization".to_owned(), "Bearer glpat-x".to_owned())], "{}", request.url);
+        assert!(!request.url.contains("glpat-x"));
+        assert!(!String::from_utf8_lossy(request.body.as_deref().unwrap_or_default()).contains("glpat-x"));
+        assert!(request.headers.iter().filter(|(name, _)| name != "Authorization").all(|(_, value)| !value.contains("glpat-x")));
+    }
+    assert!(host.logs().iter().all(|(_, line)| !line.contains("glpat-x")));
+    assert!(host.notifications().iter().all(|n| !format!("{n:?}").contains("glpat-x")));
+    assert!(host.terminals().iter().all(|t| !format!("{t:?}").contains("glpat-x")));
+    assert!(host.process_runs().iter().all(|r| !format!("{r:?}").contains("glpat-x")));
+    assert!(views.iter().all(|v| !v.contains("glpat-x")));
+    assert!(!host.terminals().is_empty() && !host.notifications().is_empty());
+}
+
+#[test]
+fn an_error_response_is_shown_without_markup_or_over_200_characters() {
+    let host = setup();
+    let page = "<!DOCTYPE html><html><head><title>GitLab is not responding (502)</title><style>body { color: red; }</style></head><body><h1>502</h1></body></html>";
+    let long = format!(r#"{{"message":"<b>{}</b>"}}"#, "x".repeat(500));
+    for body in [page.to_owned(), long, format!("<p>{}</p>", "y".repeat(500))] {
+        host.on_fetch(move |_| Ok(HttpResponse { status: 502, headers: vec![], body: body.clone().into_bytes() }));
+
+        let message = api::current_user().unwrap_err().to_string();
+
+        assert!(!message.contains('<') && !message.contains('>') && !message.contains('{'), "{message}");
+        assert!(message.chars().count() <= 200, "{}", message.chars().count());
+        assert!(message.starts_with("GitLab returned 502: "), "{message}");
+    }
+
+    host.on_fetch(move |_| Ok(HttpResponse { status: 502, headers: vec![], body: page.as_bytes().to_vec() }));
+    assert_eq!(api::current_user().unwrap_err().to_string(), "GitLab returned 502: GitLab is not responding (502)");
 }
 
 #[test]
@@ -618,8 +743,8 @@ fn share_creates_the_project_adds_the_remote_and_pushes() {
     GitLab::default().run_command("share-project", &host.invocation(), None).unwrap();
 
     assert_eq!(writes(&host)[0].2, r#"{"name":"project","visibility":"private"}"#);
-    assert_eq!(git_runs(&host), ["--version", "remote add gitlab https://gitlab.com/me/project.git"]);
-    assert_eq!(host.terminals()[0].args, ["push", "-u", "gitlab", "main"]);
+    assert_eq!(git_runs(&host), ["--version", "remote add -- gitlab https://gitlab.com/me/project.git"]);
+    assert_eq!(host.terminals()[0].args, ["push", "-u", "--", "gitlab", "main"]);
 }
 
 #[test]

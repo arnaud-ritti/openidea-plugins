@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::api::{self, DiffRefs, Discussion, DraftNote, FileDiff};
 use crate::branch::git_ok;
-use crate::{CHANGES, DETAILS, GitLab, LIST, gitlab_project};
+use crate::{CHANGES, DETAILS, GitLab, LIST, gitlab_project, safe};
 
 #[derive(Debug, PartialEq)]
 pub struct Line {
@@ -100,7 +100,7 @@ fn last_commits(ctx: &openidea_plugin::Invocation, refs: Option<&DiffRefs>) -> B
         return BTreeMap::new();
     };
 
-    if ![&refs.base_sha, &refs.head_sha].into_iter().all(|sha| is_hex_sha(sha)) {
+    if ![&refs.base_sha, &refs.head_sha].into_iter().all(|sha| safe::hex_sha(sha).is_ok()) {
         return BTreeMap::new();
     }
 
@@ -108,10 +108,6 @@ fn last_commits(ctx: &openidea_plugin::Invocation, refs: Option<&DiffRefs>) -> B
     let args = ["-c", "core.quotepath=off", "log", "--name-only", "--no-renames", "--format=%x01%H", "-n", "1000", &range];
 
     git_ok(&project, &args).map(|log| parse_last_commits(&log)).unwrap_or_default()
-}
-
-fn is_hex_sha(sha: &str) -> bool {
-    (7..=64).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// What a file's viewed mark is compared with: its last commit, else the head.

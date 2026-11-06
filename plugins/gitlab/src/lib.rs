@@ -11,6 +11,7 @@ mod branch;
 mod ci;
 mod repo;
 mod review;
+mod safe;
 
 use std::collections::{BTreeMap, BTreeSet};
 

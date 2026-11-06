@@ -9,6 +9,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::safe;
+
 // ponytail: gitlab.com only; a self-hosted server needs its own `net:<host>` capability in plugin.toml.
 pub const SERVER: &str = "https://gitlab.com";
 pub const SERVER_HOST: &str = "gitlab.com";
@@ -267,23 +269,51 @@ pub fn new_token_url() -> String {
     format!("{SERVER}/-/user_settings/personal_access_tokens?name=OpenIDEA%20GitLab&scopes=api,read_user")
 }
 
+fn html_title(body: &str) -> Option<&str> {
+    let start = body.find("<title>")? + "<title>".len();
+
+    Some(&body[start..start + body[start..].find("</title>")?])
+}
+
+fn without_markup(text: &str) -> String {
+    let mut plain = String::new();
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => plain.push(c),
+            _ => {}
+        }
+    }
+
+    plain.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// An HTML error page (a proxy's 502) is reduced to its title.
 fn error_message(body: &str) -> String {
-    let Ok(json) = serde_json::from_str::<Value>(body) else {
-        return body.chars().take(200).collect();
+    let message = match serde_json::from_str::<Value>(body) {
+        Ok(json) => match json.get("message").or_else(|| json.get("error")) {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => json.to_string(),
+        },
+        Err(_) => html_title(body).unwrap_or(body).to_owned(),
     };
 
-    match json.get("message").or_else(|| json.get("error")) {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => json.to_string(),
-    }
+    without_markup(&message)
+}
+
+/// The IDE fills the placeholder; the plugin never sees the token.
+pub(crate) fn authorization() -> String {
+    format!("Bearer {{{{secret:{TOKEN}}}}}")
 }
 
 fn send(method: &str, url: String, body: Option<Value>) -> Result<Value, Error> {
     let mut request = HttpRequest {
         method: method.into(),
         url,
-        headers: vec![("Authorization".into(), format!("Bearer {{{{secret:{TOKEN}}}}}"))],
+        headers: vec![("Authorization".into(), authorization())],
         body: None,
         timeout_ms: Some(20_000),
     };
@@ -300,7 +330,7 @@ fn send(method: &str, url: String, body: Option<Value>) -> Result<Value, Error> 
         200..=299 if text.trim().is_empty() => Ok(Value::Null),
         200..=299 => serde_json::from_str(&text).map_err(|e| Error::Failed(format!("Unexpected GitLab response: {e}"))),
         401 => Err("GitLab rejected the access token. Check it in Settings › Plugins › GitLab.".into()),
-        status => Err(Error::Failed(format!("GitLab returned {status}: {}", error_message(&text)))),
+        status => Err(Error::Failed(format!("GitLab returned {status}: {}", error_message(&text)).chars().take(200).collect())),
     }
 }
 
@@ -508,11 +538,11 @@ impl Project<'_> {
     }
 
     pub fn reply(&self, iid: u64, discussion: &str, body: &str) -> Result<(), Error> {
-        rest("POST", &self.mr(iid, &format!("/discussions/{discussion}/notes")), Some(json!({ "body": body }))).map(drop)
+        rest("POST", &self.mr(iid, &format!("/discussions/{}/notes", encode(safe::discussion_id(discussion)?))), Some(json!({ "body": body }))).map(drop)
     }
 
     pub fn resolve(&self, iid: u64, discussion: &str, resolved: bool) -> Result<(), Error> {
-        let path = self.mr(iid, &format!("/discussions/{discussion}?resolved={resolved}"));
+        let path = self.mr(iid, &format!("/discussions/{}?resolved={resolved}", encode(safe::discussion_id(discussion)?)));
 
         rest("PUT", &path, None).map(drop)
     }
