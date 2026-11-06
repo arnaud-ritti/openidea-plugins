@@ -31,6 +31,7 @@ const CHANGES: &str = "merge-request-changes";
 const PROJECTS: &str = "gitlab-projects";
 const NEW_MR: &str = "new-merge-request";
 const NEW_SNIPPET: &str = "new-snippet";
+const SHARE: &str = "share-project-form";
 
 const FILTER_KEY: &str = "filter";
 const SELECTED_KEY: &str = "selected";
@@ -268,6 +269,9 @@ pub struct GitLab {
     branches: Option<Vec<String>>,
     form_status: Option<String>,
     new_snippet: forms::SnippetForm,
+    share: forms::ShareForm,
+    /// The namespaces the share form offers, loaded when it is first drawn.
+    namespaces: Option<Vec<api::Namespace>>,
 }
 
 impl GitLab {
@@ -1147,6 +1151,61 @@ impl GitLab {
         Ok(())
     }
 
+    fn render_share(&mut self) -> Result<View, Error> {
+        if self.namespaces.is_none() {
+            let _task = host::begin_task("Loading GitLab namespaces", false);
+            self.namespaces = Some(api::namespaces()?);
+        }
+
+        Ok(self.share.render(self.namespaces.as_deref().unwrap_or_default()))
+    }
+
+    fn handle_share(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        let namespaces = self.namespaces.as_deref().unwrap_or_default();
+        let form = &mut self.share;
+        match event {
+            ViewEvent::Field(key, value) => {
+                let was_pending = form.confirm_commit.is_some();
+                if key != "namespace" || forms::namespace_choices(namespaces).contains(&value) {
+                    form.field(&key, &value);
+                }
+                if !was_pending || form.confirm_commit.is_some() {
+                    return Ok(());
+                }
+                form.status = None;
+            }
+            ViewEvent::Button(id) if id == "refresh" => {
+                self.namespaces = None;
+                form.status = None;
+                form.confirm_commit = None;
+            }
+            ViewEvent::Button(id) if id == "share" || (id == "confirm-commit" && form.confirm_commit.is_some()) => {
+                let shown = form.confirm_commit.take().filter(|_| id == "confirm-commit");
+                let shared = form.namespace_id(namespaces).and_then(|namespace| repo::share_with(ctx, form, namespace, shown.as_deref()));
+                match shared {
+                    Ok(None) => *form = forms::ShareForm::default(),
+                    Ok(Some(files)) => {
+                        let count = match files.len() {
+                            1 => "1 file".to_owned(),
+                            n => format!("{n} files"),
+                        };
+                        form.status = Some(match shown {
+                            Some(_) => format!("The files changed since the list was shown; nothing was committed. Check the {count} below and confirm again."),
+                            None => format!("Commit {count} as \"Initial commit\"? Check the list below, then click Confirm commit."),
+                        });
+                        form.confirm_commit = Some(files);
+                    }
+                    Err(e) => form.status = Some(e.to_string()),
+                }
+            }
+            _ => return Ok(()),
+        }
+
+        host::refresh_view(SHARE);
+
+        Ok(())
+    }
+
     fn check_ci_files(&mut self, events: &[Event], ctx: &Invocation) {
         let Some(project) = ctx.project() else { return };
 
@@ -1229,6 +1288,8 @@ impl Views for GitLab {
             NEW_MR => self.render_new_merge_request(ctx),
             NEW_SNIPPET if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
             NEW_SNIPPET => Ok(self.new_snippet.render(&snippet_scopes(ctx))),
+            SHARE if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
+            SHARE => self.render_share(),
             _ => return Err(Error::NotFound(format!("view {view}"))),
         };
 
@@ -1250,6 +1311,7 @@ impl Views for GitLab {
             PROJECTS => self.handle_projects(event, ctx),
             NEW_MR if forms_enabled() => self.handle_new_merge_request(event, ctx),
             NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
+            SHARE if forms_enabled() => self.handle_share(event, ctx),
             _ => Ok(()),
         }
     }

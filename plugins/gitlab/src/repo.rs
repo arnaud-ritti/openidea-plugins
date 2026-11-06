@@ -7,6 +7,7 @@ use openidea_plugin::{Error, Invocation, NotificationLevel};
 
 use crate::api::{self, ProjectInfo};
 use crate::branch::git_ok;
+use crate::forms::ShareForm;
 use crate::{GitLab, PROJECTS, first_line, safe};
 
 fn use_ssh() -> bool {
@@ -90,41 +91,125 @@ impl GitLab {
     }
 }
 
-/// Creates a private project in the user's namespace named after the folder,
-/// adds it as `origin` (or `gitlab`) and pushes the current branch.
+/// The command: a private project in the user's namespace named after the folder, no init, no commit.
 pub fn share(ctx: &Invocation) -> Result<Option<String>, Error> {
+    share_with(ctx, &ShareForm::default(), None, None).map(|_| None)
+}
+
+/// `.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, matched on the file name, any case.
+fn looks_secret(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+
+    name.starts_with(".env") || name.ends_with(".pem") || name.ends_with(".key") || name.starts_with("id_rsa") || name.starts_with("id_ed25519")
+}
+
+/// The paths of `git status --porcelain` lines (`XY path`); a rename lists both sides.
+fn porcelain_paths(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .flat_map(|paths| paths.split(" -> "))
+        .map(|path| path.trim_matches('"').to_owned())
+        .collect()
+}
+
+/// Shares the project as the form says. Every field is checked before the first `git` run and the local
+/// steps (`git init`, the commit) succeed before the project is created. With commit-all it returns the files
+/// `git status` lists, and commits only when called again with exactly those files as `confirmed`.
+pub fn share_with(ctx: &Invocation, form: &ShareForm, namespace_id: Option<u64>, confirmed: Option<&[String]>) -> Result<Option<Vec<String>>, Error> {
     let project = ctx.project().ok_or("No project is open.")?;
-    let status = project.vcs_status()?.ok_or("Create a git repository and commit your files first.")?;
-    let branch = safe::ref_name(status.branch.as_deref().ok_or("Check out a branch first.")?)?.to_owned();
-    if status.commit.is_none() {
+    if !api::VISIBILITIES.contains(&form.visibility.as_str()) {
+        return Err("Choose a visibility.".into());
+    }
+
+    let status = project.vcs_status()?;
+    if status.is_none() && !form.init {
+        return Err("Create a git repository and commit your files first.".into());
+    }
+
+    let has_commit = status.as_ref().is_some_and(|s| s.commit.is_some());
+    if !has_commit && !form.commit_all {
         return Err("There is nothing to push yet. Commit your files first.".into());
     }
 
-    let remotes = project.vcs_remotes()?;
+    let branch = status.as_ref().and_then(|s| s.branch.as_deref()).map(safe::ref_name).transpose()?.map(str::to_owned);
+    if branch.is_none() && has_commit {
+        return Err("Check out a branch first.".into());
+    }
+
+    let remotes = match status {
+        Some(_) => project.vcs_remotes()?,
+        None => Vec::new(),
+    };
     if remotes.iter().any(|(_, url)| api::project_path(url).is_some()) {
         return Err("The repository already has a gitlab.com remote.".into());
     }
 
-    let remote = ["origin", "gitlab"]
-        .into_iter()
-        .find(|name| remotes.iter().all(|(existing, _)| existing != name))
-        .ok_or("The remotes origin and gitlab both exist already.")?;
+    let remote = match form.remote.trim() {
+        "" => ["origin", "gitlab"]
+            .into_iter()
+            .find(|name| remotes.iter().all(|(existing, _)| existing != name))
+            .ok_or("The remotes origin and gitlab both exist already. Name another remote.")?,
+        typed => safe::remote_name(typed)?,
+    };
+    if remotes.iter().any(|(existing, _)| existing == remote) {
+        return Err(format!("The remote {remote} exists already. Name another one.").into());
+    }
+
+    let root = match &status {
+        Some(s) => s.root.clone(),
+        None => project.root()?,
+    };
+    let folder = root.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("project");
+    let name = match form.name.trim() {
+        "" => project_name(folder),
+        typed => typed.to_owned(),
+    };
 
     git_ok(&project, &["--version"])?;
+    if status.is_none() {
+        git_ok(&project, &["init"])?;
+    }
 
-    let folder = status.root.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("project");
+    let branch = match branch {
+        Some(branch) => branch,
+        None => safe::ref_name(git_ok(&project, &["symbolic-ref", "--short", "HEAD"])?.trim())?.to_owned(),
+    };
+
+    if form.commit_all {
+        let files = porcelain_paths(&git_ok(&project, &["status", "--porcelain", "--untracked-files=all"])?);
+        let secret: Vec<&str> = files.iter().map(String::as_str).filter(|f| looks_secret(f)).collect();
+        if !secret.is_empty() {
+            return Err(format!("Nothing was committed: {} look secret. Ignore them in .gitignore or commit by hand.", secret.join(", ")).into());
+        }
+
+        if files.is_empty() && !has_commit {
+            return Err("There is nothing to commit.".into());
+        }
+
+        if !files.is_empty() {
+            if confirmed != Some(files.as_slice()) {
+                return Ok(Some(files));
+            }
+
+            git_ok(&project, &["add", "-A"])?;
+            git_ok(&project, &["commit", "-m", "Initial commit"])?;
+        }
+    }
+
     let created = {
         let _task = host::begin_task("Creating GitLab project", false);
-        api::create_project(&project_name(folder))?
+        api::create_project(&name, namespace_id, form.description.trim(), &form.visibility)?
     };
 
-    let url = match use_ssh() {
+    let url = safe::clone_url(match use_ssh() {
         true => &created.ssh_url_to_repo,
         false => &created.http_url_to_repo,
-    };
-    git_ok(&project, &["remote", "add", "--", remote, safe::clone_url(url)?])?;
+    })?;
+    let web_url = safe::gitlab_url(&created.web_url)?;
+    git_ok(&project, &["remote", "add", "--", remote, url])?;
     host::open_terminal("Push to GitLab", "git", &["push".into(), "-u".into(), "--".into(), remote.into(), branch])?;
-    host::notify(NotificationLevel::Info, "Shared on GitLab", &created.web_url);
+    host::notify(NotificationLevel::Info, "Shared on GitLab", web_url);
 
     Ok(None)
 }

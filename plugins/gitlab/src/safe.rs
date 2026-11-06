@@ -52,7 +52,6 @@ pub fn emoji(s: &str) -> Result<&'static str, Error> {
     EMOJIS.into_iter().find(|e| *e == s).ok_or_else(|| refused("emoji", s))
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "consumed by the later GitLab tasks"))]
 pub fn gitlab_url(s: &str) -> Result<&str, Error> {
     accept("URL", s, s.starts_with(GITLAB) && !s.chars().any(|c| c.is_whitespace() || c.is_control()))
 }

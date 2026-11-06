@@ -8,8 +8,7 @@ use openidea_plugin::providers::{CodeAction, Document, LineMarker};
 use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem, TextEdit};
 
 use crate::api::{self, Discussion, MergeRequest};
-use crate::review;
-use crate::{GitLab, SELECTED_KEY, first_line, relative_path};
+use crate::{GitLab, SELECTED_KEY, first_line, relative_path, review, safe};
 
 pub const STATUS_ITEM: &str = "merge-request";
 const RECHECK_SECS: u64 = 300;
@@ -149,18 +148,21 @@ pub fn local_branch(mr: &MergeRequest) -> String {
 }
 
 /// Fetches and checks out `mr`'s branch from `remote` (the target project).
+/// `git checkout` reads a name after `--` as a path, so the checked names pass [`safe::ref_name`] instead.
 pub fn checkout(project: &Project, remote: &str, mr: &MergeRequest) -> Result<String, Error> {
+    let remote = safe::remote_name(remote)?;
     let local = local_branch(mr);
+    safe::ref_name(&local)?;
 
     if mr.source_project_id != mr.target_project_id {
         // ponytail: forks come from the target's refs/merge-requests/<iid>/head, never a fork remote.
-        git_ok(project, &["fetch", remote, &format!("+refs/merge-requests/{}/head:refs/heads/{local}", mr.iid)])?;
+        git_ok(project, &["fetch", "--", remote, &format!("+refs/merge-requests/{}/head:refs/heads/{local}", mr.iid)])?;
         git_ok(project, &["checkout", &local])?;
         return Ok(format!("Checked out {local}."));
     }
 
     let tracking = format!("{remote}/{local}");
-    git_ok(project, &["fetch", remote, &format!("+refs/heads/{local}:refs/remotes/{tracking}")])?;
+    git_ok(project, &["fetch", "--", remote, &format!("+refs/heads/{local}:refs/remotes/{tracking}")])?;
 
     let exists = git(project, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{local}")])?.status == Some(0);
     if !exists {
@@ -197,12 +199,11 @@ pub fn worktree_path(root: &str, branch: &str) -> Option<String> {
 
 /// Same sources as [`checkout`] (the branch, or `refs/merge-requests/<iid>/head` for forks), fetched to a remote-tracking ref and checked out detached.
 pub fn worktree_plan(root: &str, remote: &str, mr: &MergeRequest) -> Result<WorktreePlan, Error> {
-    if mr.source_branch.starts_with('-') {
-        return Err(Error::Failed(format!("Refusing the branch name `{}`: it looks like a git option.", mr.source_branch)));
-    }
+    let remote = safe::remote_name(remote)?;
+    let local = local_branch(mr);
+    safe::ref_name(&local)?;
 
     let path = worktree_path(root, &mr.source_branch).ok_or_else(|| Error::Failed(format!("`{}` is not a usable branch name.", mr.source_branch)))?;
-    let local = local_branch(mr);
     let tracking = format!("{remote}/{local}");
     let source = match mr.source_project_id == mr.target_project_id {
         true => format!("refs/heads/{local}"),
@@ -210,7 +211,7 @@ pub fn worktree_plan(root: &str, remote: &str, mr: &MergeRequest) -> Result<Work
     };
 
     Ok(WorktreePlan {
-        fetch: vec!["fetch".into(), remote.into(), format!("+{source}:refs/remotes/{tracking}")],
+        fetch: vec!["fetch".into(), "--".into(), remote.into(), format!("+{source}:refs/remotes/{tracking}")],
         add: ["worktree", "add", "--detach", "--", &path, &tracking].map(String::from).to_vec(),
         path,
     })
