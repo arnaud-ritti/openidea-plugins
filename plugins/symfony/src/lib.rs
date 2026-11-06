@@ -21,6 +21,7 @@ mod profiler;
 mod query_builder_checks;
 mod refs;
 mod rewrites;
+mod route_defs;
 mod service_gen;
 mod suggest;
 mod twig;
@@ -38,10 +39,20 @@ use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Pr
 
 pub use index::Index;
 use index::{Entry, Names, Sink};
+use ui_kit::routes::{self, Handler, Route, RouteEvent, RouteList};
+use ui_kit::sections::{SectionDef, Switcher};
 use refs::{Kind, Reference};
 
 const VIEW: &str = "symfony";
 const STATUS_ITEM: &str = "symfony";
+const SECTIONS_KEY: &str = "symfony.section";
+const ROUTES_KEY: &str = "symfony.routes";
+const DEFAULT_BASE_URL: &str = "http://localhost:8000";
+const ROUTES_SECTION: &str = "routes";
+const SECTIONS: &[SectionDef] = &[
+    SectionDef { id: ROUTES_SECTION, label: "Routes" },
+    SectionDef { id: "index", label: "Index" },
+];
 const PROFILER_VIEW: &str = "symfony-profiler";
 const SOURCE: &str = "Symfony";
 const DEFAULT_DOMAIN: &str = "messages";
@@ -572,8 +583,22 @@ fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &st
         .collect()
 }
 
+struct Window {
+    sections: Switcher,
+    routes: RouteList,
+}
+
+impl Window {
+    fn new() -> Window {
+        Window { sections: Switcher::new(SECTIONS_KEY, SECTIONS), routes: RouteList::new(ROUTES_KEY, "aritti.symfony") }
+    }
+}
+
 #[derive(Default)]
 pub struct Main {
+    window: Option<Window>,
+    /// Key of the last selected row of the tool window.
+    selected: Option<String>,
     /// By project root.
     indexes: BTreeMap<String, Index>,
     /// Files with published problems, checked again when the index changes.
@@ -815,6 +840,18 @@ impl Plugin for Main {
             "cache-warmup" => self.console(ctx, "cache:warmup"),
             "cache-clear" => self.console(ctx, "cache:clear"),
             "run-console-command" => self.run_console_command(ctx),
+            "route-copy-curl" => {
+                if let Some(route) = self.selected_route() {
+                    routes::copy_as_curl(route, DEFAULT_BASE_URL)?;
+                }
+                Ok(None)
+            }
+            "route-create-http" => {
+                if let Some(route) = self.selected_route() {
+                    routes::create_http_file(route, DEFAULT_BASE_URL, None)?;
+                }
+                Ok(None)
+            }
             "go-to-route" => self.go_to(ctx, "route", |i| &i.routes),
             "go-to-service" => self.go_to(ctx, "service", |i| &i.services),
             "go-to-command" => self.go_to(ctx, "console command", |i| &i.commands),
@@ -1301,6 +1338,55 @@ impl Main {
         items
     }
 
+    fn routes(&self, index: &Index) -> Vec<Route> {
+        let mut routes = Vec::new();
+        let mut handled: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
+        let mut named: BTreeSet<&str> = BTreeSet::new();
+
+        for def in &index.route_defs {
+            handled.insert((&def.class, def.member.as_deref()));
+            named.extend(def.name.as_deref());
+            let class = if def.class.is_empty() { "Closure" } else { def.class.as_str() };
+            let handler = Handler { class: class.to_owned(), member: def.member.clone() };
+            let width = def.path.len() as u32;
+            let location = Some(Location { path: def.file.clone(), range: Range::new(def.at, Position::new(def.at.line, def.at.character + width)) });
+            let methods: Vec<&str> = if def.methods.is_empty() { vec!["ANY"] } else { def.methods.iter().map(String::as_str).collect() };
+            for method in methods {
+                routes.push(Route { method: method.to_owned(), path: def.path.clone(), handler: handler.clone(), name: def.name.clone(), location: location.clone() });
+            }
+        }
+
+        for (name, entry) in &index.routes {
+            if named.contains(name.as_str()) {
+                continue;
+            }
+
+            let controller = entry.detail.as_deref().filter(|detail| !detail.starts_with('/'));
+            let (class, member) = match controller.and_then(|controller| controller.split_once("::")) {
+                Some((class, member)) => (class.rsplit('\\').next().unwrap_or(class), Some(member)),
+                None => (controller.map_or("Closure", |class| class.rsplit('\\').next().unwrap_or(class)), None),
+            };
+            if handled.contains(&(class, member)) {
+                continue;
+            }
+
+            let path = entry.detail.as_deref().filter(|detail| detail.starts_with('/')).unwrap_or(name);
+            routes.push(Route {
+                method: "ANY".into(),
+                path: path.to_owned(),
+                handler: Handler { class: class.to_owned(), member: member.map(str::to_owned) },
+                name: Some(name.clone()),
+                location: location(entry, name.len() as u32),
+            });
+        }
+
+        routes
+    }
+
+    fn selected_route(&self) -> Option<&Route> {
+        self.window.as_ref()?.routes.route(self.selected.as_deref()?)
+    }
+
     fn view_index(&self, ctx: &Invocation) -> Option<&Index> {
         let root = ctx.project()?.root().ok()?;
         self.indexes.get(&root)
@@ -1341,6 +1427,7 @@ impl Views for Main {
             return Ok(profiler_view(ctx));
         }
 
+        let routes_active = self.window.get_or_insert_with(Window::new).sections.active() == ROUTES_SECTION;
         let reindex = Button::new("reindex", "Reindex").icon("refresh");
         let Some(index) = self.view_index(ctx) else {
             return Ok(View::message("This project is not a Symfony application.").button(reindex));
@@ -1355,13 +1442,54 @@ impl Views for Main {
             status.push_str(" · Index incomplete (time limit reached)");
         }
 
-        Ok(View::new(Body::Tree(self.tree(index)))
+        let base = View::new(Body::Tree(Vec::new()))
             .button(reindex)
             .button(Button::new("cache-warmup", "Warm Up Cache").icon("build-project"))
-            .status(&status))
+            .status(&status);
+        let (routes, tree) = match routes_active {
+            true => (self.routes(index), Vec::new()),
+            false => (Vec::new(), self.tree(index)),
+        };
+        let window = self.window.get_or_insert_with(Window::new);
+        let view = if routes_active {
+            window.routes.set_routes(routes);
+            window.routes.render(base)
+        } else {
+            View { body: Body::Tree(tree), ..base }
+        };
+        let view = window.sections.buttons(view, &[]);
+        Ok(view)
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if view == VIEW {
+            let window = self.window.get_or_insert_with(Window::new);
+            if window.sections.handle(&event) {
+                host::refresh_view(view);
+                return Ok(());
+            }
+
+            if let ViewEvent::Select(key) = &event {
+                self.selected = Some(key.clone());
+            }
+
+            if window.sections.active() == ROUTES_SECTION {
+                match window.routes.handle(&event) {
+                    RouteEvent::Changed => {
+                        host::refresh_view(view);
+                        return Ok(());
+                    }
+                    RouteEvent::Open(route) => {
+                        if let Some(location) = route.location {
+                            host::open_location(&location.path, location.range.start.line, location.range.start.character)?;
+                        }
+                        return Ok(());
+                    }
+                    RouteEvent::Ignored => {}
+                }
+            }
+        }
+
         match event {
             ViewEvent::Expand(key) => {
                 self.expanded.insert(key);
@@ -1757,6 +1885,7 @@ mod tests {
         let mut plugin = activated(&host);
         let ctx = host.invocation();
 
+        plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
         plugin.handle(VIEW, ViewEvent::Expand("group:route".into()), &ctx).unwrap();
         let View { body: Body::Tree(items), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a tree") };
         let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
@@ -1773,6 +1902,98 @@ mod tests {
 
         plugin.handle(VIEW, ViewEvent::Activate("route:blog_index".into()), &ctx).unwrap();
         assert_eq!(host.opened_locations(), [("/project/src/Controller/BlogController.php".into(), 4, 28)]);
+    }
+
+    fn toolbar_labels(view: &View) -> Vec<String> {
+        view.toolbar.iter().map(|button| button.label.clone()).collect()
+    }
+
+    #[test]
+    fn symfony_window_has_routes_and_index_sections() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+
+        let view = plugin.render(VIEW, None, &ctx).unwrap();
+        assert!(matches!(view.body, Body::List(_)));
+        assert_eq!(toolbar_labels(&view)[..2], ["\u{25cf} Routes", "Index"]);
+
+        plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
+        let view = plugin.render(VIEW, None, &ctx).unwrap();
+        assert!(matches!(view.body, Body::Tree(_)));
+        assert_eq!(toolbar_labels(&view)[..2], ["Routes", "\u{25cf} Index"]);
+    }
+
+    #[test]
+    fn routes_section_lists_controller_method_and_route_name() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+
+        let View { body: Body::List(rows), status, .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "/blog");
+        assert_eq!(rows[0].detail.as_deref(), Some("[ANY] BlogController \u{b7} blog_index"));
+        assert_eq!(status.as_deref(), Some("1 endpoints"));
+
+        plugin.handle(VIEW, ViewEvent::Activate(rows[0].key.clone()), &ctx).unwrap();
+        assert_eq!(host.opened_locations(), [("/project/src/Controller/BlogController.php".into(), 4, 13)]);
+    }
+
+    #[test]
+    fn attribute_methods_give_one_row_each_with_the_controller_method() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        host.add_file(
+            "src/Controller/UserController.php",
+            "<?php\nnamespace App\\Controller;\n#[Route('/users')]\nclass UserController\n{\n    #[Route('/{id}', name: 'app_user_show', methods: ['GET', 'POST'])]\n    public function show() {}\n}\n",
+        );
+        plugin.run_command("reindex", &host.invocation(), None).unwrap();
+
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &host.invocation()).unwrap() else { panic!("not a list") };
+        let details: Vec<_> = rows.iter().map(|row| (row.label.as_str(), row.detail.clone().unwrap())).collect();
+        assert!(details.contains(&("/users/{id}", "[GET] UserController \u{b7} app_user_show".to_owned())), "{details:?}");
+        assert!(details.contains(&("/users/{id}", "[POST] UserController \u{b7} app_user_show".to_owned())), "{details:?}");
+    }
+
+    #[test]
+    fn filter_and_toggle_buttons_show_only_in_the_routes_section() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+
+        let labels = toolbar_labels(&plugin.render(VIEW, None, &ctx).unwrap());
+        assert!(labels.iter().any(|label| label.starts_with("Filter")), "{labels:?}");
+        assert!(labels.contains(&"Tree".to_owned()), "{labels:?}");
+
+        plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
+        let labels = toolbar_labels(&plugin.render(VIEW, None, &ctx).unwrap());
+        assert!(!labels.iter().any(|label| label.starts_with("Filter") || label == "Tree" || label == "Clear"), "{labels:?}");
+    }
+
+    #[test]
+    fn non_symfony_project_still_shows_the_message() {
+        let host = MockHost::install();
+        host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0"}}"#);
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        let view = plugin.render(VIEW, None, &host.invocation()).unwrap();
+        let Body::Message(text) = view.body else { panic!("not a message") };
+        assert_eq!(text, "This project is not a Symfony application.");
+    }
+
+    #[test]
+    fn route_row_actions_use_the_selected_route() {
+        let host = MockHost::install().with_capabilities(&["project.read", "clipboard"]);
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+
+        plugin.handle(VIEW, ViewEvent::Select(rows[0].key.clone()), &ctx).unwrap();
+        host.answer_next_prompt(Some(&["http://localhost:8000"]));
+        plugin.run_command("route-copy-curl", &ctx, None).unwrap();
+        assert_eq!(host.clipboard().as_deref(), Some("curl -X ANY 'http://localhost:8000/blog'"));
     }
 
     #[test]

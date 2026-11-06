@@ -13,6 +13,7 @@ use openidea_plugin::host::{self, Project};
 use openidea_plugin::Position;
 
 use crate::refs::TEMPLATE_CALLS;
+use crate::route_defs::{self, RouteDef};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -47,6 +48,8 @@ pub struct TemplateInclude {
 #[derive(Default, Debug)]
 pub struct Index {
     pub routes: Names,
+    /// Routes with their path, methods and controller, for the flat list.
+    pub route_defs: Vec<RouteDef>,
     pub templates: Names,
     pub services: Names,
     /// Keys by domain.
@@ -231,6 +234,7 @@ impl Index {
 
             if relative.starts_with("config/routes") {
                 yaml_routes(path, &text, &mut index.routes);
+                index.route_defs.extend(route_defs::yaml_route_defs(path, &text));
                 continue;
             }
 
@@ -246,7 +250,10 @@ impl Index {
 
                 match (relative.ends_with(".xml"), routes) {
                     (true, true) => xml_routes(&path, &text, &mut index.routes),
-                    (false, true) => yaml_routes(&path, &text, &mut index.routes),
+                    (false, true) => {
+                        yaml_routes(&path, &text, &mut index.routes);
+                        index.route_defs.extend(route_defs::yaml_route_defs(&path, &text));
+                    }
                     (true, false) => {
                         xml_services(&path, &text, &mut index.services);
                         xml_service_tags(&path, &text, &mut index.tags);
@@ -262,6 +269,7 @@ impl Index {
         for path in &controllers {
             let Some(text) = read(path, &mut index) else { continue };
             php_routes(path, &text, &mut index.routes);
+            index.route_defs.extend(route_defs::php_route_defs(path, &text));
             roles(path, &text, &mut index.roles);
             index.renders.extend(php_renders(path, &text));
         }
