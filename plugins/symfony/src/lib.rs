@@ -7,6 +7,7 @@
 
 mod index;
 mod refs;
+mod twig;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -150,6 +151,34 @@ fn twig_variables(index: &Index, doc: &Document, offset: usize) -> Vec<Completio
         .collect()
 }
 
+/// Twig tags, filters, functions and tests, plus variables where an expression can start.
+fn twig_names(index: &Index, doc: &Document, offset: usize) -> Vec<CompletionItem> {
+    if doc.language != "twig" {
+        return Vec::new();
+    }
+
+    let Some((slot, start, end)) = twig::slot_at(&doc.text, offset) else { return Vec::new() };
+    let kind = match slot {
+        twig::Slot::Tag => CompletionKind::Keyword,
+        _ => CompletionKind::Function,
+    };
+    let replace = range_of(&doc.text, start, end);
+    let mut items: Vec<CompletionItem> = twig::names(&slot)
+        .iter()
+        .map(|name| {
+            let mut item = CompletionItem::new(name, kind);
+            item.replace = Some(replace);
+            item
+        })
+        .collect();
+
+    if matches!(slot, twig::Slot::Function) {
+        items.extend(twig_variables(index, doc, offset));
+    }
+
+    items
+}
+
 /// A name that is built at run time (`'blog/' ~ name`, `"{$x}"`): not checked.
 fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '~', '$', '#'])
@@ -160,7 +189,11 @@ fn is_dynamic(name: &str) -> bool {
 pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
     let mut problems = Vec::new();
     let mut problem = |start: usize, end: usize, code: &str, message: String| {
-        let severity = if code == "missing-translation" { Severity::Info } else { Severity::Warning };
+        let severity = match code {
+            "missing-translation" => Severity::Info,
+            "unclosed-tag" => Severity::Error,
+            _ => Severity::Warning,
+        };
         problems.push(Diagnostic {
             range: range_of(text, start, end),
             severity,
@@ -197,6 +230,12 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
                 }
             }
             _ => {}
+        }
+    }
+
+    if language == "twig" {
+        for (range, name) in twig::unclosed_tags(text) {
+            problem(range.start, range.end, "unclosed-tag", format!("Tag \"{name}\" is never closed: missing {{% end{name} %}}."));
         }
     }
 
@@ -382,7 +421,7 @@ impl Providers for Main {
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
 
         let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else {
-            return twig_variables(index, doc, offset);
+            return twig_names(index, doc, offset);
         };
         let replace = range_of(&doc.text, reference.start, reference.end);
 
@@ -732,7 +771,73 @@ mod tests {
         let twig = doc("/project/templates/blog/index.html.twig", "twig", text);
 
         assert_eq!(labels(plugin.completion(&twig, Position::new(1, 9), None)), ["body", "title"]);
-        assert_eq!(labels(plugin.completion(&twig, Position::new(2, 4), None)), ["posts", "title"]);
+        let variables = labels(plugin.completion(&twig, Position::new(2, 4), None));
+        assert_eq!(variables.iter().filter(|v| ["posts", "title"].contains(&v.as_str())).count(), 2);
+    }
+
+    #[test]
+    fn completes_tags_filters_functions_tests_from_static_list() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let complete = |plugin: &mut Main, text: &str, character: u32| {
+            let twig = doc("/project/templates/a.html.twig", "twig", text);
+            labels(plugin.completion(&twig, Position::new(0, character), None))
+        };
+
+        let tags = complete(&mut plugin, "{% ", 3);
+        assert!(["if", "for", "block", "extends", "endblock", "endif", "verbatim", "types"].iter().all(|t| tags.contains(&(*t).to_owned())));
+
+        let filters = complete(&mut plugin, "{{ name|", 8);
+        assert!(filters.contains(&"upper".to_owned()) && !filters.contains(&"if".to_owned()));
+
+        let functions = complete(&mut plugin, "{{ ", 3);
+        assert!(functions.contains(&"range".to_owned()) && !functions.contains(&"upper".to_owned()));
+
+        let tests = complete(&mut plugin, "{% if x is not ", 15);
+        assert!(tests.contains(&"empty".to_owned()) && !tests.contains(&"range".to_owned()));
+
+        assert!(complete(&mut plugin, "{{ 'ra' }}", 5).is_empty());
+        assert!(complete(&mut plugin, "plain ra", 8).is_empty());
+    }
+
+    #[test]
+    fn extends_and_include_paths_complete_from_templates_dir() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let names = ["base.html.twig", "blog/index.html.twig"];
+
+        for tag in ["extends", "include", "embed", "import", "from"] {
+            let text = format!("{{% {tag} '' %}}");
+            let twig = doc("/project/templates/a.html.twig", "twig", &text);
+            let at = Position::new(0, (tag.len() + 5) as u32);
+            assert_eq!(labels(plugin.completion(&twig, at, None)), names, "{tag}");
+        }
+    }
+
+    #[test]
+    fn unclosed_block_tag_is_reported() {
+        let host = MockHost::install();
+        let plugin = activated(&host);
+        let index = plugin.index_for("/project/x").unwrap();
+        let found = |text: &str| -> Vec<(String, u32)> {
+            problems(index, "/project/templates/a.html.twig", "twig", text)
+                .into_iter()
+                .filter(|d| d.code.as_deref() == Some("unclosed-tag"))
+                .map(|d| (d.message, d.range.start.character))
+                .collect()
+        };
+
+        let reported = found("{% block a %}\n{% if x %}{% endif %}");
+        assert_eq!(reported, [("Tag \"block\" is never closed: missing {% endblock %}.".to_owned(), 3)]);
+
+        for name in ["for x in y", "macro m()", "embed 'a.html.twig'", "apply upper", "autoescape", "with {}", "cache 'k'", "sandbox"] {
+            assert_eq!(found(&format!("{{% {name} %}}")).len(), 1, "{name}");
+        }
+
+        assert_eq!(found("{% if a %}{% for x in y %}{% endif %}").len(), 1);
+        assert!(found("{% block a %}{% if x %}{% else %}{% endif %}{% endblock %}{% block t 'x' %}{% set v = 1 %}").is_empty());
+        assert!(found("{# {% block a %} #}{% verbatim %}{% if %}{% endverbatim %}").is_empty());
+        assert!(found("{%- block a -%}{%- endblock -%}").is_empty());
     }
 
     #[test]

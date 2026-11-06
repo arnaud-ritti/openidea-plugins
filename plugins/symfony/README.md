@@ -20,11 +20,21 @@ the free code of the public repository.
 | Entries      | `webpack.config.js` `addEntry`/`addStyleEntry`, `importmap.php`                                                    | Twig `encore_entry_link_tags()`, `encore_entry_script_tags()`, `importmap()`                                                                                    |
 | Roles        | `ROLE_*` in security config and controllers, plus built-in attributes (`IS_AUTHENTICATED_*`, `PUBLIC_ACCESS`, …)  | PHP `isGranted`, `denyAccessUnlessGranted`, `#[IsGranted]`; Twig `is_granted()`                                                                                |
 
+## Twig names and structure
+
+In `.twig` files of a Symfony project: completion of tag names (`if`, `for`,
+`block`, `extends`, … and their `end…` forms) after `{%`, filters after `|`,
+functions in expressions and tests after `is` / `is not`, from static lists
+taken from Twig's public documentation (not read from the project's Twig
+extensions). Template paths after `extends`, `include`, `embed`, `import`,
+`from` and `use` come from the cached `templates/` index.
+
 ## Problems, quick fixes and gutter
 
 - Problems: missing template, missing translation key (in a domain that has
   keys), missing route (once the compiled routes exist), missing service (once
-  the compiled container exists), route defined twice in a file. Files are
+  the compiled container exists), route defined twice in a file, Twig block tags (`block`, `if`, `for`, `macro`,
+  `embed`, `apply`, `autoescape`, `with`, `verbatim`, `cache`, `sandbox`) never closed. Files are
   checked when opened or saved. _Settings › Plugins › Symfony_ turns the
   checks off.
 - Quick fix (⌥⏎) on a missing translation key: add it to one of the domain's
