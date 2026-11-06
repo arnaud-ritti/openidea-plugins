@@ -2,15 +2,45 @@
 //! folding (tag pairs, comments) from a hand-written lexer, exported as the
 //! plugin's `syntax-provider`. Detection comes from `languages/twig.toml`.
 
+mod checks;
+mod complete;
+
 use std::ops::Range;
 
+use std::path::Path;
+
+use openidea_plugin::providers::{CompletionItem, Document, Providers};
 use openidea_plugin::syntax::{Fold, FoldKind, Highlight, Symbol, SymbolKind, SyntaxProvider, Token};
-use openidea_plugin::{Error, Invocation, Plugin, register_plugin};
+use openidea_plugin::text::{offset, position};
+use openidea_plugin::{
+    Context, Diagnostic, Error, Event, EventKind, Invocation, LogLevel, Plugin, Project, Range as EditorRange, Severity, host,
+};
+
+const SOURCE: &str = "Twig";
 
 #[derive(Default)]
 pub struct Twig;
 
 impl Plugin for Twig {
+    fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
+        for kind in [EventKind::FileOpened, EventKind::FileSaved] {
+            if let Err(error) = host::subscribe(kind) {
+                host::log(LogLevel::Warn, &format!("Twig inspections need the {} event: {error}", kind.name()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
+        for event in events {
+            let (Event::FileOpened(path) | Event::FileSaved(path)) = event else { continue };
+            if path.ends_with(".twig") {
+                inspect(path);
+            }
+        }
+    }
+
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         Err(Error::NotFound(format!("command {id}")))
     }
@@ -30,7 +60,85 @@ impl SyntaxProvider for Twig {
     }
 }
 
-register_plugin!(Twig, syntax);
+impl Providers for Twig {
+    fn completion(&mut self, doc: &Document, at: openidea_plugin::Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        let Some(offset) = offset(&doc.text, at) else { return Vec::new() };
+
+        complete::items(&doc.text, offset, !project_of(&doc.path).is_some_and(|p| is_symfony(&p)))
+    }
+}
+
+fn project_of(path: &str) -> Option<Project> {
+    host::projects()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| Some((p.root().ok()?, p)))
+        .filter(|(root, _)| Path::new(path).starts_with(root))
+        .max_by_key(|(root, _)| root.len())
+        .map(|(_, project)| project)
+}
+
+/// The test `aritti.symfony` uses to switch on. Inside such a project that
+/// plugin owns tag, filter, function and test completion, so this one stays
+/// silent there instead of listing everything twice.
+fn is_symfony(project: &Project) -> bool {
+    project.read_file("symfony.lock").is_ok()
+        || project
+            .read_file("composer.json")
+            .is_ok_and(|composer| composer.contains("\"symfony/framework-bundle\"") || composer.contains("\"symfony/symfony\""))
+}
+
+fn inspect(path: &str) {
+    let Some(project) = project_of(path) else { return };
+    let Ok(text) = project.read_file(path) else { return };
+
+    let enabled = host::setting_bool("diagnostics").unwrap_or(true);
+    let diagnostics: Vec<Diagnostic> = checks::check(&text)
+        .into_iter()
+        .filter(|_| enabled)
+        .map(|f| Diagnostic {
+            code: Some(f.code.into()),
+            source: Some(SOURCE.into()),
+            ..Diagnostic::new(
+                EditorRange::new(position(&text, f.range.start), position(&text, f.range.end)),
+                Severity::Error,
+                f.message,
+            )
+        })
+        .collect();
+
+    let _ = host::publish_diagnostics(path, &diagnostics);
+}
+
+// `register_plugin!` has no arm for syntax with providers; this is its
+// expansion put together.
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn() -> Twig = <Twig as Default>::default;
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    use openidea_plugin::syntax_bindings::exports::openidea::plugin::syntax_provider as wit;
+
+    struct Component;
+    openidea_plugin::__plugin_exports!(Twig, Component, openidea_plugin::bindings);
+    openidea_plugin::__providers_exports!(Twig, Component);
+
+    impl wit::Guest for Component {
+        fn highlights(language: String, text: String) -> Vec<wit::Token> {
+            openidea_plugin::__rt::highlights::<Twig>(&language, &text)
+        }
+
+        fn outline(language: String, text: String) -> Vec<wit::Symbol> {
+            openidea_plugin::__rt::outline::<Twig>(&language, &text)
+        }
+
+        fn folding(language: String, text: String) -> Vec<wit::Fold> {
+            openidea_plugin::__rt::folding::<Twig>(&language, &text)
+        }
+    }
+
+    openidea_plugin::bindings::__export_plugin_world!(Component with_types_in openidea_plugin::bindings);
+    openidea_plugin::syntax_bindings::__export_syntax_world!(Component with_types_in openidea_plugin::syntax_bindings);
+};
 
 const KEYWORDS: &[&str] = &[
     "and", "or", "not", "in", "is", "matches", "starts", "ends", "with", "as", "only", "ignore", "missing", "if",
@@ -54,6 +162,8 @@ struct Lexed {
     tokens: Vec<Token>,
     tags: Vec<Tag>,
     comments: Vec<Range<usize>>,
+    /// Openers (`{{`, `{%`, `{#`) whose closer is missing.
+    unterminated: Vec<Range<usize>>,
 }
 
 impl Lexed {
@@ -184,7 +294,11 @@ impl Lexer<'_> {
     /// A Twig comment, print or tag starting at `start`; returns its end.
     fn twig(&mut self, start: usize) -> usize {
         if self.at(start, "{#") {
-            let end = self.find(start + 2, "#}").map_or(self.bytes.len(), |e| e + 2);
+            let closer = self.find(start + 2, "#}");
+            if closer.is_none() {
+                self.out.unterminated.push(start..start + 2);
+            }
+            let end = closer.map_or(self.bytes.len(), |e| e + 2);
             self.out.push(start..end, Highlight::Comment);
             self.out.comments.push(start..end);
             return end;
@@ -203,6 +317,7 @@ impl Lexer<'_> {
         let mut token_count = 0;
         let mut assigns = false;
         let mut previous = 0u8;
+        let mut closed = false;
 
         while i < self.bytes.len() {
             let b = self.bytes[i];
@@ -212,6 +327,7 @@ impl Lexer<'_> {
                 let end = i + close.len() + usize::from(trimmed_close);
                 self.out.push(i..end, Highlight::Punctuation);
                 i = end;
+                closed = true;
                 break;
             }
 
@@ -274,6 +390,10 @@ impl Lexer<'_> {
             }
 
             previous = b;
+        }
+
+        if !closed {
+            self.out.unterminated.push(start..start + 2);
         }
 
         if let Some(name) = tag_name {
@@ -462,5 +582,46 @@ mod tests {
                 (9, 11, FoldKind::Comment),
             ]
         );
+    }
+
+    fn project(files: &[(&str, &str)]) -> openidea_plugin::mock::MockHost {
+        let host = openidea_plugin::mock::MockHost::install();
+        host.set_project_root(Some("/p"));
+        for (path, text) in files {
+            host.add_file(path, text);
+        }
+        host
+    }
+
+    fn open(host: &openidea_plugin::mock::MockHost, path: &str) -> Vec<(Option<String>, Option<String>)> {
+        Twig.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+        host.diagnostics().get(path).into_iter().flatten().map(|d| (d.code.clone(), d.source.clone())).collect()
+    }
+
+    #[test]
+    fn publishes_findings_for_a_twig_file() {
+        let host = project(&[("/p/a.html.twig", "{% if a %}\n{{ x ")]);
+        let found = open(&host, "/p/a.html.twig");
+        assert!(found.contains(&(Some("unclosed-tag".into()), Some("Twig".into()))));
+        assert!(found.iter().any(|(code, _)| code.as_deref() == Some("unterminated-delimiter")));
+    }
+
+    #[test]
+    fn diagnostics_can_be_switched_off() {
+        let host = project(&[("/p/a.html.twig", "{% if a %}")]);
+        host.set_setting("diagnostics", "false");
+        assert!(open(&host, "/p/a.html.twig").is_empty());
+    }
+
+    #[test]
+    fn completes_names_outside_symfony_but_not_inside() {
+        let doc = |path: &str| Document { path: path.into(), language: "twig".into(), version: 1, text: "{% i".into() };
+        let at = openidea_plugin::Position::new(0, 4);
+
+        let _plain = project(&[("composer.json", "{}")]);
+        assert!(Twig.completion(&doc("/p/a.twig"), at, None).iter().any(|i| i.label == "endif"));
+
+        let _symfony = project(&[("composer.json", r#"{"require": {"symfony/framework-bundle": "^7"}}"#)]);
+        assert!(Twig.completion(&doc("/p/a.twig"), at, None).is_empty());
     }
 }

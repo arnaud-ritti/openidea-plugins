@@ -7,8 +7,25 @@ attributes around them. The contents of `verbatim` and `raw` are not read as Twi
 The structure view lists `block`s and `macro`s, and `{% x %}…{% endx %}` pairs
 and multi-line comments fold.
 
-Route, template and translation completion in Twig files comes from the
-`aritti.symfony` plugin.
+Completion offers Twig's tags, filters, functions and tests by position
+(after `{%`, `|`, `is`, or a bare name), and in HTML text thirteen snippets
+that expand after typing a prefix: `blk` block, `mcr` macro, `esc`
+autoescape, `emb` embed, `ext` extends, `for`, `from`, `if`, `imp` import,
+`inc` include, `sbx` sandbox, `spl` spaceless, `verb` verbatim.
+
+Inspections (on open and save, setting `diagnostics`) report block tags
+without their `{% end… %}` (`unclosed-tag`), `{% end… %}` without an opening
+tag (`unexpected-end-tag`) and a `{{`, `{%` or `{#` never closed
+(`unterminated-delimiter`). A stray `}}` is not reported: it is common in
+inline JavaScript and CSS.
+
+In a Symfony project (`symfony.lock`, or `symfony/framework-bundle` in
+`composer.json`) the `aritti.symfony` plugin owns name completion, so this
+plugin leaves it out there. Route, template and translation completion also
+comes from `aritti.symfony`.
+
+There is no formatter: OpenIDEA only runs Prettier and Ruff from a language
+definition, and neither understands Twig.
 
 ```sh
 cargo test

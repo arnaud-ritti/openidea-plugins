@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "diagnostics": {
+      "type": "boolean",
+      "title": "Report unclosed tags, unexpected end tags and unterminated delimiters",
+      "default": true
+    }
+  }
+}
