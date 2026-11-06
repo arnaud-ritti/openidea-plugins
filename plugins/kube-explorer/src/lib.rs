@@ -7,10 +7,13 @@
 //! Every cluster call is a `kubectl` run with the chosen context and
 //! namespace as flags, so the user's kubeconfig is never changed.
 
+mod checks;
+mod manifest;
 mod schema;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, RandomState};
+use std::path::Path;
 
 use openidea_plugin::providers::{CodeAction, Document, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
@@ -723,12 +726,55 @@ fn diff_line(line: &str) -> String {
     }
 }
 
+/// The `Chart.yaml` above the nearest `templates` directory of `path`.
+fn chart_file(path: &str) -> Option<String> {
+    let dir = path.rsplit_once('/')?.0;
+    let (at, _) = dir.rmatch_indices("templates").find(|(i, _)| {
+        dir[..*i].ends_with('/') && (dir.len() == i + 9 || dir[i + 9..].starts_with('/'))
+    })?;
+    Some(format!("{}/Chart.yaml", dir[..at].trim_end_matches('/')))
+}
+
+/// Publishes the manifest problems of an opened or saved YAML file of an open project.
+fn inspect(path: &str) {
+    if !(path.ends_with(".yaml") || path.ends_with(".yml") || path.ends_with(".tpl")) {
+        return;
+    }
+    let Some(project) = host::projects()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| Some((p.root().ok()?, p)))
+        .filter(|(root, _)| Path::new(path).starts_with(root))
+        .max_by_key(|(root, _)| root.len())
+        .map(|(_, project)| project)
+    else {
+        return;
+    };
+    let Ok(text) = project.read_file(path) else { return };
+    let in_chart = chart_file(path).is_some_and(|chart| project.read_file(&chart).is_ok());
+    let enabled = |code: &str| {
+        let setting = checks::SETTINGS.iter().find(|(c, _)| *c == code).map(|(_, s)| *s);
+        setting.and_then(host::setting_bool) != Some(false)
+    };
+    let diagnostics: Vec<_> = checks::for_file(path, &text, in_chart)
+        .iter()
+        .filter(|finding| enabled(finding.code))
+        .map(|finding| finding.diagnostic(&text))
+        .collect();
+    let _ = host::publish_diagnostics(path, &diagnostics);
+}
+
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 impl Plugin for KubeExplorer {
     fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
+        for kind in [EventKind::FileOpened, EventKind::FileSaved] {
+            if let Err(error) = host::subscribe(kind) {
+                host::log(LogLevel::Warn, &format!("Manifest inspections need the {} event: {error}", kind.name()));
+            }
+        }
         self.context = host::storage::get("context").ok().flatten();
         self.namespace = host::storage::get("namespace").ok().flatten();
         Ok(())
@@ -736,8 +782,13 @@ impl Plugin for KubeExplorer {
 
     fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
         for event in events {
-            if let Event::FileSaved(path) = event {
-                Self::apply_saved(path);
+            match event {
+                Event::FileSaved(path) => {
+                    Self::apply_saved(path);
+                    inspect(path);
+                }
+                Event::FileOpened(path) => inspect(path),
+                _ => {}
             }
         }
     }

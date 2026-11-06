@@ -21,6 +21,14 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   Windows, you edit the YAML in the panel instead.
 - **⌥⏎ on a manifest**: *Add Kubernetes schema* (one-document files of a
   built-in kind).
+- **Manifest problems** on open and save (optional `events` and `project.read`;
+  a file is a manifest when a document has both `apiVersion:` and `kind:`; files
+  with Helm `{{ }}` actions only get the Helm checks): `deprecated-api-version`
+  (versions removed in v1.16, v1.22 or v1.25, with the replacement),
+  `duplicate-env-name`, `missing-name`, `missing-selector` (apps/v1 workloads),
+  `chart-missing-key` (`Chart.yaml` without `apiVersion`, `name` or `version`)
+  and `helm-whitespace-trim` (`{{-foo` and `foo-}}` in a chart's `templates/`;
+  a trim marker needs a space beside the dash). Each has a switch in the settings.
 - **Commands** on the open file: Apply, Validate (server dry run), Diff,
   Delete Manifest Resources (lists them with a server dry run, then waits for
   Confirm Delete), Render / Apply Kustomization (the file's directory), Preview
@@ -30,6 +38,9 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
 The chosen context and namespace are passed as `--context` / `--namespace`,
 so your kubeconfig is never modified. To use another kubeconfig file, set it in
 Settings › Plugins › Kube Explorer; otherwise kubectl uses its default.
+
+Not ported: cluster-backed checks (unknown resources or fields against the
+live API), CRD-aware validation, and Helm values checks.
 
 Requires `process:kubectl`. Exec-based auth plugins (`gke-gcloud-auth-plugin`,
 `aws`, …) must be on the PATH the IDE was started with.

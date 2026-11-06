@@ -8,12 +8,13 @@ change-notes = "0.1.0: first release. Cluster tree; describe; YAML in an editor 
 categories = ["tools"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-view:kube"]
+activation = ["on-view:kube", "on-event:file-opened", "on-event:file-saved"]
 
 [capabilities]
 required = ["process:kubectl", "editor.read", "storage"]
 # Edit YAML in an editor: tee writes a temp file, saving it applies it.
 # Helm commands run helm; finding the chart around the open file reads the project.
+# events + project.read: manifest problems on open and save (silently off without them).
 optional = ["process:tee", "events", "project.read", "process:helm"]
 
 [[contributes.views]]
