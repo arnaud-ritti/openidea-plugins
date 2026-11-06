@@ -5,14 +5,19 @@
 //! Kotlin sources, and the security namespace of Spring XML files.
 
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
+use openidea_plugin::Location;
 use openidea_plugin::text::offset;
 use openidea_plugin::{Diagnostic, Error, Invocation, Plugin, Position, Range, Severity, TextEdit, host, register_plugin};
 use spring_text::index::{Indexes, PROVIDER_BUDGET};
 use spring_text::java::{self, Annotation, JavaFile};
-use spring_text::{range, xml};
+use spring_text::sibling::sibling_calls;
+use spring_text::{SOURCE_GLOBS, beans, range, xml};
 use std::collections::BTreeSet;
 
-const METHOD_SECURITY: [&str; 4] = ["PreAuthorize", "PostAuthorize", "PreFilter", "PostFilter"];
+mod endpoints;
+mod refs;
+
+pub(crate) const METHOD_SECURITY: [&str; 4] = ["PreAuthorize", "PostAuthorize", "PreFilter", "PostFilter"];
 const GLOBAL_METHOD_SECURITY: &str =
     "org.springframework.security.config.annotation.method.configuration.EnableGlobalMethodSecurity";
 const ROLE_PREFIX: &str = "ROLE_";
@@ -679,6 +684,9 @@ fn problems(path: &str, text: &str) -> Vec<Problem> {
         }
     }
     let kotlin = spring_text::is_kotlin(path);
+    if security && !kotlin && host::setting_bool("springSecurity.checkSelfInvocation").unwrap_or(false) {
+        out.extend(self_invocations(text, &file));
+    }
     if security {
         let code = kotlin_code_only(text);
         if host::setting_bool("springSecurity.checkMatchers").unwrap_or(true) {
@@ -709,13 +717,74 @@ fn problems(path: &str, text: &str) -> Vec<Problem> {
     out
 }
 
+const BEAN_CLASSES: [&str; 6] = ["Component", "Service", "Repository", "Controller", "RestController", "Configuration"];
+
+/// Calls of a bean's method protected by method security from another method of the same class, which skip the proxy.
+fn self_invocations(text: &str, file: &JavaFile) -> Vec<Problem> {
+    let mut out = Vec::new();
+    for ty in file.types.iter().filter(|t| t.kind == "class" && t.has(&BEAN_CLASSES)) {
+        for call in sibling_calls(ty, text, |m| m.has(&METHOD_SECURITY), |_, _| false) {
+            let annotation = call.callee.annotations.iter().find(|a| METHOD_SECURITY.contains(&a.name.as_str())).map_or("", |a| a.name.as_str());
+            let message = format!(
+                "`{}` is protected by @{annotation}, but this call stays inside the class and skips the security proxy.",
+                call.callee.name
+            );
+            out.push(Problem {
+                diagnostic: problem(text, call.at, call.end, Severity::Warning, "security-self-invocation", message),
+                fix: None,
+            });
+        }
+    }
+    out
+}
+
 pub struct SecurityTools {
     roles: Indexes<Vec<String>>,
+    beans: Indexes<Vec<String>>,
+    mappings: Indexes<Vec<endpoints::Mapping>>,
 }
 
 impl Default for SecurityTools {
     fn default() -> Self {
-        Self { roles: Indexes::new(&["**/*.java"], roles) }
+        Self {
+            roles: Indexes::new(&["**/*.java"], roles),
+            beans: Indexes::new(&beans::GLOBS, refs::bean_names),
+            mappings: Indexes::new(SOURCE_GLOBS, endpoints::mappings),
+        }
+    }
+}
+
+impl SecurityTools {
+    /// Table checks of the security XML and, once every bean of the project was read, unknown bean references.
+    fn reference_findings(&mut self, doc: &Document) -> Vec<Diagnostic> {
+        let xml = doc.path.ends_with(".xml");
+        if !xml && !doc.text.contains("WithUserDetails") && !doc.text.contains('@') {
+            return Vec::new();
+        }
+        let check_beans = host::setting_bool("springSecurity.checkBeanReferences").unwrap_or(true);
+        let names: Option<BTreeSet<String>> = self
+            .beans
+            .for_document(&doc.path, &doc.text, PROVIDER_BUDGET)
+            .filter(|index| index.complete() && check_beans)
+            .map(|index| index.iter().flat_map(|(_, n)| n.clone()).collect());
+        let is_bean = |name: &str| names.as_ref().is_some_and(|n| n.contains(name));
+        let found = match (xml, names.is_some()) {
+            (true, true) => refs::xml_rules(&doc.text, Some(&is_bean)),
+            (true, false) => refs::xml_rules(&doc.text, None),
+            (false, true) => refs::source_references(&doc.path, &doc.text, &is_bean),
+            (false, false) => Vec::new(),
+        };
+        found.iter().map(|f| f.diagnostic(&doc.text)).collect()
+    }
+
+    /// The matcher pattern literals of a source (`requestMatchers(HttpMethod.GET, "/api/**")`) and the verb each has.
+    fn matcher_patterns(doc: &Document) -> Vec<(Option<String>, spring_text::java::Str)> {
+        let mut out = Vec::new();
+        for c in spring_text::source_calls(&doc.path, &doc.text).iter().filter(|c| MATCHER_CALLS.contains(&c.name.as_str()) || c.name == "securityMatcher") {
+            let verb = c.args.iter().find_map(|a| endpoints::verb_of(&a.text)).map(str::to_owned);
+            out.extend(c.args.iter().filter_map(|a| a.string.clone()).map(|s| (verb.clone(), s)));
+        }
+        out
     }
 }
 
@@ -725,9 +794,36 @@ fn overlaps(a: Range, b: Range) -> bool {
 
 impl Providers for SecurityTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        let found: Vec<Diagnostic> = problems(&doc.path, &doc.text).into_iter().map(|p| p.diagnostic).collect();
+        let mut found: Vec<Diagnostic> = problems(&doc.path, &doc.text).into_iter().map(|p| p.diagnostic).collect();
+        found.extend(self.reference_findings(doc));
         let _ = host::publish_diagnostics(&doc.path, &found);
         Vec::new()
+    }
+
+    fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        let Some(off) = offset(&doc.text, at) else { return Vec::new() };
+        let patterns: Vec<(Option<String>, String)> = if doc.path.ends_with(".xml") {
+            let elements = xml::elements(&doc.text);
+            elements
+                .iter()
+                .filter(|e| e.local() == "intercept-url")
+                .filter_map(|e| e.attr("pattern").filter(|a| a.holds(off)).map(|a| (e.value("method").map(str::to_owned), a.value.clone())))
+                .collect()
+        } else {
+            Self::matcher_patterns(doc).into_iter().filter(|(_, s)| s.holds(off)).map(|(v, s)| (v, s.value)).collect()
+        };
+        let Some(index) = self.mappings.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        let mut out = Vec::new();
+        for (verb, pattern) in patterns {
+            for (path, mappings) in index.iter() {
+                for m in mappings.iter().filter(|m| {
+                    verb.as_deref().is_none_or(|v| m.verb.is_empty() || m.verb == v) && endpoints::covers(&pattern, &m.path)
+                }) {
+                    out.push(Location { path: path.to_owned(), range: m.range });
+                }
+            }
+        }
+        out
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
@@ -1302,5 +1398,58 @@ class SecurityConfig : WebSecurityConfigurerAdapter() {
         let d = &found.iter().find(|p| p.diagnostic.code.as_deref() == Some("obsolete-path-pattern")).unwrap().diagnostic;
         assert_eq!(d.range.start.line, 3);
         assert_eq!(d.range.start.character, 33);
+    }
+
+    #[test]
+    fn unknown_bean_references_are_info_once_the_project_is_read() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Authz.java", "@Component class Authz {}");
+        let src = "@Service\nclass S {\n    @PreAuthorize(\"@authz.ok() and @ghost.ok()\")\n    void m() {}\n    @WithUserDetails(userDetailsServiceBeanName = \"myUsers\")\n    void t() {}\n}\n";
+        SecurityTools::default().line_markers(&doc("S.java", src));
+        let all = found(&host, "S.java", src);
+        assert_eq!(all, [("unresolved-bean-reference".into(), "ghost".into()), ("unresolved-bean-reference".into(), "myUsers".into())]);
+        let d = &host.diagnostics()["/project/src/main/java/com/acme/S.java"];
+        assert!(d.iter().all(|x| x.severity == Severity::Info));
+
+        host.set_setting("springSecurity.checkBeanReferences", "false");
+        SecurityTools::default().line_markers(&doc("S.java", src));
+        assert!(host.diagnostics().get("/project/src/main/java/com/acme/S.java").is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn security_xml_tables_and_bean_refs_are_reported() {
+        let xml = r#"<b:beans xmlns:b="http://www.springframework.org/schema/beans" xmlns="http://www.springframework.org/schema/security">
+<http create-session="sometimes"><intercept-url access="x"/></http>
+<authentication-manager><authentication-provider user-service-ref="svc"/></authentication-manager></b:beans>"#;
+        let codes = xml_codes(xml);
+        assert_eq!(codes, ["invalid-attribute-value", "missing-attribute", "unresolved-reference"]);
+    }
+
+    #[test]
+    fn self_invocation_of_protected_methods_is_opt_in() {
+        let host = MockHost::install();
+        let src = "import org.springframework.security.access.prepost.PreAuthorize;\n@Service\nclass S {\n    @PreAuthorize(\"hasRole('A')\") public void guarded() {}\n    public void run() { guarded(); }\n}\n";
+        SecurityTools::default().line_markers(&doc("S.java", src));
+        assert!(host.diagnostics().get("/project/src/main/java/com/acme/S.java").is_none_or(|d| d.is_empty()));
+        host.set_setting("springSecurity.checkSelfInvocation", "true");
+        SecurityTools::default().line_markers(&doc("S.java", src));
+        assert_eq!(found(&host, "S.java", src), [("security-self-invocation".to_owned(), "guarded".to_owned())]);
+    }
+
+    #[test]
+    fn matchers_lead_to_the_endpoints_they_cover() {
+        let host = MockHost::install();
+        host.add_file(
+            "src/main/java/com/acme/Api.java",
+            "@RestController @RequestMapping(\"/api\")\nclass Api {\n    @GetMapping(\"/users/{id}\") void get() {}\n    @PostMapping(\"/users\") void post() {}\n}\n",
+        );
+        let src = "import org.springframework.security.config.annotation.web.builders.HttpSecurity;\nclass C { void f(HttpSecurity http) { http.authorizeHttpRequests(a -> a.requestMatchers(HttpMethod.GET, \"/api/**\").permitAll().requestMatchers(\"/admin/**\").denyAll()); } }";
+        let d = doc("C.java", src);
+        let mut tools = SecurityTools::default();
+        let at = |needle: &str| Position::new(1, src.lines().nth(1).unwrap().find(needle).unwrap() as u32 + 2);
+        let targets = tools.definition(&d, at("/api"));
+        assert_eq!(targets.len(), 1, "GET matcher skips the POST mapping: {targets:?}");
+        assert_eq!(targets[0].range.start.line, 2);
+        assert!(tools.definition(&d, at("/admin")).is_empty());
     }
 }
