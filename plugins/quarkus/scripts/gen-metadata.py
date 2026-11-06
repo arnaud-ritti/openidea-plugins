@@ -99,7 +99,7 @@ def default_value(v):
 
 
 def fetch(url):
-    with urllib.request.urlopen(url) as r:
+    with urllib.request.urlopen(url, timeout=60) as r:
         return r.read()
 
 

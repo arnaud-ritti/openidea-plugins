@@ -87,7 +87,7 @@ def default_value(v):
 
 def cloud_jars(train):
     url = f"{CLOUD_BASE}/spring-cloud-dependencies/{train}/spring-cloud-dependencies-{train}.pom"
-    with urllib.request.urlopen(url) as r:
+    with urllib.request.urlopen(url, timeout=60) as r:
         pom = r.read().decode()
     for prop, artifacts in CLOUD.items():
         m = re.search(rf"<{prop}\.version>([^<]+)</", pom)
@@ -109,7 +109,7 @@ def main(version, out, train=None):
     props, hints = {}, {}
     for artifact, url in jars(version, train):
         try:
-            with urllib.request.urlopen(url) as r:
+            with urllib.request.urlopen(url, timeout=60) as r:
                 jar = zipfile.ZipFile(io.BytesIO(r.read()))
         except urllib.error.HTTPError as e:
             if e.code != 404 or artifact in ARTIFACTS:
