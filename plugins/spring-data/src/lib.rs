@@ -11,6 +11,7 @@ use spring_text::java::{self, JavaFile, Member, TypeDecl, TypeRef};
 use spring_text::{SOURCE_GLOBS, is_kotlin, parse_source, range};
 use std::collections::BTreeMap;
 
+mod checks;
 mod jpql;
 
 const SUBJECTS: [&str; 10] = ["find", "read", "get", "query", "search", "stream", "count", "exists", "delete", "remove"];
@@ -265,7 +266,7 @@ impl<'a> Model<'a> {
 }
 
 /// The domain type of each repository interface: `(index in file.types, simple name)`.
-fn repositories(file: &JavaFile) -> Vec<(usize, String)> {
+pub(crate) fn repositories(file: &JavaFile) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (i, t) in file.types.iter().enumerate() {
         if t.kind != "interface" || t.has(&["NoRepositoryBean"]) {
@@ -431,7 +432,7 @@ fn resolve<'a>(model: &Model<'a>, ty: &str, name: &str, from: usize, to: usize) 
     Resolved::Found(steps)
 }
 
-fn derived_method(m: &Member) -> bool {
+pub(crate) fn derived_method(m: &Member) -> bool {
     !m.has(&["Query", "NativeQuery", "Procedure"])
         && m.body.is_none()
         && !m.modifiers.iter().any(|x| x == "default" || x == "static")
@@ -756,13 +757,18 @@ impl Providers for DataTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let file = parse_source(&doc.path, &doc.text);
         let repos = repositories(&file);
+        let repository_types: Vec<usize> = repos.iter().map(|(ti, _)| *ti).collect();
+        let found: Vec<Diagnostic> =
+            checks::check(&file, &repository_types, checks::Groups::from_settings()).iter().map(|f| f.diagnostic(&doc.text)).collect();
         if repos.is_empty() {
-            let _ = host::publish_diagnostics(&doc.path, &[]);
+            let _ = host::publish_diagnostics(&doc.path, &found);
             return Vec::new();
         }
         let Some(index) = self.index(doc) else { return Vec::new() };
         let model = Model::new(index);
-        let _ = host::publish_diagnostics(&doc.path, &problems(&model, &doc.text, &file));
+        let mut diagnostics = problems(&model, &doc.text, &file);
+        diagnostics.extend(found);
+        let _ = host::publish_diagnostics(&doc.path, &diagnostics);
         let mut markers = Vec::new();
         for (ti, domain) in repos {
             let t = &file.types[ti];
@@ -1184,6 +1190,30 @@ public interface UserRepository extends JpaRepository<User, Long> {
         let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/PersonRepository.kt"];
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].message, "`Person` has no property `nmae`.");
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = setup();
+        let path = "/project/src/main/java/com/acme/Person.java";
+        let bad = "import org.springframework.data.relational.core.mapping.Sequence;\nclass Person {\n    @Sequence(sequence = \"\")\n    Long id;\n}\n";
+        let mut tools = DataTools::default();
+        let doc = |text: &str| Document { path: path.into(), language: "java".into(), version: 1, text: text.into() };
+        tools.line_markers(&doc(bad));
+        assert_eq!(host.diagnostics()[path].len(), 1);
+        tools.line_markers(&doc(&bad.replace("\"\"", "\"person_seq\"")));
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn repository_findings_are_published_with_problems() {
+        let host = setup();
+        let path = "/project/src/main/java/com/acme/UserRepository.java";
+        let text = "package com.acme;\n\nimport org.springframework.data.domain.Page;\n\ninterface UserRepository extends JpaRepository<User, Long> {\n    Page<User> findByFirstName(String firstName);\n}\n";
+        let mut tools = DataTools::default();
+        tools.line_markers(&Document { path: path.into(), language: "java".into(), version: 1, text: text.into() });
+        let codes: Vec<_> = host.diagnostics()[path].iter().map(|d| d.code.clone()).collect();
+        assert_eq!(codes, [Some("page-without-pageable".to_owned())]);
     }
 
     fn complete_in(text: &str, marker: &str) -> Vec<CompletionItem> {

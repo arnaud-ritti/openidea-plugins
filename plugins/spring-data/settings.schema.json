@@ -1,0 +1,19 @@
+{
+  "properties": {
+    "springData.checkPageable": {
+      "type": "boolean",
+      "title": "Warn when a repository method returning Page or Slice has no Pageable parameter",
+      "default": true
+    },
+    "springData.checkModifying": {
+      "type": "boolean",
+      "title": "Warn when an update or delete @Query is not marked @Modifying",
+      "default": true
+    },
+    "springData.checkJdbcMapping": {
+      "type": "boolean",
+      "title": "Check Spring Data JDBC mappings (@Sequence, @MappedCollection)",
+      "default": true
+    }
+  }
+}
