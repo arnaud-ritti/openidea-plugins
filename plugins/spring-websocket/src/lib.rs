@@ -53,7 +53,7 @@ impl Kind {
 
 const SCRIPT_EXTENSIONS: [&str; 5] = [".js", ".jsx", ".ts", ".tsx", ".vue"];
 const SKIPPED_DIRECTORIES: [&str; 3] = ["/node_modules/", "/dist/", "/build/"];
-const CLIENT_FACTORIES: [&str; 3] = ["new Client(", "Stomp.over(", "Stomp.client("];
+const CLIENT_FACTORIES: [&str; 4] = ["new Client(", "new StompJs.Client(", "Stomp.over(", "Stomp.client("];
 
 fn ident_before(text: &str, end: usize) -> &str {
     let head = &text[..end];
@@ -104,7 +104,7 @@ fn parse_script(text: &str) -> Option<WsFile> {
         for (dot, _) in text.match_indices(&pattern) {
             let receiver = ident_before(text, dot);
             let lower = receiver.to_lowercase();
-            if !(lower.contains("stomp") || lower.contains("client") || declared.contains(receiver)) {
+            if !(lower.contains("stomp") || declared.contains(receiver)) {
                 continue;
             }
             let arg = dot + pattern.len();
@@ -651,5 +651,19 @@ client.onConnect = () => {
         assert!(tools.definition(&d, Position::new(7, 24)).is_empty());
         assert!(tools.definition(&d, Position::new(8, 24)).is_empty());
         assert!(tools.line_markers(&d).iter().all(|m| m.line < 7));
+    }
+
+    #[test]
+    fn non_stomp_client_receiver_is_not_linked() {
+        let host = setup();
+        let text = "const api = makeApi();\napiClient.publish({ destination: '/chat/send' });\nhttpClient.send('/chat/send', body);\n";
+        host.add_file("web/src/api.ts", text);
+        assert!(parse("api.ts", text).is_none());
+        let declared = format!("const client = new StompJs.Client({{}});\n{text}client.send('/chat/send', {{}});\n");
+        assert_eq!(parse("api.ts", &declared).unwrap().uses.len(), 1);
+        let mut tools = WebSocketTools::default();
+        let d = Document { path: "/project/web/src/api.ts".into(), language: "typescript".into(), version: 1, text: text.into() };
+        assert!(tools.line_markers(&d).is_empty());
+        assert!(tools.definition(&d, Position::new(2, 20)).is_empty());
     }
 }
