@@ -119,3 +119,27 @@ id = "voter"
 name = "Symfony Voter"
 extension = "php"
 path = "templates/Voter.php"
+
+[[contributes.fileTemplates]]
+id = "services-yaml"
+name = "Symfony Service Config (YAML)"
+extension = "yaml"
+path = "templates/ServicesYaml.yaml"
+
+[[contributes.fileTemplates]]
+id = "services-xml"
+name = "Symfony Service Config (XML)"
+extension = "xml"
+path = "templates/ServicesXml.xml"
+
+[[contributes.fileTemplates]]
+id = "services-php"
+name = "Symfony Service Config (PHP)"
+extension = "php"
+path = "templates/ServicesPhp.php"
+
+[[contributes.fileIcons]]
+id = "symfony"
+patterns = ["services.yaml", "services.yml", "routes.yaml", "routes.yml", "bundles.php", "symfony.lock"]
+icon = "icons/symfony.svg"
+iconDark = "icons/symfony_dark.svg"

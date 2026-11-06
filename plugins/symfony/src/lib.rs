@@ -22,13 +22,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Table, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, Position, Range, Severity, TextEdit};
-use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, host, register_plugin, text};
+use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, host, register_plugin, text};
 
 pub use index::Index;
 use index::{Entry, Names, Sink};
 use refs::{Kind, Reference};
 
 const VIEW: &str = "symfony";
+const STATUS_ITEM: &str = "symfony";
 const PROFILER_VIEW: &str = "symfony-profiler";
 const SOURCE: &str = "Symfony";
 const DEFAULT_DOMAIN: &str = "messages";
@@ -409,6 +410,7 @@ impl Main {
 
         if !index::is_symfony(project) {
             self.indexes.remove(&root);
+            self.update_status_item(&root);
             return;
         }
 
@@ -417,12 +419,27 @@ impl Main {
             host::log(LogLevel::Warn, &format!("index of {root} is partial: out of time"));
         }
         self.indexes.insert(root.clone(), index);
+        self.update_status_item(&root);
 
         let checked: Vec<String> = self.checked.iter().filter(|path| under(path, &root)).cloned().collect();
         for path in checked {
             self.check(project, &path);
         }
         host::refresh_view(VIEW);
+    }
+
+    fn update_status_item(&self, root: &str) {
+        let Some(index) = self.indexes.get(root) else {
+            host::remove_status_item(STATUS_ITEM);
+            return;
+        };
+
+        let text = match index.framework_version {
+            Some((major, minor)) => format!("Symfony {major}.{minor}"),
+            None => "Symfony".to_owned(),
+        };
+        let item = StatusItem { text, tooltip: Some(self.summary_of(root, index)), command: Some("reindex".into()) };
+        host::set_status_item(STATUS_ITEM, &item);
     }
 
     fn index_all(&mut self) {
@@ -484,21 +501,19 @@ impl Main {
             return "No Symfony project is open.".into();
         }
 
-        let lines: Vec<String> = self
-            .indexes
-            .iter()
-            .map(|(root, i)| {
-                let partial = if i.partial { " (index incomplete)" } else { "" };
-                let translations: usize = i.translations.values().map(Names::len).sum();
-                format!(
-                    "{root}: {} routes, {} templates, {} services, {translations} translations{partial}",
-                    i.routes.len(),
-                    i.templates.len(),
-                    i.services.len(),
-                )
-            })
-            .collect();
+        let lines: Vec<String> = self.indexes.iter().map(|(root, i)| self.summary_of(root, i)).collect();
         lines.join("\n")
+    }
+
+    fn summary_of(&self, root: &str, i: &Index) -> String {
+        let partial = if i.partial { " (index incomplete)" } else { "" };
+        let translations: usize = i.translations.values().map(Names::len).sum();
+        format!(
+            "{root}: {} routes, {} templates, {} services, {translations} translations{partial}",
+            i.routes.len(),
+            i.templates.len(),
+            i.services.len(),
+        )
     }
 }
 
@@ -1384,8 +1399,8 @@ mod tests {
             paths.extend(value(line, "path"));
         }
 
-        assert_eq!(ids.len(), 9);
-        assert_eq!((names.len(), paths.len()), (9, 9));
+        assert_eq!(ids.len(), 12);
+        assert_eq!((names.len(), paths.len()), (12, 12));
         for list in [&ids, &names, &paths] {
             let unique: BTreeSet<_> = list.iter().collect();
             assert_eq!(unique.len(), list.len(), "{list:?}");
@@ -1394,8 +1409,10 @@ mod tests {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/");
         for path in &paths {
             let text = std::fs::read_to_string(format!("{root}{path}")).unwrap_or_else(|_| panic!("{path} is missing"));
-            assert!(text.contains("namespace App\\"), "{path}");
-            assert!(text.contains("$NAME$"), "{path}");
+            if !path.contains("Services") {
+                assert!(text.contains("namespace App\\"), "{path}");
+                assert!(text.contains("$NAME$"), "{path}");
+            }
 
             let mut rest = text.as_str();
             while let Some(at) = rest.find('$') {
@@ -1408,5 +1425,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn service_templates_use_the_documented_defaults() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/templates/");
+        for file in ["ServicesYaml.yaml", "ServicesXml.xml", "ServicesPhp.php"] {
+            let text = std::fs::read_to_string(format!("{root}{file}")).unwrap();
+            assert!(text.contains("autowire"), "{file}");
+            assert!(text.contains("autoconfigure"), "{file}");
+            assert!(text.contains("App\\"), "{file}");
+            assert!(text.contains("$END$"), "{file}");
+        }
+
+        let yaml = std::fs::read_to_string(format!("{root}ServicesYaml.yaml")).unwrap();
+        let keys = index::yaml_keys(&yaml);
+        assert!(keys.iter().any(|key| key.key == "services" && key.parents.is_empty()));
+        assert!(keys.iter().any(|key| key.key == "_defaults"));
+    }
+
+    #[test]
+    fn file_icon_files_exist_and_use_the_theme_colour() {
+        let manifest = include_str!("../plugin.toml");
+        assert!(manifest.contains("[[contributes.fileIcons]]\nid = \"symfony\""));
+        assert!(manifest.contains("icons/symfony.svg") && manifest.contains("icons/symfony_dark.svg"));
+        for name in ["services.yaml", "services.yml", "routes.yaml", "routes.yml", "bundles.php", "symfony.lock"] {
+            assert!(manifest.contains(&format!("\"{name}\"")), "{name}");
+        }
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/icons/");
+        let light = std::fs::read_to_string(format!("{root}symfony.svg")).unwrap();
+        assert!(light.contains("#6C707E"));
+        assert!(std::fs::read_to_string(format!("{root}symfony_dark.svg")).is_ok());
+    }
+
+    #[test]
+    fn status_item_shows_framework_version() {
+        let host = MockHost::install();
+        symfony_project(&host);
+        host.add_file("composer.json", r#"{"require": {"symfony/framework-bundle": "^7.1"}}"#);
+        let _plugin = {
+            let mut plugin = Main::default();
+            plugin.activate(&host.context("aritti.symfony")).unwrap();
+            plugin
+        };
+
+        let item = &host.status_items()["symfony"];
+        assert_eq!(item.text, "Symfony 7.1");
+        assert_eq!(item.command.as_deref(), Some("reindex"));
+        assert!(item.tooltip.as_deref().unwrap().contains("routes"));
+    }
+
+    #[test]
+    fn status_item_is_removed_for_non_symfony_projects() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        assert!(host.status_items().contains_key("symfony"));
+
+        host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0"}}"#);
+        plugin.run_command("reindex", &host.invocation(), None).unwrap();
+        assert!(!host.status_items().contains_key("symfony"));
     }
 }

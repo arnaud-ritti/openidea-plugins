@@ -137,6 +137,19 @@ New menu entries for a PHP class with a fixed `App\…` namespace: Command,
 Controller, Form Type, Twig Extension, Compiler Pass, Kernel Test, Web Test,
 Event Subscriber and Voter.
 
+Three more create the default `config/services` file of the Symfony recipe
+(`_defaults` with autowire and autoconfigure, the `App\` resource): Service
+Config (YAML), (XML) and (PHP).
+
+## File icons and status item
+
+`services.yaml`, `services.yml`, `routes.yaml`, `routes.yml`, `bundles.php` and
+`symfony.lock` get a small "S" icon (drawn for this plugin, not the Symfony
+logo). The status bar shows `Symfony 7.1` (the `symfony/framework-bundle`
+constraint; just `Symfony` without one) with the route, service and template
+counts as tooltip; clicking it reindexes. It disappears when the project is
+not a Symfony project.
+
 ## Tool window and commands
 
 The _Symfony_ tool window lists routes, templates, services and translations
