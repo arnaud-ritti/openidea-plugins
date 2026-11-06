@@ -16,9 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use api::{Approvals, Discussion, DraftNote, FileDiff, MergeRequest, ProjectInfo, TimelineEvent, User};
 use branch::BranchReview;
 use openidea_plugin::host::{self, storage};
-use openidea_plugin::providers::{Document, LineMarker, Providers};
+use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Error, Event, Invocation, LogLevel, NotificationLevel, Plugin, RepositoryStatus, register_plugin};
+use openidea_plugin::{Error, Event, Invocation, LogLevel, NotificationLevel, Plugin, Range, RepositoryStatus, register_plugin};
 
 const LIST: &str = "merge-requests";
 const DETAILS: &str = "merge-request";
@@ -921,6 +921,10 @@ impl Plugin for GitLab {
 impl Providers for GitLab {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         self.branch_line_markers(doc)
+    }
+
+    fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        self.suggestion_actions(doc, selection)
     }
 }
 

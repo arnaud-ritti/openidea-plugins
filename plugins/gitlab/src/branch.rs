@@ -4,8 +4,8 @@
 //! out a merge request's branch with `git`.
 
 use openidea_plugin::host::{self, storage};
-use openidea_plugin::providers::{Document, LineMarker};
-use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem};
+use openidea_plugin::providers::{CodeAction, Document, LineMarker};
+use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem, TextEdit};
 
 use crate::api::{self, Discussion, MergeRequest};
 use crate::{GitLab, SELECTED_KEY, first_line, relative_path};
@@ -60,6 +60,63 @@ impl BranchReview {
             })
             .collect()
     }
+}
+
+/// A GitLab suggestion block: replaces `above` lines before and `below` lines after the commented line with `text`.
+#[derive(Debug, PartialEq)]
+pub struct Suggestion {
+    pub above: u32,
+    pub below: u32,
+    pub text: String,
+}
+
+/// The blocks opened by ```` ```suggestion ```` or ```` ```suggestion:-N+M ````.
+pub fn suggestions(body: &str) -> Vec<Suggestion> {
+    let mut found = Vec::new();
+    let mut open: Option<(u32, u32, String)> = None;
+
+    for line in body.lines() {
+        let fence = line.trim_end();
+        match open.take() {
+            Some((above, below, text)) if fence == "```" => found.push(Suggestion { above, below, text }),
+            Some((above, below, mut text)) => {
+                text.push_str(line);
+                text.push('\n');
+                open = Some((above, below, text));
+            }
+            None => {
+                let Some(range) = fence.strip_prefix("```suggestion") else {
+                    continue;
+                };
+                let parsed = match range.strip_prefix(':') {
+                    None if range.is_empty() => Some((0, 0)),
+                    None => None,
+                    Some(range) => range
+                        .strip_prefix('-')
+                        .and_then(|r| r.split_once('+'))
+                        .and_then(|(above, below)| Some((above.parse().ok()?, below.parse().ok()?))),
+                };
+                open = parsed.map(|(above, below)| (above, below, String::new()));
+            }
+        }
+    }
+
+    found
+}
+
+/// The edit of `text` that applies `suggestion` to the 0-based commented `line`; `None` past the end of the file.
+fn suggestion_edit(text: &str, line: u32, suggestion: &Suggestion) -> Option<TextEdit> {
+    let first = line.checked_sub(suggestion.above)?;
+    let last = line + suggestion.below;
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let last_line = *lines.get(last as usize)?;
+
+    let (end, replacement) = match last_line.ends_with('\n') {
+        true => (Position::new(last + 1, 0), suggestion.text.clone()),
+        false => (Position::new(last, last_line.chars().count() as u32), suggestion.text.trim_end_matches('\n').to_owned()),
+    };
+
+    Some(TextEdit { range: Range::new(Position::new(first, 0), end), text: replacement })
 }
 
 fn git(project: &Project, args: &[&str]) -> Result<ProcessOutput, Error> {
@@ -245,6 +302,32 @@ impl GitLab {
             .iter()
             .flat_map(|b| b.threads_on(&doc.path))
             .map(|(line, d)| LineMarker { line, icon: None, tooltip: thread_text(d), target: None })
+            .collect()
+    }
+
+    /// "Apply suggestion" for the suggestion blocks of the threads on the selected lines of the open file.
+    /// The file may have changed since the comment: the lines are replaced as they are now.
+    pub(crate) fn suggestion_actions(&self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        let Some(branch) = &self.branch else {
+            return Vec::new();
+        };
+
+        branch
+            .threads_on(&doc.path)
+            .into_iter()
+            .filter(|(line, _)| (selection.start.line..=selection.end.line).contains(line))
+            .flat_map(|(line, d)| d.notes.iter().flat_map(|n| suggestions(&n.body)).map(move |s| (line, s)))
+            .filter_map(|(line, suggestion)| {
+                let edit = suggestion_edit(&doc.text, line, &suggestion)?;
+
+                Some(CodeAction {
+                    title: "GitLab: Apply suggestion".into(),
+                    kind: Some("quickfix".into()),
+                    preferred: false,
+                    edits: vec![(doc.path.clone(), vec![edit])],
+                    data: None,
+                })
+            })
             .collect()
     }
 

@@ -37,7 +37,7 @@ schema = "settings.schema.json"
 title = "GitLab"
 
 [[contributes.providers]]
-kinds = ["line-markers"]
+kinds = ["line-markers", "code-actions"]
 languages = ["*"]
 
 [[contributes.secrets]]

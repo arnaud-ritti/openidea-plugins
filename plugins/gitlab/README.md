@@ -96,6 +96,14 @@ open files as gutter markers and `Info` problems (source `GitLab`) on their
 line on the new side. They're hidden while the local branch is behind its
 upstream, as in the original.
 
+With a review thread's suggestion block (` ```suggestion:-N+M `) on a line of an
+open file, *GitLab: Apply suggestion* appears in the quick fixes there. It
+replaces the N lines above, the commented line and the M lines below with the
+suggestion (a plain ` ```suggestion ` replaces the commented line; an empty one
+deletes it). It's offered for the unresolved threads shown in the editor and
+doesn't check that the lines still match the comment, so look at the lines
+before applying. It only edits the open file; nothing is posted to GitLab.
+
 ## Commands
 
 | Command | Does | Menus |
@@ -149,7 +157,7 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 - Share Project doesn't run `git init` or commit files.
 - A file counts as viewed until a later merge request commit touches it; that
   needs the commits in the local checkout, else the head commit is used.
-- Not ported: worktrees, applying suggestions, usage statistics.
+- Not ported: worktrees, usage statistics. Applying a suggestion doesn't mark it as applied on GitLab.
 
 See the `aritti.gitlab` section of `LIMITATIONS.md` at the repository root
 for the missing APIs behind each limit.

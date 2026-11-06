@@ -752,3 +752,63 @@ fn viewed_falls_back_to_the_head_without_local_history() {
     assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"head"}"#);
     assert!(changes_html(&mut plugin, &host).contains(" checked"));
 }
+
+fn branch_with_suggestion(body: &str) -> (MockHost, GitLab) {
+    let host = setup();
+    host.set_vcs_status(Some(status("feature")));
+    let discussions = serde_json::json!([{"id": "d1", "notes": [
+        {"id": 11, "body": body, "author": {"username": "bob"}, "resolvable": true, "resolved": false,
+         "position": {"new_path": "src/a.rs", "new_line": 4}}
+    ]}])
+    .to_string();
+    host.on_fetch(move |req| match req.url.contains("/discussions") {
+        true => ok(&discussions),
+        false => gitlab(req),
+    });
+    let mut plugin = GitLab::default();
+    plugin.handle_events(&[Event::VcsChanged("/project".into())], &host.invocation());
+
+    (host, plugin)
+}
+
+fn document(path: &str) -> Document {
+    Document { path: path.into(), text: "a\nb\nc\nd\ne\nf\n".into(), ..Document::default() }
+}
+
+fn at_line(line: u32) -> openidea_plugin::Range {
+    openidea_plugin::Range::new(openidea_plugin::Position::new(line, 0), openidea_plugin::Position::new(line, 0))
+}
+
+#[test]
+fn suggestion_block_becomes_edit() {
+    let (_host, mut plugin) = branch_with_suggestion("Better:\n```suggestion:-1+1\nX\nY\n```\n");
+
+    let actions = plugin.code_actions(&document("/project/src/a.rs"), at_line(3));
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "GitLab: Apply suggestion");
+    let (path, edits) = &actions[0].edits[0];
+    assert_eq!(path, "/project/src/a.rs");
+    assert_eq!((edits[0].range.start.line, edits[0].range.end.line), (2, 5));
+    assert_eq!(edits[0].text, "X\nY\n");
+
+    assert!(plugin.code_actions(&document("/project/src/a.rs"), at_line(0)).is_empty(), "not on the commented line");
+    assert!(plugin.code_actions(&document("/project/src/b.rs"), at_line(3)).is_empty(), "not the commented file");
+}
+
+#[test]
+fn a_plain_suggestion_replaces_the_commented_line_and_an_empty_one_deletes_it() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion\nD\n```\n```suggestion:-0+0\n```");
+
+    let actions = plugin.code_actions(&document("/project/src/a.rs"), at_line(3));
+
+    let edits: Vec<_> = actions.iter().map(|a| (a.edits[0].1[0].range.start.line, a.edits[0].1[0].range.end.line, a.edits[0].1[0].text.as_str())).collect();
+    assert_eq!(edits, [(3, 4, "D\n"), (3, 4, "")]);
+}
+
+#[test]
+fn a_suggestion_reaching_past_the_file_is_not_offered() {
+    let (_host, mut plugin) = branch_with_suggestion("```suggestion:-0+9\nX\n```");
+
+    assert!(plugin.code_actions(&document("/project/src/a.rs"), at_line(3)).is_empty());
+}
