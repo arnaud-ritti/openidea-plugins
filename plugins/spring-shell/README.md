@@ -10,7 +10,7 @@ Spring Shell support for Java projects in OpenIDEA, for both annotation models:
 
 Matching is text-based. `@Command` only counts in files importing from `org.springframework.shell` (picocli has an annotation of the same name). Beans come from stereotype classes and `@Bean` methods of the project; providers are `@Bean` methods returning `AvailabilityProvider` or classes implementing it. Checks that need the whole project wait until the project has been read once.
 
-Not ported: shell script files, an interactive command list, option value completion, `alias` names in the duplicate check, Kotlin.
+Not ported: shell script files, an interactive command list, option value completion, `alias` names in the duplicate check.
 
 ```sh
 cargo test
