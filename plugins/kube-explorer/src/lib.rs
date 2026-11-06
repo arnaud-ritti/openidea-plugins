@@ -56,8 +56,16 @@ const KINDS: &[(&str, &str, &str)] = &[
     ("persistentvolumes", "Persistent Volumes", k8s!("pv")),
 ];
 
-/// API groups of the kinds in `KINDS` (core kinds have no group).
-const BUILT_IN_GROUPS: &[&str] = &["apps", "batch", "networking.k8s.io", "events.k8s.io"];
+/// Exact API groups Kubernetes itself serves. Others, even `*.k8s.io` ones
+/// like `gateway.networking.k8s.io`, are custom resources.
+const BUILT_IN_GROUPS: &[&str] = &[
+    "apps", "batch", "autoscaling", "policy",
+    "networking.k8s.io", "events.k8s.io", "storage.k8s.io", "rbac.authorization.k8s.io",
+    "coordination.k8s.io", "discovery.k8s.io", "apiextensions.k8s.io", "metrics.k8s.io",
+    "scheduling.k8s.io", "node.k8s.io", "certificates.k8s.io", "admissionregistration.k8s.io",
+    "flowcontrol.apiserver.k8s.io", "apiregistration.k8s.io", "internal.apiserver.k8s.io",
+    "resource.k8s.io", "authentication.k8s.io", "authorization.k8s.io",
+];
 
 /// Kinds whose pods `kubectl logs --all-pods` follows.
 const WORKLOADS: &[&str] = &["deployments", "statefulsets", "daemonsets", "jobs"];
@@ -146,12 +154,8 @@ impl KubeExplorer {
     /// `kind.group` names of the cluster's custom resources.
     fn custom_resources(&self) -> Result<Vec<String>, String> {
         let _task = host::begin_task("Loading custom resources", false);
-        let mut names = Vec::new();
-        for scope in ["--namespaced=true", "--namespaced=false"] {
-            let out = self.kubectl(&["api-resources", scope, "-o", "name", "--verbs=list", REQUEST_TIMEOUT], None)?;
-            names.extend(out.lines().map(str::to_owned));
-        }
-        Ok(custom_resource_names(names))
+        let out = self.kubectl(&["api-resources", "-o", "name", "--verbs=list", REQUEST_TIMEOUT], None)?;
+        Ok(custom_resource_names(out.lines().map(str::to_owned).collect()))
     }
 
     /// Drops cached children and reloads those of expanded nodes.
@@ -1230,6 +1234,75 @@ mod tests {
 
         kube.handle(TREE, ViewEvent::Select("kind:certificates.cert-manager.io/web-tls".into()), &host.invocation()).unwrap();
         assert_eq!(kube.selected, Some(("certificates.cert-manager.io".into(), "web-tls".into())));
+    }
+
+    #[test]
+    fn built_in_groups_are_not_custom_resources() {
+        let names = [
+            "storageclasses.storage.k8s.io", "roles.rbac.authorization.k8s.io", "poddisruptionbudgets.policy",
+            "horizontalpodautoscalers.autoscaling", "leases.coordination.k8s.io", "customresourcedefinitions.apiextensions.k8s.io",
+            "pods.metrics.k8s.io", "gateways.gateway.networking.k8s.io", "certificates.cert-manager.io",
+            "clusters.cluster.x-k8s.io", "volumesnapshots.snapshot.storage.k8s.io", "pods",
+        ];
+
+        let custom = custom_resource_names(names.iter().map(|n| (*n).to_owned()).collect());
+
+        assert_eq!(custom, [
+            "certificates.cert-manager.io",
+            "clusters.cluster.x-k8s.io",
+            "gateways.gateway.networking.k8s.io",
+            "volumesnapshots.snapshot.storage.k8s.io",
+        ]);
+    }
+
+    fn crd_tree(api_resources: Result<ProcessOutput, Error>) -> Vec<TreeItem> {
+        let host = host();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = calls.clone();
+        host.on_process(KUBECTL, move |_, _| {
+            seen.set(seen.get() + 1);
+            api_resources.clone()
+        });
+        let mut kube = KubeExplorer::default();
+        kube.current_context = Some("minikube".into());
+        for key in ["crds", "crd:b.io", "crd:a.io"] {
+            kube.handle(TREE, ViewEvent::Expand(key.into()), &host.invocation()).unwrap();
+        }
+        assert_eq!(calls.get(), 1);
+        let Body::Tree(items) = kube.render(TREE, None, &host.invocation()).unwrap().body else {
+            panic!("not a tree");
+        };
+        items
+    }
+
+    #[test]
+    fn groups_are_sorted_and_kinds_labelled_by_plural() {
+        let items = crd_tree(ok("zeta.b.io\nalpha.a.io\nbeta.a.io\n"));
+        let nodes: Vec<(&str, &str)> = items.iter().skip_while(|i| i.key != "crds").map(|i| (i.key.as_str(), i.label.as_str())).collect();
+
+        assert_eq!(nodes, [
+            ("crds", "Custom Resources"),
+            ("crd:a.io", "a.io"),
+            ("kind:alpha.a.io", "alpha"),
+            ("kind:beta.a.io", "beta"),
+            ("crd:b.io", "b.io"),
+            ("kind:zeta.b.io", "zeta"),
+        ]);
+    }
+
+    #[test]
+    fn a_failing_api_resources_shows_an_error_node() {
+        let items = crd_tree(Ok(ProcessOutput { status: Some(1), stdout: String::new(), stderr: "Error from server (Forbidden): nope\n".into() }));
+
+        let node = items.iter().find(|i| i.key == "crds!").unwrap();
+        assert!(node.label.contains("Forbidden"));
+    }
+
+    #[test]
+    fn no_custom_resources_shows_a_placeholder() {
+        let items = crd_tree(ok("pods\ndeployments.apps\n"));
+
+        assert!(items.iter().any(|i| i.key == "crds!" && i.label == "No custom resources"));
     }
 
     #[test]
