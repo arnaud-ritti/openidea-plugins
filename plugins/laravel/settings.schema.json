@@ -49,6 +49,11 @@
       "type": "boolean",
       "title": "Report Model::factory() calls of models without a factory",
       "default": true
+    },
+    "checkEloquent": {
+      "type": "boolean",
+      "title": "Report mass assignment of unguarded models, unscheduled prunable models and orderBy('created_at') that latest() or oldest() replace",
+      "default": true
     }
   }
 }

@@ -845,3 +845,119 @@ fn directive_list_matches_the_blade_plugin() {
     let here: std::collections::BTreeSet<&str> = crate::directives::CORE.iter().copied().collect();
     assert_eq!(here, in_blade);
 }
+
+fn project_files(files: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+    move |path| files.iter().find(|(name, _)| *name == path).map(|(_, text)| (*text).to_owned())
+}
+
+const UNGUARDED_POST: (&str, &str) = ("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $guarded = [];\n}\n");
+const FILLABLE_POST: (&str, &str) = ("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $fillable = ['title', 'body'];\n}\n");
+const PRUNABLE_POST: (&str, &str) = ("app/Models/Post.php", "<?php\nuse Illuminate\\Database\\Eloquent\\Prunable;\nclass Post extends Model\n{\n    use HasFactory, Prunable;\n}\n");
+
+fn eloquent_snippets(text: &str, files: &'static [(&'static str, &'static str)]) -> Vec<(&'static str, String)> {
+    eloquent_checks::findings(text, &project_files(files)).into_iter().map(|f| (f.code, text[f.start..f.end].to_owned())).collect()
+}
+
+#[test]
+fn guarded_attribute_assigned_through_fill_warns() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let found = eloquent_snippets("<?php\n(new Post)->fill($request->all());\nPost::create($request->all());\nPost::create($request->validated());\n", &FILES);
+    assert_eq!(found, [("guarded-attribute-assignment", "$request->all()".into()), ("guarded-attribute-assignment", "$request->all()".into())]);
+
+    static FILLABLE: [(&str, &str); 1] = [FILLABLE_POST];
+    let found = eloquent_snippets("<?php\nPost::create(['title' => 'a', 'role' => 'admin', 'body' => 'b']);\nPost::create($request->all());\n", &FILLABLE);
+    assert_eq!(found, [("guarded-attribute-assignment", "role".into())]);
+}
+
+#[test]
+fn guarded_attribute_assignment_is_quiet_for_library_or_dynamic_name() {
+    static FILES: [(&str, &str); 1] = [UNGUARDED_POST];
+    let text = "<?php\nCollection::create($request->all());\n$model::create($request->all());\nstatic::create($request->all());\nPost::create($request->only('a'));\n$post->fill($request->all());\n";
+    assert!(eloquent_snippets(text, &FILES).is_empty());
+
+    static FILLABLE: [(&str, &str); 1] = [FILLABLE_POST];
+    assert!(eloquent_snippets("<?php\nPost::create(['title' => 1, $key => 2, ...$rest]);\nPost::create(['title' => 1, 'body' => 2]);\n", &FILLABLE).is_empty());
+
+    static CUSTOM: [(&str, &str); 1] = [("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $fillable = ['a'];\n    public function getFillable() {}\n}\n")];
+    assert!(eloquent_snippets("<?php\nPost::create(['zzz' => 1]);\n", &CUSTOM).is_empty());
+}
+
+#[test]
+fn prunable_model_without_schedule_warns() {
+    static NO_SCHEDULE: [(&str, &str); 1] = [("routes/console.php", "<?php\nSchedule::command('inspire')->hourly();\n")];
+    let found = eloquent_snippets(PRUNABLE_POST.1, &NO_SCHEDULE);
+    assert_eq!(found, [("unscheduled-prunable", "Prunable".into())]);
+
+    let mass = PRUNABLE_POST.1.replace("Prunable;\n}", "MassPrunable;\n}").replace("HasFactory, Prunable", "HasFactory, MassPrunable");
+    assert_eq!(eloquent_snippets(&mass, &NO_SCHEDULE).len(), 1);
+}
+
+#[test]
+fn unscheduled_prunable_is_quiet_for_library_or_dynamic_name() {
+    static SCHEDULED: [(&str, &str); 2] = [("routes/console.php", "<?php\nSchedule::command('inspire');\n"), ("bootstrap/app.php", "<?php\n->withSchedule(fn ($s) => $s->command('model:prune')->daily())")];
+    assert!(eloquent_snippets(PRUNABLE_POST.1, &SCHEDULED).is_empty());
+
+    static NOTHING_READABLE: [(&str, &str); 0] = [];
+    assert!(eloquent_snippets(PRUNABLE_POST.1, &NOTHING_READABLE).is_empty());
+
+    static NO_SCHEDULE: [(&str, &str); 1] = [("routes/console.php", "<?php\n")];
+    let text = "<?php\nuse Illuminate\\Database\\Eloquent\\Prunable;\nclass Post extends Model\n{\n    use HasFactory;\n    // use Prunable;\n}\n";
+    assert!(eloquent_snippets(text, &NO_SCHEDULE).is_empty());
+}
+
+#[test]
+fn order_by_created_at_desc_becomes_latest() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/PostController.php";
+
+    let text = "<?php\n$a = Post::orderBy('created_at', 'desc')->get();\n$b = Post::query()->orderBy(\"created_at\")->get();\n$c = Post::orderBy('created_at', 'ASC')->get();\n";
+    assert_eq!(apply_rewrite(&mut plugin, path, "php", text, "orderBy('created_at', 'desc')"), text.replace("orderBy('created_at', 'desc')", "latest()"));
+    assert_eq!(apply_rewrite(&mut plugin, path, "php", text, "orderBy(\"created_at\")"), text.replace("orderBy(\"created_at\")", "oldest()"));
+    assert_eq!(apply_rewrite(&mut plugin, path, "php", text, "orderBy('created_at', 'ASC')"), text.replace("orderBy('created_at', 'ASC')", "oldest()"));
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", text, "orderBy('created_at', 'desc')").len(), 1);
+}
+
+#[test]
+fn simplify_order_by_is_quiet_for_library_or_dynamic_name() {
+    static NOTHING: [(&str, &str); 0] = [];
+    let text = "<?php\n$a = Post::orderBy('title', 'desc');\n$b = Post::orderBy($column, 'desc');\n$c = Post::orderBy('created_at', $direction);\n$d = Post::orderBy('created_at', 'desc', 1);\n$e = Post::orderByDesc('created_at');\n// Post::orderBy('created_at');\n$f = orderBy('created_at');\n";
+    assert!(eloquent_snippets(text, &NOTHING).is_empty());
+}
+
+#[test]
+fn eloquent_checks_publish_and_clear_when_the_file_is_fixed() {
+    let host = MockHost::install();
+    let mut plugin = activated_with(&host, &[("app/Models/Post.php", UNGUARDED_POST.1), ("app/Http/Controllers/C.php", "<?php\nPost::create($request->all());\n")]);
+    let path = "/project/app/Http/Controllers/C.php";
+
+    plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+    let found = &host.diagnostics()[path];
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].code.as_deref(), Some("guarded-attribute-assignment"));
+
+    host.add_file("app/Http/Controllers/C.php", "<?php\nPost::create($request->validated());\n");
+    plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+    assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
+
+    host.add_file("app/Http/Controllers/C.php", "<?php\nPost::create($request->all());\n");
+    host.set_setting("checkEloquent", "false");
+    plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+    assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
+}
+
+#[test]
+fn eloquent_findings_use_utf16_columns_and_crlf() {
+    let host = MockHost::install();
+    let body = "<?php\r\n// é日本😀\r\n$x = 'é日'; Post::orderBy('created_at', 'desc');\r\n";
+    let mut plugin = activated_with(&host, &[("app/Http/Controllers/C.php", body)]);
+    let path = "/project/app/Http/Controllers/C.php";
+
+    plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+    let range = host.diagnostics()[path][0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.character), (2, 17, 46));
+    assert_eq!(host.diagnostics()[path][0].severity, Severity::Hint);
+
+    let result = apply_rewrite(&mut plugin, path, "php", body, "orderBy('created");
+    assert_eq!(result, "<?php\r\n// é日本😀\r\n$x = 'é日'; Post::latest();\r\n");
+}

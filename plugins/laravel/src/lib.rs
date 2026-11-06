@@ -10,6 +10,7 @@ mod actions;
 mod blade;
 mod controllers;
 mod directives;
+mod eloquent_checks;
 mod index;
 mod migrations;
 mod php;
@@ -264,6 +265,21 @@ pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -
     found
 }
 
+/// Mass assignment, prunable and `orderBy` problems of a PHP file.
+fn eloquent_problems(project: &Project, language: &str, text: &str) -> Vec<Diagnostic> {
+    if language != "php" || !enabled("checkEloquent") {
+        return Vec::new();
+    }
+
+    let Ok(root) = project.root() else { return Vec::new() };
+    let read = |relative: &str| project.read_file(&format!("{root}/{relative}")).ok();
+
+    eloquent_checks::findings(text, &read)
+        .into_iter()
+        .map(|finding| problem(text, finding.start..finding.end, finding.code, finding.severity, finding.message))
+        .collect()
+}
+
 fn enabled(setting: &str) -> bool {
     host::setting_bool(setting).unwrap_or(true)
 }
@@ -359,7 +375,12 @@ impl Main {
         let enabled = host::setting_bool("diagnostics").unwrap_or(true);
         let check_routes = host::setting_bool("reportMissingRoutes").unwrap_or(false);
         let found = match project.read_file(path) {
-            Ok(text) if enabled && !index.partial => problems(index, language, &text, check_routes),
+            Ok(text) if enabled && !index.partial => {
+                let mut found = problems(index, language, &text, check_routes);
+                found.extend(eloquent_problems(project, language, &text));
+                found.sort_by_key(|d| (d.range.start.line, d.range.start.character));
+                found
+            }
             _ => Vec::new(),
         };
 
@@ -568,6 +589,19 @@ impl Providers for Main {
         let mut found = Vec::new();
         if let Some(index) = self.index_for(&doc.path) {
             found.extend(missing_key_actions(index, doc, language, offset));
+        }
+
+        if language == "php" && enabled("checkEloquent") {
+            let masked = php::mask_comments(&doc.text);
+            found.extend(eloquent_checks::order_by(&masked).into_iter().filter(|f| f.start <= offset && offset <= f.end).filter_map(|finding| {
+                Some(CodeAction {
+                    title: format!("Replace with {}", finding.replacement.as_deref()?),
+                    kind: Some("quickfix".into()),
+                    preferred: true,
+                    edits: vec![(doc.path.clone(), vec![TextEdit { range: range_of(&doc.text, finding.start, finding.end), text: finding.replacement? }])],
+                    data: None,
+                })
+            }));
         }
 
         found.extend(actions::rewrites(&doc.path, language, &doc.text, offset).into_iter().map(|rewrite| CodeAction {

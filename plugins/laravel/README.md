@@ -44,6 +44,16 @@ in `app/**`, names only, no snippets. `@@if`, `user@example.com` and `@` inside
   Route names are only checked when _Settings › Plugins › Laravel_ asks for it,
   because packages add routes the plugin can't see. Files are checked when
   opened or saved.
+- Eloquent problems (setting `checkEloquent`, PHP files): `Post::create($request->all())`
+  or `(new Post)->fill($request->all())` when `Post` in `app/Models` or `app/` has
+  `$guarded = []` and no `$fillable`; a literal key of `Post::create([...])` that
+  a non-empty `$fillable` leaves out (mass assignment discards it); a model using
+  `Prunable` or `MassPrunable` while none of `routes/console.php`,
+  `app/Console/Kernel.php` and `bootstrap/app.php` mentions `model:prune` (quiet
+  when none can be read); and `orderBy('created_at', 'desc')` /
+  `orderBy('created_at')`, a hint with a quick fix to `latest()` / `oldest()`.
+  Models with `getFillable()`, `#[Fillable]` or `unguard` stay quiet, as do
+  classes without a file in the project and dynamic class names.
 - Quick fix (⌥⏎) on a missing `file.key` translation key: add `'key' => 'key'`
   to the main locale's lang file.
 - Intentions (⌥⏎): `'required|email'` in a validation call or `rules()` becomes
