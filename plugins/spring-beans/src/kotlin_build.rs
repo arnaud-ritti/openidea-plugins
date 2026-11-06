@@ -10,7 +10,7 @@ use spring_text::range;
 
 const OPEN_MODIFIERS: [&str; 8] = ["open", "abstract", "sealed", "data", "enum", "inner", "annotation", "value"];
 const OPENING_ANNOTATIONS: [&str; 6] = ["Transactional", "Async", "Cacheable", "CacheEvict", "CachePut", "Retryable"];
-const PLUGIN_MARKERS: [&str; 3] = ["kotlin-spring", "plugin.spring", "allopen"];
+const PLUGIN_MARKERS: [&str; 4] = ["kotlin-spring", "kotlin.spring", "plugin.spring", "allopen"];
 const KTS_JVM_MARKERS: [&str; 2] = ["kotlin(\"jvm\")", "\"org.jetbrains.kotlin.jvm\""];
 const GROOVY_JVM_MARKER: &str = "org.jetbrains.kotlin.jvm";
 
@@ -20,7 +20,7 @@ pub fn missing_spring_plugin(path: &str, file: &JavaFile) -> Vec<Finding> {
         return Vec::new();
     }
     let builds = module_builds(path);
-    if builds.is_empty() || builds.iter().any(|(_, text)| names_plugin(text)) {
+    if !builds.iter().any(|(path, text)| applies_kotlin(path, text)) || builds.iter().any(|(_, text)| names_plugin(text)) {
         return Vec::new();
     }
     candidates
@@ -66,6 +66,23 @@ fn module_builds(path: &str) -> Vec<(String, String)> {
             Some((full, text))
         })
         .collect()
+}
+
+/// Only a build file applying Kotlin through a literal tells us the plugin is ours to add: catalogs, convention plugins and root builds stay quiet.
+fn applies_kotlin(build_path: &str, text: &str) -> bool {
+    if build_path.ends_with("pom.xml") {
+        return text.contains("kotlin-maven-plugin");
+    }
+    let kotlin_dsl = build_path.ends_with(".kts");
+    text.lines().any(|line| is_jvm_line(line, kotlin_dsl))
+}
+
+fn is_jvm_line(line: &str, kotlin_dsl: bool) -> bool {
+    let named = match kotlin_dsl {
+        true => KTS_JVM_MARKERS.iter().any(|m| line.contains(m)),
+        false => line.contains(GROOVY_JVM_MARKER),
+    };
+    named && !line.contains("apply false")
 }
 
 fn names_plugin(build: &str) -> bool {
@@ -118,12 +135,7 @@ pub fn gradle_fix(build_path: &str, build_text: &str) -> Option<TextEdit> {
     if closing_line <= open || !build_text[closing_line..close].trim().is_empty() {
         return None;
     }
-    let jvm_line = build_text[open..close].lines().find(|line| {
-        match kotlin_dsl {
-            true => KTS_JVM_MARKERS.iter().any(|m| line.contains(m)),
-            false => line.contains(GROOVY_JVM_MARKER),
-        }
-    })?;
+    let jvm_line = build_text[open..close].lines().find(|line| is_jvm_line(line, kotlin_dsl))?;
     let version = quoted_version(jvm_line)?;
     let indent: String = jvm_line.chars().take_while(|c| c.is_whitespace()).collect();
     let newline = if build_text.contains("\r\n") { "\r\n" } else { "\n" };

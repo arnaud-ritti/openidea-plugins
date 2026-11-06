@@ -1871,6 +1871,7 @@ fn cache_ranges_use_utf16_columns_with_multibyte_text() {
 
 const KT_TX: &str = "@Service\nclass Billing {\n    @Transactional\n    fun charge() {}\n}\n";
 const KTS_BUILD: &str = "plugins {\n    kotlin(\"jvm\") version \"1.9.24\"\n    id(\"org.springframework.boot\") version \"3.3.0\"\n}\n";
+const KT_POM: &str = "<project><plugin>kotlin-maven-plugin</plugin></project>";
 const KT_PATH: &str = "/project/src/main/kotlin/Billing.kt";
 
 fn kt_host(build: Option<(&str, &str)>) -> MockHost {
@@ -1906,7 +1907,7 @@ fn final_transactional_kotlin_class_without_plugin_is_reported() {
 
 #[test]
 fn configuration_class_without_plugin_is_reported() {
-    let host = kt_host(Some(("pom.xml", "<project/>")));
+    let host = kt_host(Some(("pom.xml", KT_POM)));
     assert_eq!(kt_findings(&host, "@Configuration\nclass Config\n"), [pair("kotlin-spring-plugin", "Config")]);
     let explicit = "@Configuration(proxyBeanMethods = true)\nclass Config\n";
     assert_eq!(kt_findings(&host, explicit).len(), 1);
@@ -1921,10 +1922,10 @@ fn plugin_in_build_file_silences_the_check() {
         "<compilerPlugins>\n  <plugin>spring</plugin>\n</compilerPlugins>",
         "compilerPlugins { \"spring\" }",
     ] {
-        let host = kt_host(Some(("build.gradle.kts", build)));
+        let host = kt_host(Some(("build.gradle.kts", &format!("kotlin(\"jvm\")\n{build}"))));
         assert!(kt_findings(&host, KT_TX).is_empty(), "{build}");
     }
-    let host = kt_host(Some(("build.gradle.kts", "compilerPlugins { \"jpa\" }")));
+    let host = kt_host(Some(("build.gradle.kts", "kotlin(\"jvm\")\ncompilerPlugins { \"jpa\" }")));
     assert_eq!(kt_findings(&host, KT_TX).len(), 1);
 }
 
@@ -1999,7 +2000,7 @@ fn groovy_gradle_fix_inserts_plugin_line() {
 
 #[test]
 fn maven_build_offers_no_fix() {
-    let host = kt_host(Some(("pom.xml", "<project/>")));
+    let host = kt_host(Some(("pom.xml", KT_POM)));
     let document = doc(KT_PATH, KT_TX);
     assert!(Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8))).is_empty());
     assert_eq!(kt_findings(&host, KT_TX).len(), 1);
@@ -2012,8 +2013,8 @@ fn maven_build_offers_no_fix() {
 
 #[test]
 fn fix_never_edits_outside_the_project() {
-    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
-    host.add_file("../outside/build.gradle.kts", KTS_BUILD);
+    // the mock refuses `..` files, so this guards the `..` segment check in build_module
+    let _host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
     for path in ["/project/../outside/src/Billing.kt", "/projectile/src/Billing.kt", "/etc/Billing.kt"] {
         let document = doc(path, KT_TX);
         assert!(kotlin_build::fix_for(path).is_none(), "{path}");
@@ -2060,4 +2061,22 @@ fn kotlin_plugin_crlf_files_report_correct_lines() {
     Navigator::default().line_markers(&document);
     let d = host.diagnostics()[KT_PATH].iter().find(|d| d.code.as_deref() == Some("kotlin-spring-plugin")).unwrap().clone();
     assert_eq!((d.range.start.line, d.range.start.character), (1, 6));
+}
+
+#[test]
+fn kotlin_spring_plugin_is_quiet_without_a_literal_kotlin_plugin() {
+    for build in [
+        "plugins {\n    alias(libs.plugins.kotlin.spring)\n    kotlin(\"jvm\") version \"1.9.24\"\n}\n",
+        "plugins {\n    id(\"my.kotlin-conventions\")\n}\n",
+        "plugins {\n    kotlin(\"jvm\") version \"1.9.24\" apply false\n}\n",
+        "subprojects { }\n",
+    ] {
+        let host = kt_host(Some(("build.gradle.kts", build)));
+        assert!(kt_findings(&host, KT_TX).is_empty(), "{build}");
+        assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", build).is_none_or(|_| build.contains("alias")));
+    }
+    let root_applies = kt_host(Some(("build.gradle.kts", "plugins {\n    kotlin(\"plugin.spring\") version \"1.9.24\" apply false\n}\n")));
+    assert!(kt_findings(&root_applies, KT_TX).is_empty());
+    let host = kt_host(Some(("pom.xml", KT_POM)));
+    assert_eq!(kt_findings(&host, KT_TX).len(), 1);
 }
