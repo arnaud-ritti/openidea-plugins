@@ -4,8 +4,11 @@
 use crate::World;
 use crate::aop;
 use crate::checks::{Groups, weaving_plugin_in_build};
-use openidea_plugin::Severity;
+use openidea_plugin::TextEdit;
+use openidea_plugin::text::offset;
+use openidea_plugin::{Position, Severity};
 use spring_text::finding::Finding;
+use spring_text::range;
 use spring_text::xml;
 
 const BEANS_NS: &str = "http://www.springframework.org/schema/beans";
@@ -27,6 +30,7 @@ pub fn check_xml(path: &str, text: &str, _world: &World, groups: Groups) -> Vec<
         bean_attributes(&els, &mut out);
         injection_values(&els, &mut out);
         bean_scopes(&els, &mut out);
+        value_style(text, &els, &mut out);
     }
     out
 }
@@ -177,4 +181,76 @@ fn one_edit_apart(a: &str, b: &str) -> bool {
     let prefix = short.iter().zip(long.iter()).take_while(|(x, y)| x == y).count();
     let short_rest = if short.len() == long.len() { prefix + 1 } else { prefix };
     short.get(short_rest..).unwrap_or_default() == long.get(prefix + 1..).unwrap_or_default()
+}
+
+fn value_style(text: &str, els: &[xml::Element], out: &mut Vec<Finding>) {
+    for (parent, child) in style_candidates(text, els) {
+        let c = &els[child];
+        let hint = format!("This nested {} can be written as an attribute of the {}.", c.local(), els[parent].local());
+        out.push(Finding::new(c.at, c.at + c.name.len(), "xml-value-style", hint).with_severity(Severity::Hint));
+    }
+}
+
+/// `(parent, child)` pairs where the only child holds a plain literal or bean name.
+fn style_candidates(text: &str, els: &[xml::Element]) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    for name in ["property", "constructor-arg"] {
+        for (i, parent) in beans_elements(els, name) {
+            if parent.attr("value").is_some() || parent.attr("ref").is_some() || text[..parent.tag_end].ends_with("/>") {
+                continue;
+            }
+            let mut children = els.iter().enumerate().filter(|(_, c)| c.parent == Some(i));
+            let (Some((child, _)), None) = (children.next(), children.next()) else { continue };
+            if style_attribute(text, els, child, parent).is_some() {
+                found.push((i, child));
+            }
+        }
+    }
+    found
+}
+
+/// The attribute (`value="t"` or `ref="x"`) that replaces `child`, when the swap loses nothing.
+fn style_attribute(text: &str, els: &[xml::Element], child: usize, parent: &xml::Element) -> Option<String> {
+    let c = &els[child];
+    if !in_namespace(els, child, BEANS_NS) || !text[parent.tag_end..c.start].trim().is_empty() {
+        return None;
+    }
+    let tail_at = text[..parent.end].rfind("</").filter(|at| *at >= c.end)?;
+    if !text[c.end..tail_at].trim().is_empty() {
+        return None;
+    }
+    match c.local() {
+        "value" if c.attrs.is_empty() => {
+            let literal = text[c.tag_end..c.end].strip_suffix('>')?.rsplit_once("</")?.0;
+            let plain = !literal.contains(['<', '"', '\n', '\r', '\t']) && !dynamic(literal);
+            (plain && c.tag_end < c.end).then(|| format!(" value=\"{literal}\"/>"))
+        }
+        "ref" if c.tag_end == c.end && c.attrs.len() == 1 => {
+            let bean = c.attr("bean")?;
+            (!bean.value.contains('"') && !dynamic(&bean.value)).then(|| format!(" ref=\"{}\"/>", bean.value))
+        }
+        _ => None,
+    }
+}
+
+/// The edit turning the single `<value>` or `<ref>` child of `property` into an attribute.
+pub fn attribute_style_edit(text: &str, property: &xml::Element, els: &[xml::Element]) -> Option<TextEdit> {
+    let parent = els.iter().position(|e| e.start == property.start)?;
+    let (_, child) = style_candidates(text, els).into_iter().find(|(p, _)| *p == parent)?;
+    let replacement = style_attribute(text, els, child, property)?;
+    Some(TextEdit { range: range(text, property.tag_end - 1, property.end), text: replacement })
+}
+
+/// The quick fix for a style hint under `cursor`: its title and edit.
+pub fn style_fix(text: &str, cursor: Position) -> Option<(&'static str, TextEdit)> {
+    let at = offset(text, cursor)?;
+    let els = xml::elements(text);
+    if !is_beans_file(&els) {
+        return None;
+    }
+    let (parent, child) = style_candidates(text, &els)
+        .into_iter()
+        .find(|(_, c)| els[*c].at <= at && at <= els[*c].at + els[*c].name.len())?;
+    let title = if els[child].local() == "value" { "Use the value attribute" } else { "Use the ref attribute" };
+    Some((title, attribute_style_edit(text, &els[parent], &els)?))
 }

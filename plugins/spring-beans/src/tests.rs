@@ -1231,3 +1231,114 @@ fn escaped_literal_is_quiet() {
     let escaped = WEAVING_ASPECT.replace("within(a..*) &&", "within(a..*) \\t&&");
     assert!(found(&escaped).is_empty());
 }
+
+fn applied_xml_fix(text: &str) -> Option<String> {
+    let host = MockHost::install();
+    let document = doc(XML_PATH, text);
+    let mut navigator = Navigator::default();
+    navigator.line_markers(&document);
+    let hint = host.diagnostics()[XML_PATH].iter().find(|d| d.code.as_deref() == Some("xml-value-style"))?.range;
+    let actions = navigator.code_actions(&document, hint);
+    let edits = &actions.first()?.edits;
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].0, XML_PATH);
+    let mut fixed = text.to_owned();
+    for e in &edits[0].1 {
+        let (s, t) = (offset(&fixed, e.range.start).unwrap(), offset(&fixed, e.range.end).unwrap());
+        fixed.replace_range(s..t, &e.text);
+    }
+    Some(fixed)
+}
+
+#[test]
+fn value_element_is_hinted_and_rewritten_to_attribute() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\">\n<property name=\"n\">\n  <value>5 &amp; 6</value>\n</property>\n</bean>");
+    let host = MockHost::install();
+    assert_eq!(xml_findings(&host, &text), [pair("xml-value-style", "value")]);
+    assert_eq!(host.diagnostics()[XML_PATH][0].severity, Severity::Hint);
+    let constructor = beans_xml("<bean id=\"a\" class=\"x.Y\"><constructor-arg index=\"0\"><value>7</value></constructor-arg></bean>");
+    assert_eq!(xml_findings(&host, &constructor), [pair("xml-value-style", "value")]);
+    let fixed = applied_xml_fix(&text).unwrap();
+    assert!(fixed.contains("<property name=\"n\" value=\"5 &amp; 6\"/>\n</bean>"), "{fixed}");
+    let els = spring_text::xml::elements(&fixed);
+    let property = els.iter().find(|e| e.name == "property").unwrap();
+    assert_eq!(property.value("value"), Some("5 &amp; 6"));
+    assert!(els.iter().all(|e| e.name != "value"));
+}
+
+#[test]
+fn ref_element_is_hinted_and_rewritten_to_attribute() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\">\n<property name=\"n\"><ref bean=\"other\"/></property>\n</bean>");
+    let host = MockHost::install();
+    assert_eq!(xml_findings(&host, &text), [pair("xml-value-style", "ref")]);
+    let fixed = applied_xml_fix(&text).unwrap();
+    assert!(fixed.contains("<property name=\"n\" ref=\"other\"/>\n</bean>"), "{fixed}");
+    let els = spring_text::xml::elements(&fixed);
+    let property = els.iter().find(|e| e.name == "property").unwrap();
+    assert_eq!(property.value("ref"), Some("other"));
+    assert!(els.iter().all(|e| e.name != "ref"));
+    assert!(els.iter().any(|e| e.name == "bean"));
+}
+
+#[test]
+fn value_style_is_quiet_for_library_or_dynamic_name() {
+    let host = MockHost::install();
+    let quiet = |body: &str| {
+        let found = xml_findings(&host, &beans_xml(&format!("<bean id=\"a\" class=\"x.Y\">{body}</bean>")));
+        assert!(found.iter().all(|(code, _)| code != "xml-value-style"), "{body}: {found:?}");
+    };
+    quiet("<property name=\"n\"><value>one\ntwo</value></property>");
+    quiet("<property name=\"n\"><value><![CDATA[a<b]]></value></property>");
+    quiet("<property name=\"n\"><value type=\"java.lang.String\">v</value></property>");
+    quiet("<property name=\"n\"><value>say \"hi\"</value></property>");
+    quiet("<property name=\"n\"><value>a</value><value>b</value></property>");
+    quiet("<property name=\"n\"><value>a</value><description>d</description></property>");
+    quiet("<property name=\"n\"><ref local=\"o\"/></property>");
+    quiet("<property name=\"n\"><ref bean=\"o\" local=\"o\"/></property>");
+    quiet("<property name=\"n\"><ref bean=\"${o}\"/></property>");
+    quiet("<property name=\"n\"><value>${v}</value></property>");
+    quiet("<property name=\"n\" value=\"x\"><value>a</value></property>");
+    quiet("<property name=\"n\"/>");
+    quiet("<property name=\"n\"><!-- keep --><value>a</value></property>");
+    let other_ns = "<x:bean xmlns:x=\"urn:other\"><x:property name=\"n\"><x:value>a</x:value></x:property></x:bean>";
+    assert!(xml_findings(&host, other_ns).is_empty());
+    host.set_setting("springBeans.checkXml", "false");
+    let off = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\"><value>a</value></property></bean>");
+    assert!(xml_findings(&host, &off).is_empty());
+}
+
+#[test]
+fn rewrite_keeps_multibyte_text() {
+    let text = beans_xml("<!-- \u{1F600} --><bean id=\"a\" class=\"x.Y\">\n<property name=\"n\"><value>caf\u{e9} \u{1F600}</value></property>\n</bean>").replace('\n', "\r\n");
+    let host = MockHost::install();
+    xml_findings(&host, &text);
+    let hint = host.diagnostics()[XML_PATH][0].range;
+    assert_eq!((hint.start.line, hint.start.character), (3, 20));
+    let fixed = applied_xml_fix(&text).unwrap();
+    assert!(fixed.contains("<property name=\"n\" value=\"caf\u{e9} \u{1F600}\"/>\r\n</bean>"), "{fixed:?}");
+    let els = spring_text::xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "property").unwrap().value("value"), Some("caf\u{e9} \u{1F600}"));
+}
+
+#[test]
+fn code_action_applies_the_edit_to_the_open_file() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\"><value>v</value></property></bean>");
+    let host = MockHost::install();
+    let document = doc(XML_PATH, &text);
+    let mut navigator = Navigator::default();
+    navigator.line_markers(&document);
+    let hint = host.diagnostics()[XML_PATH][0].range;
+    let actions = navigator.code_actions(&document, hint);
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "Use the value attribute");
+    assert_eq!(actions[0].edits.len(), 1);
+    assert_eq!(actions[0].edits[0].0, XML_PATH);
+    let elsewhere = Range::new(Position::new(0, 1), Position::new(0, 1));
+    assert!(navigator.code_actions(&document, elsewhere).is_empty());
+
+    let reference = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\"><ref bean=\"o\"/></property></bean>");
+    let document = doc(XML_PATH, &reference);
+    navigator.line_markers(&document);
+    let hint = host.diagnostics()[XML_PATH][0].range;
+    assert_eq!(navigator.code_actions(&document, hint)[0].title, "Use the ref attribute");
+}

@@ -540,6 +540,16 @@ impl Providers for Navigator {
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        if doc.language == "xml" {
+            let Some((title, edit)) = xml_checks::style_fix(&doc.text, selection.start) else { return Vec::new() };
+            return vec![CodeAction {
+                title: title.into(),
+                kind: Some("quickfix".into()),
+                preferred: true,
+                edits: vec![(doc.path.clone(), vec![edit])],
+                data: None,
+            }];
+        }
         if doc.language != "java" {
             return Vec::new();
         }
