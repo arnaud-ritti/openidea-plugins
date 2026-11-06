@@ -436,7 +436,7 @@ impl WebSocketTools {
         }
 
         let mut items = Vec::new();
-        for (destination, mut entries) in destinations.iter().map(|(k, v)| (k, v.clone())) {
+        for (index, (destination, mut entries)) in destinations.iter().map(|(k, v)| (k, v.clone())).enumerate() {
             entries.sort_by(|a, b| (&a.0, a.1.at).cmp(&(&b.0, b.1.at)));
             let senders = entries.iter().filter(|(_, u)| u.kind.sends()).count();
             let receivers = entries.len() - senders;
@@ -446,7 +446,7 @@ impl WebSocketTools {
             items.push(TreeItem::new(&key, destination).detail(&detail).icon(icon));
 
             for (path, u) in entries {
-                let child = format!("u:{}:{}:{path}", u.range.start.line, u.range.start.character);
+                let child = format!("u:{index}:{}:{}:{path}", u.range.start.line, u.range.start.character);
                 let label = format!("{}:{}", file_name(path), u.range.start.line + 1);
                 let detail = format!("{} · {}", u.kind.label(), u.via);
                 items.push(TreeItem::new(&child, &label).parent(&key).detail(&detail).icon("file"));
@@ -489,9 +489,9 @@ impl Views for WebSocketTools {
                 host::refresh_view(view);
             }
             ViewEvent::Activate(key) => {
-                let mut parts = key.splitn(4, ':');
-                if let (Some("u"), Some(line), Some(column), Some(path)) =
-                    (parts.next(), parts.next(), parts.next(), parts.next())
+                let mut parts = key.splitn(5, ':');
+                if let (Some("u"), Some(_), Some(line), Some(column), Some(path)) =
+                    (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
                     && let (Ok(line), Ok(column)) = (line.parse(), column.parse())
                 {
                     host::open_location(path, line, column)?;
@@ -1052,10 +1052,25 @@ client.onConnect = () => {
     }
 
     #[test]
+    fn use_keys_are_unique_when_a_use_appears_under_several_destinations() {
+        let host = setup();
+        let mut tools = WebSocketTools::default();
+        let items = tree(tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap());
+        let mut keys: Vec<_> = items.iter().map(|i| i.key.as_str()).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total);
+
+        let subscribe: Vec<_> = items.iter().filter(|i| i.detail.as_deref().is_some_and(|d| d.contains("@SubscribeMapping"))).collect();
+        assert!(subscribe.len() >= 2, "{subscribe:?}");
+    }
+
+    #[test]
     fn malformed_key_is_ignored() {
         let host = MockHost::install();
         let mut tools = WebSocketTools::default();
-        for key in ["u:x:y:/a.java", "u:1", "d:/topic/x", "", "u:1:2"] {
+        for key in ["u:0:x:y:/a.java", "u:0:1", "d:/topic/x", "", "u:0:1:2"] {
             tools.handle(DESTINATIONS_VIEW, ViewEvent::Activate(key.into()), &host.invocation()).unwrap();
         }
         assert!(host.opened_locations().is_empty());
@@ -1098,8 +1113,8 @@ client.onConnect = () => {
         let mut tools = WebSocketTools::default();
         let items = tree(tools.render(DESTINATIONS_VIEW, None, &host.invocation()).unwrap());
         let second = children(&items, "d:/topic/b")[0];
-        assert!(second.key.starts_with("u:1:"), "{}", second.key);
-        let column: u32 = second.key.split(':').nth(2).unwrap().parse().unwrap();
+        assert_eq!(second.key.split(':').nth(2), Some("1"), "{}", second.key);
+        let column: u32 = second.key.split(':').nth(3).unwrap().parse().unwrap();
         let line = "    void f() { messagingTemplate.convertAndSend(\"/topic/\u{1F600}\", \"é😀\"); messagingTemplate.convertAndSend(\"";
         assert_eq!(column as usize, line.encode_utf16().count());
     }
