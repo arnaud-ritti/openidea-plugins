@@ -212,6 +212,9 @@ impl Plugin for DotEnv {
             let text = project.read_file(path).ok();
             if let Some(index) = self.projects.get_mut(&root) {
                 index.update(path, text.as_deref());
+                if let Some(text) = &text {
+                    index.add_compose_env_files(&project, path, text);
+                }
             }
             if let Some(text) = text.filter(|_| is_env_file(path)) {
                 self.inspect(path, &text);

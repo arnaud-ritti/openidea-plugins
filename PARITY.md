@@ -12,7 +12,7 @@ Path: **Source** = ported from an open-source repo, licence files kept. **Clean-
 
 | Plugin | IntelliJ counterpart | Path | Parity | Main gaps |
 |---|---|---|---|---|
-| `dotenv` | .env files support (`ru.adelf.idea.dotenv`) | Source | High | Hide values, `$` auto-popup, Find Usages/Rename UI, plugin extension points |
+| `dotenv` | .env files support (`ru.adelf.idea.dotenv`) | Source | High | Hide values, `$` auto-popup, Find Usages/Rename UI, plugin extension points; compose anchors and multi-line flow collections |
 | `ignore` | .ignore (`mobi.hsz.idea.gitignore`) | Source | High | Not reviewed in LIMITATIONS.md: check against the original's rename/generate actions |
 | `properties` | Properties (`com.intellij.properties`) | Source | Medium | No references/rename between bundles, no structure view for built-in `properties` language beyond the plugin's own |
 | `tasks` | Tasks & Contexts (`com.intellij.tasks`) | Source | Medium | Switch/Go-to-Task popups, self-hosted trackers (fixed `net:` hosts), changelists, context clearing, bookmarks/breakpoints, commit dialog |

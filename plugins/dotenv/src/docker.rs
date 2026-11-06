@@ -85,8 +85,65 @@ pub fn dockerfile(text: &str) -> Vec<Entry> {
     out
 }
 
-/// `environment:` as a list (`- KEY=value`) or a mapping (`KEY: value`).
-// ponytail: line-based, no flow style (`environment: [A=1]`) or anchors; a YAML parser if those matter.
+fn is_anchor_syntax(key: &str) -> bool {
+    key.is_empty() || key.starts_with(['<', '*', '&'])
+}
+
+fn is_comment_or_empty(rest: &str) -> bool {
+    rest.is_empty() || rest.starts_with('#')
+}
+
+/// Items of a one-line flow collection `[a, b]` / `{a: 1}`: `(start, item)` with
+/// start relative to `s`, split on commas outside quotes.
+fn flow_items(s: &str) -> Option<Vec<(usize, &str)>> {
+    let s = s.trim_end();
+    let close = match s.as_bytes().first()? {
+        b'[' => b']',
+        b'{' => b'}',
+        _ => return None,
+    };
+    let end = s.rfind(char::from(close))?;
+    let inner = &s[1..end];
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    for (i, c) in inner.char_indices() {
+        match (c, quote) {
+            ('"' | '\'', None) => quote = Some(c),
+            (q, Some(open)) if q == open => quote = None,
+            (',', None) => {
+                items.push((start + 1, &inner[start..i]));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push((start + 1, &inner[start..]));
+    Some(items)
+}
+
+fn entry_of(item: &str, item_at: usize, map: bool) -> Option<Entry> {
+    let lead = item.len() - item.trim_start().len();
+    let item = item.trim();
+    let (key, value) = if map {
+        item.split_once(':').map(|(k, v)| (unquote(k), unquote(v)))?
+    } else {
+        let inner = unquote(item);
+        let (k, v) = inner.split_once('=').unwrap_or((inner, ""));
+        (k.trim(), v.trim())
+    };
+    if is_anchor_syntax(key) {
+        return None;
+    }
+    let start = item_at + lead + item.find(key)?;
+    let value = if value == "~" || value == "null" { "" } else { value };
+    Some((key.to_owned(), value.to_owned(), start..start + key.len()))
+}
+
+/// `environment:` as a list (`- KEY=value`), a mapping (`KEY: value`) or a
+/// one-line flow collection (`[A=1, B]`, `{A: 1}`). Anchors, aliases and merge
+/// keys are skipped: `environment: *env` and `<<: *common` declare nothing.
+// ponytail: line-based; a multi-line flow collection or an anchored block (`x-env: &env`) isn't read; a YAML parser if that matters.
 pub fn compose(text: &str) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut environment: Option<usize> = None;
@@ -113,7 +170,7 @@ pub fn compose(text: &str) -> Vec<Entry> {
                     }
                     None => (content.split_once(':').map(|(k, v)| (unquote(k), unquote(v))), at),
                 };
-                if let Some((key, value)) = item.filter(|(key, _)| !key.is_empty()) {
+                if let Some((key, value)) = item.filter(|(key, _)| !is_anchor_syntax(key)) {
                     let start = item_at + content[item_at - at..].find(key).unwrap_or(0);
                     out.push((key.to_owned(), value.to_owned(), start..start + key.len()));
                 }
@@ -122,9 +179,55 @@ pub fn compose(text: &str) -> Vec<Entry> {
             environment = None;
         }
 
-        let after = content.strip_prefix("environment:").map(str::trim);
-        if after.is_some_and(|rest| rest.is_empty() || rest.starts_with('#')) {
+        let Some(rest) = content.strip_prefix("environment:") else { continue };
+        let rest = rest.trim();
+        if is_comment_or_empty(rest) || (rest.starts_with('&') && !rest.contains(char::is_whitespace)) {
             environment = Some(indent);
+            continue;
+        }
+        let rest_at = line_start + indent + "environment:".len() + (content["environment:".len()..].len() - content["environment:".len()..].trim_start().len());
+        if let Some(items) = flow_items(rest) {
+            let map = rest.starts_with('{');
+            out.extend(items.into_iter().filter_map(|(at, item)| entry_of(item, rest_at + at, map)));
+        }
+    }
+    out
+}
+
+/// Paths named by `env_file:` (scalar, list, or `- path: x` long form), as
+/// written in the compose file.
+pub fn compose_env_files(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut parent: Option<usize> = None;
+    for line in text.lines() {
+        let content = line.trim_start();
+        let indent = line.len() - content.len();
+        if content.is_empty() || content.starts_with('#') {
+            continue;
+        }
+        if let Some(p) = parent {
+            if indent > p {
+                let item = content.strip_prefix('-').unwrap_or(content).trim_start();
+                let item = item.strip_prefix("path:").unwrap_or(item);
+                let item = unquote(item.split(" #").next().unwrap_or(item));
+                if !item.is_empty() && !item.starts_with(['*', '&']) && !item.contains(": ") && !item.ends_with(':') {
+                    out.push(item.to_owned());
+                }
+                continue;
+            }
+            parent = None;
+        }
+        let Some(rest) = content.strip_prefix("env_file:") else { continue };
+        let rest = rest.trim();
+        if is_comment_or_empty(rest) {
+            parent = Some(indent);
+        } else if let Some(items) = flow_items(rest) {
+            out.extend(items.into_iter().map(|(_, i)| unquote(i).to_owned()).filter(|i| !i.is_empty()));
+        } else {
+            let value = unquote(rest.split(" #").next().unwrap_or(rest));
+            if !value.starts_with(['*', '&']) {
+                out.push(value.to_owned());
+            }
         }
     }
     out
@@ -158,5 +261,26 @@ mod tests {
             keys(text, compose(text)),
             [e("DB_HOST", "db"), e("QUOTED", "1"), e("BARE", ""), e("QUEUE", "redis"), e("TIMEOUT", "30")]
         );
+    }
+
+    #[test]
+    fn compose_env_file_list_and_scalar_are_declared() {
+        let text = "services:\n  a:\n    env_file: .env\n  b:\n    env_file:\n      - ./x.env\n      - path: \"./y.env\"\n        required: false\n  c:\n    env_file: [z.env, \"w.env\"]\n";
+        assert_eq!(compose_env_files(text), [".env", "./x.env", "./y.env", "z.env", "w.env"]);
+    }
+
+    #[test]
+    fn flow_style_environment_array_is_read() {
+        let text = "services:\n  a:\n    environment: [A=1, \"B\", 'C=x y' , ]\n  b:\n    environment: {A: 1, B: ~, \"C\": \"two words\"}\n";
+        assert_eq!(
+            keys(text, compose(text)),
+            [e("A", "1"), e("B", ""), e("C", "x y"), e("A", "1"), e("B", ""), e("C", "two words")]
+        );
+    }
+
+    #[test]
+    fn anchor_merge_keys_are_skipped_not_crashing() {
+        let text = "x-env: &env\n  X: 1\nservices:\n  a:\n    environment: *env\n  b:\n    environment:\n      <<: *env\n      Y: 2\n  c:\n    environment: &local\n      - *env\n      - Z=3\n";
+        assert_eq!(keys(text, compose(text)), [e("Y", "2"), e("Z", "3")]);
     }
 }
