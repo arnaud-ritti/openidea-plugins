@@ -8,7 +8,7 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, TextEdit, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range, Severity, TextEdit, host, register_plugin,
 };
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, JavaFile, Param, Str};
@@ -575,6 +575,30 @@ impl WebTools {
     }
 }
 
+const DEFAULT_BASE_URL: &str = "http://localhost:8080";
+
+fn curl_command(endpoint: &endpoints::Endpoint, base: &str) -> String {
+    let url = format!("{}/{}", base.trim().trim_end_matches('/'), endpoint.path.trim_start_matches('/'));
+    let quoted = format!("'{}'", url.replace('\'', "'\\''"));
+    match endpoint.verb.as_str() {
+        "" | "GET" => format!("curl {quoted}"),
+        verb => format!("curl -X {verb} {quoted}"),
+    }
+}
+
+impl WebTools {
+    fn endpoint_of(&mut self, project: &Project, key: &str) -> Option<endpoints::Endpoint> {
+        let mut parts = key.splitn(4, ':');
+        let (Some("e"), Some(line), Some(column), Some(path)) = (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let (line, column): (u32, u32) = (line.parse().ok()?, column.parse().ok()?);
+        let info = self.endpoints.get(project, COMMAND_BUDGET).files().get(path)?;
+        info.endpoints.iter().find(|e| e.range.start.line == line && e.range.start.character == column).cloned()
+    }
+}
+
 fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
@@ -620,8 +644,24 @@ impl Views for WebTools {
 }
 
 impl Plugin for WebTools {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+    fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
+        if id != "copy-endpoint-curl" {
+            return Err(Error::NotFound(format!("command {id}")));
+        }
+        let Some(project) = ctx.project() else { return Ok(None) };
+        let Some(endpoint) = arg.and_then(|key| self.endpoint_of(&project, key)) else { return Ok(None) };
+        let Some(base) = host::input("Base URL of the running application", Some(DEFAULT_BASE_URL))? else {
+            return Ok(None);
+        };
+        match host::copy_to_clipboard(&curl_command(&endpoint, &base)) {
+            Err(Error::Denied(_)) => host::notify(
+                NotificationLevel::Warning,
+                "Spring Web",
+                "Copying the curl command needs the clipboard capability.",
+            ),
+            result => result?,
+        }
+        Ok(None)
     }
 }
 
@@ -1007,6 +1047,43 @@ class Users {
         assert_eq!(host.opened_locations().len(), 1);
         assert_eq!(host.opened_locations()[0].0, "/project/src/main/java/com/acme/Users.java");
         assert_eq!(host.opened_locations()[0].1, 6);
+    }
+
+    fn curl_of(host: &MockHost, tools: &mut WebTools, label: &str) -> Option<String> {
+        let items = tree(tools.render(ENDPOINT_VIEW, None, &host.invocation()).unwrap());
+        let key = items.iter().find(|i| i.label == label).unwrap().key.clone();
+        tools.run_command("copy-endpoint-curl", &host.invocation(), Some(&key)).unwrap();
+        host.clipboard()
+    }
+
+    #[test]
+    fn copies_an_endpoint_as_curl() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        let mut tools = WebTools::default();
+        host.answer_next_prompt(Some(&["http://localhost:9000/"]));
+        assert_eq!(curl_of(&host, &mut tools, "POST /api/users").as_deref(), Some("curl -X POST 'http://localhost:9000/api/users'"));
+        host.answer_next_prompt(Some(&["http://h"]));
+        assert_eq!(curl_of(&host, &mut tools, "GET /api/users").as_deref(), Some("curl 'http://h/api/users'"));
+    }
+
+    #[test]
+    fn dismissed_curl_prompt_copies_nothing() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        let mut tools = WebTools::default();
+        host.answer_next_prompt(None);
+        assert_eq!(curl_of(&host, &mut tools, "POST /api/users"), None);
+    }
+
+    #[test]
+    fn curl_without_clipboard_warns() {
+        let host = MockHost::install().with_capabilities(&["project.read"]);
+        host.add_file("src/main/java/com/acme/Users.java", API_CONTROLLER);
+        let mut tools = WebTools::default();
+        host.answer_next_prompt(Some(&["http://h"]));
+        assert_eq!(curl_of(&host, &mut tools, "POST /api/users"), None);
+        assert_eq!(host.notifications().len(), 1);
     }
 
     #[test]
