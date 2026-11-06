@@ -9,8 +9,28 @@ permissions:
   contents: read
 
 jobs:
-  plugins:
+  list:
     runs-on: ubuntu-latest
+    outputs:
+      plugins: ${{ steps.list.outputs.plugins }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: list
+        run: |
+          plugins=$(for f in plugins/*/Cargo.toml; do basename "$(dirname "$f")"; done | jq -R . | jq -sc .)
+          echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
+
+  plugin:
+    needs: list
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.list.outputs.plugins) }}
+    defaults:
+      run:
+        working-directory: plugins/${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -20,11 +40,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: plugins/*
+          workspaces: plugins/${{ matrix.name }}
 
-      - name: Test and build every plugin
-        run: |
-          for d in plugins/*/; do
-            [ -f "$d/Cargo.toml" ] || continue
-            (cd "$d" && cargo test && cargo build --release --target wasm32-wasip2) || { echo "FAILED: $d"; exit 1; }
-          done
+      - run: cargo test
+
+      - run: cargo build --release --target wasm32-wasip2
