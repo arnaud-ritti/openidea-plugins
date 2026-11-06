@@ -736,6 +736,8 @@ fn chart_file(path: &str) -> Option<String> {
     Some(format!("{}/Chart.yaml", dir[..at].trim_end_matches('/')))
 }
 
+const MAX_BYTES: usize = 1 << 20;
+
 /// Publishes the manifest problems of an opened or saved YAML file of an open project.
 fn inspect(path: &str) {
     if !(path.ends_with(".yaml") || path.ends_with(".yml") || path.ends_with(".tpl")) {
@@ -752,12 +754,20 @@ fn inspect(path: &str) {
         return;
     };
     let Ok(text) = project.read_file(path) else { return };
+    if text.len() > MAX_BYTES {
+        let _ = host::publish_diagnostics(path, &[]);
+        return;
+    }
     let in_chart = chart_file(path).is_some_and(|chart| project.read_file(&chart).is_ok());
+    let directory = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let patch_context = ["kustomization.yaml", "kustomization.yml", "Kustomization"]
+        .iter()
+        .any(|name| project.read_file(&format!("{directory}/{name}")).is_ok());
     let enabled = |code: &str| {
         let setting = checks::SETTINGS.iter().find(|(c, _)| *c == code).map(|(_, s)| *s);
         setting.and_then(host::setting_bool) != Some(false)
     };
-    let diagnostics: Vec<_> = checks::for_file(path, &text, in_chart)
+    let diagnostics: Vec<_> = checks::for_file(path, &text, in_chart, patch_context)
         .iter()
         .filter(|finding| enabled(finding.code))
         .map(|finding| finding.diagnostic(&text))

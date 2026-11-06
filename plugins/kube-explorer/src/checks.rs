@@ -56,19 +56,26 @@ pub fn is_helm_template(text: &str) -> bool {
 }
 
 /// Everything that applies to the file at `path`; `in_chart` says it sits in a chart's `templates/`.
-pub fn for_file(path: &str, text: &str, in_chart: bool) -> Vec<Finding> {
+pub fn for_file(path: &str, text: &str, in_chart: bool, patch_context: bool) -> Vec<Finding> {
     if path.rsplit('/').next() == Some("Chart.yaml") {
         return chart_keys(text);
     }
+    let patch_context = patch_context || path.rsplit('/').next().is_some_and(|name| name.contains("patch"));
     let mut found = if in_chart { helm_whitespace_trim(text) } else { Vec::new() };
-    if path.ends_with(".yaml") || path.ends_with(".yml") {
-        found.extend(check(&documents(text), text));
+    if (path.ends_with(".yaml") || path.ends_with(".yml")) && text.contains("apiVersion") {
+        found.extend(check_in(&documents(text), text, patch_context));
     }
     found
 }
 
 /// The manifest groups, for a file without Helm actions.
+#[cfg(test)]
 pub fn check(docs: &[Doc], text: &str) -> Vec<Finding> {
+    check_in(docs, text, false)
+}
+
+/// `patch_context`: the file is a patch or sits next to a kustomization, so partial workloads are expected.
+fn check_in(docs: &[Doc], text: &str, patch_context: bool) -> Vec<Finding> {
     if is_helm_template(text) {
         return Vec::new();
     }
@@ -78,7 +85,9 @@ pub fn check(docs: &[Doc], text: &str) -> Vec<Finding> {
         found.extend(deprecated_api_version(doc));
         found.extend(duplicate_env_names(doc));
         found.extend(missing_name(doc));
-        found.extend(missing_selector(doc));
+        if !patch_context {
+            found.extend(missing_selector(doc));
+        }
     }
     found
 }
@@ -110,8 +119,11 @@ const DEPRECATED: &[(&str, &[&str], &str, &str)] = &[
 
 fn deprecated_api_version(doc: &Doc) -> Option<Finding> {
     let (api_version, kind) = (doc.api_version.as_ref()?, doc.kind.as_ref()?);
-    let message = if kind.text == "PodSecurityPolicy" && ["extensions/v1beta1", "policy/v1beta1"].contains(&api_version.text.as_str()) {
-        format!("PodSecurityPolicy was removed in Kubernetes v1.25; use Pod Security Admission instead of {}.", api_version.text)
+    let message = if kind.text == "PodSecurityPolicy" && api_version.text == "extensions/v1beta1" {
+        "extensions/v1beta1 PodSecurityPolicy was removed in Kubernetes v1.16; its replacement apiVersion policy/v1beta1 was itself removed in v1.25, so use Pod Security Admission."
+            .to_owned()
+    } else if kind.text == "PodSecurityPolicy" && api_version.text == "policy/v1beta1" {
+        "policy/v1beta1 PodSecurityPolicy was removed in Kubernetes v1.25; use Pod Security Admission.".to_owned()
     } else {
         let (_, _, replacement, removed) = DEPRECATED
             .iter()
@@ -153,7 +165,7 @@ fn missing_name(doc: &Doc) -> Option<Finding> {
 fn missing_selector(doc: &Doc) -> Option<Finding> {
     let (api_version, kind) = (doc.api_version.as_ref()?, doc.kind.as_ref()?);
     let selects = ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"].contains(&kind.text.as_str());
-    if api_version.text != "apps/v1" || !selects || doc.has_selector {
+    if api_version.text != "apps/v1" || !selects || doc.has_selector || !doc.has_template {
         return None;
     }
     let message = format!("apps/v1 {} requires spec.selector.", kind.text);
@@ -264,6 +276,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn extensions_pod_security_policy_was_removed_in_1_16() {
+        let text = "apiVersion: extensions/v1beta1\nkind: PodSecurityPolicy\nmetadata:\n  name: a\n";
+        let message = &check(&documents(text), text)[0].message;
+        assert!(message.contains("v1.16") && message.contains("v1.25") && message.contains("Pod Security Admission"), "{message}");
+    }
+
+    #[test]
+    fn patch_without_template_is_quiet() {
+        let text = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  replicas: 3\n";
+        assert!(codes(text).is_empty());
+    }
+
+    #[test]
+    fn kustomize_directory_patch_is_quiet() {
+        let full = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  template:\n    spec: {}\n";
+        assert_eq!(for_file("/p/dep.yaml", full, false, false).len(), 1);
+        assert!(for_file("/p/dep.yaml", full, false, true).is_empty());
+        assert!(for_file("/p/web-patch.yaml", full, false, false).is_empty());
+
+        let host = project(&[("k/kustomization.yaml", "resources: []\n"), ("k/dep.yaml", full), ("j/dep.yaml", full)]);
+        publish(&host, Event::FileOpened("/p/k/dep.yaml".into()));
+        publish(&host, Event::FileOpened("/p/j/dep.yaml".into()));
+        assert_eq!(host.diagnostics().keys().collect::<Vec<_>>(), ["/p/j/dep.yaml"]);
+    }
+
+    #[test]
+    fn kustomization_yaml_is_quiet() {
+        assert!(codes("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - a.yaml\n").is_empty());
+    }
+
+    #[test]
+    fn init_container_duplicate_env_warns() {
+        let text = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\nspec:\n  initContainers:\n    - name: i\n      env:\n        - name: X\n          value: a\n        - name: X\n          value: b\n";
+        assert_eq!(codes(text), [DUPLICATE_ENV_NAME]);
+    }
+
+    #[test]
+    fn huge_yaml_is_skipped_and_clears_stale_diagnostics() {
+        let host = project(&[("ing.yaml", INGRESS)]);
+        publish(&host, Event::FileOpened("/p/ing.yaml".into()));
+        assert_eq!(host.diagnostics().len(), 1);
+
+        host.add_file("ing.yaml", &format!("{INGRESS}# {}\n", "x".repeat(crate::MAX_BYTES)));
+        publish(&host, Event::FileSaved("/p/ing.yaml".into()));
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn non_manifest_yaml_is_not_scanned() {
+        let host = project(&[("data.yaml", "key: value\nlist:\n  - a\n")]);
+        let before = crate::manifest::SCANS.with(|s| s.get());
+        publish(&host, Event::FileOpened("/p/data.yaml".into()));
+        assert_eq!(crate::manifest::SCANS.with(|s| s.get()), before);
+        assert!(host.diagnostics().is_empty());
+    }
+
     const POD: &str = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\nspec:\n  containers:\n    - name: a\n      env:\n        - name: A\n          value: \"1\"\n        - name: B\n          value: \"2\"\n        - name: A\n          valueFrom:\n            secretKeyRef: {name: s, key: k}\n    - name: b\n      env:\n        - name: A\n          value: \"3\"\n";
 
     #[test]
@@ -337,7 +406,7 @@ mod tests {
 
     #[test]
     fn chart_yaml_missing_version_warns() {
-        let found = for_file("/p/chart/Chart.yaml", "apiVersion: v2\nname: web\n", false);
+        let found = for_file("/p/chart/Chart.yaml", "apiVersion: v2\nname: web\n", false, false);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].code, CHART_MISSING_KEY);
         assert!(found[0].message.contains("`version`"));
@@ -346,8 +415,8 @@ mod tests {
     #[test]
     fn chart_missing_key_is_quiet_for_library_or_dynamic_name() {
         let complete = "apiVersion: v2\nname: web\nversion: 0.1.0\ndependencies:\n  - name: redis\n    version: 1.0.0\n";
-        assert!(for_file("/p/chart/Chart.yaml", complete, false).is_empty());
-        assert!(for_file("/p/chart/values.yaml", "replicas: 1\n", false).is_empty());
+        assert!(for_file("/p/chart/Chart.yaml", complete, false, false).is_empty());
+        assert!(for_file("/p/chart/values.yaml", "replicas: 1\n", false, false).is_empty());
     }
 
     #[test]
@@ -369,8 +438,8 @@ mod tests {
     #[test]
     fn helm_template_is_only_read_by_the_helm_group() {
         let text = "{{-.Values.x }}\napiVersion: extensions/v1beta1\nkind: Ingress\n";
-        assert!(for_file("/p/chart/templates/a.yaml", text, false).is_empty());
-        let found = for_file("/p/chart/templates/a.yaml", text, true);
+        assert!(for_file("/p/chart/templates/a.yaml", text, false, false).is_empty());
+        let found = for_file("/p/chart/templates/a.yaml", text, true, false);
         assert_eq!(found.iter().map(|f| f.code).collect::<Vec<_>>(), [HELM_WHITESPACE_TRIM]);
     }
 

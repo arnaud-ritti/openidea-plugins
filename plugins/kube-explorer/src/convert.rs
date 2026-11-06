@@ -14,7 +14,15 @@ pub const DOCUMENTS_TO_LIST: &str = "Convert documents to a single List";
 
 pub fn code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
     let text = &doc.text;
-    if !text.contains("apiVersion:") || is_helm_template(text) || has_anchors(text) {
+    if text.len() > crate::MAX_BYTES || !text.contains("apiVersion:") || !text.contains("kind:") {
+        return Vec::new();
+    }
+    let has_list = text.contains("List");
+    let has_several = text.contains("---");
+    if !has_list && !has_several {
+        return Vec::new();
+    }
+    if is_helm_template(text) || has_anchors(text) {
         return Vec::new();
     }
     let docs = documents(text);
@@ -268,6 +276,12 @@ mod tests {
             assert!(convert(text, DOCUMENTS_TO_LIST, 0).is_none(), "{text}");
         }
         assert!(convert(two, DOCUMENTS_TO_LIST, 0).is_some());
+    }
+
+    #[test]
+    fn huge_yaml_gets_no_actions() {
+        let text = format!("{LIST}# {}\n", "x".repeat(crate::MAX_BYTES));
+        assert!(code_actions(&doc(&text), at(4)).is_empty());
     }
 
     #[test]

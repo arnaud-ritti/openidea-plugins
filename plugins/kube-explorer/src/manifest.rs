@@ -14,6 +14,11 @@ pub struct Value {
     pub end: usize,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub static SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Doc {
     pub api_version: Option<Value>,
@@ -21,6 +26,7 @@ pub struct Doc {
     pub name: Option<Value>,
     pub has_generate_name: bool,
     pub has_selector: bool,
+    pub has_template: bool,
     /// `metadata` is written in flow style, so no name can be judged.
     pub name_unknown: bool,
     /// The `name:` values of each block-style `env:` list.
@@ -74,6 +80,8 @@ fn is_separator(line: &Line) -> bool {
 
 /// The documents of `text`; a document that is empty between two separators is left out.
 pub fn documents(text: &str) -> Vec<Doc> {
+    #[cfg(test)]
+    SCANS.with(|scans| scans.set(scans.get() + 1));
     let all = lines(text);
     let mut docs = Vec::new();
     let mut from = 0;
@@ -210,6 +218,7 @@ fn scan_section(doc: &mut Doc, lines: &[Line], mask: &[bool], at: usize, section
     }
     if section == "spec" && inline {
         doc.has_selector = true;
+        doc.has_template = true;
     }
     for j in children(lines, mask, at) {
         let Some((key, value)) = key_value(lines[j].content(), lines[j].start + lines[j].indent()) else { continue };
@@ -217,6 +226,7 @@ fn scan_section(doc: &mut Doc, lines: &[Line], mask: &[bool], at: usize, section
             ("metadata", "name") => doc.name = value,
             ("metadata", "generateName") => doc.has_generate_name = true,
             ("spec", "selector") => doc.has_selector = true,
+            ("spec", "template") => doc.has_template = true,
             _ => {}
         }
     }
