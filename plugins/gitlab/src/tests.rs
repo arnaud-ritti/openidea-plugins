@@ -63,6 +63,9 @@ fn gitlab(req: &HttpRequest) -> Result<HttpResponse, Error> {
         }
         ("GET", p) if p.starts_with(&format!("{mr}/resource_")) => ok("[]"),
         ("GET", p) if p.starts_with("/api/v4/projects/g%2Fp/repository/branches?") => ok(r#"[{"name": "main"}, {"name": "develop"}, {"name": "feature"}]"#),
+        ("GET", p) if p.starts_with("/api/v4/projects/g%2Fp/labels") => ok(r#"[{"name": "bug"}, {"name": "ui"}]"#),
+        ("GET", p) if p.starts_with("/api/v4/projects/g%2Fp/members/all") => ok(r#"[{"id": 2, "username": "ann", "name": "Ann"}, {"id": 3, "username": "bob", "name": "Bob"}]"#),
+        ("GET", p) if p.starts_with("/api/v4/projects/g%2Fp/milestones") => ok(r#"[{"id": 40, "title": "v2"}]"#),
         ("GET", p) if p.starts_with("/api/v4/namespaces?") => ok(r#"[{"id": 3, "full_path": "me", "kind": "user"}, {"id": 12, "full_path": "team/sub", "kind": "group"}]"#),
         ("GET", "/api/v4/users?username=ann") =>ok(r#"[{"id": 2, "username": "ann"}]"#),
         ("GET", "/api/v4/users?username=bob") => ok(r#"[{"id": 3, "username": "bob"}]"#),
@@ -159,6 +162,8 @@ fn lists_merge_requests_assigned_to_me_then_cycles_filters() {
     assert!(list.url.contains("state=opened&scope=assigned_to_me"));
     assert_eq!(list.headers[0], ("Authorization".into(), "Bearer glpat-x".into()));
 
+    host.answer_next_prompt(Some(&["quick"]));
+    host.answer_next_prompt(Some(&["closed"]));
     plugin.handle(LIST, ViewEvent::Button("filter".into()), &host.invocation()).unwrap();
     plugin.render(LIST, None, &host.invocation()).unwrap();
 
@@ -230,7 +235,7 @@ fn details_offer_the_review_flow() {
 
     assert_eq!(
         buttons(&view),
-        ["comment", "react", "approve", "merge", "review", "draft", "close", "checkout", "browser", "copy", "refresh"]
+        ["comment", "react", "approve", "merge", "review", "edit", "draft", "close", "checkout", "browser", "copy", "refresh"]
     );
     assert!(view.toolbar.iter().all(|b| b.icon.is_some()), "{view:?}");
     assert_eq!(
@@ -871,6 +876,7 @@ fn copy_link_without_clipboard_notifies() {
 fn creates_a_private_snippet_from_the_selection() {
     let host = setup();
     host.open_editor("/project/src/a.rs", "rust", "fn main() {}\n", &[(0, 3, 0, 7)]);
+    host.answer_next_prompt(Some(&[""]));
 
     GitLab::default().run_command("create-snippet", &host.invocation(), None).unwrap();
 
@@ -887,6 +893,7 @@ fn creates_a_private_snippet_from_the_selection() {
 fn create_merge_request_opens_the_new_page_for_the_branch() {
     let host = setup();
     host.set_vcs_status(Some(status("feature")));
+    host.set_setting("forms", "false");
 
     GitLab::default().run_command("create-merge-request", &host.invocation(), None).unwrap();
 
@@ -3106,4 +3113,129 @@ mod pipeline_tests {
         assert_eq!(host.requests().len(), before);
         assert!(host.opened_urls().is_empty());
     }
+}
+
+#[test]
+fn creates_a_snippet_from_the_selected_files_with_a_typed_title() {
+    let host = setup();
+    host.add_file("/project/src/a.rs", "one");
+    host.add_file("/project/b.txt", "two");
+    host.select_paths(&["/project/src/a.rs", "/project/b.txt", "/project/dir"]);
+    host.answer_next_prompt(Some(&["My files"]));
+
+    GitLab::default().run_command("create-snippet", &host.invocation(), None).unwrap();
+
+    assert_eq!(
+        writes(&host)[0].2,
+        r#"{"files":[{"content":"one","file_path":"src/a.rs"},{"content":"two","file_path":"b.txt"}],"title":"My files","visibility":"private"}"#
+    );
+}
+
+#[test]
+fn cancelling_the_snippet_title_posts_nothing() {
+    let host = setup();
+    host.open_editor("/project/a.rs", "rust", "x", &[(0, 0, 0, 0)]);
+    host.answer_next_prompt(None);
+
+    GitLab::default().run_command("create-snippet", &host.invocation(), None).unwrap();
+
+    assert!(writes(&host).is_empty());
+}
+
+#[test]
+fn the_status_item_reveals_the_merge_request_view() {
+    let host = branch_on_merge_request_8();
+    let mut plugin = GitLab::default();
+    plugin.handle_events(&[Event::VcsChanged("/project".into())], &host.invocation());
+
+    plugin.run_command("show-branch-merge-request", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.revealed_views(), ["merge-request"]);
+}
+
+#[test]
+fn create_merge_request_reveals_the_form() {
+    let host = setup();
+    host.set_vcs_status(Some(status("feature")));
+
+    GitLab::default().run_command("create-merge-request", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.revealed_views(), ["new-merge-request"]);
+    assert!(host.opened_urls().is_empty());
+}
+
+#[test]
+fn typed_filters_are_added_to_the_quick_filter_and_cleared() {
+    let host = setup();
+    let mut plugin = GitLab::default();
+    plugin.render(LIST, None, &host.invocation()).unwrap();
+
+    host.answer_next_prompt(Some(&["labels"]));
+    host.answer_next_prompt(Some(&["bug"]));
+    plugin.handle(LIST, ViewEvent::Button("filter".into()), &host.invocation()).unwrap();
+    host.answer_next_prompt(Some(&["search"]));
+    host.answer_next_prompt(Some(&["parser x"]));
+    plugin.handle(LIST, ViewEvent::Button("filter".into()), &host.invocation()).unwrap();
+    let view = plugin.render(LIST, None, &host.invocation()).unwrap();
+
+    let list = host.requests().into_iter().filter(|r| r.url.contains("merge_requests?")).last().unwrap();
+    assert!(list.url.contains("state=opened&scope=assigned_to_me&labels=bug&search=parser%20x"), "{}", list.url);
+    assert_eq!(label(&view, "filter"), "Assigned to me + 2 typed");
+
+    host.answer_next_prompt(Some(&["clear"]));
+    plugin.handle(LIST, ViewEvent::Button("filter".into()), &host.invocation()).unwrap();
+    let view = plugin.render(LIST, None, &host.invocation()).unwrap();
+    assert_eq!(label(&view, "filter"), "Assigned to me");
+}
+
+#[test]
+fn dismissing_the_filter_pick_keeps_the_filter() {
+    let host = setup();
+    let mut plugin = GitLab::default();
+    plugin.render(LIST, None, &host.invocation()).unwrap();
+
+    plugin.handle(LIST, ViewEvent::Button("filter".into()), &host.invocation()).unwrap();
+    let view = plugin.render(LIST, None, &host.invocation()).unwrap();
+
+    assert_eq!(label(&view, "filter"), "Assigned to me");
+}
+
+#[test]
+fn the_edit_button_replaces_labels_reviewers_and_milestone() {
+    let host = setup();
+    let mut plugin = selected(&host);
+    let ctx = host.invocation();
+
+    host.answer_next_prompt(Some(&["labels"]));
+    host.answer_next_prompt(Some(&["bug", "ui"]));
+    plugin.handle(DETAILS, ViewEvent::Button("edit".into()), &ctx).unwrap();
+    plugin.render(DETAILS, None, &ctx).unwrap();
+    host.answer_next_prompt(Some(&["reviewers"]));
+    host.answer_next_prompt(Some(&["3"]));
+    plugin.handle(DETAILS, ViewEvent::Button("edit".into()), &ctx).unwrap();
+    plugin.render(DETAILS, None, &ctx).unwrap();
+    host.answer_next_prompt(Some(&["milestone"]));
+    host.answer_next_prompt(Some(&["40"]));
+    plugin.handle(DETAILS, ViewEvent::Button("edit".into()), &ctx).unwrap();
+
+    let bodies: Vec<String> = writes(&host).into_iter().map(|w| w.2).collect();
+    assert_eq!(bodies, [r#"{"labels":"bug,ui"}"#, r#"{"reviewer_ids":[3]}"#, r#"{"milestone_id":40}"#]);
+}
+
+#[test]
+fn editing_the_title_with_a_command_and_dismissing() {
+    let host = setup();
+    let mut plugin = selected(&host);
+
+    host.answer_next_prompt(Some(&["title"]));
+    host.answer_next_prompt(Some(&["Parser v2"]));
+    let message = plugin.run_command("edit-merge-request", &host.invocation(), None).unwrap();
+    assert_eq!(message.as_deref(), Some("Title updated."));
+    assert_eq!(writes(&host)[0].2, r#"{"title":"Parser v2"}"#);
+
+    host.answer_next_prompt(Some(&["assignees"]));
+    host.answer_next_prompt(None);
+    let message = plugin.run_command("edit-merge-request", &host.invocation(), None).unwrap();
+    assert_eq!(message, None);
+    assert_eq!(writes(&host).len(), 1);
 }

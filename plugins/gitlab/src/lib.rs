@@ -7,6 +7,7 @@
 //! Create Snippet.
 
 mod api;
+mod attributes;
 mod branch;
 mod ci;
 mod forms;
@@ -22,7 +23,7 @@ use openidea_plugin::host::{self, storage};
 use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Range, RepositoryStatus, register_plugin, text,
+    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, PickItem, Plugin, Position, Range, RepositoryStatus, register_plugin, text,
 };
 
 const LIST: &str = "merge-requests";
@@ -36,6 +37,8 @@ const COMMITS: &str = "merge-request-commits";
 const PIPELINES: &str = "merge-request-pipeline";
 
 const FILTER_KEY: &str = "filter";
+/// Typed filters (author, reviewer, label, text) as a query-string fragment added to the quick filter's.
+const EXTRA_FILTER_KEY: &str = "filter-extra";
 const SELECTED_KEY: &str = "selected";
 const THREAD_KEY: &str = "thread";
 /// The selected reply; without it a selected thread means its first note.
@@ -79,6 +82,90 @@ fn filter_query(key: &str, me: &User) -> String {
         "review" => format!("state=opened&scope=all&reviewer_username={}", api::encode(&me.username)),
         "closed" => "state=closed&scope=all".into(),
         _ => "state=opened&scope=assigned_to_me".into(),
+    }
+}
+
+fn extra_filter() -> String {
+    storage::get(EXTRA_FILTER_KEY).ok().flatten().unwrap_or_default()
+}
+
+fn set_extra_filter(key: &str, value: Option<&str>) -> Result<(), Error> {
+    let kept = extra_filter();
+    let mut pairs: Vec<String> = kept.split('&').filter(|p| !p.is_empty() && p.split('=').next() != Some(key)).map(str::to_owned).collect();
+
+    if let Some(value) = value {
+        pairs.push(format!("{key}={}", api::encode(value)));
+    }
+
+    storage::set(EXTRA_FILTER_KEY, &pairs.join("&"))
+}
+
+fn full_filter_query(key: &str, me: &User) -> String {
+    let query = filter_query(key, me);
+
+    match extra_filter().as_str() {
+        "" => query,
+        extra => format!("{query}&{extra}"),
+    }
+}
+
+/// Asks which filter to change: the quick filter, or a typed one (author, reviewer and label from the project's lists).
+/// Where the IDE refuses the picker the quick filter just moves on to the next.
+fn edit_filter(ctx: &Invocation) -> Result<(), Error> {
+    let dimensions = [
+        PickItem::new("quick", "Quick filter"),
+        PickItem::new("author_username", "Author"),
+        PickItem::new("reviewer_username", "Reviewer"),
+        PickItem::new("labels", "Label"),
+        PickItem::new("search", "Text in title or description"),
+        PickItem::new("clear", "Clear author, reviewer, label and text"),
+    ];
+
+    let dimension = match host::pick("Filter merge requests", &dimensions) {
+        Err(Error::Invalid(_)) => return storage::set(FILTER_KEY, next_filter(filter())),
+        Err(e) => return Err(e),
+        Ok(None) => return Ok(()),
+        Ok(Some(dimension)) => dimension,
+    };
+
+    match dimension.as_str() {
+        "quick" => {
+            let items: Vec<PickItem> = FILTERS.iter().map(|(key, label)| PickItem::new(key, label)).collect();
+            if let Some(key) = host::pick("Quick filter", &items)? {
+                storage::set(FILTER_KEY, &key)?;
+            }
+        }
+        "clear" => storage::delete(EXTRA_FILTER_KEY)?,
+        "search" => {
+            if let Some(text) = host::input("Search merge requests", None)? {
+                set_extra_filter("search", Some(text.trim()).filter(|t| !t.is_empty()))?;
+            }
+        }
+        key => {
+            let repo = gitlab_project(ctx)?;
+            let _task = host::begin_task("Loading choices", false);
+            let api = api::Project(&repo.path);
+            let names = match key {
+                "labels" => api.labels()?,
+                _ => api.members()?.into_iter().map(|u| u.username).collect(),
+            };
+            let items: Vec<PickItem> = names.iter().map(|name| PickItem::new(name, name)).collect();
+
+            if let Some(name) = host::pick("Filter merge requests", &items)? {
+                set_extra_filter(key, Some(&name))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn filter_button_label(filter: &str, extra: &str) -> String {
+    let typed = extra.split('&').filter(|p| !p.is_empty()).count();
+
+    match typed {
+        0 => filter_label(filter).to_owned(),
+        n => format!("{} + {n} typed", filter_label(filter)),
     }
 }
 
@@ -538,11 +625,12 @@ impl GitLab {
     fn render_list(&mut self, ctx: &Invocation) -> Result<View, Error> {
         let repo = gitlab_project(ctx)?;
         let filter = filter();
-        let wanted = (repo.path.clone(), filter.to_owned());
+        let extra = extra_filter();
+        let wanted = (repo.path.clone(), format!("{filter}&{extra}"));
 
         if self.loaded.as_ref() != Some(&wanted) {
             let _task = host::begin_task("Loading merge requests", false);
-            let query = filter_query(filter, &self.me()?);
+            let query = full_filter_query(filter, &self.me()?);
             self.list = api::Project(&repo.path).merge_requests(&query)?;
             self.loaded = Some(wanted);
         }
@@ -570,14 +658,14 @@ impl GitLab {
         }
 
         let body = match items.is_empty() {
-            true => Body::Message(format!("No merge requests match the filter \"{}\".", filter_label(filter))),
+            true => Body::Message(format!("No merge requests match the filter \"{}\".", filter_button_label(filter, &extra))),
             false => Body::Tree(items),
         };
         let events = if preference(EVENTS_KEY, true) { "Hide Events" } else { "Show Events" };
 
         Ok(View::new(body)
             .button(Button::new("refresh", "Refresh").icon("refresh"))
-            .button(Button::new("filter", &format!("Filter: {}", filter_label(filter))).icon("filter"))
+            .button(Button::new("filter", &filter_button_label(filter, &extra)).icon("filter"))
             .button(Button::new("events", events).icon("github-timeline"))
             .status(&format!("{} · {}", repo.path, filter_label(filter))))
     }
@@ -589,7 +677,7 @@ impl GitLab {
                 host::refresh_view(DETAILS);
                 host::refresh_view(CHANGES);
             }
-            ViewEvent::Button(id) if id == "filter" => storage::set(FILTER_KEY, next_filter(filter()))?,
+            ViewEvent::Button(id) if id == "filter" => edit_filter(ctx)?,
             ViewEvent::Button(id) if id == "events" => {
                 storage::set(EVENTS_KEY, &(!preference(EVENTS_KEY, true)).to_string())?;
                 let repo = gitlab_project(ctx)?;
@@ -745,6 +833,8 @@ impl GitLab {
             if !mr.reviewers.iter().any(|u| u.id == me.id) {
                 view = view.button(Button::new("review", "Add Me as Reviewer").icon("github-review"));
             }
+
+            view = view.button(Button::new("edit", "Edit Labels, People, Milestone").icon("edit"));
 
             let (draft, draft_icon) = match mr.draft {
                 true => ("Mark as Ready", "github-pr-open"),
@@ -932,6 +1022,10 @@ impl GitLab {
                 let ids: Vec<u64> = mr.reviewers.iter().map(|u| u.id).chain([me.id]).collect();
                 api.set_reviewers(mr.iid, &ids).and_then(|_| done("Added you as a reviewer."))
             }
+            "edit" => match attributes::edit(&api, mr) {
+                Err(Error::Invalid(_)) => Err("The IDE shows pickers only for commands. Run GitLab: Edit Merge Request from the command palette.".into()),
+                result => result.map(|message| message.unwrap_or_else(|| "Nothing changed.".into())),
+            },
             "checkout" => {
                 let project = ctx.project().ok_or("No project is open.")?;
                 branch::checkout(&project, &repo.remote, mr).map_err(|e| match e {
@@ -1100,14 +1194,42 @@ fn post_snippet(draft: &api::SnippetDraft) -> Result<(), Error> {
     Ok(())
 }
 
+fn selected_files(ctx: &Invocation) -> Vec<(String, String)> {
+    let Some(project) = ctx.project() else { return Vec::new() };
+    let root = project.vcs_status().ok().flatten().map(|s| s.root);
+
+    ctx.selected_paths()
+        .into_iter()
+        .filter_map(|path| {
+            let content = project.read_file(&path).ok().filter(|c| !c.is_empty())?;
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+            let file_path = root.as_deref().and_then(|r| relative_path(r, &path)).unwrap_or(name).replace('\\', "/");
+
+            Some((file_path, content))
+        })
+        .collect()
+}
+
 fn create_snippet(ctx: &Invocation) -> Result<Option<String>, Error> {
     if !host::secret_is_set(api::TOKEN) {
         return Err(NO_TOKEN.into());
     }
 
-    let (file_path, content) = snippet_content(ctx)?;
-    let title = file_path.rsplit('/').next().unwrap_or(&file_path).to_owned();
-    post_snippet(&api::SnippetDraft { title, description: String::new(), visibility: "private".into(), file_path, content, project: None })?;
+    let mut files = selected_files(ctx);
+    if files.is_empty() {
+        files = vec![snippet_content(ctx)?];
+    }
+
+    let default_title = match files.as_slice() {
+        [(path, _)] => path.rsplit('/').next().unwrap_or(path).to_owned(),
+        _ => format!("{} files", files.len()),
+    };
+    let title = match host::input("Snippet title", Some(&default_title)) {
+        Ok(Some(typed)) if !typed.trim().is_empty() => typed.trim().to_owned(),
+        Ok(Some(_)) | Err(_) => default_title,
+        Ok(None) => return Ok(None),
+    };
+    post_snippet(&api::SnippetDraft { title, description: String::new(), visibility: "private".into(), files, project: None })?;
 
     Ok(None)
 }
@@ -1167,10 +1289,15 @@ impl Plugin for GitLab {
 
                 return repo::share(ctx);
             }
+            "edit-merge-request" => return self.edit_merge_request(ctx),
             "show-branch-merge-request" => return self.show_branch_merge_request(),
             "open-merge-request-in-worktree" => return self.open_worktree(ctx),
             "update-merge-request-branch" => return self.update_merge_request_branch(ctx),
             "create-merge-request" => {
+                if forms_enabled() && host::reveal_view(NEW_MR).is_ok() {
+                    return Ok(None);
+                }
+
                 let repo = gitlab_project(ctx)?;
                 let branch = repo.status.branch.ok_or("HEAD is detached. Check out a branch first.")?;
                 host::open_url(&api::new_merge_request_url(&repo.path, &branch))?;
@@ -1207,6 +1334,24 @@ impl GitLab {
         let branch_iid = self.branch.as_ref().and_then(|b| b.mr.as_ref()).map(|mr| mr.iid);
 
         Self::selected().or(branch_iid).ok_or_else(|| "Select a merge request first.".into())
+    }
+
+    fn edit_merge_request(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        if !host::secret_is_set(api::TOKEN) {
+            return Err(NO_TOKEN.into());
+        }
+
+        let repo = gitlab_project(ctx)?;
+        let api = api::Project(&repo.path);
+        let mr = api.merge_request(self.command_target()?)?;
+        let message = attributes::edit(&api, &mr)?;
+
+        if message.is_some() {
+            self.loaded = None;
+            self.reload_merge_request(mr.iid);
+        }
+
+        Ok(message)
     }
 
     fn open_worktree(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {

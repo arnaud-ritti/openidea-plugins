@@ -1,6 +1,6 @@
 id = "aritti.gitlab"
 name = "GitLab"
-version = "0.1.0" # x-release-please-version
+version = "0.3.0" # x-release-please-version
 description = """\
 gitlab.com merge requests in the IDE. List them with the IntelliJ quick filters and follow their timeline. \
 Review the changes with comments on diff lines and pending reviews, then reply, resolve, approve, merge, rebase, \
@@ -12,6 +12,8 @@ authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "JetBrains s.r.o. and contri
 homepage = "https://github.com/JetBrains/intellij-community/tree/master/plugins/gitlab"
 license = "Apache-2.0"
 change-notes = """\
+Unreleased: Edit labels, assignees, reviewers, milestone and title of a merge request from the Details button or GitLab: Edit Merge Request, choosing from the project's labels, members and milestones. The list Filter button picks a quick filter or an author, reviewer, label or text filter. \
+0.3.0: Create Snippet from the files selected in the Project view, with a title prompt; the status item and Create Merge Request bring their views to the front. Needs OpenIDEA API 1.2. \
 0.2.0: Merge Request Changes tool window (diff, comments on lines, pending review, viewed files), Submit Review, \
 timeline events, the current branch's merge request in the status bar and the editor, Check Out Branch, and cloning \
 and sharing projects with git. \
@@ -19,7 +21,7 @@ and sharing projects with git. \
 gitlab.com with a personal access token: merge request list, threads and review actions, Open on GitLab and Copy Link \
 for files, Create Snippet."""
 categories = ["vcs"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [
     "on-view:merge-requests", "on-view:merge-request", "on-view:merge-request-changes", "on-view:gitlab-projects", "on-view:new-merge-request", "on-view:new-snippet", "on-view:share-project-form", "on-view:merge-request-commits", "on-view:merge-request-pipeline",
@@ -115,6 +117,11 @@ title = "GitLab: Copy Link"
 category = "GitLab"
 
 [[contributes.commands]]
+id = "edit-merge-request"
+title = "GitLab: Edit Merge Request"
+category = "GitLab"
+
+[[contributes.commands]]
 id = "create-snippet"
 title = "GitLab: Create Snippet"
 category = "GitLab"
@@ -163,6 +170,10 @@ command = "open-in-browser"
 
 [[contributes.menus]]
 menu = "editorTab.context"
+command = "create-snippet"
+
+[[contributes.menus]]
+menu = "projectView.context"
 command = "create-snippet"
 
 [[contributes.menus]]

@@ -189,8 +189,7 @@ impl SnippetForm {
             title,
             description: self.description.clone(),
             visibility: self.visibility.clone(),
-            file_path,
-            content,
+            files: vec![(file_path, content)],
             project: self.scope.strip_prefix("Project ").map(str::to_owned),
         })
     }

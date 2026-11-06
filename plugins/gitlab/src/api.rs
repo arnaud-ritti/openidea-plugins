@@ -51,6 +51,18 @@ pub struct Permissions {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
+pub struct Milestone {
+    pub id: u64,
+    pub title: String,
+}
+
+#[derive(Deserialize)]
+struct Label {
+    name: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct DiffRefs {
     pub base_sha: String,
     pub head_sha: String,
@@ -72,6 +84,9 @@ pub struct MergeRequest {
     pub target_branch: String,
     pub author: User,
     pub reviewers: Vec<User>,
+    pub assignees: Vec<User>,
+    pub labels: Vec<String>,
+    pub milestone: Option<Milestone>,
     pub web_url: String,
     pub sha: Option<String>,
     pub detailed_merge_status: Option<String>,
@@ -449,8 +464,8 @@ pub struct SnippetDraft {
     pub title: String,
     pub description: String,
     pub visibility: String,
-    pub file_path: String,
-    pub content: String,
+    /// `(repository path, content)` of each file.
+    pub files: Vec<(String, String)>,
     /// `group/name` for a project snippet, `None` for a personal one.
     pub project: Option<String>,
 }
@@ -463,7 +478,7 @@ pub fn create_snippet(draft: &SnippetDraft) -> Result<String, Error> {
     let mut body = json!({
         "title": draft.title,
         "visibility": draft.visibility,
-        "files": [{ "file_path": draft.file_path, "content": draft.content }],
+        "files": draft.files.iter().map(|(file_path, content)| json!({ "file_path": file_path, "content": content })).collect::<Vec<_>>(),
     });
     if !draft.description.is_empty() {
         body["description"] = json!(draft.description);
@@ -677,6 +692,25 @@ impl Project<'_> {
     /// `close` or `reopen`.
     pub fn set_state(&self, iid: u64, event: &str) -> Result<(), Error> {
         rest("PUT", &self.mr(iid, ""), Some(json!({ "state_event": event }))).map(drop)
+    }
+
+    pub fn labels(&self) -> Result<Vec<String>, Error> {
+        let labels: Vec<Label> = paged(&self.path("/labels"), 100)?;
+
+        Ok(labels.into_iter().map(|l| l.name).collect())
+    }
+
+    pub fn members(&self) -> Result<Vec<User>, Error> {
+        paged(&self.path("/members/all"), 100)
+    }
+
+    pub fn milestones(&self) -> Result<Vec<Milestone>, Error> {
+        paged(&self.path("/milestones?state=active"), 100)
+    }
+
+    /// `fields` is the JSON body of the update (`{"labels": "a,b"}`).
+    pub fn update_merge_request(&self, iid: u64, fields: Value) -> Result<(), Error> {
+        rest("PUT", &self.mr(iid, ""), Some(fields)).map(drop)
     }
 
     pub fn set_reviewers(&self, iid: u64, ids: &[u64]) -> Result<(), Error> {
