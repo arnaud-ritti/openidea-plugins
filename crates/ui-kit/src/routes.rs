@@ -191,13 +191,11 @@ impl RouteList {
 
     fn tree_body(&self, rows: &[(usize, &Route)]) -> Body {
         let mut items = Vec::new();
-        let mut seen = BTreeSet::new();
         let mut classes: Vec<&str> = rows.iter().map(|(_, route)| route.handler.class.as_str()).collect();
         classes.sort();
         classes.dedup();
         for class in classes {
             let group = format!("{GROUP_PREFIX}{class}");
-            seen.insert(class);
             items.push(TreeItem::new(&group, class).icon("folder").expandable(true));
             for (index, route) in rows.iter().filter(|(_, route)| route.handler.class == class) {
                 items.push(
