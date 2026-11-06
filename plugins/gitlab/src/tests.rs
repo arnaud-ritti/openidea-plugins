@@ -708,3 +708,47 @@ fn paging_stops_at_the_page_cap() {
     assert_eq!(threads.len(), 1000);
     assert_eq!(host.requests().len(), 10);
 }
+
+fn file_changed_at_c1(args: &[String], _: Option<&str>) -> Result<ProcessOutput, Error> {
+    let stdout = match args[0].as_str() {
+        "log" => "\u{1}c2\n\nsrc/b.rs\n\u{1}c1\n\nsrc/a.rs\nsrc/b.rs\n".to_owned(),
+        _ => String::new(),
+    };
+
+    Ok(ProcessOutput { status: Some(0), stdout, stderr: String::new() })
+}
+
+fn changes_html(plugin: &mut GitLab, host: &MockHost) -> String {
+    let view = plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    let Body::Html(html) = view.body else { panic!("{view:?}") };
+
+    html
+}
+
+#[test]
+fn viewed_compares_file_last_commit() {
+    let host = setup();
+    host.on_process("git", file_changed_at_c1);
+    let mut plugin = selected(&host);
+
+    storage::set("viewed:g/p:7", r#"{"src/a.rs": "c1"}"#).unwrap();
+    assert!(changes_html(&mut plugin, &host).contains(" checked"), "a.rs last changed at c1, viewed at c1");
+
+    storage::set("viewed:g/p:7", r#"{"src/a.rs": "c0"}"#).unwrap();
+    assert!(!changes_html(&mut plugin, &host).contains(" checked"), "viewed before the last change to a.rs");
+
+    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"c1"}"#);
+}
+
+#[test]
+fn viewed_falls_back_to_the_head_without_local_history() {
+    let host = setup();
+    host.on_process("git", |_, _| Ok(ProcessOutput { status: Some(128), stdout: String::new(), stderr: "bad object".into() }));
+    let mut plugin = selected(&host);
+
+    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"head"}"#);
+    assert!(changes_html(&mut plugin, &host).contains(" checked"));
+}

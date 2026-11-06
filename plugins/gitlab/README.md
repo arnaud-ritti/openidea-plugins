@@ -70,8 +70,9 @@ Optional permissions:
   merge request, one block per file with `+added −removed`, existing threads
   and pending comments under their lines. Click a line number to comment
   (*Add to Review* or *Comment Now*); threads have Reply and Resolve /
-  Unresolve. *Viewed* collapses a file and is remembered for the current head
-  commit. Clicking a file name opens it locally; clicking the header folds it.
+  Unresolve. *Viewed* collapses a file and is remembered until the file changes again
+  (compared with the last merge request commit touching it, read from the local
+  git history; without `process:git` or the commits locally, with the head commit). Clicking a file name opens it locally; clicking the header folds it.
   The diff stays readable without scripts, with every file expanded.
   Binary and very large files have no diff here; open them on GitLab. Toolbar: Refresh,
   Submit Review (n), Open on GitLab.
@@ -146,7 +147,8 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 - Create Merge Request, Share Project and Create Snippet have no title or
   description fields.
 - Share Project doesn't run `git init` or commit files.
-- A file counts as viewed only at the head commit it was marked at.
+- A file counts as viewed until a later merge request commit touches it; that
+  needs the commits in the local checkout, else the head commit is used.
 - Not ported: worktrees, applying suggestions, usage statistics.
 
 See the `aritti.gitlab` section of `LIMITATIONS.md` at the repository root
