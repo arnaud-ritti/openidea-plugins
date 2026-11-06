@@ -105,6 +105,16 @@ title = "GitLab: Show Current Branch's Merge Request"
 category = "GitLab"
 
 [[contributes.commands]]
+id = "open-merge-request-in-worktree"
+title = "GitLab: Open Merge Request in Worktree"
+category = "GitLab"
+
+[[contributes.commands]]
+id = "update-merge-request-branch"
+title = "GitLab: Update Merge Request Branch"
+category = "GitLab"
+
+[[contributes.commands]]
 id = "new-token"
 title = "GitLab: Create Access Token"
 category = "GitLab"

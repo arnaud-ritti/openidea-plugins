@@ -51,7 +51,7 @@ fn gitlab(req: &HttpRequest) -> Result<HttpResponse, Error> {
                 "http_url_to_repo": "https://gitlab.com/me/tool.git", "ssh_url_to_repo": "git@gitlab.com:me/tool.git"}]"#,
         ),
         ("GET", p) if p.starts_with("/api/v4/projects/g%2Fp/merge_requests?") => ok(&format!("[{MR}]")),
-        ("GET", p) if p == mr => ok(MR),
+        ("GET", p) if p.split('?').next() == Some(mr) => ok(MR),
         ("GET", p) if p == format!("{mr}/approvals") => {
             ok(r#"{"approved_by": [{"user": {"username": "bob"}}], "approvals_left": 1, "user_can_approve": true}"#)
         }
@@ -1209,5 +1209,103 @@ mod ci_tests {
         host.set_setting("ciJobReferences", "false");
 
         assert!(open(&host, &mut plugin, "job:\n  needs: [ghost]\n").is_empty());
+    }
+}
+
+mod worktree_tests {
+    use super::*;
+
+    fn merge_request(branch: &str) -> MergeRequest {
+        MergeRequest { iid: 7, source_branch: branch.into(), source_project_id: 5, target_project_id: 5, ..MergeRequest::default() }
+    }
+
+    #[test]
+    fn worktree_args_use_the_merge_request_branch() {
+        let plan = branch::worktree_plan("/work/tool", "origin", &merge_request("feature/x")).unwrap();
+
+        assert_eq!(plan.path, "/work/tool-feature-x");
+        assert_eq!(plan.fetch, ["fetch", "origin", "+refs/heads/feature/x:refs/remotes/origin/feature/x"]);
+        assert_eq!(plan.add, ["worktree", "add", "--detach", "--", "/work/tool-feature-x", "origin/feature/x"]);
+    }
+
+    #[test]
+    fn fork_worktree_checks_out_the_fetched_merge_request_head() {
+        let mut mr = merge_request("fix");
+        mr.source_project_id = 9;
+        mr.author.username = "ann".into();
+        let plan = branch::worktree_plan("/work/tool", "origin", &mr).unwrap();
+
+        assert_eq!(plan.fetch, ["fetch", "origin", "+refs/merge-requests/7/head:refs/remotes/origin/fork/ann/fix"]);
+        assert_eq!(plan.add.last().map(String::as_str), Some("origin/fork/ann/fix"));
+    }
+
+    #[test]
+    fn worktree_refuses_option_like_branch_names() {
+        assert!(branch::worktree_plan("/work/tool", "origin", &merge_request("--upload-pack=x")).is_err());
+        assert!(branch::worktree_plan("/work/tool", "origin", &merge_request("-b")).is_err());
+    }
+
+    #[test]
+    fn worktree_path_is_sanitised() {
+        assert_eq!(branch::worktree_path("/work/tool/", "../../etc/passwd"), Some("/work/tool-etc-passwd".into()));
+        assert_eq!(branch::worktree_path("/work/tool", "a b\\c"), Some("/work/tool-a-b-c".into()));
+        assert_eq!(branch::worktree_path("/work/tool", "..."), None);
+        assert_eq!(branch::worktree_path("/work/tool", "..hidden"), Some("/work/tool-hidden".into()));
+    }
+
+    #[test]
+    fn worktree_command_adds_it_and_notifies_the_path() {
+        let host = setup();
+        host.on_process("git", git_ok);
+        let _plugin = selected(&host);
+
+        GitLab::default().run_command("open-merge-request-in-worktree", &host.invocation(), None).unwrap();
+
+        assert_eq!(
+            git_runs(&host),
+            [
+                "fetch origin +refs/heads/feature:refs/remotes/origin/feature",
+                "worktree add --detach -- /project-feature origin/feature",
+            ]
+        );
+        assert!(host.notifications()[0].body.contains("/project-feature"));
+    }
+
+    #[test]
+    fn worktree_without_git_notifies() {
+        let without_git: Vec<&str> = CAPS.iter().copied().filter(|c| *c != "process:git").collect();
+        let host = setup().with_capabilities(&without_git);
+        let _plugin = selected(&host);
+
+        GitLab::default().run_command("open-merge-request-in-worktree", &host.invocation(), None).unwrap();
+
+        assert!(host.notifications()[0].body.contains("Allow git"));
+    }
+
+    #[test]
+    fn update_branch_request_targets_rebase_endpoint() {
+        let host = setup();
+        let _plugin = selected(&host);
+
+        let message = GitLab::default().run_command("update-merge-request-branch", &host.invocation(), None).unwrap();
+
+        let posted = writes(&host);
+        assert_eq!(posted[0].0, "PUT");
+        assert!(posted[0].1.ends_with("/projects/g%2Fp/merge_requests/7/rebase"));
+        assert_eq!(message.as_deref(), Some("Rebase of !7 started."));
+    }
+
+    #[test]
+    fn update_branch_conflict_response_is_reported() {
+        let host = setup();
+        host.on_fetch(|req| match (req.method.as_str(), req.url.contains("include_rebase_in_progress")) {
+            ("GET", true) => ok(r#"{"rebase_in_progress": false, "merge_error": "Rebase failed. Please rebase locally"}"#),
+            _ => gitlab(req),
+        });
+        let _plugin = selected(&host);
+
+        let error = GitLab::default().run_command("update-merge-request-branch", &host.invocation(), None).unwrap_err();
+
+        assert_eq!(error.to_string(), "Rebase of !7 failed: Rebase failed. Please rebase locally");
     }
 }

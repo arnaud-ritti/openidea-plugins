@@ -66,6 +66,13 @@ pub struct MergeRequest {
     pub user: Option<Permissions>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RebaseState {
+    pub rebase_in_progress: bool,
+    pub merge_error: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Approver {
@@ -474,6 +481,11 @@ impl Project<'_> {
 
     pub fn rebase(&self, iid: u64) -> Result<(), Error> {
         rest("PUT", &self.mr(iid, "/rebase"), None).map(drop)
+    }
+
+    /// Where a rebase stands; GitLab reports a conflict as `merge_error` once the background rebase has failed.
+    pub fn rebase_state(&self, iid: u64) -> Result<RebaseState, Error> {
+        parse(rest("GET", &self.mr(iid, "?include_rebase_in_progress=true"), None)?)
     }
 
     /// `close` or `reopen`.
