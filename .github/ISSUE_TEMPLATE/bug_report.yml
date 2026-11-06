@@ -1,0 +1,29 @@
+name: Bug report
+description: A plugin misbehaves
+labels: [bug]
+body:
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin and version
+      placeholder: aritti.spring-web 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: ide
+    attributes:
+      label: OpenIDEA version
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behaviour
+    validations:
+      required: true

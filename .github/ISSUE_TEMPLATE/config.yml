@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Plugin API / host issue
+    url: https://github.com/l0ng-ai/openidea/issues
+    about: Missing extension points or host bugs belong upstream.
