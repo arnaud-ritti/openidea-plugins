@@ -9,6 +9,11 @@
       "type": "boolean",
       "title": "Check the parameters and return type of @EventListener methods",
       "default": true
+    },
+    "springBoot.checkTestLifecycle": {
+      "type": "boolean",
+      "title": "Check @DirtiesContext modes and @BeforeTransaction/@AfterTransaction signatures",
+      "default": true
     }
   }
 }
