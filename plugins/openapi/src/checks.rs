@@ -1,7 +1,7 @@
 //! Problems in an OpenAPI document: unresolved `$ref`s, duplicate operationIds
 //! and path parameters that disagree with their path template.
 
-use crate::spec::{Index, Key, Operation, Spec, exact, operations, refs, split_ref};
+use crate::spec::{Index, Key, Operation, Spec, exact, operations, refs, scan, split_ref};
 use openidea_plugin::{Diagnostic, Severity};
 use spring_text::range;
 use std::collections::{HashMap, HashSet};
@@ -57,8 +57,8 @@ fn unresolved_refs(text: &str, local: &Index, read: &dyn Fn(&str) -> Fetched) ->
         files.entry(file.to_owned()).or_insert_with(|| match read(file) {
             Fetched::Missing => Loaded::Missing,
             Fetched::Unreadable => Loaded::Unreadable,
-            Fetched::Text(_) if file.ends_with(".json") => Loaded::Keys(Vec::new()),
-            Fetched::Text(content) => Loaded::Keys(spring_text::config::yaml(&content)),
+            Fetched::Text(content) if content.trim_start().starts_with('[') => Loaded::Unreadable,
+            Fetched::Text(content) => Loaded::Keys(scan(&content)),
         });
     }
 
@@ -83,7 +83,7 @@ fn unresolved_refs(text: &str, local: &Index, read: &dyn Fn(&str) -> Fetched) ->
             match (&files[file], indexes.get(file)) {
                 (Loaded::Missing, _) => Some(format!("Cannot find file `{file}`")),
                 (Loaded::Unreadable, _) => None,
-                (Loaded::Keys(_), _) if file.ends_with(".json") || fragment.is_empty() => None,
+                (Loaded::Keys(_), _) if fragment.is_empty() => None,
                 (Loaded::Keys(_), index) => index
                     .is_some_and(|i| i.target(fragment).is_none())
                     .then(|| format!("Cannot find `{}`", r.target)),

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "PHP",
+  "image": "mcr.microsoft.com/devcontainers/php:8.3",
+  "features": {},
+  "forwardPorts": [8080],
+  "postCreateCommand": ""
+}

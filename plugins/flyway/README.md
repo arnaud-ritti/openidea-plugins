@@ -60,6 +60,18 @@ The setting `runner` picks `flyway` (the CLI, goal `info`) or `mvn` (goal
 `process:mvn` permission, which a notification asks you to allow in
 Settings › Plugins.
 
+## Migrations view
+
+The bottom view Flyway Migrations runs `info` as JSON (`-outputType=json`; with
+`mvn`, `-Dflyway.outputType=json`) in the project root and lists every
+migration with its state: Applied, Pending, Failed, Missing (applied, file
+gone), Out of order, Ignored, Superseded, Deleted. Double-click a row to open
+its file, found by version (or description for repeatable ones) among the
+migration locations, else by the `filepath` Flyway prints. Refresh runs `info`
+again. It needs Flyway 10 or newer, a database Flyway can reach (the
+configuration comes from the project or the `arguments` setting) and the
+permission to run the program; otherwise the view says what failed.
+
 ## Completion
 
 - In SQL files, after `${`: Flyway's built-in placeholders

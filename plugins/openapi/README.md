@@ -1,8 +1,8 @@
 # OpenAPI
 
-Editing support for OpenAPI 3 and Swagger 2 files in YAML, with a Swagger UI
-preview. A file is an OpenAPI document when it has a top-level `openapi` or
-`swagger` key with a value. Every other YAML file gets no completion, no
+Editing support for OpenAPI 3 and Swagger 2 files in YAML and JSON, with a
+Swagger UI preview. A file is an OpenAPI document when it has a top-level `openapi` or
+`swagger` key with a value. Every other YAML or JSON file gets no completion, no
 actions and no problems, and any problems left from an earlier edit are cleared
 when it is opened or saved.
 
@@ -21,7 +21,11 @@ Definition also resolves pointers into `paths`
 
 For a relative file (`../common.yaml#/Pet`) the pointers of that file are
 offered, resolved against the spec's directory. `https://` references are left
-alone. File names aren't completed.
+alone. When the value has no `#` yet, the YAML, YML and JSON files of the
+project are offered as relative paths (`./schemas/pet.yaml`, `../common/pet.json`).
+That list is read when a YAML or JSON file is opened or saved (at most 500 files
+per extension, hidden and ignored paths excluded by the host), so a file created
+since then shows up after the next open or save.
 
 Go to Definition on a `$ref` opens the target, in the same file or the
 referenced one.
@@ -38,8 +42,8 @@ Checked when a file is opened or saved.
 | `path-parameter` | warning | ``Path parameter `<name>` is not in the path <path>`` |
 
 A `$ref` into a file that exists but can't be read (a directory, too large, not
-UTF-8) is not flagged. Pointers into `.json` files aren't checked, only the
-file's existence. Path parameters are skipped when the parameter list can't be
+UTF-8) is not flagged. JSON files are checked like YAML ones, except a JSON file whose root
+is an array. Path parameters are skipped when the parameter list can't be
 read reliably: flow style, a `$ref` that isn't local, or a local `$ref` that
 can't be resolved or lacks `name` or `in`.
 
@@ -63,9 +67,14 @@ Swagger UI 5.34.1 beside the text. It opens automatically for `openapi.*`,
 extension. For any other YAML or JSON file, use Open With and pick API Preview.
 The preview follows edits as you type.
 
+- Relative `$ref`s to other files: implemented, not yet verified in a live IDE
+  (an `openidea-plugin link` check is pending). The plugin reads the files the
+  open document references and hands them to the page, which serves them to
+  Swagger UI. Only one level is loaded (files referenced from those files are
+  not), at most 50 files and 512 KiB in total; larger ones are skipped. The
+  files are re-sent only when they changed.
 - There is no Try it out: the frame has no network.
 - The dark theme is a colour inversion of the light one.
-- Only the open file is shown; references to other files aren't loaded.
 
 ## Copy Requests for the HTTP Client
 
@@ -82,8 +91,9 @@ notice files are in `web/vendor/`; see `NOTICE.md`.
 
 ## Limits
 
-- Editing features cover YAML only. JSON files get the preview but no
-  completion, definition or problems.
+- JSON is read by a small scanner: string escapes other than `\"`, `\/` and
+  `\\` in keys are not decoded, and a document that stops being valid JSON is
+  checked only up to that point.
 - Flow-style mappings are only seen for `$ref`.
 - Problems appear on open and save, not while typing.
 - Problems caused by another file's content refresh only when the spec itself
@@ -93,8 +103,9 @@ notice files are in `web/vendor/`; see `NOTICE.md`.
 - No rename, find usages, hover or structure view.
 - The endpoints view re-scans the project on each render.
 - The schema modeline is YAML only; JSON specs get no schema validation.
-- The preview isn't opened automatically for other file names, and shows a
-  single file.
+- The endpoints view lists YAML files only.
+- The preview isn't opened automatically for other file names, and loads only
+  the files the open document references directly.
 
 ```sh
 cargo test                       # logic, against the SDK's mock host

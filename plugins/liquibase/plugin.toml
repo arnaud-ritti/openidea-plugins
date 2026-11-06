@@ -8,7 +8,7 @@ change-notes = "0.1.0: first release. Live checks (duplicate and incomplete chan
 categories = ["tools", "linters"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:xml", "on-language:yaml", "on-language:sql"]
+activation = ["on-language:xml", "on-language:yaml", "on-language:sql", "on-view:changesets"]
 
 [capabilities]
 required = ["project.read"]
@@ -52,6 +52,12 @@ name = "Liquibase: update (writes to the database)"
 files = ["liquibase.properties"]
 command = "liquibase"
 args = ["update"]
+
+[[contributes.views]]
+id = "changesets"
+title = "Liquibase Changesets"
+icon = "database"
+location = "bottom"
 
 [[contributes.fileTemplates]]
 id = "changelog-xml"
