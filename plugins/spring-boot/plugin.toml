@@ -6,7 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0: first release, with key and value completion, warnings for deprecated and unknown keys, a quick fix for deprecated keys and cron validation. Bundled metadata from Spring Boot 3.5.16 (Apache-2.0)."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [
     "on-file:**/application*.properties",
