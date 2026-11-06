@@ -1,7 +1,7 @@
 //! Code and SQL written from entities: equals/hashCode/toString, DDL, DTOs,
 //! and entities from `CREATE TABLE` statements.
 
-use crate::model::{Attribute, Class, Edit, Kind, Relation, camel_case, capitalize, closing, snake_case};
+use crate::model::{Attribute, Class, Edit, Kind, Relation, camel_case, capitalize, closing, decapitalize, snake_case};
 use crate::queries::convert_type;
 
 /// The classes known by simple name.
@@ -71,6 +71,21 @@ pub fn equals_and_hash_code(class: &Class, text: &str, known: Known) -> Option<E
     };
 
     Some(Edit::insert(at, &method))
+}
+
+/// The annotation's class: `javax` when the file already imports `javax.persistence`.
+pub fn callback_import(class: &Class, annotation: &str) -> String {
+    let javax = class.imports.iter().any(|i| i.starts_with("javax.persistence"));
+    format!("{}.persistence.{annotation}", if javax { "javax" } else { "jakarta" })
+}
+
+/// An empty lifecycle callback method at the end of the class body.
+pub fn callback_method(class: &Class, annotation: &str) -> Option<Edit> {
+    let at = class.body_end?;
+    let name = decapitalize(annotation);
+    let keyword = if class.kotlin { "fun" } else { "void" };
+
+    Some(Edit::insert(at, &format!("\n    @{annotation} {keyword} {name}() {{}}\n")))
 }
 
 /// `toString` over the id and basic attributes: it never touches a lazy association.

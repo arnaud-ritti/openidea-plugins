@@ -27,9 +27,9 @@ use openidea_plugin::{
     Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Location, Position, Project, Range, register_plugin,
 };
 
-use checks::{Finding, inspect_attribute_types, inspect_callbacks, inspect_entity, inspect_kotlin_entity, inspect_repository, missing_id};
-use generate::{Dialect, Known, ddl, dto, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
-use model::{Class, Edit, Kind, Relation, has_word, language_of, mask, parse_class};
+use checks::{CALLBACKS, Finding, inspect_attribute_types, inspect_class_signature, is_empty_listener, listener_references, unused_listener, inspect_callbacks, inspect_entity, inspect_kotlin_entity, inspect_repository, missing_id};
+use generate::{Dialect, Known, callback_import, callback_method, ddl, dto, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
+use model::{Class, Edit, Kind, Relation, annotations, has_word, import_edit, language_of, mask, parse_class};
 use queries::{ItemKind, Prop, complete, parse_repository};
 
 /// Time one provider call may spend reading repositories.
@@ -288,7 +288,33 @@ impl JpaAssist {
         findings
     }
 
+    /// Listeners named in `@EntityListeners` that are found once in the project and declare no callback.
+    fn listener_findings(&mut self, project: &Project, text: &str) -> Vec<Finding> {
+        let references = listener_references(text);
+        if references.is_empty() {
+            return Vec::new();
+        }
+
+        let files = self.sources(project);
+        let mut findings = Vec::new();
+
+        for (name, start, end) in references {
+            let mut found = files.iter().filter(|path| file_stem(path) == name);
+            let (Some(path), None) = (found.next(), found.next()) else { continue };
+            let Some(kotlin) = language_of(path) else { continue };
+            let Ok(source) = project.read_file(path) else { continue };
+
+            if is_empty_listener(&source, &name, kotlin) {
+                findings.push(unused_listener(start, end, &name));
+            }
+        }
+
+        findings
+    }
+
     fn findings(&mut self, project: &Project, path: &str, text: &str, kotlin: bool) -> Vec<Finding> {
+        let signature = if setting("checkClassSignature") { inspect_class_signature(text, kotlin) } else { Vec::new() };
+
         if let Some(class) = parse_class(text, path) {
             self.remember(class);
             if self.scanned {
@@ -301,15 +327,20 @@ impl JpaAssist {
             if !setting("checkKotlinEntities") {
                 findings.retain(|f| !matches!(f.code, "jpa-data-class" | "jpa-val-attribute" | "jpa-immutable-collection"));
             }
+            findings.extend(signature);
             findings.extend(self.entity_rule_findings(project, path, text, kotlin));
+            if setting("checkListenerUsage") {
+                findings.extend(self.listener_findings(project, text));
+            }
             return findings;
         }
 
+        let mut early = signature;
         if setting("checkListenerSignatures") {
-            let callbacks = inspect_callbacks(text, kotlin);
-            if !callbacks.is_empty() {
-                return callbacks;
-            }
+            early.extend(inspect_callbacks(text, kotlin));
+        }
+        if !early.is_empty() {
+            return early;
         }
 
         let Some(repo) = parse_repository(text, kotlin) else { return Vec::new() };
@@ -512,6 +543,15 @@ impl Providers for JpaAssist {
 
         if !has_word(&masked, "toString") {
             actions.extend(to_string_method(&class, known).map(|e| action(doc, "Generate toString()", "source", false, &[e])));
+        }
+
+        let declared: Vec<&str> = annotations(&masked).iter().map(|a| a.name).collect();
+
+        for callback in CALLBACKS.iter().filter(|c| !declared.contains(c)) {
+            let Some(method) = callback_method(&class, callback) else { continue };
+            let mut edits: Vec<Edit> = import_edit(text, &[&callback_import(&class, callback)], kotlin).into_iter().collect();
+            edits.push(method);
+            actions.push(action(doc, &format!("Add @{callback} callback"), "source", false, &edits));
         }
 
         actions
@@ -869,7 +909,12 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         let doc = Document { path: "/project/src/shop/Order.java".into(), language: "java".into(), version: 1, text: ORDER.into() };
 
         let class_line = Position::new(5, 15);
-        let titles: Vec<String> = plugin.code_actions(&doc, Range::new(class_line, class_line)).into_iter().map(|a| a.title).collect();
+        let titles: Vec<String> = plugin
+            .code_actions(&doc, Range::new(class_line, class_line))
+            .into_iter()
+            .map(|a| a.title)
+            .filter(|t| !t.starts_with("Add @"))
+            .collect();
         assert_eq!(titles, ["Generate equals() and hashCode()", "Generate toString()"]);
 
         let association = Position::new(11, 6);
@@ -1001,4 +1046,281 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
             "Allow the clipboard for JPA Assist in Settings › Plugins to copy generated code."
         );
     }
+    fn java_codes(text: &str) -> Vec<String> {
+        problems(&host(), "src/shop/J.java", text)
+    }
+
+    #[test]
+    fn inner_entity_class_warns() {
+        let text = "class Outer {\n  @Entity\n  class In {\n    @Id Long id;\n  }\n}\n";
+        assert_eq!(java_codes(text), ["jpa-entity-nested"]);
+        let found = checks::inspect_class_signature(text, false);
+        assert_eq!(&text[found[0].start..found[0].end], "class");
+    }
+
+    #[test]
+    fn static_nested_entity_is_quiet() {
+        assert!(java_codes("class Outer {\n  @Entity\n  public static class In {\n    @Id Long id;\n  }\n}\n").is_empty());
+        assert!(java_codes("class Outer {\n  @Entity static class In {\n    @Id Long id;\n  }\n}\n").is_empty());
+    }
+
+    #[test]
+    fn kotlin_nested_entity_is_quiet_and_inner_warns() {
+        let nested = "class Outer {\n  @Entity\n  class In(@Id var id: Long?)\n}\n";
+        assert!(kotlin_codes(nested).is_empty());
+        let inner = "class Outer {\n  @Entity\n  inner class In(@Id var id: Long?)\n}\n";
+        assert_eq!(kotlin_codes(inner), ["jpa-entity-nested"]);
+    }
+
+    #[test]
+    fn entity_with_embeddable_warns_on_the_second_annotation() {
+        let text = "@Entity\n@Embeddable\nclass E {\n  @Id Long id;\n}\n";
+        assert_eq!(java_codes(text), ["jpa-entity-multiple-roles"]);
+        let found = checks::inspect_class_signature(text, false);
+        assert_eq!(&text[found[0].start..found[0].end], "@Embeddable");
+
+        let reversed = "@Embeddable\n@Entity\nclass E {\n  @Id Long id;\n}\n";
+        let found = checks::inspect_class_signature(reversed, false);
+        assert_eq!(&reversed[found[0].start..found[0].end], "@Entity");
+    }
+
+    #[test]
+    fn entity_with_mapped_superclass_warns() {
+        assert_eq!(java_codes("@Entity\n@MappedSuperclass\nclass E {\n  @Id Long id;\n}\n"), ["jpa-entity-multiple-roles"]);
+    }
+
+    #[test]
+    fn entity_on_interface_warns() {
+        let text = "@Entity\ninterface I {}\n";
+        assert_eq!(java_codes(text), ["jpa-entity-not-a-class"]);
+        let found = checks::inspect_class_signature(text, false);
+        assert_eq!(&text[found[0].start..found[0].end], "interface");
+        assert_eq!(checks::inspect_class_signature("@Entity\n@interface A {}\n", false).len(), 1);
+        assert_eq!(checks::inspect_class_signature("@Entity\nannotation class A\n", true).len(), 1);
+    }
+
+    #[test]
+    fn entity_on_enum_warns() {
+        assert_eq!(java_codes("@Entity\nenum E { A }\n\nclass Later {}\n"), ["jpa-entity-not-a-class"]);
+        assert_eq!(kotlin_codes("@Entity\nenum class E { A }\n"), ["jpa-entity-not-a-class"]);
+    }
+
+    #[test]
+    fn entity_signature_is_quiet_for_library_or_dynamic_name() {
+        assert!(java_codes("@Entity\nclass E {\n  @Id Long id;\n}\n").is_empty());
+        assert!(java_codes("@Entity\nclass E {\n  @Id Long id;\n}\n\nclass Later {}\n").is_empty());
+        assert!(java_codes("class Entity {}\nclass Embeddable {}\n").is_empty());
+        assert!(java_codes("@Entity\n@EntityListeners(A.class)\nclass E {\n  @Id Long id;\n}\n").is_empty());
+        for unfinished in ["@Entity", "@Entity\nclass", "@Entity\nenum", "class A {\n @Entity\n", "@Entity @Embeddable"] {
+            checks::inspect_class_signature(unfinished, false);
+            checks::listener_references(unfinished);
+        }
+    }
+
+    #[test]
+    fn kotlin_class_literal_in_an_annotation_is_not_the_class() {
+        let text = "@Entity\n@EntityListeners(AuditListener::class)\nclass K(@Id var id: Long?, val name: String)\n";
+        let found = checks::inspect_kotlin_entity(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(&text[found[0].start..found[0].end], "val");
+        assert!(checks::inspect_class_signature(text, true).is_empty());
+    }
+
+    const LISTENED: &str = "@Entity\n@EntityListeners(AuditListener.class)\nclass E {\n  @Id Long id;\n}\n";
+
+    fn with_listener(listener: &str) -> MockHost {
+        let host = host();
+        host.add_file("src/shop/AuditListener.java", listener);
+        host
+    }
+
+    #[test]
+    fn listener_without_callbacks_warns_on_the_class_reference() {
+        let host = with_listener("class AuditListener {\n  void touch() {}\n}\n");
+        assert_eq!(problems(&host, "src/shop/E.java", LISTENED), ["jpa-listener-without-callbacks"]);
+        assert_eq!(first_range(&host, "src/shop/E.java"), (1, 17));
+        let found = checks::listener_references(LISTENED);
+        assert_eq!(&LISTENED[found[0].1..found[0].2], "AuditListener");
+    }
+
+    #[test]
+    fn listener_with_a_callback_is_quiet() {
+        let host = with_listener("class AuditListener {\n  @PrePersist void touch(Object o) {}\n}\n");
+        assert!(problems(&host, "src/shop/E.java", LISTENED).is_empty());
+    }
+
+    #[test]
+    fn unresolved_listener_is_quiet() {
+        assert!(problems(&host(), "src/shop/E.java", LISTENED).is_empty());
+    }
+
+    #[test]
+    fn listener_found_in_two_files_is_quiet() {
+        let host = with_listener("class AuditListener {}\n");
+        host.add_file("src/other/AuditListener.java", "class AuditListener {}\n");
+        assert!(problems(&host, "src/shop/E.java", LISTENED).is_empty());
+    }
+
+    #[test]
+    fn listener_with_a_superclass_is_quiet() {
+        let host = with_listener("class AuditListener extends BaseListener {}\n");
+        assert!(problems(&host, "src/shop/E.java", LISTENED).is_empty());
+    }
+
+    #[test]
+    fn listener_in_kotlin_entity_is_read() {
+        let host = host();
+        host.add_file("src/shop/AuditListener.kt", "class AuditListener {\n  fun touch() {}\n}\n");
+        let text = "@Entity\n@EntityListeners(AuditListener::class, value = [Other::class])\nclass K(@Id var id: Long?)\n";
+        assert_eq!(problems(&host, "src/shop/K.kt", text), ["jpa-listener-without-callbacks"]);
+
+        host.add_file("src/shop/AuditListener.kt", "class AuditListener : Base() {\n}\n");
+        assert!(problems(&host, "src/shop/K.kt", text).is_empty());
+    }
+
+    #[test]
+    fn fixing_the_listener_clears_the_warning_on_the_entity_after_reopen() {
+        let host = with_listener("class AuditListener {}\n");
+        assert_eq!(problems(&host, "src/shop/E.java", LISTENED), ["jpa-listener-without-callbacks"]);
+        host.add_file("src/shop/AuditListener.java", "class AuditListener {\n  @PostLoad void loaded(Object o) {}\n}\n");
+        assert!(problems(&host, "src/shop/E.java", LISTENED).is_empty());
+    }
+
+    fn actions_at(path: &str, text: &str, line: u32) -> Vec<CodeAction> {
+        let _host = host();
+        let doc = Document { path: format!("/project/{path}"), language: "java".into(), version: 1, text: text.into() };
+        let at = Position::new(line, 6);
+        let all = JpaAssist::default().code_actions(&doc, Range::new(at, at));
+        all.into_iter().filter(|a| a.title.starts_with("Add @")).collect()
+    }
+
+    const BARE: &str = "@Entity\nclass E {\n  @Id Long id;\n}\n";
+
+    #[test]
+    fn class_line_offers_one_action_per_missing_callback() {
+        let titles: Vec<String> = actions_at("src/shop/E.java", BARE, 1).into_iter().map(|a| a.title).collect();
+        assert_eq!(
+            titles,
+            [
+                "Add @PrePersist callback",
+                "Add @PostPersist callback",
+                "Add @PreUpdate callback",
+                "Add @PostUpdate callback",
+                "Add @PreRemove callback",
+                "Add @PostRemove callback",
+                "Add @PostLoad callback"
+            ]
+        );
+
+        let first = &actions_at("src/shop/E.java", BARE, 1)[0];
+        assert_eq!(first.kind.as_deref(), Some("source"));
+        let method = first.edits[0].1.last().unwrap();
+        assert_eq!(method.text, "\n    @PrePersist void prePersist() {}\n");
+        assert_eq!(method.range.start, Position::new(3, 0));
+    }
+
+    #[test]
+    fn declared_callbacks_are_not_offered_again() {
+        let text = "@Entity\nclass E {\n  @Id Long id;\n  @PrePersist void p() {}\n  @PostLoad void l() {}\n}\n";
+        let titles: Vec<String> = actions_at("src/shop/E.java", text, 1).into_iter().map(|a| a.title).collect();
+        assert_eq!(titles.len(), 5);
+        assert!(!titles.iter().any(|t| t.contains("PrePersist") || t.contains("PostLoad")));
+    }
+
+    #[test]
+    fn callback_action_adds_the_import_once() {
+        let actions = actions_at("src/shop/E.java", BARE, 1);
+        let imports: Vec<&str> = actions[0].edits[0].1.iter().map(|e| e.text.as_str()).filter(|t| t.contains("import")).collect();
+        assert_eq!(imports, ["import jakarta.persistence.PrePersist;\n\n"]);
+
+        let imported = "import jakarta.persistence.PrePersist;\n@Entity\nclass E {\n  @Id Long id;\n}\n";
+        let actions = actions_at("src/shop/E.java", imported, 2);
+        assert_eq!(actions[0].edits[0].1.len(), 1, "PrePersist is imported already");
+        assert_eq!(actions[1].edits[0].1.len(), 2, "import and method for another callback");
+        let wildcard = "import jakarta.persistence.*;\n@Entity\nclass E {\n  @Id Long id;\n}\n";
+        assert!(actions_at("src/shop/E.java", wildcard, 2).iter().all(|a| a.edits[0].1.len() == 1));
+    }
+
+    #[test]
+    fn callback_action_edits_only_the_open_file() {
+        for action in actions_at("src/shop/E.java", BARE, 1) {
+            assert_eq!(action.edits.len(), 1);
+            assert_eq!(action.edits[0].0, "/project/src/shop/E.java");
+        }
+    }
+
+    #[test]
+    fn callback_action_uses_javax_when_the_file_does_too() {
+        let text = "import javax.persistence.Entity;\nimport javax.persistence.Id;\n@Entity\nclass E {\n  @Id Long id;\n}\n";
+        let actions = actions_at("src/shop/E.java", text, 3);
+        let inserted: String = actions[0].edits[0].1.iter().map(|e| e.text.clone()).collect();
+        assert!(inserted.contains("import javax.persistence.PrePersist;"), "{inserted}");
+        assert!(!inserted.contains("jakarta"));
+    }
+
+    #[test]
+    fn callback_action_is_quiet_off_the_class_line_and_for_non_entities() {
+        assert!(actions_at("src/shop/E.java", BARE, 2).is_empty());
+        assert!(actions_at("src/shop/P.java", "class P {\n}\n", 0).is_empty());
+        assert!(actions_at("src/shop/P.java", "@Embeddable\nclass P {\n}\n", 1).is_empty());
+        assert!(actions_at("src/shop/P.java", "@Entity\nclass P", 1).is_empty(), "unfinished body");
+    }
+
+    #[test]
+    fn callback_action_for_kotlin_uses_fun() {
+        let _host = host();
+        let text = "@Entity\nclass K(@Id var id: Long?) {\n}\n";
+        let doc = Document { path: "/project/src/shop/K.kt".into(), language: "kotlin".into(), version: 1, text: text.into() };
+        let at = Position::new(1, 6);
+        let actions = JpaAssist::default().code_actions(&doc, Range::new(at, at));
+        let action = actions.iter().find(|a| a.title == "Add @PostLoad callback").unwrap();
+        let inserted: String = action.edits[0].1.iter().map(|e| e.text.clone()).collect();
+        assert!(inserted.contains("@PostLoad fun postLoad() {}"), "{inserted}");
+        assert!(inserted.contains("import jakarta.persistence.PostLoad\n"), "{inserted}");
+    }
+
+    #[test]
+    fn class_signature_group_can_be_switched_off() {
+        let host = host();
+        host.set_setting("jpaAssist.checkClassSignature", "false");
+        assert!(problems(&host, "src/shop/J.java", "@Entity\n@Embeddable\nclass E {\n  @Id Long id;\n}\n").is_empty());
+        assert!(problems(&host, "src/shop/I.java", "@Entity\ninterface I {}\n").is_empty());
+    }
+
+    #[test]
+    fn listener_usage_group_can_be_switched_off() {
+        let host = with_listener("class AuditListener {}\n");
+        host.set_setting("jpaAssist.checkListenerUsage", "false");
+        assert!(problems(&host, "src/shop/E.java", LISTENED).is_empty());
+    }
+
+    #[test]
+    fn signature_and_listener_ranges_use_utf16_columns_with_multibyte_text() {
+        let host = host();
+        assert_eq!(problems(&host, "src/shop/I.java", "@Entity\n/* \u{1F600} */ interface I {}\n"), ["jpa-entity-not-a-class"]);
+        assert_eq!(first_range(&host, "src/shop/I.java"), (1, 9));
+
+        let host = with_listener("class AuditListener {}\n");
+        let text = "@Entity\n@EntityListeners(/* \u{1F600} */ AuditListener.class)\nclass E {\n  @Id Long id;\n}\n";
+        assert_eq!(problems(&host, "src/shop/E.java", text), ["jpa-listener-without-callbacks"]);
+        assert_eq!(first_range(&host, "src/shop/E.java"), (1, 26));
+    }
+
+    #[test]
+    fn signature_findings_have_correct_lines_in_crlf_files() {
+        let host = host();
+        let text = "@Entity\r\n@Embeddable\r\nclass E {\r\n  @Id Long id;\r\n}\r\n";
+        assert_eq!(problems(&host, "src/shop/E.java", text), ["jpa-entity-multiple-roles"]);
+        assert_eq!(first_range(&host, "src/shop/E.java"), (1, 0));
+    }
+
+    #[test]
+    fn missing_file_is_treated_as_absent() {
+        let host = host();
+        let mut plugin = JpaAssist::default();
+        plugin.handle_events(&[Event::FileOpened("/project/src/shop/Gone.java".into())], &host.invocation());
+        assert!(!host.diagnostics().contains_key("/project/src/shop/Gone.java"));
+        assert!(problems(&host, "src/shop/E.java", LISTENED).is_empty(), "listener file not in the project");
+    }
+
 }

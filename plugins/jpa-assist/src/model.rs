@@ -102,6 +102,18 @@ pub fn words<'a>(s: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a 
     })
 }
 
+/// The first of `keywords` at or after `from` that opens a declaration: a `class` or `enum` after `.` or `::` is a class literal.
+pub fn declaration_keyword<'a>(masked: &str, from: usize, keywords: &[&'a str]) -> Option<(usize, &'a str)> {
+    keywords
+        .iter()
+        .flat_map(|&keyword| words(&masked[from..], keyword).map(move |i| (i + from, keyword)))
+        .filter(|&(i, _)| {
+            let before = masked[..i].trim_end();
+            !(before.ends_with("::") || before.ends_with('.'))
+        })
+        .min_by_key(|&(i, _)| i)
+}
+
 pub fn has_word(s: &str, word: &str) -> bool {
     words(s, word).next().is_some()
 }
@@ -613,7 +625,10 @@ pub fn parse_class(text: &str, path: &str) -> Option<Class> {
         _ => None,
     })?;
 
-    let class_at = words(&masked[marker.end()..], "class").next()? + marker.end();
+    let (class_at, keyword) = declaration_keyword(&masked, marker.end(), &["class", "interface", "enum", "record"])?;
+    if keyword != "class" {
+        return None;
+    }
     let after = &masked[class_at + "class".len()..];
     let name_start = class_at + "class".len() + after.len() - after.trim_start().len();
     let name_len = masked[name_start..].bytes().take_while(|&c| is_ident(c)).count();

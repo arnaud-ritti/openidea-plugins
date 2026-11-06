@@ -4,7 +4,7 @@ use openidea_plugin::text::position;
 use openidea_plugin::{Diagnostic, Range, Severity};
 
 use crate::model::{
-    Annotation, Edit, annotations, closing, declared_type, has_word, import_edit, is_ident, mask, members, split_top_level,
+    Annotation, Edit, annotations, closing, declaration_keyword, declared_type, has_word, import_edit, is_ident, kotlin_supertype, mask, members, split_top_level,
     without_annotations, words,
 };
 use crate::queries::{Props, Repository, boxed, problem};
@@ -181,7 +181,7 @@ pub fn inspect_kotlin_entity(text: &str) -> Vec<Finding> {
     let all = annotations(&masked);
     let mut findings = Vec::new();
 
-    let Some(class_at) = words(&masked, "class").next() else { return findings };
+    let Some((class_at, _)) = declaration_keyword(&masked, 0, &["class"]) else { return findings };
     let class_level = |name: &str| all.iter().any(|a| a.start < class_at && a.name == name);
 
     if !class_level("Entity") {
@@ -277,7 +277,7 @@ pub fn missing_id(text: &str) -> Option<Finding> {
 
 /// Offset ranges of the declarations in the first class of `masked`: Kotlin constructor properties, then the body.
 fn class_members(masked: &str, kotlin: bool) -> Vec<(usize, usize)> {
-    let Some(class_at) = words(masked, "class").next() else { return Vec::new() };
+    let Some((class_at, _)) = declaration_keyword(masked, 0, &["class"]) else { return Vec::new() };
     let header_end = masked[class_at..].find('{').map_or(masked.len(), |p| p + class_at);
     let mut found = Vec::new();
 
@@ -348,7 +348,157 @@ pub fn inspect_attribute_types(text: &str, kotlin: bool, is_model: &dyn Fn(&str)
     findings
 }
 
-const CALLBACKS: &[&str] =
+const DECLARATIONS: &[&str] = &["class", "interface", "enum", "record"];
+
+fn declaration_start(masked: &str, at: usize) -> usize {
+    masked[..at].rfind(['{', '}', ';']).map_or(0, |p| p + 1)
+}
+
+fn enclosing_open(masked: &str, at: usize) -> Option<usize> {
+    let mut open = Vec::new();
+
+    for (i, c) in masked[..at].bytes().enumerate() {
+        match c {
+            b'{' => open.push(i),
+            b'}' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+
+    open.pop()
+}
+
+/// What JPA requires of the declaration an `@Entity` sits on: a class, with one persistence role, not an inner class.
+pub fn inspect_class_signature(text: &str, kotlin: bool) -> Vec<Finding> {
+    let masked = mask(text);
+    let all = annotations(&masked);
+    let mut findings = Vec::new();
+
+    for entity in all.iter().filter(|a| a.name == "Entity") {
+        let Some((keyword_at, keyword)) = declaration_keyword(&masked, entity.end(), DECLARATIONS) else { continue };
+        let keyword_end = keyword_at + keyword.len();
+        let start = declaration_start(&masked, entity.start);
+        let modifiers = &masked[start..keyword_at];
+
+        for role in all.iter().filter(|a| a.start >= start && a.start < keyword_at && matches!(a.name, "Embeddable" | "MappedSuperclass")) {
+            let second = if role.start > entity.start { role } else { entity };
+            findings.push(Finding::new(
+                second.start,
+                second.end(),
+                Severity::Warning,
+                "jpa-entity-multiple-roles",
+                format!("A class is either an entity or @{}, not both.", role.name),
+            ));
+        }
+
+        let annotation_type = (keyword == "interface" && masked[..keyword_at].trim_end().ends_with('@'))
+            || (kotlin && keyword == "class" && has_word(modifiers, "annotation"));
+        let not_a_class = match keyword {
+            _ if annotation_type => Some("an annotation"),
+            "interface" => Some("an interface"),
+            "enum" => Some("an enum"),
+            _ => None,
+        };
+
+        if let Some(what) = not_a_class {
+            findings.push(Finding::new(
+                keyword_at,
+                keyword_end,
+                Severity::Warning,
+                "jpa-entity-not-a-class",
+                format!("An entity must be a class, but this is {what}."),
+            ));
+            continue;
+        }
+
+        if keyword != "class" {
+            continue;
+        }
+
+        let Some(open) = enclosing_open(&masked, entity.start) else { continue };
+        let header = &masked[declaration_start(&masked, open)..open];
+        if declaration_keyword(header, 0, DECLARATIONS).is_none_or(|(_, k)| k != "class") {
+            continue;
+        }
+
+        let nested_ok = if kotlin { !has_word(modifiers, "inner") } else { has_word(modifiers, "static") };
+        if !nested_ok {
+            let how = if kotlin { "not be inner" } else { "be static" };
+            findings.push(Finding::new(
+                keyword_at,
+                keyword_end,
+                Severity::Warning,
+                "jpa-entity-nested",
+                format!("A nested entity class must {how}: an inner class cannot be instantiated without its outer instance."),
+            ));
+        }
+    }
+
+    findings
+}
+
+/// Simple class name and byte range of each `X.class` (Kotlin `X::class`) inside `@EntityListeners(...)`.
+pub fn listener_references(text: &str) -> Vec<(String, usize, usize)> {
+    let masked = mask(text);
+    let mut found = Vec::new();
+
+    for listeners in annotations(&masked).iter().filter(|a| a.name == "EntityListeners") {
+        let Some((start, end)) = listeners.args else { continue };
+
+        for at in words(&masked[start..end], "class") {
+            let before = masked[..start + at].trim_end();
+            let Some(before) = before.strip_suffix("::").or_else(|| before.strip_suffix('.')) else { continue };
+            let before = before.trim_end();
+            let length = before.bytes().rev().take_while(|&c| is_ident(c)).count();
+            if length == 0 {
+                continue;
+            }
+
+            let name_start = before.len() - length;
+            found.push((before[name_start..].to_owned(), name_start, before.len()));
+        }
+    }
+
+    found
+}
+
+pub fn has_callbacks(text: &str) -> bool {
+    annotations(&mask(text)).iter().any(|a| CALLBACKS.contains(&a.name))
+}
+
+/// Whether `text` declares class `name` with no callback and no superclass that could supply one.
+pub fn is_empty_listener(text: &str, name: &str, kotlin: bool) -> bool {
+    if has_callbacks(text) {
+        return false;
+    }
+
+    let masked = mask(text);
+    let Some((at, "class")) = declaration_keyword(&masked, 0, DECLARATIONS) else { return false };
+    let header_end = masked[at..].find('{').map_or(masked.len(), |p| p + at);
+    let header = masked[at + "class".len()..header_end].trim_start();
+
+    let Some(rest) = header.strip_prefix(name) else { return false };
+    if rest.bytes().next().is_some_and(is_ident) {
+        return false;
+    }
+
+    let extended = if kotlin { kotlin_supertype(rest).is_some() } else { has_word(rest, "extends") };
+    !extended
+}
+
+pub fn unused_listener(start: usize, end: usize, name: &str) -> Finding {
+    Finding::new(
+        start,
+        end,
+        Severity::Warning,
+        "jpa-listener-without-callbacks",
+        format!("{name} declares none of the lifecycle callbacks (@PrePersist, @PostLoad, ...), so this listener never runs."),
+    )
+}
+
+pub const CALLBACKS: &[&str] =
     &["PrePersist", "PostPersist", "PreUpdate", "PostUpdate", "PreRemove", "PostRemove", "PostLoad"];
 
 /// Lifecycle callbacks with a signature JPA rejects: on an entity none take arguments, on a listener exactly one.

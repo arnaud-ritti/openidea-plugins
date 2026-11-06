@@ -27,6 +27,16 @@
       "title": "Warn about val attributes, read-only collections and data classes in Kotlin entities",
       "default": true
     },
+    "jpaAssist.checkClassSignature": {
+      "type": "boolean",
+      "title": "Warn about entities that are inner classes, interfaces or enums, or also embeddable or mapped superclasses",
+      "default": true
+    },
+    "jpaAssist.checkListenerUsage": {
+      "type": "boolean",
+      "title": "Warn about entity listeners that declare no lifecycle callback",
+      "default": true
+    },
     "jpaAssist.checkListenerSignatures": {
       "type": "boolean",
       "title": "Warn about lifecycle callbacks with the wrong parameters or return type",
