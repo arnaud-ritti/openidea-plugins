@@ -468,7 +468,7 @@ fn diagram_of(index: &Index<Vec<Name>>) -> (Vec<Node>, Vec<Edge>) {
                 }
             }
             if n.kind == Kind::Job || n.detail == "flow" {
-                if let Some(first) = names.iter().find(|t| t.kind == Kind::State && t.scope == Some(n.el) && n.detail != "") {
+                if let Some(first) = names.iter().find(|t| t.kind == Kind::State && t.scope == Some(n.el)) {
                     edges.insert((id(n), id(first), None));
                 }
             }
@@ -489,16 +489,23 @@ impl Views for Batch {
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
         let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its batch jobs.").button(refresh)) };
         let index = self.indexes.get(&project, COMMAND_BUDGET);
+        let complete = index.complete();
+        if !complete {
+            host::refresh_view(VIEW);
+        }
         let (nodes, edges) = diagram_of(index);
-        let status = format!("{} nodes · {} transitions{}", nodes.len(), edges.len(), if index.complete() { "" } else { " · scanning…" });
+        let status = format!("{} nodes · {} transitions{}", nodes.len(), edges.len(), if complete { "" } else { " · scanning…" });
         Ok(View::new(Body::Html(diagram::html(&nodes, &edges, "No batch jobs found."))).button(refresh).status(&status))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         let key = match event {
             ViewEvent::Button(b) if b == "refresh" => {
-                if let Some(project) = ctx.project() {
-                    self.indexes.get(&project, std::time::Duration::ZERO).reset();
+                // Resetting a scan in progress would throw away what it has read.
+                if let Some(project) = ctx.project()
+                    && self.indexes.get(&project, std::time::Duration::ZERO).complete()
+                {
+                    self.indexes.reset();
                 }
                 host::refresh_view(view);
                 return Ok(());
@@ -723,10 +730,31 @@ public class BatchConfig {
         let mut b = Batch::default();
         let view = b.render(VIEW, None, &host.invocation()).unwrap();
         let Body::Html(page) = view.body else { panic!("html expected") };
-        assert!(page.contains(&format!("data-id=\"b:3:13:{XML_PATH}\"")), "{page}");
+        let job = position(JOB_XML, JOB_XML.find("importJob").unwrap());
+        let job_key = format!("b:{}:{}:{XML_PATH}", job.line, job.character);
+        assert!(page.contains(&format!("data-id=\"{job_key}\"")), "{page}");
         assert_eq!(view.status.as_deref(), Some("7 nodes · 4 transitions"));
-        b.handle(VIEW, ViewEvent::Message(format!("b:3:13:{XML_PATH}")), &host.invocation()).unwrap();
-        assert_eq!(host.opened_locations(), [(XML_PATH.to_string(), 3, 13)]);
+        b.handle(VIEW, ViewEvent::Message(job_key), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations(), [(XML_PATH.to_string(), job.line, job.character)]);
+    }
+
+    #[test]
+    fn refresh_during_scan_keeps_the_partial_index() {
+        let host = setup();
+        let mut b = Batch::default();
+        let project = host.invocation().project().unwrap();
+        b.indexes.get(&project, std::time::Duration::ZERO).update(XML_PATH, JOB_XML);
+        b.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert_eq!(b.indexes.get(&project, std::time::Duration::ZERO).files().len(), 1, "not reset");
+
+        b.indexes.get(&project, COMMAND_BUDGET);
+        b.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert!(b.indexes.get(&project, std::time::Duration::ZERO).files().is_empty(), "a complete index starts over");
+    }
+
+    #[test]
+    fn manifest_activates_on_the_diagram_view() {
+        assert!(include_str!("../plugin.toml").contains("\"on-view:diagram\""));
     }
 
     #[test]

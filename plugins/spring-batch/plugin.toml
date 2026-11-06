@@ -14,6 +14,7 @@ activation = [
     "on-file:**/application*.properties",
     "on-file:**/application*.yml",
     "on-file:**/application*.yaml",
+    "on-view:diagram",
 ]
 
 [capabilities]
