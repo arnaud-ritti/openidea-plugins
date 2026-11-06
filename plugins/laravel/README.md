@@ -72,7 +72,16 @@ no `livewire.name` view; `Inertia::render('Page')`, `inertia('Page')` and
 model of the project without `database/factories/<Model>Factory.php`. Names in
 a package namespace (`<x-package::alert>`), names built at run time, and
 projects where a provider registers component paths or namespaces
-(`anonymousComponentPath`, `componentNamespace`) stay quiet.
+(`anonymousComponentPath`, `componentNamespace`) stay quiet. Component
+checks are also off when `composer.json` lists a package that ships
+un-namespaced components: any `*/blade-*` package (icon packs such as
+`blade-ui-kit/blade-heroicons`), `laravel/jetstream`, `filament/*` or
+`livewire/flux`. Livewire checks are off when a provider calls
+`Livewire::component()`, `componentNamespace()`, `addNamespace()` or
+`addLocation()`. `Blade::component(Alert::class)` registers `alert`; a
+`Blade::component()` call with no literal alias or class makes the component
+check quiet. None of the five checks reports while the index is partial (the
+3 s reading budget ran out).
 
 ## Not ported
 

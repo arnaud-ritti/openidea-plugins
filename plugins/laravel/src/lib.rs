@@ -200,6 +200,7 @@ fn problem(text: &str, range: std::ops::Range<usize>, code: &str, severity: Seve
 /// exist and, when asked for, routes that don't.
 pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -> Vec<Diagnostic> {
     let mut found = Vec::new();
+    let sure = !index.partial;
 
     for reference in refs::references(language, text).into_iter().filter(|r| r.closed) {
         let name = &text[reference.start..reference.end];
@@ -220,17 +221,17 @@ pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -
             Kind::Route if check_routes && !index.routes.contains_key(name) => {
                 found.push(problem(text, reference.start..reference.end, "missing-route", Severity::Warning, format!("Route \"{name}\" is not defined.")));
             }
-            Kind::Inertia if unknown_inertia_page(index, name) && enabled("reportUnknownInertiaPages") => {
+            Kind::Inertia if sure && unknown_inertia_page(index, name) && enabled("reportUnknownInertiaPages") => {
                 found.push(problem(text, reference.start..reference.end, "laravel.unknown-inertia-page", Severity::Warning, format!("Inertia page \"{name}\" does not exist.")));
             }
-            Kind::Livewire if unknown_livewire(index, name) && enabled("reportUnknownLivewireDirectives") => {
+            Kind::Livewire if sure && unknown_livewire(index, name) && enabled("reportUnknownLivewireDirectives") => {
                 found.push(problem(text, reference.start..reference.end, "laravel.unknown-livewire-directive", Severity::Warning, format!("Livewire component \"{name}\" does not exist.")));
             }
             _ => {}
         }
     }
 
-    if language == "blade" {
+    if language == "blade" && sure {
         for reference in refs::tag_references(text) {
             let name = &text[reference.start..reference.end];
             let range = reference.start..reference.end;
@@ -247,7 +248,7 @@ pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -
         }
     }
 
-    if language == "php" && enabled("reportUnknownFactories") {
+    if language == "php" && sure && enabled("reportUnknownFactories") {
         for range in refs::factory_classes(text) {
             let class = text[range.clone()].rsplit('\\').next().unwrap_or_default();
             if unknown_factory(index, class) {
@@ -269,7 +270,7 @@ fn unknown_component(index: &Index, name: &str) -> bool {
 }
 
 fn unknown_livewire(index: &Index, name: &str) -> bool {
-    !matches!(name, "is" | "styles" | "scripts" | "dynamic-component") && !index.livewire.contains_key(name) && !index.views.contains_key(&format!("livewire.{name}"))
+    !index.open_livewire && !matches!(name, "is" | "styles" | "scripts" | "dynamic-component") && !index.livewire.contains_key(name) && !index.views.contains_key(&format!("livewire.{name}"))
 }
 
 fn unknown_inertia_page(index: &Index, name: &str) -> bool {

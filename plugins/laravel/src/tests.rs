@@ -472,3 +472,49 @@ fn switched_off_checks_are_quiet() {
     assert!(codes(&plugin, "blade", "<x-nope /><livewire:nope />@livewire('nope')").is_empty());
     assert!(codes(&plugin, "php", "<?php\nPost::factory();").is_empty());
 }
+
+#[test]
+fn vendor_component_packages_keep_components_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("composer.json", r#"{"require": {"laravel/framework": "^11.0", "blade-ui-kit/blade-heroicons": "^2"}}"#)]);
+    assert!(codes(&plugin, "blade", "<x-heroicon-o-user />").is_empty());
+
+    let host = MockHost::install();
+    let plugin = activated(&host);
+    assert_eq!(codes(&plugin, "blade", "<x-heroicon-o-user />"), ["laravel.unknown-component"]);
+}
+
+#[test]
+fn registered_livewire_components_keep_livewire_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("app/Providers/AppServiceProvider.php", "<?php\nLivewire::component('shop-cart', Cart::class);\n")]);
+    assert!(codes(&plugin, "blade", "<livewire:shop-cart />@livewire('shop-cart')").is_empty());
+}
+
+#[test]
+fn blade_component_without_alias_is_derived_or_quiet() {
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("app/Providers/AppServiceProvider.php", "<?php\nBlade::component(\\Pkg\\FancyAlert::class);\n")]);
+    assert_eq!(codes(&plugin, "blade", "<x-fancy-alert /><x-nope />"), ["laravel.unknown-component"]);
+
+    let host = MockHost::install();
+    let plugin = activated_with(&host, &[("app/Providers/AppServiceProvider.php", "<?php\nBlade::component($class);\n")]);
+    assert!(codes(&plugin, "blade", "<x-nope />").is_empty());
+}
+
+#[test]
+fn partial_index_stays_quiet() {
+    let host = MockHost::install();
+    let mut plugin = activated_with(&host, &[("resources/js/Pages/Home.vue", ""), ("database/factories/ArticleFactory.php", "<?php\n")]);
+    let root = plugin.indexes.keys().next().unwrap().clone();
+    plugin.indexes.get_mut(&root).unwrap().partial = true;
+
+    let blade = "<x-nope /><livewire:nope />@livewire('nope')";
+    let php = "<?php\nInertia::render('Nope');\nPost::factory();\n";
+    assert!(codes(&plugin, "blade", blade).is_empty());
+    assert!(codes(&plugin, "php", php).is_empty());
+
+    plugin.indexes.get_mut(&root).unwrap().partial = false;
+    assert_eq!(codes(&plugin, "blade", blade).len(), 3);
+    assert_eq!(codes(&plugin, "php", php).len(), 2);
+}
