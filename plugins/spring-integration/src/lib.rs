@@ -318,8 +318,14 @@ impl Providers for Integration {
 
 const VIEW: &str = "diagram";
 
-fn location_key(path: &str, range: Range) -> String {
-    format!("b:{}:{}:{path}", range.start.line, range.start.character)
+fn key(prefix: &str, path: &str, range: Range) -> String {
+    format!("{prefix}:{}:{}:{path}", range.start.line, range.start.character)
+}
+
+/// `in -> out` channel names of an endpoint, to tell endpoints of one kind apart.
+fn route(refs: &[&Ref]) -> String {
+    let names = |role: Role| refs.iter().filter(|r| r.role == role).map(|r| r.name.as_str()).collect::<Vec<_>>().join(",");
+    format!("({} -> {})", names(Role::Consumes), names(Role::Produces))
 }
 
 /// Channels as nodes and endpoints as small nodes: input channel -> endpoint -> output channel.
@@ -338,15 +344,17 @@ fn diagram_of(index: &Index<Vec<Ref>>) -> (Vec<Node>, Vec<Edge>) {
             endpoints.entry((path, r.owner)).or_default().push(r);
         }
     }
-    let channel_id = |name: &str| location_key(channels[name].0, channels[name].1.range);
+    let channel_id = |name: &str| key("b", channels[name].0, channels[name].1.range);
     let mut nodes: Vec<Node> = channels
         .iter()
-        .map(|(name, (path, r))| Node::new(&location_key(path, r.range), name).detail("channel").accent(r.role == Role::Declares))
+        .map(|(name, (path, r))| Node::new(&key("b", path, r.range), name).detail("channel").accent(r.role == Role::Declares))
         .collect();
     let mut edges = BTreeSet::new();
     for ((path, _), refs) in &endpoints {
-        let id = location_key(path, refs[0].range).replacen('b', "e", 1);
-        nodes.push(Node::new(&id, &refs[0].what).detail(file_name(path)));
+        let id = key("e", path, refs[0].range);
+        let same_kind = endpoints.values().filter(|o| o[0].what == refs[0].what).count() > 1;
+        let label = if same_kind { format!("{} {}", refs[0].what, route(refs)) } else { refs[0].what.clone() };
+        nodes.push(Node::new(&id, &label).detail(file_name(path)));
         for r in refs {
             edges.insert(match r.role {
                 Role::Consumes => (channel_id(&r.name), id.clone()),
@@ -362,16 +370,23 @@ impl Views for Integration {
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
         let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its message channels.").button(refresh)) };
         let index = self.indexes.get(&project, COMMAND_BUDGET);
+        let complete = index.complete();
+        if !complete {
+            host::refresh_view(VIEW);
+        }
         let (nodes, edges) = diagram_of(index);
-        let status = format!("{} nodes · {} links{}", nodes.len(), edges.len(), if index.complete() { "" } else { " · scanning…" });
+        let status = format!("{} nodes · {} links{}", nodes.len(), edges.len(), if complete { "" } else { " · scanning…" });
         Ok(View::new(Body::Html(diagram::html(&nodes, &edges, "No message channels found."))).button(refresh).status(&status))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         let key = match event {
             ViewEvent::Button(b) if b == "refresh" => {
-                if let Some(project) = ctx.project() {
-                    self.indexes.get(&project, std::time::Duration::ZERO).reset();
+                // Resetting a scan in progress would throw away what it has read.
+                if let Some(project) = ctx.project()
+                    && self.indexes.get(&project, std::time::Duration::ZERO).complete()
+                {
+                    self.indexes.reset();
                 }
                 host::refresh_view(view);
                 return Ok(());
@@ -586,6 +601,9 @@ interface OrderGateway {
     fn integration_diagram_has_expected_nodes_and_edges() {
         let host = setup();
         let (nodes, edges) = diagram_of(Integration::default().indexes.get(&host.invocation().project().unwrap(), COMMAND_BUDGET));
+        let ids: BTreeSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids.len(), nodes.len(), "node ids are unique");
+        assert!(edges.iter().all(|e| ids.contains(e.from.as_str()) && ids.contains(e.to.as_str())));
         let label_of = |id: &str| nodes.iter().find(|n| n.id == id).map(|n| n.label.as_str()).unwrap_or("?");
         let mut pairs: Vec<(&str, &str)> = edges.iter().map(|e| (label_of(&e.from), label_of(&e.to))).collect();
         let mut labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
@@ -602,6 +620,41 @@ interface OrderGateway {
         assert!(page.contains(&format!("data-id=\"e:6:38:{BILLING_PATH}\"")), "{page}");
         p.handle(VIEW, ViewEvent::Message(format!("e:6:38:{BILLING_PATH}")), &host.invocation()).unwrap();
         assert_eq!(host.opened_locations(), [(BILLING_PATH.to_string(), 6, 38)]);
+    }
+
+    #[test]
+    fn integration_diagram_tells_endpoints_of_one_kind_apart() {
+        let host = MockHost::install();
+        let xml = "<beans xmlns=\"http://www.springframework.org/schema/beans\" xmlns:int=\"http://www.springframework.org/schema/integration\">\n<int:service-activator input-channel=\"a\" output-channel=\"b\"/>\n<int:service-activator input-channel=\"c\" output-channel=\"d\"/>\n</beans>";
+        host.add_file("src/main/resources/two.xml", xml);
+        let (nodes, _) = diagram_of(Integration::default().indexes.get(&host.invocation().project().unwrap(), COMMAND_BUDGET));
+        let mut labels: Vec<&str> = nodes.iter().filter(|n| n.label.starts_with('<')).map(|n| n.label.as_str()).collect();
+        labels.sort();
+        assert_eq!(labels, ["<int:service-activator> (a -> b)", "<int:service-activator> (c -> d)"]);
+    }
+
+    #[test]
+    fn refresh_during_scan_keeps_the_partial_index() {
+        let host = setup();
+        let mut p = Integration::default();
+        let project = host.invocation().project().unwrap();
+        p.indexes.get(&project, std::time::Duration::ZERO).update(CONFIG_PATH, CONFIG);
+        p.render(VIEW, None, &host.invocation()).unwrap();
+        host.refreshed_views();
+        p.indexes.reset();
+        p.indexes.get(&project, std::time::Duration::ZERO).update(CONFIG_PATH, CONFIG);
+        p.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert_eq!(p.indexes.get(&project, std::time::Duration::ZERO).files().len(), 1, "not reset");
+
+        p.indexes.get(&project, COMMAND_BUDGET);
+        p.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
+        assert!(p.indexes.get(&project, std::time::Duration::ZERO).files().is_empty(), "a complete index starts over");
+    }
+
+    #[test]
+    fn manifest_activates_on_the_diagram_view() {
+        let line = include_str!("../plugin.toml").lines().find(|l| l.starts_with("activation")).unwrap();
+        assert!(line.contains("\"on-view:diagram\""), "{line}");
     }
 
     #[test]
