@@ -53,7 +53,7 @@ impl Kind {
 
 const SCRIPT_EXTENSIONS: [&str; 5] = [".js", ".jsx", ".ts", ".tsx", ".vue"];
 const SKIPPED_DIRECTORIES: [&str; 3] = ["/node_modules/", "/dist/", "/build/"];
-const CLIENT_FACTORIES: [&str; 4] = ["new Client(", "new StompJs.Client(", "Stomp.over(", "Stomp.client("];
+const CLIENT_FACTORIES: [&str; 6] = ["new Client(", "new Client<", "new StompJs.Client(", "new StompJs.Client<", "Stomp.over(", "Stomp.client("];
 
 fn ident_before(text: &str, end: usize) -> &str {
     let head = &text[..end];
@@ -70,7 +70,10 @@ fn client_names(text: &str) -> BTreeSet<&str> {
         for (at, _) in text.match_indices(factory) {
             let before = text[..at].trim_end();
             if let Some(before) = before.strip_suffix('=') {
-                names.insert(ident_before(before.trim_end(), before.trim_end().len()));
+                let before = before.trim_end();
+                let statement = before.rsplit(['\n', ';', '{', '}']).next().unwrap_or(before);
+                let declared = statement.split(':').next().unwrap_or(statement).trim_end();
+                names.insert(ident_before(declared, declared.len()));
             }
         }
     }
@@ -665,5 +668,13 @@ client.onConnect = () => {
         let d = Document { path: "/project/web/src/api.ts".into(), language: "typescript".into(), version: 1, text: text.into() };
         assert!(tools.line_markers(&d).is_empty());
         assert!(tools.definition(&d, Position::new(2, 20)).is_empty());
+    }
+
+    #[test]
+    fn typed_declaration_receiver_is_linked() {
+        let _host = setup();
+        let text = "class Chat {\n  private stomp2: StompJs.Client = new StompJs.Client({});\n  connect() {\n    this.link = new Client<Opts>({});\n    const client: Client = new Client({});\n    client.subscribe('/topic/messages', cb);\n    this.stomp2.send('/app/chat/send', {}, '');\n    this.link.subscribe('/topic/messages', cb);\n  }\n}\n";
+        let kinds: Vec<_> = parse("chat.ts", text).unwrap().uses.iter().map(|u| u.kind).collect();
+        assert_eq!(kinds, [Kind::ClientSubscribe, Kind::ClientSend, Kind::ClientSubscribe]);
     }
 }
