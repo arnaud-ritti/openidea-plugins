@@ -28,7 +28,9 @@ Dev Mode run configurations:
 - A detector can only match marker files by name, so they show in every Maven or Gradle project once granted, Quarkus or not.
 - `./mvnw` and `./gradlew` can't be run (a `process:` program must be on `PATH` or absolute).
 
-Not ported: Java-side MicroProfile/Quarkus language server features (hover, go to definition, code lens, inlay hints, JAX-RS symbols, Java diagnostics and quick fixes), Qute support, the in-IDE project wizard (use code.quarkus.io), debugger auto-attach to Dev Mode and the run dashboard, named-map entries in completion (`quarkus.datasource."name".*`), and keys from extensions outside the bundled set. See `LIMITATIONS.md`.
+Checks (each group has a setting): duplicate keys, lines without a separator and empty values (`quarkus.checkSyntax`); values that are not a number, boolean, enum constant, duration or memory size (`quarkus.checkValues`); `${...}` expressions naming nothing defined in the file, the project, the environment or the system properties (`quarkus.checkExpressions`).
+
+Not ported: the project-wide missing-required-property check (the bundled metadata does not say which properties are required), Java-side MicroProfile/Quarkus language server features (hover, go to definition, code lens, inlay hints, JAX-RS symbols, Java diagnostics and quick fixes), Qute support, the in-IDE project wizard (use code.quarkus.io), debugger auto-attach to Dev Mode and the run dashboard, named-map entries in completion (`quarkus.datasource."name".*`), and keys from extensions outside the bundled set. See `LIMITATIONS.md`.
 
 Source code: this plugin's source repository, directory `plugins/quarkus`.
 

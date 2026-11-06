@@ -1,6 +1,7 @@
 //! Quarkus Tools for OpenIDEA: completion and checks for Quarkus configuration
 //! files, ported from Quarkus Tools for IntelliJ 2.6.1 (Red Hat, EPL-2.0).
 
+pub mod checks;
 mod java;
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
@@ -131,6 +132,13 @@ fn problems(path: &str, text: &str, lookup: &Lookup, complete: bool) -> Vec<Diag
             out.push(Diagnostic::new(range, Severity::Warning, message).code("unknown-property"));
         }
     }
+    let groups = checks::Groups {
+        syntax: host::setting_bool("quarkus.checkSyntax").unwrap_or(true),
+        values: host::setting_bool("quarkus.checkValues").unwrap_or(true),
+        expressions: host::setting_bool("quarkus.checkExpressions").unwrap_or(true),
+    };
+    let yaml = !path.ends_with(".properties");
+    out.extend(checks::check(text, yaml, lookup, groups).iter().map(|f| f.diagnostic(text)));
     out
 }
 
@@ -344,6 +352,25 @@ mod tests {
         let text = "\"%dev\":\n  quarkus:\n    http:\n      portt: 1\n      port: 8081\n";
         QuarkusTools::default().line_markers(&doc(YAML, text));
         assert_eq!(codes(text, &host.diagnostics()[YAML]), [("unknown-property", "portt")]);
+    }
+
+    #[test]
+    fn publishes_value_checks_with_the_deprecated_ones_and_clears_when_fixed() {
+        let host = quarkus_project();
+        let mut tools = QuarkusTools::default();
+        let text = "quarkus.http.port=abc\nquarkus.http.portt=1\nquarkus.http.port=1\n";
+        tools.line_markers(&doc(PROPS, text));
+        assert_eq!(codes(text, &host.diagnostics()[PROPS]).iter().map(|c| c.0).collect::<Vec<_>>(), ["unknown-property", "duplicate-key", "invalid-value"]);
+        host.set_setting("quarkus.checkValues", "false");
+        host.set_setting("quarkus.checkSyntax", "false");
+        tools.line_markers(&doc(PROPS, text));
+        assert_eq!(host.diagnostics()[PROPS].len(), 1);
+        tools.line_markers(&doc(PROPS, "quarkus.http.port=8080\n"));
+        assert!(host.diagnostics().get(PROPS).is_none_or(|d| d.is_empty()));
+        let yaml = "quarkus:\n  http:\n    port: abc\n";
+        host.set_setting("quarkus.checkValues", "true");
+        tools.line_markers(&doc(YAML, yaml));
+        assert_eq!(codes(yaml, &host.diagnostics()[YAML]), [("invalid-value", "abc")]);
     }
 
     #[test]

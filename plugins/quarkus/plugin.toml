@@ -52,3 +52,7 @@ name = "Quarkus Dev Mode (quarkus CLI)"
 files = ["pom.xml", "build.gradle", "build.gradle.kts"]
 command = "quarkus"
 args = ["dev"]
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Quarkus Tools"
