@@ -13,12 +13,13 @@ Works in any Spring XML file that declares `http://www.springframework.org/schem
   - service: the `ref` bean (or nested `<bean class>`) of an `<osgi:service>` must implement every exported interface;
   - listener: `bind-method`/`unbind-method` of an `<osgi:listener>` must be public, return `void` and take `(ServiceType, Map|Dictionary)` or `(ServiceReference)`; a listener without both methods must implement `OsgiServiceLifecycleListener`;
   - listener methods (`bind-method`, `unbind-method`, `registration-method`, `unregistration-method`) that don't exist in the listener's class.
-- **Go to Definition and completion**: `ref`, `comparator-ref`, `depends-on` → beans (XML ids/names/aliases of the project's Spring XML files, Java beans from stereotypes and `@Bean` methods); `interface` and `<osgi:interfaces><value>` → project Java classes (interfaces first); listener methods → the methods of the listener bean's class that fit the expected signature.
+- **Unresolved `ref`** (Info, `unresolved-osgi-ref`): a `ref` on `<osgi:service>`, `<osgi:listener>` or `<osgi:registration-listener>` naming no bean of the project. Info because beans from libraries or the container are invisible; placeholders are skipped.
+- **Go to Definition and completion**: `ref`, `comparator-ref`, `depends-on` → beans (on `<osgi:service ref>` the beans implementing the exported interfaces sort first; XML ids/names/aliases of the project's Spring XML files, Java beans from stereotypes and `@Bean` methods); `interface` and `<osgi:interfaces><value>` → project Java classes (interfaces first); listener methods → the methods of the listener bean's class that fit the expected signature; while typing `<osgix:` the compendium elements `cm-properties`, `managed-properties` and `managed-service-factory` (hand-written list, whether the host triggers completion inside a tag name is unverified).
 
 How it matches: classes by fully qualified name from the project's Java sources, supertypes through each file's imports, parameter types by simple name. A check only fires when the whole class hierarchy is in the project's sources. When the hierarchy reaches into a library (a superclass from a jar, a wildcard import), the check is skipped.
 
 Not ported:
-- type checks needing real type resolution: the registration method's first parameter against the service bean class, beans of an `<osgi:reference>` as service implementors, completion of `ref` restricted to beans implementing the interfaces (all beans are offered);
+- type checks needing real type resolution: the registration method's first parameter against the service bean class, beans of an `<osgi:reference>` as service implementors; `ref` completion only sorts, it never hides beans;
 - the "Interface is expected here" check (disabled upstream too);
 - `OsgiSpringBeanGenerateProvider` (Generate › Spring OSGi bean: no generate API), the `bundle` bean scope, `ReferenceEffectiveTypeProvider` (no Spring model to feed bean types into), the compendium DOM model;
 - Kotlin sources.
