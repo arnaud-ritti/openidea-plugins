@@ -6,18 +6,23 @@
 //! tag pycharm/263.7307.101).
 
 mod log;
+mod patterns;
 mod source;
 
 use log::{Config, Event, Format, Parsed, Severity};
 use openidea_plugin::syntax::{Fold, FoldKind, Highlight, Symbol, SymbolKind, SyntaxProvider, Token};
 use openidea_plugin::providers::{Document, Providers};
+use openidea_plugin::views::{View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Error, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Project, TextEditor, host, text,
+    Error, Event as HostEvent, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Project, StatusItem,
+    TextEditor, host, text,
 };
 use std::ops::Range;
 use std::rc::Rc;
 
 const CUSTOM_PATTERNS: &str = "customPatterns";
+const TIME_GAP: &str = "timeGapSeconds";
+const FORMAT_STATUS: &str = "format";
 // ponytail: only the head of a big log is parsed, so the provider answers within
 // the IDE's 50 ms edit budget; parse incrementally if big logs need colour past it.
 const MAX_DOCUMENT_BYTES: usize = 512 << 10;
@@ -30,7 +35,7 @@ pub struct Ideolog {
 
 impl Ideolog {
     fn config(&mut self) -> Rc<Config> {
-        let custom = host::setting_string(CUSTOM_PATTERNS).unwrap_or_default();
+        let custom = patterns::combined(&host::setting_string(CUSTOM_PATTERNS).unwrap_or_default());
         if let Some((built_from, config)) = &self.config
             && *built_from == custom
         {
@@ -46,8 +51,36 @@ impl Ideolog {
     }
 }
 
+impl Ideolog {
+    fn show_format(&mut self, ctx: &Invocation) {
+        let Some(editor) = ctx.editor().filter(|e| matches!(e.language().as_str(), "ideolog" | "log")) else {
+            host::remove_status_item(FORMAT_STATUS);
+            return;
+        };
+        let Ok(document) = editor.document() else { return };
+
+        let config = self.config();
+        let (text, tooltip) = match config.detect(head(&document.text)) {
+            Some(format) => (format!("Log: {}", format.name), "The log format Ideolog detected. Click to manage custom formats."),
+            None => ("Log: plain text".to_owned(), "No known log format matches this file. Click to add a custom format."),
+        };
+        host::set_status_item(FORMAT_STATUS, &StatusItem { text, tooltip: Some(tooltip.into()), command: Some("patterns".into()) });
+    }
+}
+
 impl Plugin for Ideolog {
+    fn handle_events(&mut self, events: &[HostEvent], ctx: &Invocation) {
+        if events.iter().any(|e| matches!(e, HostEvent::EditorFocused(_) | HostEvent::FileOpened(_))) {
+            self.show_format(ctx);
+        }
+    }
+
     fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        if id == "patterns" {
+            host::reveal_view(patterns::VIEW)?;
+            return Ok(None);
+        }
+
         let editor = ctx.editor().ok_or("No file is open.")?;
         if !matches!(editor.language().as_str(), "ideolog" | "log") {
             return Err("Not a log file.".into());
@@ -74,7 +107,8 @@ impl Plugin for Ideolog {
 
 impl SyntaxProvider for Ideolog {
     fn highlights(&mut self, _language: &str, text: &str) -> Vec<Token> {
-        highlights(&self.config(), head(text))
+        let gap = host::setting_number(TIME_GAP).unwrap_or(0.0);
+        highlights_with_gaps(&self.config(), head(text), gap)
     }
 
     fn outline(&mut self, _language: &str, text: &str) -> Vec<Symbol> {
@@ -104,6 +138,22 @@ impl Providers for Ideolog {
     }
 }
 
+impl Views for Ideolog {
+    fn render(&mut self, view: &str, _viewport: Option<Viewport>, _ctx: &Invocation) -> Result<View, Error> {
+        match view {
+            patterns::VIEW => Ok(patterns::render()),
+            _ => Err(Error::NotFound(view.into())),
+        }
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, _ctx: &Invocation) -> Result<(), Error> {
+        match view {
+            patterns::VIEW => patterns::handle(event),
+            _ => Err(Error::NotFound(view.into())),
+        }
+    }
+}
+
 /// The open project holding `path` (providers get no window context).
 fn project_of(path: &str) -> Option<Project> {
     let projects = host::projects().ok()?;
@@ -112,9 +162,8 @@ fn project_of(path: &str) -> Option<Project> {
     projects.into_iter().nth(index)
 }
 
-// ponytail: SDK 0.1.37's `register_plugin!` has no `syntax, providers` arm. This is
-// its `syntax` arm plus its (doc(hidden)) `__providers_exports!`; replace it with
-// `register_plugin!(Ideolog, syntax, providers)` once the SDK has that arm.
+// ponytail: the SDK's `register_plugin!` has no `syntax, providers, views` arm. This is
+// its `syntax` arm plus its (doc(hidden)) `__providers_exports!` and `__views_exports!`.
 #[cfg(not(target_arch = "wasm32"))]
 const _: fn() -> Ideolog = <Ideolog as ::core::default::Default>::default;
 #[cfg(target_arch = "wasm32")]
@@ -124,6 +173,7 @@ const _: () = {
     struct __OpenideaComponent;
     openidea_plugin::__plugin_exports!(Ideolog, __OpenideaComponent, openidea_plugin::bindings);
     openidea_plugin::__providers_exports!(Ideolog, __OpenideaComponent);
+    openidea_plugin::__views_exports!(Ideolog, __OpenideaComponent);
 
     impl wit::Guest for __OpenideaComponent {
         fn highlights(language: String, text: String) -> Vec<wit::Token> {
@@ -162,12 +212,33 @@ fn parsed_events<'a>(config: &'a Config, text: &'a str) -> (Option<&'a Format>, 
     (format, events.collect())
 }
 
+#[cfg(test)]
 fn highlights(config: &Config, text: &str) -> Vec<Token> {
+    highlights_with_gaps(config, text, 0.0)
+}
+
+/// With `gap_seconds` above zero, the time of an event that comes at least
+/// that long after the previous timed one gets the `Constant` colour.
+fn highlights_with_gaps(config: &Config, text: &str, gap_seconds: f64) -> Vec<Token> {
     let (format, events) = parsed_events(config, text);
     let mut out = Vec::new();
+    let mut previous: Option<f64> = None;
     for (event, parsed) in &events {
+        let now = parsed.time(format).and_then(log::seconds);
+        let gap_range = match (gap_seconds > 0.0, previous, now) {
+            (true, Some(before), Some(now)) if now - before >= gap_seconds => parsed.time_range(format),
+            _ => None,
+        };
+        previous = now.or(previous);
+
         for (range, kind) in config.highlight(format, parsed) {
-            push_by_line(&mut out, event.text, event.offset, range, kind);
+            match &gap_range {
+                Some(gap) if range.start < gap.end && gap.start < range.end => {}
+                _ => push_by_line(&mut out, event.text, event.offset, range, kind),
+            }
+        }
+        if let Some(gap) = gap_range {
+            push_by_line(&mut out, event.text, event.offset, gap, Highlight::Constant);
         }
     }
     out
@@ -288,6 +359,7 @@ fn jump_to_source(config: &Config, ctx: &Invocation, editor: &TextEditor) -> Res
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
+    use openidea_plugin::views::Body;
 
     const IDEA: &str = "\
 2024-05-01 10:00:00,123 [   1234]   INFO - #c.i.Startup - IDE started
@@ -311,6 +383,80 @@ java.lang.IllegalStateException: boom
     fn open_log(host: &MockHost, line: u32, column: u32) {
         host.set_project_root(Some("/p"));
         host.open_editor("/p/logs/idea.log", "ideolog", IDEA, &[(line, column, line, column)]);
+    }
+
+    #[test]
+    fn long_pauses_colour_the_time_of_the_next_event() {
+        let text = "2024-05-01 10:00:00,000 [   1] INFO - #a - one\n2024-05-01 10:00:01,000 [   1] INFO - #a - two\n2024-05-01 10:05:00,000 [   1] INFO - #a - three\n";
+        let marked = |gap| -> Vec<String> {
+            highlights_with_gaps(&Config::default(), text, gap)
+                .into_iter()
+                .filter(|t| t.kind == Highlight::Constant)
+                .map(|t| text[t.range].trim().to_owned())
+                .collect()
+        };
+        assert_eq!(marked(60.0), ["2024-05-01 10:05:00,000"]);
+        assert!(marked(0.0).is_empty());
+        assert_eq!(marked(1.0).len(), 2);
+    }
+
+    #[test]
+    fn status_item_names_the_detected_format() {
+        let host = MockHost::install();
+        open_log(&host, 0, 0);
+        let mut plugin = Ideolog::default();
+
+        plugin.handle_events(&[HostEvent::EditorFocused(Some("/p/logs/idea.log".into()))], &host.invocation());
+        assert_eq!(host.status_items()["format"].text, "Log: IntelliJ IDEA");
+
+        host.open_editor("/p/logs/other.log", "ideolog", "just some text\n", &[]);
+        plugin.handle_events(&[HostEvent::EditorFocused(None)], &host.invocation());
+        assert_eq!(host.status_items()["format"].text, "Log: plain text");
+
+        host.open_editor("/p/a.rs", "rust", "fn main() {}", &[]);
+        plugin.handle_events(&[HostEvent::EditorFocused(None)], &host.invocation());
+        assert!(host.status_items().is_empty());
+    }
+
+    #[test]
+    fn patterns_view_adds_a_format_and_removes_it() {
+        let host = MockHost::install();
+        let mut plugin = Ideolog::default();
+        let ctx = host.invocation();
+        let click = |plugin: &mut Ideolog, id: &str| plugin.handle("patterns", ViewEvent::Button(id.into()), &ctx).unwrap();
+
+        for answer in ["Mine", r"^(\d+) \[(\w+)\] (.*)$", "^\\d", "0", "1", "-1"] {
+            host.answer_next_prompt(Some(&[answer]));
+        }
+        click(&mut plugin, "add-format");
+
+        let text = "12 [WARN] careful\n";
+        let format_name = |plugin: &mut Ideolog| plugin.config().detect(text).map(|f| f.name.clone());
+        assert_eq!(format_name(&mut plugin).as_deref(), Some("Mine"));
+
+        host.answer_next_prompt(Some(&["^x"]));
+        host.answer_next_prompt(Some(&["HIGHLIGHT_LINE"]));
+        host.answer_next_prompt(Some(&["red"]));
+        click(&mut plugin, "add-highlight");
+        let Body::Table(table) = plugin.render("patterns", None, &ctx).unwrap().body else { panic!("a table") };
+        assert_eq!(table.rows.len(), 2);
+
+        host.answer_next_prompt(Some(&["0"]));
+        click(&mut plugin, "remove");
+        assert_eq!(format_name(&mut plugin), None);
+    }
+
+    #[test]
+    fn a_broken_pattern_is_not_stored() {
+        let host = MockHost::install();
+        let ctx = host.invocation();
+        for answer in ["Bad", "^(unclosed", "^", "0", "1", "-1"] {
+            host.answer_next_prompt(Some(&[answer]));
+        }
+        Ideolog::default().handle("patterns", ViewEvent::Button("add-format".into()), &ctx).unwrap();
+
+        assert!(patterns::stored().is_empty());
+        assert_eq!(host.notifications().len(), 1);
     }
 
     #[test]

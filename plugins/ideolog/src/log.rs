@@ -31,11 +31,30 @@ const MONOLOG: &str = concat!(
 );
 const SERILOG: &str =
     r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?\s[+-]\d\d:\d\d)\s\[(VRB|DBG|INF|WRN|ERR|FTL)]\s(.*)$";
+fn default_name(uuid: &str) -> &'static str {
+    match uuid {
+        "b5772998-bf1e-4d9d-ab41-da0b86451163" => "Pipe-separated",
+        "8a0e8992-94cb-4f4c-8be2-42b03609626b" => "IntelliJ IDEA",
+        "e9fa2755-8390-42f5-a41e-a909c58c8cf9" => "TeamCity build log",
+        "b8fcb4d4-b1b8-4681-90f1-42f7c02aaf67" => "Logcat",
+        "19dd1738-1dc7-4df6-b437-18e0800b7782" => "Loguru",
+        "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0001" => "Docker",
+        "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0002" => "Python logging",
+        "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0003" => "Python logging with timestamps",
+        "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0004" => "nginx error log",
+        "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0006" => "Monolog",
+        "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0007" => "Serilog",
+        SYSLOG_UUID => "Syslog",
+        _ => "Built-in format",
+    }
+}
+
 const ERROR_WORDS: &str = r"\b(error|fatal|fail(ed|ure)?|critical|panic)\b";
 const WARN_WORDS: &str = r"\bwarn(ing)?\b";
 
 pub struct Format {
     pub uuid: String,
+    pub name: String,
     pattern: Regex,
     line_start: Regex,
     pub time_column: Option<usize>,
@@ -136,6 +155,7 @@ impl Default for Config {
         .map(|(uuid, pattern, line_start, [time, severity, category])| {
             let mut format = Format::new(uuid, pattern, line_start, time, severity, category).unwrap();
             format.level_from_message = uuid == SYSLOG_UUID;
+            format.name = default_name(uuid).to_owned();
             format
         })
         .collect();
@@ -163,6 +183,7 @@ impl Format {
         let compile = |p: &str, flags: &str| Regex::new(&format!("{flags}{p}")).map_err(|e| format!("{p}: {e}"));
         Ok(Self {
             uuid: uuid.to_owned(),
+            name: String::new(),
             pattern: compile(pattern, "(?s)")?,
             line_start: compile(line_start, "")?,
             time_column: column(time),
@@ -211,7 +232,10 @@ impl Config {
                     int("severityId"),
                     int("categoryId"),
                 )
-                .map(|format| custom_formats.push(format)),
+                .map(|mut format| {
+                    format.name = attr(&attrs, "name").filter(|n| !n.is_empty()).unwrap_or("Custom format").to_owned();
+                    custom_formats.push(format);
+                }),
                 _ => custom_rule(&attrs).map(|rule| config.rules.extend(rule)),
             };
             if let Err(e) = result {
@@ -343,6 +367,11 @@ impl<'a> Parsed<'a> {
         self.value(format.and_then(|f| f.time_column))
     }
 
+    pub fn time_range(&self, format: Option<&Format>) -> Option<Range<usize>> {
+        let column = format.and_then(|f| f.time_column)?;
+        self.tokens.iter().filter(|t| !t.separator).nth(column).map(|t| t.range.clone())
+    }
+
     pub fn category(&self, format: Option<&Format>) -> Option<&'a str> {
         self.value(format.and_then(|f| f.category_column)).filter(|c| !c.is_empty())
     }
@@ -370,6 +399,36 @@ impl<'a> Parsed<'a> {
             _ => None,
         }
     }
+}
+
+static TIMESTAMP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(\d{4})[-/](\d\d)[-/](\d\d)|(\d\d)-(\d\d)|([A-Z][a-z]{2})\s+(\d{1,2}))?[ T]*(\d\d):(\d\d):(\d\d)(?:[.,](\d+))?").unwrap()
+});
+
+const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/// Seconds of a log timestamp on a common scale, for the gap between events.
+/// Time zones are ignored and a missing year counts as 2000: only differences
+/// within one log matter.
+// ponytail: handles ISO-like, Logcat, syslog and time-only stamps; other time columns get no gaps.
+pub fn seconds(time: &str) -> Option<f64> {
+    let c = TIMESTAMP.captures(time.trim()).ok()??;
+    let number = |i: usize| c.get(i).and_then(|m| m.as_str().parse::<i64>().ok());
+
+    let (year, month, day) = if let (Some(y), Some(m), Some(d)) = (number(1), number(2), number(3)) {
+        (y, m, d)
+    } else if let (Some(m), Some(d)) = (number(4), number(5)) {
+        (2000, m, d)
+    } else if let Some(name) = c.get(6) {
+        (2000, MONTHS.iter().position(|n| *n == name.as_str())? as i64 + 1, number(7)?)
+    } else {
+        (2000, 1, 1)
+    };
+
+    let (y, m) = if month <= 2 { (year - 1, month + 9) } else { (year, month - 3) };
+    let days = 365 * y + y / 4 - y / 100 + y / 400 + (153 * m + 2) / 5 + day;
+    let fraction = c.get(11).map_or(0.0, |f| format!("0.{}", f.as_str()).parse::<f64>().unwrap_or(0.0));
+    Some((days * 86_400 + number(8)? * 3_600 + number(9)? * 60 + number(10)?) as f64 + fraction)
 }
 
 fn message_severity(message: &str) -> Option<Severity> {
@@ -519,6 +578,11 @@ fn custom_rule(attrs: &[(String, String)]) -> Result<Option<Rule>, String> {
     Rule::new(attr(attrs, "pattern").unwrap_or_default(), format, column, action, kind).map(Some)
 }
 
+#[cfg(test)]
+pub fn colour_kind_of(argb: i32) -> Option<Highlight> {
+    colour_kind(&argb.to_string())
+}
+
 /// The theme kind closest to an Ideolog colour: a signed ARGB integer, or
 /// `{"lightRgb": …, "darkRgb": …}` (the light one is used).
 fn colour_kind(value: &str) -> Option<Highlight> {
@@ -549,7 +613,7 @@ fn colour_kind(value: &str) -> Option<Highlight> {
 }
 
 /// `<Name attr="…" …/>` elements of the two pattern kinds, attributes unescaped.
-fn elements(xml: &str) -> Vec<(&'static str, Vec<(String, String)>)> {
+pub fn elements(xml: &str) -> Vec<(&'static str, Vec<(String, String)>)> {
     let mut out = Vec::new();
     let mut rest = xml;
     while let Some(start) = rest.find('<') {
@@ -577,7 +641,7 @@ fn attributes(mut text: &str) -> Vec<(String, String)> {
     attrs
 }
 
-fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+pub fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
     attrs.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
 }
 
@@ -632,6 +696,17 @@ mod tests {
     <LogParsingPattern enabled="true" name="Serilog" pattern="^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [+-]?\d{2}:\d{2}) \[([A-Z]+)\] (.*)$" timePattern="yyyy-MM-dd HH:mm:ss.SSS XXX" linePattern="^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}" timeId="0" severityId="1" categoryId="-1" fullmatch="false" uuid="496412b0-aed0-4b48-a539-30522f90d3ce" />
   </parsingPatterns>
 </State>"#;
+
+    #[test]
+    fn timestamps_become_comparable_seconds() {
+        let gap = |a: &str, b: &str| seconds(b).unwrap() - seconds(a).unwrap();
+        assert_eq!(gap("2024-05-01 10:00:00,500", "2024-05-01 10:00:02.000"), 1.5);
+        assert_eq!(gap("2024-02-28T23:59:59Z", "2024-03-01T00:00:00Z"), 86_401.0);
+        assert_eq!(gap("05-01 10:00:00.000", "05-01 10:01:00.000"), 60.0);
+        assert_eq!(gap("Nov  6 10:00:00", "Nov  6 10:00:09"), 9.0);
+        assert_eq!(gap("10:00:00", "10:05:00"), 300.0);
+        assert_eq!(seconds("INFO"), None);
+    }
 
     #[test]
     fn exception_detection_finds_signals_anywhere_in_the_event() {
