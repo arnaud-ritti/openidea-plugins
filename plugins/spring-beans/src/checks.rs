@@ -2,7 +2,7 @@
 //! check stays quiet when an annotation comes from a library other than
 //! Spring or a name is not a plain string literal.
 
-use crate::{aop, injection_checks};
+use crate::{annotation_checks, aop, injection_checks};
 use crate::model::{Bean, class_bean, method_bean, short_name};
 use crate::{World, file_name};
 use openidea_plugin::{Severity, host};
@@ -41,6 +41,8 @@ pub struct Groups {
     pub aop: bool,
     pub xml: bool,
     pub injection: bool,
+    pub profiles: bool,
+    pub async_methods: bool,
 }
 
 impl Default for Groups {
@@ -56,6 +58,8 @@ impl Default for Groups {
             aop: true,
             xml: true,
             injection: true,
+            profiles: true,
+            async_methods: true,
         }
     }
 }
@@ -75,6 +79,8 @@ impl Groups {
             aop: on("checkAop", defaults.aop),
             xml: on("checkXml", defaults.xml),
             injection: on("checkInjectionAnnotations", defaults.injection),
+            profiles: on("checkProfiles", defaults.profiles),
+            async_methods: on("checkAsync", defaults.async_methods),
         }
     }
 }
@@ -102,6 +108,12 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         }
         if groups.injection {
             injection_checks::check(file, ty, &mut out);
+        }
+        if groups.profiles {
+            annotation_checks::check_profiles(file, ty, &mut out);
+        }
+        if groups.async_methods {
+            annotation_checks::check_async(file, ty, &mut out);
         }
         if groups.aop {
             pointcut_designators(path, file, ty, &mut out);

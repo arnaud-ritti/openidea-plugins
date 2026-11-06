@@ -4,6 +4,7 @@
 //! Text-based: types match by simple name through the project's own type
 //! hierarchy; beans from libraries and auto-configuration aren't seen.
 
+mod annotation_checks;
 mod aop;
 mod checks;
 mod injection_checks;

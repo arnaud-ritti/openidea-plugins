@@ -2,6 +2,7 @@ use super::*;
 use openidea_plugin::Event;
 use openidea_plugin::mock::MockHost;
 use spring_text::xml;
+use crate::annotation_checks;
 
 const SERVICE: &str = r#"package com.acme;
 
@@ -1714,4 +1715,82 @@ fn injection_ranges_use_utf16_columns_with_multibyte_text() {
     let diagnostics = &host.diagnostics()[&document.path];
     let diagnostic = diagnostics.iter().find(|d| d.code.as_deref() == Some("static-injection")).unwrap();
     assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 43));
+}
+
+#[test]
+fn profile_expression_problem_cases() {
+    for bad in ["", "  ", "a & b | c", "a | b & c", "!", "(a & b", "a & b)", "a &", "!!", "()"] {
+        assert!(annotation_checks::profile_expression_problem(bad).is_some(), "{bad:?} should report");
+    }
+    for good in ["a | b", "!dev", "(a & b) | c", "a", " a & b ", "!(a | b)", "a & (b | c)", "((a))", "a&b&c", "!a & !b"] {
+        assert_eq!(annotation_checks::profile_expression_problem(good), None, "{good:?} should be quiet");
+    }
+}
+
+#[test]
+fn empty_profile_is_reported() {
+    let text = "@Profile(\"\")\n@Service\nclass A {\n    @Bean\n    @Profile(\" \")\n    B b() { return null; }\n}\n";
+    assert_eq!(found(text), [pair("profile-expression", ""), pair("profile-expression", " ")]);
+}
+
+#[test]
+fn mixed_operators_are_reported() {
+    let text = "@Service\nclass A {\n    @Profile({\"x\", \"a & b | c\", \"!\"})\n    void m() {}\n}\n";
+    assert_eq!(found(text), [pair("profile-expression", "a & b | c"), pair("profile-expression", "!")]);
+    let valid = "@Profile({\"a\", \"!b\", \"(a & b) | c\"})\n@Service\nclass A {}\n";
+    assert!(found(valid).is_empty());
+}
+
+#[test]
+fn profile_checks_are_quiet_for_library_or_dynamic_name() {
+    let constant = "@Profile(NAMES)\n@Service\nclass A {}\n";
+    assert!(found(constant).is_empty());
+    let concatenated = "@Profile(\"a &\" + X)\n@Service\nclass A {}\n";
+    assert!(found(concatenated).is_empty());
+    let placeholder = "@Profile(\"${p} & !\")\n@Service\nclass A {}\n";
+    assert!(found(placeholder).is_empty());
+    let foreign = "import com.acme.Profile;\n\n@Profile(\"\")\n@Service\nclass A {}\n";
+    assert!(found(foreign).is_empty());
+}
+
+#[test]
+fn profile_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\nclass A {\n    @Named(\"é\") @Profile(\"a & b | c\") void m() {}\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let diagnostic = host.diagnostics()[&document.path].iter().find(|d| d.code.as_deref() == Some("profile-expression")).unwrap().clone();
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 26));
+}
+
+#[test]
+fn async_returning_string_is_reported() {
+    let text = "@Service\nclass A {\n    @Async\n    public String a() { return null; }\n    @Async\n    int b() { return 0; }\n    @Async\n    public List<String> c() { return null; }\n}\n";
+    assert_eq!(found(text), [pair("async-return-type", "String"), pair("async-return-type", "int"), pair("async-return-type", "List")]);
+}
+
+#[test]
+fn async_returning_future_types_is_quiet() {
+    let text = "@Service\nclass A {\n    @Async\n    void a() {}\n    @Async\n    Future<String> b() { return null; }\n    @Async\n    CompletableFuture<String> c() { return null; }\n    @Async\n    ListenableFuture<String> d() { return null; }\n    @Async\n    CompletionStage<String> e() { return null; }\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn async_check_is_quiet_for_library_or_dynamic_name() {
+    let project = "@Service\nclass A {\n    @Async\n    Result a() { return null; }\n}\n";
+    assert!(found(project).is_empty());
+    let foreign = "import com.acme.Async;\n\n@Service\nclass A {\n    @Async\n    String a() { return null; }\n}\n";
+    assert!(found(foreign).is_empty());
+    let plain = "@Service\nclass A {\n    String a() { return null; }\n}\n";
+    assert!(found(plain).is_empty());
+}
+
+#[test]
+fn switched_off_profile_and_async_groups_are_quiet() {
+    let text = "@Profile(\"\")\n@Service\nclass A {\n    @Async\n    String a() { return null; }\n}\n";
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkProfiles", "false");
+    assert_eq!(findings(&host, &mut Navigator::default(), "Subject.java", text), [pair("async-return-type", "String")]);
+    host.set_setting("springBeans.checkAsync", "false");
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", text).is_empty());
 }

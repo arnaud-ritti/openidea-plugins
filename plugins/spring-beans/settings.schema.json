@@ -45,6 +45,16 @@
       "title": "Report @Autowired, @Value, @Inject and @Resource on static members and conflicting @Autowired constructors",
       "default": true
     },
+    "springBeans.checkProfiles": {
+      "type": "boolean",
+      "title": "Report malformed @Profile expressions",
+      "default": true
+    },
+    "springBeans.checkAsync": {
+      "type": "boolean",
+      "title": "Report @Async methods that return a value instead of void or a Future",
+      "default": true
+    },
     "springBeans.checkXml": {
       "type": "boolean",
       "title": "Run the other checks on Spring XML configuration files",
