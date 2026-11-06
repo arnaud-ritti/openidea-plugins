@@ -328,14 +328,14 @@ impl WebTools {
             return Vec::new();
         }
         let groups = checks::Groups::from_settings();
-        let configured = match self.versioning.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
-            Some(index) if groups.api_versioning => {
+        let (configured, standard_parser) = match self.versioning.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
+            Some(index) if groups.api_versioning || groups.version_format => {
                 let files: Vec<_> = index.iter().map(|(_, v)| *v).collect();
-                checks::project_versioning(index.complete(), &files)
+                (checks::project_versioning(index.complete(), &files), checks::project_standard_parser(index.complete(), &files))
             }
-            _ => None,
+            _ => (None, None),
         };
-        checks::check_java(&java::parse(&doc.text), configured, groups)
+        checks::check_java(&java::parse(&doc.text), configured, standard_parser, groups)
             .iter()
             .map(|f| f.diagnostic(&doc.text))
             .collect()

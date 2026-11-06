@@ -14,12 +14,13 @@ const DATA_BINDERS: [&str; 4] = ["WebDataBinder", "DataBinder", "ServletRequestD
 pub struct Groups {
     pub api_versioning: bool,
     pub init_binder: bool,
+    pub version_format: bool,
 }
 
 impl Groups {
     pub fn from_settings() -> Self {
         let on = |key: &str| host::setting_bool(&format!("springWeb.{key}")).unwrap_or(true);
-        Self { api_versioning: on("checkApiVersioning"), init_binder: on("checkInitBinder") }
+        Self { api_versioning: on("checkApiVersioning"), init_binder: on("checkInitBinder"), version_format: on("checkVersionFormat") }
     }
 }
 
@@ -28,6 +29,7 @@ impl Groups {
 pub struct Versioning {
     pub is_config_file: bool,
     pub configured: bool,
+    pub custom_parser: bool,
 }
 
 /// Reads one source or `application*` file: `None` for a source that does not mention API versioning.
@@ -35,7 +37,8 @@ pub fn versioning(path: &str, text: &str) -> Option<Versioning> {
     let is_config_file = !path.ends_with(".java") && !path.ends_with(".kt");
     let lower = text.to_ascii_lowercase();
     let configured = lower.contains("apiversion") || lower.contains("api-version") || lower.contains("api_version");
-    (is_config_file || configured).then_some(Versioning { is_config_file, configured })
+    let custom_parser = text.contains("ApiVersionParser");
+    (is_config_file || configured).then_some(Versioning { is_config_file, configured, custom_parser })
 }
 
 /// Whether the project configures versioning; `None` unless every file was read and an `application*` file exists.
@@ -46,7 +49,12 @@ pub fn project_versioning(complete: bool, files: &[Versioning]) -> Option<bool> 
     Some(files.iter().any(|f| f.configured))
 }
 
-pub fn check_java(file: &JavaFile, versioning_configured: Option<bool>, groups: Groups) -> Vec<Finding> {
+/// Whether the project uses Spring's own version parser; `None` unless every file was read.
+pub fn project_standard_parser(complete: bool, files: &[Versioning]) -> Option<bool> {
+    complete.then(|| files.iter().all(|f| !f.custom_parser))
+}
+
+pub fn check_java(file: &JavaFile, versioning_configured: Option<bool>, standard_parser: Option<bool>, groups: Groups) -> Vec<Finding> {
     let mut out = Vec::new();
     for ty in file.types.iter().filter(|t| t.kind == "class") {
         if groups.api_versioning && versioning_configured == Some(false) {
@@ -54,6 +62,9 @@ pub fn check_java(file: &JavaFile, versioning_configured: Option<bool>, groups: 
         }
         if groups.init_binder {
             init_binder_signature(file, ty, &mut out);
+        }
+        if groups.version_format && standard_parser == Some(true) {
+            invalid_api_version(file, ty, &mut out);
         }
     }
     out
@@ -77,6 +88,35 @@ fn api_version_mismatch(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) 
             version.end,
             "api-version-mismatch",
             "This mapping uses `version`, but no API versioning is configured (spring.mvc.apiversion.* or ApiVersionConfigurer), so the attribute has no effect.",
+        ));
+    }
+}
+
+fn is_semantic_version(text: &str) -> bool {
+    let core = text.strip_suffix('+').unwrap_or(text);
+    let core = core.strip_prefix('v').unwrap_or(core);
+    let parts: Vec<_> = core.split('.').collect();
+
+    parts.len() <= 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The default parser reads `major[.minor[.patch]]`; a literal that is not one never matches a request.
+fn invalid_api_version(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
+    let annotations = ty.annotations.iter().chain(ty.members.iter().flat_map(|m| &m.annotations));
+    for a in annotations.filter(|a| MAPPINGS.contains(&a.name.as_str())) {
+        let Some(version) = a.arg("version").filter(|_| from_spring(file, &a.name)) else { continue };
+        let [literal] = version.strings.as_slice() else { continue };
+        let quote = literal.at - version.at;
+        let alone = quote > 0 && version.end - literal.end == quote && version.text.len() == literal.end - literal.at + 2 * quote;
+        if !alone || is_semantic_version(&literal.value) {
+            continue;
+        }
+
+        out.push(Finding::new(
+            version.at,
+            version.end,
+            "invalid-api-version",
+            "This is not a version the default parser reads; use `major`, `major.minor` or `major.minor.patch`, optionally ending in `+` for a baseline.",
         ));
     }
 }
@@ -111,8 +151,14 @@ mod tests {
     use super::*;
     use spring_text::java::parse;
 
+    const ALL: Groups = Groups { api_versioning: true, init_binder: true, version_format: true };
+
     fn run(text: &str, configured: Option<bool>) -> Vec<(&'static str, String)> {
-        let found = check_java(&parse(text), configured, Groups { api_versioning: true, init_binder: true });
+        run_with(text, configured, Some(true), ALL)
+    }
+
+    fn run_with(text: &str, configured: Option<bool>, parser: Option<bool>, groups: Groups) -> Vec<(&'static str, String)> {
+        let found = check_java(&parse(text), configured, parser, groups);
         found.iter().map(|f| (f.code, text[f.start..f.end].to_owned())).collect()
     }
 
@@ -140,11 +186,11 @@ mod tests {
         assert_eq!(none("/p/application.properties", "spring.mvc.apiversion.use.header=X"), Some(true));
         assert_eq!(none("/p/A.java", "class A {}"), None);
         assert_eq!(none("/p/C.java", "class C implements WebMvcConfigurer { void configureApiVersioning(ApiVersionConfigurer c) {} }"), Some(true));
-        let cfg = Versioning { is_config_file: true, configured: false };
+        let cfg = Versioning { is_config_file: true, configured: false, custom_parser: false };
         assert_eq!(project_versioning(true, &[cfg]), Some(false));
         assert_eq!(project_versioning(false, &[cfg]), None);
-        assert_eq!(project_versioning(true, &[Versioning { is_config_file: false, configured: true }]), None);
-        assert_eq!(project_versioning(true, &[cfg, Versioning { is_config_file: false, configured: true }]), Some(true));
+        assert_eq!(project_versioning(true, &[Versioning { is_config_file: false, configured: true, custom_parser: false }]), None);
+        assert_eq!(project_versioning(true, &[cfg, Versioning { is_config_file: false, configured: true, custom_parser: false }]), Some(true));
     }
 
     const BINDERS: &str = "import org.springframework.web.bind.annotation.InitBinder;\n@Controller\nclass A {\n    @InitBinder\n    String bad(WebDataBinder b) { return \"\"; }\n    @InitBinder(\"x\")\n    void none(Locale l) {}\n    @InitBinder\n    void ok(WebDataBinder b, WebRequest r) {}\n}\n";
@@ -155,7 +201,7 @@ mod tests {
             run(BINDERS, None),
             [("init-binder-signature", "bad".to_owned()), ("init-binder-signature", "none".to_owned())]
         );
-        let found = check_java(&parse(BINDERS), None, Groups { api_versioning: true, init_binder: true });
+        let found = check_java(&parse(BINDERS), None, None, ALL);
         assert_eq!(found[0].severity, Severity::Error);
         assert_eq!(found[1].severity, Severity::Warning);
     }
@@ -170,7 +216,77 @@ mod tests {
 
     #[test]
     fn groups_can_be_switched_off() {
-        let off = Groups { api_versioning: false, init_binder: false };
-        assert!(check_java(&parse(BINDERS), Some(false), off).is_empty());
+        let off = Groups { api_versioning: false, init_binder: false, version_format: false };
+        assert!(check_java(&parse(BINDERS), Some(false), Some(true), off).is_empty());
+    }
+
+    fn versions(version: &str) -> Vec<(&'static str, String)> {
+        run(&VERSIONED.replace("\"1.1\"", version), Some(true))
+    }
+
+    #[test]
+    fn malformed_version_warns() {
+        for bad in ["\"1.x\"", "\"latest\"", "\"1..2\""] {
+            assert_eq!(versions(bad), [("invalid-api-version", bad.to_owned())]);
+        }
+    }
+
+    #[test]
+    fn semantic_versions_are_quiet() {
+        for good in ["\"1\"", "\"1.1\"", "\"1.2.3\"", "\"1.2+\"", "\"v2\""] {
+            assert!(versions(good).is_empty(), "{good}");
+        }
+    }
+
+    #[test]
+    fn version_format_is_quiet_for_library_or_dynamic_name() {
+        assert!(versions("VERSION").is_empty());
+        assert!(versions("{\"1.x\", \"2\"}").is_empty());
+        assert!(versions("\"1.\" + \"x\"").is_empty());
+        let bad = VERSIONED.replace("\"1.1\"", "\"latest\"");
+        assert!(run_with(&bad, Some(true), Some(false), ALL).is_empty());
+        assert!(run_with(&bad, Some(true), None, ALL).is_empty());
+        let foreign = bad.replace("org.springframework.web.bind.annotation.*", "org.acme.GetMapping");
+        assert!(run(&foreign, Some(true)).is_empty());
+    }
+
+    #[test]
+    fn standard_parser_needs_every_file_without_a_custom_one() {
+        let plain = Versioning::default();
+        let custom = Versioning { custom_parser: true, ..plain };
+        assert_eq!(project_standard_parser(true, &[plain]), Some(true));
+        assert_eq!(project_standard_parser(true, &[plain, custom]), Some(false));
+        assert_eq!(project_standard_parser(false, &[plain]), None);
+        assert!(versioning("/p/P.java", "class P implements ApiVersionParser<String> {}").unwrap().custom_parser);
+    }
+
+    #[test]
+    fn version_format_group_can_be_switched_off() {
+        let off = Groups { version_format: false, ..ALL };
+        let bad = VERSIONED.replace("\"1.1\"", "\"latest\"");
+        assert!(run_with(&bad, Some(true), Some(true), off).is_empty());
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let fixed = VERSIONED.replace("\"1.1\"", "\"1.2\"");
+        assert!(run(&fixed, Some(true)).is_empty());
+    }
+
+    #[test]
+    fn ranges_use_utf16_columns_with_multibyte_text() {
+        let text = VERSIONED.replace("\"1.1\"", "\"é1\"").replace("String a()", "String é()");
+        let found = check_java(&parse(&text), Some(true), Some(true), ALL);
+        let range = found[0].diagnostic(&text).range;
+        assert_eq!(range.start.line, 3);
+        assert_eq!(range.end.character - range.start.character, 4);
+    }
+
+    #[test]
+    fn crlf_files_report_correct_lines() {
+        let text = VERSIONED.replace("1.1", "latest").replace('\n', "\r\n");
+        let found = check_java(&parse(&text), Some(true), Some(true), ALL);
+        let range = found[0].diagnostic(&text).range;
+        assert_eq!(range.start.line, 3);
     }
 }
