@@ -17,6 +17,16 @@ and `GitTaskHandler` from `plugins/git4idea`). Apache-2.0, © JetBrains s.r.o. (
   is set in Settings › Plugins › Tasks, and issues are updated every 20 minutes. Closing a task can resolve GitHub,
   GitLab, Codeberg, YouTrack and Jira issues; work time can be posted to YouTrack and Jira.
 
+## Permissions
+
+| Permission | Used for | Without it |
+|---|---|---|
+| `project.read`, `storage` (required) | Read the project, keep task contexts and settings | The plugin does not load |
+| `secrets` (optional) | Store each tracker's API token (`github-token`, `gitlab-token`, `forgejo-token`, `youtrack-token` and so on) in the IDE's secrets store. The plugin never logs a token; the host puts it in the request header | Trackers that need a token cannot be used |
+| `net:api.github.com`, `net:gitlab.com`, `net:codeberg.org`, `net:*.youtrack.cloud`, `net:*.atlassian.net`, `net:api.trello.com` (optional) | Fetch and update issues on the tracker you configured. Only the hosts of the trackers you turn on are contacted | That tracker is unavailable; the others still work |
+| `process:git` (optional) | A branch per task, shelving, merge on close, commit template | Tasks work without VCS integration |
+| `vcs.read`, `events`, `clipboard` (optional) | Detect the project's remote, record the files of each task, Copy Commit Message | Those features are off |
+
 ```sh
 cargo test
 openidea-plugin build

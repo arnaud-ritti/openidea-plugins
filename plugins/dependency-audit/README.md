@@ -68,6 +68,15 @@ No new dependencies: the new formats are read by hand.
 
 See `LIMITATIONS.md` at the repository root for the API gaps behind these.
 
+## Permissions
+
+| Permission | Used for |
+|---|---|
+| `net:api.osv.dev` (required) | Query the OSV.dev vulnerability database. Only package names and versions are sent (see Privacy). No other host is contacted |
+| `project.read` (required) | Read the manifests and lockfiles in the table above |
+| `storage` (required) | Cache scan results so unchanged dependencies are not queried again |
+| `events` (optional) | Re-check when a manifest is opened or saved. Without it, run the scan from the command |
+
 ```sh
 cargo test
 openidea-plugin build

@@ -43,6 +43,17 @@ Requires the devcontainer CLI (`npm i -g @devcontainers/cli`) and Docker. The ID
 keeps running on the host: OpenIDEA's remote development connects over SSH or
 WSL, not into a container.
 
+## Permissions
+
+| Permission | Used for |
+|---|---|
+| `process:devcontainer` (required) | Run the devcontainer CLI: up, rebuild, exec (shell in the container) |
+| `process:docker` (optional) | Stop containers labelled with the project folder (`docker stop`). Without it, Stop Container is unavailable |
+| `project.read` (required) | Find and read `devcontainer.json` |
+| `events` (optional) | Check `devcontainer.json` when opened or saved |
+
+Programs are started with separate arguments, never through a shell line.
+
 ```sh
 cargo test
 openidea-plugin build
