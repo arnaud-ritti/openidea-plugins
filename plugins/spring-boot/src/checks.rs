@@ -141,7 +141,7 @@ fn event_listener_signature(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Findin
     }
 }
 
-/// `@DirtiesContext(methodMode)` belongs on methods, `classMode` and `hierarchyMode` on classes; `@BeforeTransaction` and `@AfterTransaction` methods must be `void`, take no parameters and be non-static.
+/// `@DirtiesContext(methodMode)` belongs on methods, `classMode` and `hierarchyMode` on classes; `@BeforeTransaction` and `@AfterTransaction` methods are documented to return `void`.
 fn test_lifecycle(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     if ty.kind == "interface" {
         return;
@@ -172,12 +172,11 @@ fn test_lifecycle(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
             continue;
         };
         let returns_value = m.ty.as_ref().is_some_and(|t| t.name != "void" || t.array);
-        let is_static = m.modifiers.iter().any(|x| x == "static");
-        if !returns_value && m.params.is_empty() && !is_static {
+        if !returns_value {
             continue;
         }
         out.push(
-            Finding::new(m.at, m.at + m.name.len(), "transaction-callback-signature", format!("An @{name} method must be `void`, take no parameters and not be static; Spring does not invoke it otherwise."))
+            Finding::new(m.at, m.at + m.name.len(), "transaction-callback-signature", format!("An @{name} method is documented to return `void`."))
                 .with_severity(Severity::Warning),
         );
     }
@@ -274,9 +273,9 @@ mod tests {
     }
 
     #[test]
-    fn before_transaction_with_parameters_is_reported() {
-        assert_eq!(lifecycle("before()", "before(String s)"), [("transaction-callback-signature", "before".to_owned())]);
-        assert_eq!(lifecycle("void before", "static void before"), [("transaction-callback-signature", "before".to_owned())]);
+    fn before_transaction_with_parameters_or_static_is_quiet() {
+        assert!(lifecycle("before()", "before(String s)").is_empty());
+        assert!(lifecycle("void before", "static void before").is_empty());
     }
 
     #[test]
@@ -292,24 +291,24 @@ mod tests {
         let foreign = LIFECYCLE.replace("org.springframework.test.annotation.DirtiesContext", "org.acme.DirtiesContext");
         assert!(run(&foreign.replace("methodMode = MethodMode.AFTER_METHOD", "classMode = X"), None).is_empty());
         let foreign = LIFECYCLE.replace("org.springframework.test.context.transaction.", "org.acme.");
-        assert!(run(&foreign.replace("before()", "before(int a)"), None).is_empty());
+        assert!(run(&foreign.replace("void before()", "int before()"), None).is_empty());
         let interface = "import org.springframework.test.context.transaction.BeforeTransaction;\ninterface I {\n    @BeforeTransaction\n    default int before(int a) { return a; }\n}\n";
         assert!(run(interface, None).is_empty());
     }
 
     #[test]
     fn switched_off_group_is_quiet() {
-        let text = LIFECYCLE.replace("before()", "before(int a)");
+        let text = LIFECYCLE.replace("void before()", "int before()");
         let off = Groups { test_lifecycle: false, ..ALL };
         assert!(check_java(&parse(&text), None, off).is_empty());
     }
 
     #[test]
     fn lifecycle_ranges_use_utf16_columns_with_multibyte_text() {
-        let text = "import org.springframework.test.context.transaction.BeforeTransaction;\nclass T {\n    String s = \"é😀\"; @BeforeTransaction void before(int a) {}\n}\n";
+        let text = "import org.springframework.test.context.transaction.BeforeTransaction;\nclass T {\n    String s = \"é😀\"; @BeforeTransaction int before() {}\n}\n";
         let found = check_java(&parse(text), None, ALL);
         let d = found[0].diagnostic(text);
-        let line = "    String s = \"é😀\"; @BeforeTransaction void ";
+        let line = "    String s = \"é😀\"; @BeforeTransaction int ";
         let col = line.encode_utf16().count() as u32;
         assert_eq!((d.range.start.line, d.range.start.character), (2, col));
         assert_eq!(d.range.end.character, col + 6);
