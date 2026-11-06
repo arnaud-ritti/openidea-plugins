@@ -113,6 +113,16 @@ impl Site {
         self.callee.strip_prefix('@').is_some_and(|name| names.contains(&name))
     }
 
+    /// The string is the value of a key in the rules array itself, not in a nested list or the messages array.
+    fn is_rule_value(&self) -> bool {
+        let rules_argument = if self.is_method(&["validateWithBag"]) || self.is_static(&["Validator"], &["make"]) || self.is_function(&["validator"]) {
+            1
+        } else {
+            0
+        };
+        self.depth == 1 && self.key.is_some() && self.arg == rules_argument
+    }
+
     fn direct(&self, argument: usize) -> bool {
         self.depth == 0 && self.arg == argument
     }
@@ -586,7 +596,9 @@ pub fn literal_at(language: &str, text: &str, at: usize) -> Option<(Kind, Range<
         }
         if at <= literal.end {
             if literal.closed {
-                found = classify(text, language, literal, site).map(|(kind, _)| (kind, literal.start..literal.end));
+                found = classify(text, language, literal, site)
+                    .filter(|(kind, _)| *kind != Kind::Rule || site.is_rule_value())
+                    .map(|(kind, _)| (kind, literal.start..literal.end));
             }
             return false;
         }

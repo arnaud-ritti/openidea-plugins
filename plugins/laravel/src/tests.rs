@@ -600,3 +600,36 @@ fn blade_braces_escape_toggle() {
     assert!(rewrite_titles(&mut plugin, path, "blade", "<p>text</p>", "text").is_empty());
     assert!(rewrite_titles(&mut plugin, "/project/app/a.php", "php", "<?php echo '{{ $x }}';", "$x").is_empty());
 }
+
+#[test]
+fn validation_string_inside_existing_array_is_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$request->validate(['a' => ['required', 'string|max:5']]);\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/A.php", "php", text, "string|max").is_empty());
+}
+
+#[test]
+fn validation_custom_messages_are_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let text = "<?php\n$request->validate(['email' => 'required|email'], ['email.required' => 'Required|please']);\nValidator::make($d, ['n' => 'a|b'], ['n.a' => 'x|y']);\n";
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "Required|please").is_empty());
+    assert!(rewrite_titles(&mut plugin, path, "php", text, "x|y").is_empty());
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", text, "a|b").len(), 1);
+}
+
+#[test]
+fn rewrites_survive_multibyte_text_and_crlf() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let text = "<?php\r\n// é日本\r\n$request->validate(['é' => 'required|email']);\r\n";
+    let result = apply_rewrite(&mut plugin, path, "php", text, "required|email");
+    assert_eq!(result, "<?php\r\n// é日本\r\n$request->validate(['é' => ['required', 'email']]);\r\n");
+
+    let blade = "<p>é</p>\r\n<p>{{ $x }}</p>\r\n";
+    let result = apply_rewrite(&mut plugin, "/project/resources/views/a.blade.php", "blade", blade, "$x");
+    assert_eq!(result, "<p>é</p>\r\n<p>{!! $x !!}</p>\r\n");
+}
