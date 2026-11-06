@@ -33,7 +33,7 @@ static PYTHON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"File "([^"]+)", 
 static DOTNET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" in (\S.*?):line (\d+)").unwrap());
 static URI: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:file://|package:)([^\s():]+\.\w+):(\d+)").unwrap());
-static SWIFT_FATAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"file (\S+\.\w+), line (\d+)").unwrap());
+static SWIFT_FATAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bfile (\S+\.\w+), line (\d+)").unwrap());
 static GENERIC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"((?:[A-Za-z]:)?[\w.\\/@~-]*?[\w-]+\.[A-Za-z]\w*)(?::|\()(\d+)").unwrap());
 
@@ -196,6 +196,10 @@ mod tests {
 
         let python = frames(r#"  File "/srv/app/views.py", line 17, in index"#);
         assert_eq!((python[0].path.as_str(), python[0].line), ("/srv/app/views.py", 17));
+
+        let bare_php = frames("Foo.php(12)");
+        assert_eq!((bare_php[0].path.as_str(), bare_php[0].line), ("Foo.php", 12));
+        assert!(frames("profile x.txt, line 3").is_empty());
 
         let php = frames("#0 /var/www/html/app/Http/Kernel.php(128): Foo->bar()");
         assert_eq!((php[0].path.as_str(), php[0].line), ("/var/www/html/app/Http/Kernel.php", 128));

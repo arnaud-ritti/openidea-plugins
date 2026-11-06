@@ -498,6 +498,18 @@ java.lang.IllegalStateException: boom
     }
 
     #[test]
+    fn next_exception_skips_errors_without_one() {
+        let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
+        let log = "2024-05-01 10:00:00,000 [   1]  INFO - #a.B - fine\n2024-05-01 10:00:00,123 [   1] ERROR - #a.B - plain failure\n2024-05-01 10:00:01,000 [   1] ERROR - #a.B - java.io.IOException: x\n";
+        host.set_project_root(Some("/p"));
+        host.open_editor("/p/a.log", "ideolog", log, &[(0, 0, 0, 0)]);
+        let mut plugin = Ideolog::default();
+        plugin.run_command("next-error", &host.invocation(), None).unwrap();
+        plugin.run_command("next-exception", &host.invocation(), None).unwrap();
+        assert_eq!(host.opened_locations(), [("/p/a.log".to_owned(), 1, 0), ("/p/a.log".to_owned(), 2, 0)]);
+    }
+
+    #[test]
     fn next_exception_targets_the_next_event_with_an_exception() {
         let host = MockHost::install().with_capabilities(&["editor.read", "project.read"]);
         open_log(&host, 0, 0);

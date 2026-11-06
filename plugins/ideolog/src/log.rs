@@ -7,6 +7,7 @@
 use fancy_regex::Regex;
 use openidea_plugin::syntax::Highlight;
 use std::ops::Range;
+use std::sync::LazyLock;
 
 const DETECTION_LINES: usize = 25;
 const MAX_PARSING_LENGTH: usize = 10_000;
@@ -129,12 +130,12 @@ impl Default for Config {
             ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0004", NGINX, r"^\d{4}/\d\d/\d\d ", [0, 1, 2]),
             ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0006", MONOLOG, r"^\[\d{4}-", [0, 2, 1]),
             ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0007", SERILOG, r"^\d{4}-\d\d-\d\d[ T]", [0, 1, -1]),
-            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0005", SYSLOG, r"^[A-Z][a-z]{2}\s+\d", [0, -1, 2]),
+            (SYSLOG_UUID, SYSLOG, r"^[A-Z][a-z]{2}\s+\d", [0, -1, 2]),
         ]
         .into_iter()
         .map(|(uuid, pattern, line_start, [time, severity, category])| {
             let mut format = Format::new(uuid, pattern, line_start, time, severity, category).unwrap();
-            format.level_from_message = pattern == SYSLOG;
+            format.level_from_message = uuid == SYSLOG_UUID;
             format
         })
         .collect();
@@ -379,14 +380,19 @@ fn message_severity(message: &str) -> Option<Severity> {
     words().any(|w| matches!(w.as_str(), "warn" | "warning")).then_some(Severity::Warning)
 }
 
-/// A line naming an exception (`java.io.IOException: …`, `PDOException`, `Error: …`) or a Python traceback.
+static EXCEPTION_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:\b[A-Z][A-Za-z0-9_$]*(?:Exception|Error)|[A-Za-z0-9_$]\.(?:Exception|Error))[:(]").unwrap()
+});
+
+/// Whether the event shows an exception anywhere: a `FooException:` / `Foo.Error(` name, a `Caused by:`
+/// or Python traceback line, or a stack frame.
 pub fn has_exception(event: &str) -> bool {
     event.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with("Traceback (most recent call last)")
-            || line.split([':', ' ']).next().is_some_and(|word| {
-                word.ends_with("Exception") || (word.ends_with("Error") && word.len() > 5) || word == "Error"
-            }) && !line.starts_with("at ")
+        let trimmed = line.trim_start();
+        trimmed.starts_with("Caused by:")
+            || trimmed.starts_with("Traceback (most recent call last)")
+            || is_match(&EXCEPTION_NAME, line)
+            || !crate::source::frames(line).is_empty()
     })
 }
 
@@ -615,6 +621,37 @@ mod tests {
     <LogParsingPattern enabled="true" name="Serilog" pattern="^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [+-]?\d{2}:\d{2}) \[([A-Z]+)\] (.*)$" timePattern="yyyy-MM-dd HH:mm:ss.SSS XXX" linePattern="^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}" timeId="0" severityId="1" categoryId="-1" fullmatch="false" uuid="496412b0-aed0-4b48-a539-30522f90d3ce" />
   </parsingPatterns>
 </State>"#;
+
+    #[test]
+    fn exception_detection_finds_signals_anywhere_in_the_event() {
+        let positives = [
+            r#"[2026-11-06 10:00:00] local.ERROR: boom {"exception":"[object] (Foo\\BarException(code: 0): msg at /x.php:12)"}"#,
+            "2026-11-06 10:00:00 ERROR - #X - java.io.IOException: x",
+            "2026-11-06 10:00:00 ERROR - boom\nCaused by: java.lang.Foo",
+            "2026-11-06 10:00:00 ERROR - boom\nTraceback (most recent call last):\n  line",
+            "[2026-11-06 10:00:00] local.ERROR: boom\n#0 /var/www/Foo.php(12): fn()",
+            "[2026-11-06 10:00:00] local.ERROR: boom\n#0 /var/www/Foo.php(12): fn()",
+            "failed with Foo.Error: nope",
+        ];
+        for event in positives {
+            assert!(has_exception(event), "{event}");
+        }
+    }
+
+    #[test]
+    fn exception_detection_ignores_plain_messages() {
+        let negatives = [
+            "2026-11-06 10:00:00 ERROR Error: x",
+            "Error: x",
+            "ExceptionHandler started",
+            "no errors found",
+            "error-free build",
+            "profile x.txt, line 3",
+        ];
+        for event in negatives {
+            assert!(!has_exception(event), "{event}");
+        }
+    }
 
     fn kinds(config: &Config, text: &str) -> Vec<(String, Highlight)> {
         let format = config.detect(text);
