@@ -480,8 +480,11 @@ impl KubeExplorer {
             return Ok(self.render_details(details));
         }
         if self.context.is_none() && self.current_context.is_none() {
-            self.current_context = match self.kubectl(&["config", "current-context"], None) {
-                Ok(out) => Some(out.trim().to_owned()),
+            // A non-zero exit (no current context yet) means kubectl is installed: only a
+            // failed spawn offers the install hint.
+            self.current_context = match host::run_process(KUBECTL, &self.args(&["config", "current-context"]), None) {
+                Ok(out) if out.status == Some(0) => Some(out.stdout.trim().to_owned()),
+                Ok(_) => Some("(kubectl unavailable)".into()),
                 Err(Error::Denied(_)) => {
                     return Ok(View::message("Kube Explorer needs permission to run kubectl. Grant it in Settings › Plugins."));
                 }
@@ -828,6 +831,9 @@ fn helm_repo_update() -> Result<(), Error> {
 
 /// The last 20 lines, at most 2000 characters (the end is kept).
 fn output_tail(text: &str) -> String {
+    if text.trim().is_empty() {
+        return "Helm repositories updated.".into();
+    }
     let lines: Vec<&str> = text.trim().lines().collect();
     let tail = lines[lines.len().saturating_sub(20)..].join("\n");
     let extra = tail.chars().count().saturating_sub(2000);
@@ -1606,6 +1612,27 @@ mod tests {
 
         let _denied = MockHost::install().with_capabilities(&["editor.read", "storage"]);
         assert!(!toolbar(&KubeExplorer::default().render_tree().unwrap()).contains(&"how-to-install-kubectl".to_owned()));
+    }
+
+    #[test]
+    fn tree_hides_the_install_hint_when_kubectl_runs_but_has_no_context() {
+        let host = MockHost::install().with_capabilities(&["process:kubectl", "editor.read", "storage"]);
+        host.on_process(KUBECTL, |_, _| {
+            Ok(ProcessOutput { status: Some(1), stdout: String::new(), stderr: "error: current-context is not set\n".into() })
+        });
+
+        let view = KubeExplorer::default().render_tree().unwrap();
+
+        assert!(!toolbar(&view).contains(&"how-to-install-kubectl".to_owned()));
+    }
+
+    #[test]
+    fn repo_update_with_empty_output_still_says_it_finished() {
+        let (host, _) = helm_host(&["process:helm"], ok(""));
+
+        repo_update(&host, None).unwrap();
+
+        assert_eq!(host.notifications()[0].body, "Helm repositories updated.");
     }
 
     #[test]
