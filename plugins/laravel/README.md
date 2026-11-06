@@ -122,6 +122,22 @@ table; edit the namespace by hand when the file lives in a subfolder. A
 migration file name needs its timestamp prefix typed by hand (see
 `LIMITATIONS.md`).
 
+## JavaScript, TypeScript and Vue
+
+In `javascript`, `typescript`, `vue`, `javascriptreact` and `typescriptreact`
+files the plugin completes and opens (Go to) Ziggy route names in
+`route('...')` and `route().current('...')`, including `:href="route('...')"`
+in a Vue template. It works from the in-memory route index only and returns
+at once when the file has no `route(` / `.current(`. Page names are not
+completed in JavaScript: no Inertia client call takes one (the page name is
+resolved by `resolvePageComponent` and glob imports).
+
+Declaring a provider for these languages makes the host load the plugin for
+them, so activation is limited to `on-file:resources/js/**`. The language ids
+`vue`, `javascriptreact` and `typescriptreact` are declared but unverified in
+the IDE; files are also recognised by extension. A block comment opened on an
+earlier line is not detected.
+
 ## Not ported
 
 These rely on PhpStorm's PHP PSI and type inference, which the OpenIDEA plugin

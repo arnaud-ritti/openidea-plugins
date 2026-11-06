@@ -12,6 +12,7 @@ mod controllers;
 mod directives;
 mod eloquent_checks;
 mod index;
+mod js;
 mod migrations;
 mod php;
 mod refs;
@@ -535,8 +536,40 @@ fn directive_items(index: &Index, replace: Range) -> Vec<CompletionItem> {
         .collect()
 }
 
+impl Main {
+    fn script_completion(&self, doc: &Document, at: Position) -> Vec<CompletionItem> {
+        let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
+        let Some(name) = js::route_name_at(&doc.text, offset) else { return Vec::new() };
+        let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
+
+        let replace = range_of(&doc.text, name.start, name.end);
+        index
+            .routes
+            .iter()
+            .map(|(name, entry)| {
+                let mut item = CompletionItem::new(name, CompletionKind::Reference);
+                item.detail = entry.detail.clone();
+                item.replace = Some(replace);
+                item
+            })
+            .collect()
+    }
+
+    fn script_definition(&self, doc: &Document, at: Position) -> Vec<Location> {
+        let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
+        let Some(name) = js::route_name_at(&doc.text, offset) else { return Vec::new() };
+        let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
+
+        index.routes.get(&doc.text[name]).and_then(location).into_iter().collect()
+    }
+}
+
 impl Providers for Main {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        if js::is_script(&doc.path, &doc.language) {
+            return self.script_completion(doc, at);
+        }
+
         let Some(language) = language_of(&doc.path, &doc.language) else { return Vec::new() };
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
@@ -559,6 +592,10 @@ impl Providers for Main {
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        if js::is_script(&doc.path, &doc.language) {
+            return self.script_definition(doc, at);
+        }
+
         let Some(language) = language_of(&doc.path, &doc.language) else { return Vec::new() };
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };

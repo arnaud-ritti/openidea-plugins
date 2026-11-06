@@ -1073,3 +1073,133 @@ fn group_import_alias_resolves() {
     let nested = "<?php\nnamespace App\\Http;\nuse App\\{Models\\Post};\nPost::create($request->all());\n";
     assert_eq!(eloquent_snippets(nested, &FILES).len(), 1);
 }
+
+fn js_complete(plugin: &mut Main, path: &str, language: &str, marked: &str) -> Vec<String> {
+    let (text, at) = cursor(marked);
+    labels(plugin.completion(&doc(path, language, &text), at, None))
+}
+
+const ROUTES: [&str; 4] = ["admin.dashboard", "home", "posts.index", "posts.show"];
+
+#[test]
+fn ziggy_route_completes_route_names() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/app.js", "javascript", "route('|')"), ROUTES);
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/app.ts", "typescript", "router.visit(route(\"po|\"), {})"), ROUTES);
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/app.tsx", "typescriptreact", "route(`|`)"), ROUTES);
+
+    let (text, at) = cursor("route('|home')");
+    let items = plugin.completion(&doc("/project/resources/js/app.js", "javascript", &text), at, None);
+    let home = items.iter().find(|item| item.label == "home").unwrap();
+    assert_eq!(home.detail.as_deref(), Some("GET|HEAD / → Closure"));
+}
+
+#[test]
+fn ziggy_current_completes_route_names() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/a.js", "javascript", "route().current('|')"), ROUTES);
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/a.js", "javascript", "route( ).current( 'po|' )"), ROUTES);
+}
+
+#[test]
+fn vue_template_href_route_completes() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let vue = "<template>\n  <Link :href=\"route('|')\">Home</Link>\n</template>\n";
+
+    assert_eq!(js_complete(&mut plugin, "/project/resources/js/Pages/Home.vue", "vue", vue), ROUTES);
+}
+
+#[test]
+fn ziggy_route_definition_opens_the_route() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let routes = host_text(&host, "routes/web.php");
+    let name_at = text::position(&routes, routes.find("'home'").unwrap() + 1);
+
+    let script = doc("/project/resources/js/a.js", "javascript", "route('home');\nroute().current('posts.show');\n");
+    let found = plugin.definition(&script, Position::new(0, 9));
+    assert_eq!(found[0].path, "/project/routes/web.php");
+    assert_eq!(found[0].range, Range::new(name_at, Position::new(name_at.line, name_at.character + 4)));
+    assert_eq!(plugin.definition(&script, Position::new(1, 20)).len(), 1);
+    assert!(plugin.definition(&doc("/project/resources/js/a.js", "javascript", "route('nope');"), Position::new(0, 9)).is_empty());
+}
+
+#[test]
+fn js_provider_ignores_non_inertia_calls() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/resources/js/a.js";
+
+    for marked in [
+        "myroute('|')",
+        "$route('|')",
+        "app.route('|')",
+        "this.route('|')",
+        "router.get('|x')",
+        "router.visit('|')",
+        "// route('|')",
+        "/* route('|') */",
+        "const a = 1; // route('|')",
+        "route(name, '|')",
+        "route(foo('|'))",
+        "other.current('|')",
+        "route('home')|",
+    ] {
+        assert!(js_complete(&mut plugin, path, "javascript", marked).is_empty(), "{marked}");
+    }
+}
+
+#[test]
+fn completion_does_not_scan_project() {
+    let host = MockHost::install();
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+
+    assert!(js_complete(&mut plugin, "/project/resources/js/a.js", "javascript", "route('|')").is_empty());
+    assert!(plugin.definition(&doc("/project/resources/js/a.js", "javascript", "route('home')"), Position::new(0, 8)).is_empty());
+}
+
+#[test]
+fn js_route_replace_range_is_utf16_and_covers_the_whole_name() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let (text, at) = cursor("const é = '😀'; route('ho|me.x')");
+    let items = plugin.completion(&doc("/project/resources/js/a.js", "javascript", &text), at, None);
+
+    let start = text.find("home").unwrap();
+    let expected = Range::new(text::position(&text, start), text::position(&text, start + 6));
+    assert_eq!(items[0].replace, Some(expected));
+    assert_eq!(expected.start.character, 23);
+}
+
+#[test]
+fn inertia_render_completes_page_names_from_resources_js_pages() {
+    let host = MockHost::install();
+    laravel_project(&host);
+    host.add_file("resources/js/Pages/Posts/Index.vue", "");
+    host.add_file("resources/js/pages/Home.tsx", "");
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+
+    let names = js_complete(&mut plugin, "/project/app/Http/Controllers/X.php", "php", "<?php Inertia::render('|');");
+    assert_eq!(names, ["Home", "Posts/Index"]);
+}
+
+#[test]
+fn inertia_page_extensions_vue_jsx_tsx_svelte() {
+    let host = MockHost::install();
+    laravel_project(&host);
+    for file in ["A.vue", "B.jsx", "C.tsx", "D.svelte", "E.js"] {
+        host.add_file(&format!("resources/js/Pages/{file}"), "");
+    }
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+
+    let names = js_complete(&mut plugin, "/project/app/Http/Controllers/X.php", "php", "<?php inertia('|');");
+    assert_eq!(names, ["A", "B", "C", "D"]);
+}
