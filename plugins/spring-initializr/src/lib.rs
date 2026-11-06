@@ -4,7 +4,7 @@
 //! the zip.
 
 use openidea_plugin::views::{Body, Button, Field, FieldValue, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Error, Invocation, Plugin, host, register_plugin};
+use openidea_plugin::{Error, Invocation, NotificationLevel, Plugin, host, register_plugin};
 use std::collections::BTreeMap;
 
 const START: &str = "https://start.spring.io";
@@ -143,6 +143,73 @@ impl Launcher {
         params.join("&")
     }
 
+    /// `spring init` arguments from the form, or why they cannot be built. The
+    /// terminal receives them as separate arguments (no shell), so a value
+    /// stays one argument whatever it contains; coordinates are still restricted.
+    pub fn cli_args(&mut self) -> Result<Vec<String>, String> {
+        for (key, label) in [("groupId", "group"), ("artifactId", "artifact"), ("name", "name"), ("bootVersion", "Spring Boot version"), ("javaVersion", "Java version")] {
+            let value = self.get(key);
+            if !value.is_empty() && !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+                return Err(format!("The {label} `{value}` may only contain letters, digits, `.`, `_` and `-` for the Spring Boot CLI."));
+            }
+        }
+        let package = self.get("packageName");
+        if !package.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) {
+            return Err(format!("The package name `{package}` may only contain letters, digits, `.` and `_` for the Spring Boot CLI."));
+        }
+        let kind = self.get("type");
+        let build = if kind.starts_with("gradle") { "gradle" } else { "maven" };
+        let mut args: Vec<String> = ["init".into(), format!("--build={build}"), format!("--type={kind}")].into();
+        for (flag, key) in [
+            ("language", "language"),
+            ("boot-version", "bootVersion"),
+            ("java-version", "javaVersion"),
+            ("packaging", "packaging"),
+            ("groupId", "groupId"),
+            ("artifactId", "artifactId"),
+            ("name", "name"),
+            ("description", "description"),
+            ("package-name", "packageName"),
+        ] {
+            let value = self.get(key);
+            if !value.is_empty() {
+                args.push(format!("--{flag}={value}"));
+            }
+        }
+        let dependencies = self.get("dependencies").split([',', ' ']).filter(|d| !d.is_empty()).collect::<Vec<_>>().join(",");
+        if dependencies.chars().any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ','))) {
+            return Err(format!("The dependencies `{dependencies}` may only be comma-separated ids for the Spring Boot CLI."));
+        }
+        if !dependencies.is_empty() {
+            args.push(format!("--dependencies={dependencies}"));
+        }
+        args.push("--extract".into());
+        args.push(self.get("artifactId"));
+        Ok(args)
+    }
+
+    /// Opens `spring init` in a terminal; without `process:spring`, the browser download instead.
+    fn generate_with_cli(&mut self) -> Result<(), Error> {
+        let args = match self.cli_args() {
+            Ok(args) => args,
+            Err(message) => {
+                host::notify(NotificationLevel::Warning, "Spring Initializr", &message);
+                return Ok(());
+            }
+        };
+        match host::open_terminal("Spring Initializr: spring init", "spring", &args) {
+            Err(Error::Denied(_)) => {
+                host::notify(
+                    NotificationLevel::Warning,
+                    "Spring Initializr",
+                    "The Spring Boot CLI path needs the process:spring capability; downloading the project in the browser instead.",
+                );
+                host::open_url(&self.starter_url())
+            }
+            result => result,
+        }
+    }
+
     /// The project zip.
     pub fn starter_url(&mut self) -> String {
         format!("{}/starter.zip?{}", self.get("server").trim_end_matches('/'), self.query())
@@ -177,6 +244,7 @@ impl Views for Launcher {
         };
         Ok(View::new(Body::Form(fields))
             .button(Button::new("generate", "Generate Project").icon("export").enabled(problem.is_none()))
+            .button(Button::new("cli", "Generate with Spring Boot CLI").icon("terminal").enabled(problem.is_none()))
             .button(Button::new("explore", "Explore in Browser").icon("external-link").enabled(problem.is_none()))
             .button(Button::new("reset", "Reset").icon("revert"))
             .status(&status))
@@ -187,6 +255,7 @@ impl Views for Launcher {
             ViewEvent::Field(key, value) if FIELDS.iter().any(|f| f.0 == key) => self.set(&key, &value),
             ViewEvent::Button(b) if b == "reset" => self.reset(),
             ViewEvent::Button(b) if self.problem().is_none() && b == "generate" => host::open_url(&self.starter_url())?,
+            ViewEvent::Button(b) if self.problem().is_none() && b == "cli" => self.generate_with_cli()?,
             ViewEvent::Button(b) if self.problem().is_none() && b == "explore" => host::open_url(&self.explore_url())?,
             _ => {}
         }
@@ -288,7 +357,7 @@ mod tests {
         assert_eq!((fresh.get("groupId"), fresh.get("type")), ("com.example".into(), "maven-project".into()));
         let view = fresh.render(VIEW, None, &host.invocation()).unwrap();
         let icons: Vec<_> = view.toolbar.iter().map(|b| (b.label.as_str(), b.icon.as_deref().unwrap())).collect();
-        assert_eq!(icons, [("Generate Project", "export"), ("Explore in Browser", "external-link"), ("Reset", "revert")]);
+        assert_eq!(icons, [("Generate Project", "export"), ("Generate with Spring Boot CLI", "terminal"), ("Explore in Browser", "external-link"), ("Reset", "revert")]);
     }
 
     #[test]
@@ -315,5 +384,52 @@ mod tests {
         assert_eq!(l.get("name"), "shop");
         l.run_command("open-start", &host.invocation(), None).unwrap();
         assert_eq!(host.opened_urls(), ["https://start.spring.io"]);
+    }
+
+    #[test]
+    fn spring_init_args_match_form_values() {
+        let host = MockHost::install().with_capabilities(&["storage", "process:spring"]);
+        let mut l = Launcher::default();
+        field(&mut l, &host, "type", "Gradle - Kotlin");
+        field(&mut l, &host, "language", "kotlin");
+        field(&mut l, &host, "bootVersion", "3.5.16");
+        field(&mut l, &host, "artifactId", "my-app");
+        field(&mut l, &host, "description", "a b; rm -rf ~ 'x'");
+        field(&mut l, &host, "dependencies", "web, data-jpa");
+        click(&mut l, &host, "cli");
+        let terminals = host.terminals();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0].program, "spring");
+        assert_eq!(
+            terminals[0].args,
+            [
+                "init", "--build=gradle", "--type=gradle-project-kotlin", "--language=kotlin", "--boot-version=3.5.16",
+                "--java-version=17", "--packaging=jar", "--groupId=com.example", "--artifactId=my-app", "--name=my-app",
+                "--description=a b; rm -rf ~ 'x'", "--package-name=com.example.myapp", "--dependencies=web,data-jpa",
+                "--extract", "my-app"
+            ]
+        );
+        assert!(host.opened_urls().is_empty());
+    }
+
+    #[test]
+    fn spring_init_refuses_unsafe_coordinates() {
+        let host = MockHost::install().with_capabilities(&["storage", "process:spring"]);
+        let mut l = Launcher::default();
+        field(&mut l, &host, "artifactId", "a b; rm -rf ~");
+        click(&mut l, &host, "cli");
+        assert!(host.terminals().is_empty());
+        assert_eq!(host.notifications().len(), 1);
+        assert!(l.cli_args().unwrap_err().contains("artifact"));
+    }
+
+    #[test]
+    fn spring_init_without_capability_falls_back_to_the_browser() {
+        let host = MockHost::install().with_capabilities(&["storage"]);
+        let mut l = Launcher::default();
+        click(&mut l, &host, "cli");
+        assert!(host.terminals().is_empty());
+        assert!(host.opened_urls()[0].starts_with("https://start.spring.io/starter.zip?"));
+        assert!(host.notifications()[0].body.contains("process:spring"));
     }
 }
