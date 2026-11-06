@@ -504,3 +504,21 @@ fn kotlin_string_body_is_not_a_constructor_call() {
     let model = parse("C.kt", text).unwrap();
     assert_eq!(model.beans[1].ty, "");
 }
+
+#[test]
+fn merge_after_a_trailing_line_comment() {
+    let class = |ctor: &str| format!("package com.acme;\n\n@Service\nclass S {{\n    @Autowired\n    private Foo foo;\n\n{ctor}}}\n");
+    let fix = |text: &str| constructor_injection(text, 4).map(|e| apply(text, e));
+
+    let fixed = fix(&class("    S(\n        Bar bar // the bar\n    ) {\n        this.bar = bar;\n    }\n")).unwrap();
+    assert!(fixed.contains("    S(\n        Bar bar, // the bar\n        Foo foo\n    ) {\n"), "{fixed}");
+
+    let fixed = fix(&class("    S(\n        Bar bar /* the bar */\n    ) {\n        this.bar = bar;\n    }\n")).unwrap();
+    assert!(fixed.contains("    S(\n        Bar bar, /* the bar */\n        Foo foo\n    ) {\n"), "{fixed}");
+}
+
+#[test]
+fn parameter_name_clash_is_refused_by_the_clash_check() {
+    let text = "package com.acme;\n\n@Service\nclass S {\n    @Autowired\n    private Foo foo;\n\n    S(Foo foo) {}\n}\n";
+    assert_eq!(constructor_injection(text, 4), None);
+}

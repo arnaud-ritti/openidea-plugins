@@ -241,19 +241,26 @@ fn merge_into(text: &str, constructor: &java::Member, params: &[(String, String)
     }
     let indent = indent_of(text, constructor.start);
     let new: Vec<String> = params.iter().map(|(t, n)| format!("{t} {n}")).collect();
-    let (param_at, param_text) = match constructor.params.last() {
-        None => (close, new.join(", ")),
+    let mut edits = Vec::new();
+    match constructor.params.last() {
+        None => edits.push(TextEdit { range: range(text, close, close), text: new.join(", ") }),
         Some(last) => {
+            let code_end = last.at + last.name.len();
             let after_last = open + 1 + text[open + 1..close].trim_end().len();
-            let param_text = if text[open + 1..close].contains('\n') {
+            let (comma, rest) = if text[open + 1..close].contains('\n') {
                 let pad = indent_of(text, last.at);
-                format!(",\n{pad}{}", new.join(&format!(",\n{pad}")))
+                (",", format!("\n{pad}{}", new.join(&format!(",\n{pad}"))))
             } else {
-                format!(", {}", new.join(", "))
+                (",", format!(" {}", new.join(", ")))
             };
-            (after_last, param_text)
+            if code_end == after_last {
+                edits.push(TextEdit { range: range(text, code_end, code_end), text: format!("{comma}{rest}") });
+            } else {
+                edits.push(TextEdit { range: range(text, code_end, code_end), text: comma.into() });
+                edits.push(TextEdit { range: range(text, after_last, after_last), text: rest });
+            }
         }
-    };
+    }
     let assignments: String = params.iter().map(|(_, n)| format!("\n{indent}    this.{n} = {n};")).collect();
     let inner = &body[1..body.len() - 1];
     let (at, end, replacement) = if inner.trim().is_empty() {
@@ -262,10 +269,8 @@ fn merge_into(text: &str, constructor: &java::Member, params: &[(String, String)
         let at = from + 1 + inner.trim_end().len();
         (at, at, assignments)
     };
-    Some(vec![
-        TextEdit { range: range(text, param_at, param_at), text: param_text },
-        TextEdit { range: range(text, at, end), text: replacement },
-    ])
+    edits.push(TextEdit { range: range(text, at, end), text: replacement });
+    Some(edits)
 }
 
 fn indent_of(text: &str, at: usize) -> String {
