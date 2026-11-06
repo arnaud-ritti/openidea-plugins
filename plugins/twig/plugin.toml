@@ -6,7 +6,7 @@ authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0: first release, with .twig file detection, highlighting, structure view and folding."
 categories = ["languages"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 # Highlighting, structure and folding come from this component; it is loaded
 # when the first Twig file is opened.
 wasm = "dist/plugin.wasm"
