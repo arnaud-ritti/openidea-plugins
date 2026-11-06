@@ -20,7 +20,11 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   plugin API can't write files. Without `tee`, `events` or `project.read`, or on
   Windows, you edit the YAML in the panel instead.
 - **⌥⏎ on a manifest**: *Add Kubernetes schema* (one-document files of a
-  built-in kind).
+  built-in kind); *Convert List to separate documents* (caret inside a
+  `kind: List` with `items:`) and *Convert documents to a single List* (two or
+  more manifest documents). Both edit only the open file and copy the item lines
+  as written, so comments stay; neither is offered when the file has anchors,
+  aliases or Helm actions.
 - **Manifest problems** on open and save (optional `events` and `project.read`;
   a file is a manifest when a document has both `apiVersion:` and `kind:`; files
   with Helm `{{ }}` actions only get the Helm checks): `deprecated-api-version`

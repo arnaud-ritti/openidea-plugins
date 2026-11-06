@@ -8,6 +8,7 @@
 //! namespace as flags, so the user's kubeconfig is never changed.
 
 mod checks;
+mod convert;
 mod manifest;
 mod schema;
 
@@ -889,8 +890,10 @@ impl KubeExplorer {
 }
 
 impl Providers for KubeExplorer {
-    fn code_actions(&mut self, doc: &Document, _selection: Range) -> Vec<CodeAction> {
-        schema::code_actions(doc)
+    fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        let mut actions = schema::code_actions(doc);
+        actions.extend(convert::code_actions(doc, selection));
+        actions
     }
 }
 
