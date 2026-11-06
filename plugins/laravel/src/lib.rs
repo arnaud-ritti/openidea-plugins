@@ -17,6 +17,7 @@ mod routes;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
@@ -313,6 +314,8 @@ pub struct Main {
     checked: BTreeSet<String>,
     /// Expanded nodes of the tool window.
     expanded: BTreeSet<String>,
+    /// When `migrate-fresh` was asked for the first time.
+    fresh_asked: Option<Instant>,
 }
 
 impl Main {
@@ -434,6 +437,20 @@ impl Plugin for Main {
             "view-clear" => self.artisan(ctx, "view:clear"),
             "migrate" => self.artisan(ctx, "migrate"),
             "storage-link" => self.artisan(ctx, "storage:link"),
+            "db-seed" => self.artisan(ctx, "db:seed"),
+            "migrate-fresh" => {
+                let confirmed = self.fresh_asked.take().is_some_and(|asked| asked.elapsed() < Duration::from_secs(30));
+                if !confirmed {
+                    self.fresh_asked = Some(Instant::now());
+                    host::notify(
+                        NotificationLevel::Warning,
+                        SOURCE,
+                        "Fresh migration drops all tables. Run Laravel: Fresh Migration (drops all tables) again within 30 seconds to confirm.",
+                    );
+                    return Ok(None);
+                }
+                self.artisan(ctx, "migrate:fresh")
+            }
             "route-list" => {
                 host::open_terminal("artisan route:list", "php", &["artisan".to_owned(), "route:list".to_owned()])?;
                 Ok(None)

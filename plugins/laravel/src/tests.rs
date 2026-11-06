@@ -706,3 +706,65 @@ fn every_template_is_registered_and_parses() {
         }
     }
 }
+
+fn manifest_values(header: &str, key: &str) -> Vec<String> {
+    let manifest = include_str!("../plugin.toml");
+    let prefix = format!("{key} = ");
+    let mut inside = false;
+    let mut values = Vec::new();
+    for line in manifest.lines() {
+        if line.starts_with('[') {
+            inside = line == header;
+        }
+        if inside && let Some(value) = line.strip_prefix(&prefix) {
+            values.push(value.to_owned());
+        }
+    }
+    values
+}
+
+#[test]
+fn commands_declared_in_manifest_have_handlers() {
+    let ids = manifest_values("[[contributes.commands]]", "id");
+    assert!(ids.len() >= 10, "{ids:?}");
+    for quoted in ids {
+        let id = quoted.trim_matches('"');
+        let host = MockHost::install();
+        let result = Main::default().run_command(id, &host.invocation(), None);
+        assert!(!matches!(result, Err(Error::NotFound(_))), "no handler for {id}");
+    }
+}
+
+#[test]
+fn run_detectors_run_artisan_through_php() {
+    let header = "[[contributes.runDetectors]]";
+    assert_eq!(manifest_values(header, "files"), ["[\"artisan\"]"; 4]);
+    assert_eq!(manifest_values(header, "command"), ["\"php\""; 4]);
+    assert_eq!(
+        manifest_values(header, "args"),
+        [
+            "[\"artisan\", \"serve\"]",
+            "[\"artisan\", \"test\"]",
+            "[\"artisan\", \"queue:work\"]",
+            "[\"artisan\", \"schedule:work\"]",
+        ]
+    );
+}
+
+#[test]
+fn migrate_fresh_runs_only_when_confirmed() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php"]);
+    let mut plugin = activated(&host);
+    host.on_process("php", |args, _| {
+        assert_eq!(args, ["artisan", "migrate:fresh", "--no-interaction"]);
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "ok".into(), stderr: String::new() })
+    });
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    assert!(host.notifications()[0].body.contains("again within 30 seconds"));
+    assert_eq!(host.notifications().len(), 1);
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    assert_eq!(host.notifications().len(), 2);
+    plugin.run_command("migrate-fresh", &host.invocation(), None).unwrap();
+    assert_eq!(host.notifications().len(), 3);
+    assert!(host.notifications()[2].body.contains("again within"));
+}

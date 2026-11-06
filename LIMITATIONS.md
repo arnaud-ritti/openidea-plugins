@@ -209,6 +209,11 @@ These aren't API limits; they were left out for size:
 
 Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus features that follow Laravel's documentation. Checked against the SDK, WIT and host source of v0.1.37 on 2026-11-06. The gaps in the Symfony section above apply here too (no PHP semantic model, no references, rename or hover, code actions can't create files, problems aren't re-checked while typing, one target per gutter marker); this section only adds what is specific to Laravel.
 
+### Run configurations: artisan
+
+- **Blocks:** choosing the artisan arguments (`serve --port`, `test --filter`), or a `./artisan` wrapper such as Sail.
+- **Workaround:** run detectors are fixed commands matched by file name: `php artisan serve`, `test`, `queue:work` and `schedule:work` appear in every project that has an `artisan` file, Laravel or not. Use Laravel: Show Route List's terminal or the IDE's terminal for anything else. Laravel: Fresh Migration asks twice within 30 seconds because it drops all tables.
+
 ### Blocks: type-aware Laravel features
 
 - **Blocks:**

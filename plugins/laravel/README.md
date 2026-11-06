@@ -55,9 +55,13 @@ The _Laravel_ tool window lists routes (method, URI, name and action), views,
 config keys, translations, middleware and env keys; double-click opens the
 definition. Commands, all under the _Laravel_ category: Reindex Project, Clear
 All Caches (`optimize:clear`), Clear Application / Config / Route Cache,
-Clear Compiled Views, Run Migrations, Link Storage and Show Route List. They
-run `php artisan` (optional `process:php` capability, trusted projects only)
-and the first seven reindex afterwards. Saving a file under `routes/`,
+Clear Compiled Views, Run Migrations, Link Storage, Seed Database, Fresh
+Migration and Show Route List. Fresh Migration drops all tables, so it asks
+for a second run within 30 seconds. They run `php artisan` (optional
+`process:php` capability, trusted projects only) and all but Show Route List
+reindex afterwards. Run configurations (`php artisan serve`, `test`,
+`queue:work`, `schedule:work`) are offered for any project with an `artisan`
+file. Saving a file under `routes/`,
 `config/`, `lang/`, `resources/views/`, `app/Http/Controllers/` or `app/Mail/`,
 `.env`, `.env.example`, `bootstrap/app.php`, `app/Http/Kernel.php` or
 `composer.json` also rebuilds the index.

@@ -71,6 +71,44 @@ id = "route-list"
 title = "Laravel: Show Route List"
 category = "Laravel"
 
+[[contributes.commands]]
+id = "db-seed"
+title = "Laravel: Seed Database"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "migrate-fresh"
+title = "Laravel: Fresh Migration (drops all tables)"
+category = "Laravel"
+
+[[contributes.runDetectors]]
+id = "serve"
+name = "Laravel: Serve"
+files = ["artisan"]
+command = "php"
+args = ["artisan", "serve"]
+
+[[contributes.runDetectors]]
+id = "test"
+name = "Laravel: Test"
+files = ["artisan"]
+command = "php"
+args = ["artisan", "test"]
+
+[[contributes.runDetectors]]
+id = "queue-work"
+name = "Laravel: Queue Worker"
+files = ["artisan"]
+command = "php"
+args = ["artisan", "queue:work"]
+
+[[contributes.runDetectors]]
+id = "schedule-work"
+name = "Laravel: Schedule Worker"
+files = ["artisan"]
+command = "php"
+args = ["artisan", "schedule:work"]
+
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers", "code-actions"]
 languages = ["php", "blade"]
