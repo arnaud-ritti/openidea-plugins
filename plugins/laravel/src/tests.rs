@@ -232,6 +232,8 @@ fn completes_columns_from_migrations() {
     assert!(complete(controller, "<?php Widget::where('|');").is_empty());
     assert!(complete(controller, "<?php Route::get('/x', 'A@b')->where('|');").is_empty());
     assert!(complete(controller, "<?php $query->where('|');").is_empty());
+    assert_eq!(complete(controller, "<?php $query = Post::query()->latest();\n$query->where('|');"), columns);
+    assert!(complete(controller, "<?php $query = collect([]);\n$query->where('|');").is_empty());
 
     let usage = doc(controller, "php", "<?php\nPost::where('title', 'x');\n");
     let migration = host_text(&host, "database/migrations/2024_01_01_create_posts_table.php");
@@ -687,12 +689,14 @@ fn every_template_is_registered_and_parses() {
         .filter(|rest| rest.starts_with("templates/"))
         .filter_map(|rest| rest.strip_suffix('"'))
         .collect();
-    assert_eq!(paths.len(), 27, "{paths:?}");
+    assert_eq!(paths.len(), 47, "{paths:?}");
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for path in paths {
         let body = std::fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("missing {path}"));
-        assert!(body.starts_with("<?php") || body.starts_with("<?php\n"), "{path}");
-        assert!(!body.contains("{{"), "{path}");
+        if path.ends_with("php") && !path.ends_with("blade.php") {
+            assert!(body.starts_with("<?php"), "{path}");
+            assert!(path.ends_with("blade.php") || !body.contains("{{"), "{path}");
+        }
         let mut rest = body.as_str();
         while let Some(start) = rest.find('$') {
             let after = &rest[start + 1..];
@@ -2098,11 +2102,7 @@ fn routes_naming_missing_controllers_and_methods_are_reported() {
         [
             ("laravel.unknown-route-method".to_owned(), 5),
             ("laravel.unknown-route-controller".to_owned(), 6),
-            ("laravel.unknown-route-method".to_owned(), 8),
-            ("laravel.unknown-route-method".to_owned(), 8),
-            ("laravel.unknown-route-method".to_owned(), 8),
-            ("laravel.unknown-route-method".to_owned(), 8),
-            ("laravel.unknown-route-method".to_owned(), 8),
+            ("laravel.missing-resource-methods".to_owned(), 8),
         ]
     );
 }
@@ -2304,4 +2304,117 @@ fn config_app_providers_complete_project_providers() {
 
     let (text, at) = cursor("<?php\nreturn [\n    'providers' => [\n        App\\Providers\\Billing|ServiceProvider::class,\n    ],\n];\n");
     assert_eq!(plugin.definition(&doc(path, "php", &text), at).len(), 1);
+}
+
+type Written = std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, String)>>>;
+
+fn tee_host() -> (MockHost, Written) {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "process:tee", "editor.read"]);
+    let written: Written = Written::default();
+    let sink = written.clone();
+    host.on_process("tee", move |args, stdin| {
+        sink.borrow_mut().push((args.to_vec(), stdin.unwrap_or_default().to_owned()));
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+    });
+    (host, written)
+}
+
+#[test]
+fn generate_for_a_selected_model_writes_a_factory_with_its_columns() {
+    let (host, written) = tee_host();
+    let mut plugin = activated(&host);
+    host.select_paths(&["/project/app/Models/Post.php"]);
+    host.answer_next_prompt(Some(&["factory"]));
+    host.answer_next_prompt(Some(&["PostFactory"]));
+    plugin.run_command("generate-for-model", &host.invocation(), None).unwrap();
+
+    let (args, body) = written.borrow()[0].clone();
+    assert_eq!(args, ["/project/database/factories/PostFactory.php"]);
+    assert!(body.contains("'title' => fake()->sentence(),") && body.contains("'body' => fake()->paragraph(),"), "{body}");
+    assert!(!body.contains("created_at"), "{body}");
+    assert!(host.terminals().is_empty());
+}
+
+#[test]
+fn resource_body_lists_columns_and_falls_back_to_artisan_without_tee() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read"]);
+    let mut plugin = activated(&host);
+    host.select_paths(&["/project/app/Models/Post.php"]);
+    host.answer_next_prompt(Some(&["resource"]));
+    host.answer_next_prompt(Some(&["PostResource"]));
+    plugin.run_command("generate-for-model", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:resource", "PostResource"]]);
+
+    let index = plugin.indexes.values().next().unwrap();
+    let source = bulk::resource_source(index, "Post", "PostResource");
+    assert!(source.contains("'title' => $this->title,") && source.contains("'created_at' => $this->created_at,"), "{source}");
+}
+
+#[test]
+fn remove_phpdocs_rewrites_every_model_that_has_helper_tags() {
+    let (host, written) = tee_host();
+    host.add_file("app/Models/Tag.php", "<?php\n/**\n * @property int $id\n */\nclass Tag extends Model {}\n");
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&[]));
+    plugin.run_command("remove-phpdocs", &host.invocation(), None).unwrap();
+
+    let runs = written.borrow();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].0, ["/project/app/Models/Tag.php"]);
+    assert_eq!(runs[0].1, "<?php\nclass Tag extends Model {}\n");
+}
+
+#[test]
+fn new_generators_run_their_own_artisan_commands_when_the_package_is_installed() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read"]);
+    host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0", "laravel/nova": "^5.0"}}"#);
+    let mut plugin = activated(&host);
+    host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0", "laravel/nova": "^5.0"}}"#);
+    host.answer_next_prompt(Some(&["nova:resource"]));
+    host.answer_next_prompt(Some(&["Post"]));
+    plugin.run_command("make", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "nova:resource", "Post"]]);
+}
+
+#[test]
+fn indexing_sets_the_menu_context_and_reveal_brings_the_tool_window_forward() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    assert!(host.context_keys().contains_key("indexed"));
+    plugin.run_command("reveal", &host.invocation(), None).unwrap();
+    assert_eq!(host.revealed_views(), ["laravel"]);
+}
+
+#[test]
+fn extra_model_directories_and_the_resource_check_setting_are_honoured() {
+    let host = MockHost::install();
+    laravel_project(&host);
+    host.add_file("modules/Blog/Models/Comment.php", "<?php\nclass Comment extends Model {}\n");
+    host.set_setting("modelDirectories", "\"modules/Blog/Models, ../outside\"");
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+    let index = plugin.indexes.values().next().unwrap();
+    assert!(index.models.contains_key("Comment"));
+
+    host.add_file("routes/res.php", "<?php\nuse App\\Http\\Controllers\\PostController;\nRoute::resource('p', PostController::class);\n");
+    host.set_setting("reportMissingResourceMethods", "false");
+    let project = host.invocation().project().unwrap();
+    plugin.index_project(&project);
+    plugin.check(&project, "/project/routes/res.php");
+    assert!(host.diagnostics().get("/project/routes/res.php").is_none_or(|d| d.is_empty()));
+}
+
+#[test]
+fn create_missing_makes_the_class_named_by_new_and_refuses_existing_ones() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    host.add_file("app/Jobs/ExistingJob.php", "<?php\nclass ExistingJob {}\n");
+    let mut plugin = activated(&host);
+    let text = "<?php\ndispatch(new SendReportJob());\ndispatch(new ExistingJob());\n";
+    host.open_editor("/project/app/Http/X.php", "php", text, &[(1, 18, 1, 18)]);
+    host.answer_next_prompt(Some(&[]));
+    plugin.run_command("create-missing", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:job", "SendReportJob"]]);
+
+    host.open_editor("/project/app/Http/X.php", "php", text, &[(2, 18, 2, 18)]);
+    assert!(plugin.run_command("create-missing", &host.invocation(), None).is_err());
 }

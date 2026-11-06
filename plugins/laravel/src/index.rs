@@ -742,7 +742,9 @@ impl Index {
             }
         }
 
-        for path in files(&globs(&["app/Models/**/*.php", "app/*.php"])) {
+        let mut model_globs = globs(&["app/Models/**/*.php", "app/*.php"]);
+        model_globs.extend(comma_separated("modelDirectories").into_iter().filter(|d| !d.contains("..") && !d.starts_with('/')).map(|d| format!("{d}/**/*.php")));
+        for path in files(&model_globs) {
             let Some(text) = read(&path, &mut index) else { continue };
             let relative_path = relative(&path);
             let inside = relative_path.trim_start_matches("app/").trim_start_matches("Models/");

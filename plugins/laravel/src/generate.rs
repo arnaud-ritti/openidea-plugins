@@ -15,6 +15,7 @@ struct Generator {
     flags: &'static [(&'static str, &'static str)],
     model_option: Option<&'static str>,
     suffix: &'static str,
+    needs: &'static str,
 }
 
 const fn kind(
@@ -24,7 +25,11 @@ const fn kind(
     model_option: Option<&'static str>,
     suffix: &'static str,
 ) -> Generator {
-    Generator { id, label, flags, model_option, suffix }
+    Generator { id, label, flags, model_option, suffix, needs: "" }
+}
+
+const fn needs(generator: Generator, package: &'static str) -> Generator {
+    Generator { needs: package, ..generator }
 }
 
 const KINDS: &[Generator] = &[
@@ -73,7 +78,10 @@ const KINDS: &[Generator] = &[
     kind("trait", "Trait", &[], None, ""),
     kind("exception", "Exception", &[], None, ""),
     kind("channel", "Broadcast channel", &[], None, ""),
-    kind("livewire", "Livewire component", &[("--inline", "Inline view")], None, ""),
+    needs(kind("livewire", "Livewire component", &[("--inline", "Inline view")], None, ""), "livewire/livewire"),
+    needs(kind("livewire:form", "Livewire form", &[], None, ""), "livewire/livewire"),
+    needs(kind("nova:resource", "Nova resource", &[], None, ""), "laravel/nova"),
+    needs(kind("make:filament-resource", "Filament resource", &[("--generate", "Generate form and table")], None, ""), "filament/filament"),
 ];
 
 const MODEL_AWARE: &[&str] = &["policy", "observer", "factory", "resource", "controller"];
@@ -112,7 +120,7 @@ fn valid_for(kind: &Generator, name: &str) -> bool {
     }
 
     match kind.id {
-        "view" | "component" | "livewire" | "migration" => true,
+        "view" | "component" | "livewire" | "livewire:form" | "migration" => true,
         _ => valid_class(name),
     }
 }
@@ -200,16 +208,17 @@ fn finish(ctx: &Invocation, kind: &Generator, name: &str, model: Option<String>,
     }
     args.extend(flags);
 
-    run(&format!("make:{}", kind.id), args)?;
+    let command = if kind.id.contains(':') { kind.id.to_owned() } else { format!("make:{}", kind.id) };
+    run(&command, args)?;
     Ok(None)
 }
 
 /// `fixed` skips the kind pick (New Eloquent Model).
-pub fn make(ctx: &Invocation, index: Option<&Index>, fixed: Option<&str>, has_livewire: bool) -> Result<Option<String>, Error> {
+pub fn make(ctx: &Invocation, index: Option<&Index>, fixed: Option<&str>, composer: &str) -> Result<Option<String>, Error> {
     let kind = match fixed {
         Some(id) => find(id).ok_or_else(|| Error::NotFound(format!("generator {id}")))?,
         None => {
-            let choices = items(KINDS.iter().filter(|k| has_livewire || k.id != "livewire").map(|k| (k.id, k.label)));
+            let choices = items(KINDS.iter().filter(|k| k.needs.is_empty() || composer.contains(&format!("\"{}\"", k.needs))).map(|k| (k.id, k.label)));
             let Some(chosen) = host::pick("Generate with artisan make", &choices)? else { return Ok(None) };
             find(&chosen).ok_or_else(|| Error::Invalid(format!("unknown generator {chosen}")))?
         }
@@ -245,8 +254,15 @@ pub fn make(ctx: &Invocation, index: Option<&Index>, fixed: Option<&str>, has_li
 }
 
 pub fn for_model(ctx: &Invocation, index: Option<&Index>) -> Result<Option<String>, Error> {
-    let Some(Some(model)) = pick_model("Model", index, false)? else {
-        return Err("No Eloquent model found in the project.".into());
+    let selected = index.map(|index| crate::bulk::selected_models(index, &ctx.selected_paths())).unwrap_or_default();
+    let model = match selected.as_slice() {
+        [(model, _)] => model.clone(),
+        _ => {
+            let Some(Some(model)) = pick_model("Model", index, false)? else {
+                return Err("No Eloquent model found in the project.".into());
+            };
+            model
+        }
     };
 
     let choices = items(MODEL_AWARE.iter().filter_map(|id| find(id)).map(|k| (k.id, k.label)));
@@ -260,6 +276,12 @@ pub fn for_model(ctx: &Invocation, index: Option<&Index>) -> Result<Option<Strin
     let name = name.trim().to_owned();
     if !valid_for(kind, &name) {
         return Err(Error::Invalid(format!("{name:?} is not a valid {} name", kind.label.to_lowercase())));
+    }
+
+    if let (Some(project), Some(index)) = (ctx.project(), index)
+        && crate::bulk::model_file(&project, index, kind.id, &model, &name)?.is_some()
+    {
+        return Ok(None);
     }
 
     let mut flags = Vec::new();
@@ -289,7 +311,9 @@ pub fn create_missing(ctx: &Invocation, index: Option<&Index>) -> Result<Option<
     let language = crate::language_of(&editor.path(), &editor.language()).ok_or("Not a PHP or Blade file.")?;
     let index = index.ok_or("The project is not indexed.")?;
 
-    let reference = refs::reference_at(language, &document.text, offset).ok_or("No Laravel name at the cursor.")?;
+    let Some(reference) = refs::reference_at(language, &document.text, offset) else {
+        return create_missing_class(ctx, &document.text, offset);
+    };
     let name = &document.text[reference.start..reference.end];
 
     let (id, argument) = match reference.kind {
@@ -318,4 +342,62 @@ pub fn create_missing(ctx: &Invocation, index: Option<&Index>) -> Result<Option<
     }
 
     finish(ctx, kind, &argument, None, Vec::new())
+}
+
+const CLASS_SUFFIXES: &[(&str, &str)] = &[
+    ("Job", "job"),
+    ("Mail", "mail"),
+    ("Event", "event"),
+    ("Notification", "notification"),
+    ("Listener", "listener"),
+    ("Policy", "policy"),
+    ("Observer", "observer"),
+    ("Request", "request"),
+    ("Resource", "resource"),
+    ("Middleware", "middleware"),
+    ("Rule", "rule"),
+    ("Cast", "cast"),
+    ("Scope", "scope"),
+    ("Exception", "exception"),
+    ("Seeder", "seeder"),
+    ("Factory", "factory"),
+    ("Provider", "provider"),
+    ("Command", "command"),
+    ("Channel", "channel"),
+];
+
+/// The class name at the offset when it is created with `new X` or named as `X::class`.
+fn class_at(text: &str, offset: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let offset = offset.min(bytes.len());
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let start = (0..offset).rev().take_while(|&i| is_word(bytes[i])).last().unwrap_or(offset);
+    let end = (offset..bytes.len()).take_while(|&i| is_word(bytes[i])).last().map_or(offset, |i| i + 1);
+    let word = &text[start..end];
+    let creates = text[..start].trim_end().ends_with("new") || text[end..].starts_with("::class");
+
+    (creates && word.starts_with(|c: char| c.is_ascii_uppercase())).then_some(word)
+}
+
+fn create_missing_class(ctx: &Invocation, text: &str, offset: usize) -> Result<Option<String>, Error> {
+    let project = ctx.project().ok_or("No project is open.")?;
+    let word = class_at(text, offset).ok_or("No Laravel name at the cursor.")?;
+    let (_, id) = CLASS_SUFFIXES
+        .iter()
+        .find(|(suffix, _)| word.len() > suffix.len() && word.ends_with(suffix))
+        .ok_or("Nothing missing here.")?;
+
+    if !project.find_files(&format!("**/{word}.php"), 1).unwrap_or_default().is_empty() {
+        return Err("Nothing missing here.".into());
+    }
+
+    let kind = find(id).ok_or_else(|| Error::NotFound(format!("generator {id}")))?;
+    if !valid_for(kind, word) {
+        return Err(Error::Invalid(format!("{word:?} is not a valid {} name", kind.label.to_lowercase())));
+    }
+    if !host::confirm("Create missing class", &format!("Run php artisan make:{id} {word}?"))? {
+        return Ok(None);
+    }
+
+    finish(ctx, kind, word, None, Vec::new())
 }

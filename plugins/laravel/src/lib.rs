@@ -8,6 +8,7 @@
 
 mod actions;
 mod blade;
+mod bulk;
 mod class_actions;
 mod components;
 mod controllers;
@@ -377,6 +378,7 @@ fn route_controller_problems(project: &Project, index: &Index, path: &str, langu
     let namespace = controllers_namespace();
     let imports = routes::imports(&masked);
     let mut declared: BTreeMap<String, Option<Vec<String>>> = BTreeMap::new();
+    let mut missing: BTreeMap<usize, (std::ops::Range<usize>, String, Vec<String>)> = BTreeMap::new();
     let mut found = Vec::new();
 
     for def in routes::parse(&masked) {
@@ -401,12 +403,24 @@ fn route_controller_problems(project: &Project, index: &Index, path: &str, langu
                     controllers::declared_methods(&php::mask_comments(&project.read_file(file).ok()?))
                 });
                 if methods.as_ref().is_some_and(|methods| !methods.contains(method)) {
-                    found.push(problem(text, range, "laravel.unknown-route-method", Severity::Warning, format!("{class} has no method \"{method}\".")));
+                    missing.entry(def.offset).or_insert_with(|| (range, class.clone(), Vec::new())).2.push(method.clone());
                 }
             }
             _ => {}
         }
     }
+
+    for (range, class, methods) in missing.into_values() {
+        match methods.as_slice() {
+            [_, _, ..] if !enabled("reportMissingResourceMethods") => {}
+            [method] => found.push(problem(text, range, "laravel.unknown-route-method", Severity::Warning, format!("{class} has no method \"{method}\"."))),
+            _ => {
+                let message = format!("{class} lacks the resource methods {}.", methods.join(", "));
+                found.push(problem(text, range, "laravel.missing-resource-methods", Severity::Warning, message));
+            }
+        }
+    }
+    found.sort_by_key(|diagnostic| diagnostic.range.start.line);
 
     found
 }
@@ -480,6 +494,7 @@ impl Main {
             host::log(LogLevel::Warn, &format!("index of {root} is partial: out of time"));
         }
         self.indexes.insert(root.clone(), index);
+        let _ = host::set_context("indexed", true);
 
         let checked: Vec<String> = self.checked.iter().filter(|path| under(path, &root)).cloned().collect();
         for path in checked {
@@ -553,11 +568,13 @@ impl Main {
 
         match id {
             "make" => {
-                let has_livewire = index.is_some_and(|i| !i.livewire.is_empty())
-                    || project.read_file("composer.json").is_ok_and(|c| c.contains("\"livewire/livewire\""));
-                generate::make(ctx, index, None, has_livewire)
+                let mut composer = project.read_file("composer.json").unwrap_or_default();
+                if index.is_some_and(|i| !i.livewire.is_empty()) {
+                    composer.push_str("\"livewire/livewire\"");
+                }
+                generate::make(ctx, index, None, &composer)
             }
-            "new-model" => generate::make(ctx, index, Some("model"), false),
+            "new-model" => generate::make(ctx, index, Some("model"), ""),
             "generate-for-model" => generate::for_model(ctx, index),
             _ => generate::create_missing(ctx, index),
         }
@@ -669,6 +686,14 @@ impl Plugin for Main {
             "unused-views" => self.unused_views(ctx),
             "artisan-run" => generate::run_artisan(ctx),
             "make" | "new-model" | "generate-for-model" | "create-missing" => self.generator(id, ctx),
+            "remove-phpdocs" => {
+                let root = ctx.project().and_then(|project| project.root().ok()).unwrap_or_default();
+                bulk::remove_phpdocs(ctx, self.indexes.get(&root))
+            }
+            "reveal" => {
+                host::reveal_view(VIEW)?;
+                Ok(None)
+            }
             "route-list" => {
                 host::open_terminal("artisan route:list", "php", &["artisan".to_owned(), "route:list".to_owned()])?;
                 Ok(None)

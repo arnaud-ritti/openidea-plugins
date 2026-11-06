@@ -164,25 +164,19 @@ pub fn rewrites(text: &str, at: usize) -> Vec<Rewrite> {
     let Some(class) = class_of(&masked) else { return Vec::new() };
     let found = methods(&masked, &class);
 
-    [scope_attribute(text, &masked, &found, at), move_argument(text, &masked, &class, &found, at), inject_facade(text, &masked, &class, &found, at)]
-        .into_iter()
-        .flatten()
-        .collect()
+    let mut rewrites = scope_attribute(text, &masked, &found, at);
+    rewrites.extend(move_argument(text, &masked, &class, &found, at));
+    rewrites.extend(inject_facade(text, &masked, &class, &found, at));
+    rewrites
 }
 
-fn scope_attribute(text: &str, masked: &str, found: &[Method], at: usize) -> Option<Rewrite> {
-    if !masked.contains(" extends Model") {
-        return None;
-    }
-
-    let method = found.iter().find(|m| m.line_start <= at && at <= m.params.start)?;
+fn scope_edit(text: &str, masked: &str, found: &[Method], method: &Method, attribute: &str) -> Option<(String, (Range<usize>, String))> {
     let rest = method.name.strip_prefix("scope").filter(|r| r.chars().next().is_some_and(|c| c.is_ascii_uppercase()))?;
     let new_name = camel(rest);
     if found.iter().any(|m| m.name == new_name) || masked.contains(&format!("{}(", method.name)) && whole_word_positions(masked, &method.name).len() > 1 {
         return None;
     }
 
-    let import = php::insert_use(text, "Illuminate\\Database\\Eloquent\\Attributes\\Scope")?;
     let line = &text[method.line_start..line_end(text, method.line_start)];
     let name_at = method.line_start + line.find("function ")? + "function ".len();
     let indent = indentation(text, method.line_start);
@@ -190,15 +184,40 @@ fn scope_attribute(text: &str, masked: &str, found: &[Method], at: usize) -> Opt
     let visibility_end = method.line_start + line.find("function ")?;
     let modifiers = text[method.line_start..visibility_end].trim().replace("public", "protected");
     let modifiers = if modifiers.is_empty() { "protected".to_owned() } else { modifiers };
+    let edit = (method.line_start..name_at + method.name.len(), format!("{indent}#[{attribute}]{eol}{indent}{modifiers} function {new_name}"));
 
-    let mut edits = vec![
-        (method.line_start..name_at + method.name.len(), format!("{indent}#[{}]{eol}{indent}{modifiers} function {new_name}", import.short_name)),
-    ];
-    if !import.text.is_empty() {
-        edits.insert(0, (import.offset..import.offset, import.text));
+    Some((new_name, edit))
+}
+
+fn scope_attribute(text: &str, masked: &str, found: &[Method], at: usize) -> Vec<Rewrite> {
+    if !masked.contains(" extends Model") {
+        return Vec::new();
     }
 
-    Some(Rewrite { title: format!("Use #[Scope] on {new_name}()"), kind: "refactor.rewrite", edits })
+    let import = php::insert_use(text, "Illuminate\\Database\\Eloquent\\Attributes\\Scope");
+    let Some(import) = import else { return Vec::new() };
+    let with_import = |mut edits: Vec<(Range<usize>, String)>| {
+        if !import.text.is_empty() {
+            edits.insert(0, (import.offset..import.offset, import.text.clone()));
+        }
+        edits
+    };
+
+    let mut rewrites = Vec::new();
+    let all: Vec<(String, (Range<usize>, String))> = found.iter().filter_map(|m| scope_edit(text, masked, found, m, &import.short_name)).collect();
+
+    if let Some(method) = found.iter().find(|m| m.line_start <= at && at <= m.params.start)
+        && let Some((new_name, edit)) = scope_edit(text, masked, found, method, &import.short_name)
+    {
+        rewrites.push(Rewrite { title: format!("Use #[Scope] on {new_name}()"), kind: "refactor.rewrite", edits: with_import(vec![edit]) });
+    }
+
+    if all.len() > 1 {
+        let edits = with_import(all.into_iter().map(|(_, edit)| edit).collect());
+        rewrites.push(Rewrite { title: "Use #[Scope] on all scope methods".into(), kind: "refactor.rewrite", edits });
+    }
+
+    rewrites
 }
 
 fn move_argument(text: &str, masked: &str, class: &Class, found: &[Method], at: usize) -> Option<Rewrite> {
@@ -335,6 +354,17 @@ mod tests {
         let out = apply(text, rewrite);
         assert!(out.contains("use Illuminate\\Database\\Eloquent\\Attributes\\Scope;"), "{out}");
         assert!(out.contains("    #[Scope]\n    protected function active($query)"), "{out}");
+    }
+
+    #[test]
+    fn all_scope_methods_convert_together_with_one_import() {
+        let text = "<?php\nnamespace App\\Models;\n\nuse Illuminate\\Database\\Eloquent\\Model;\n\nclass Post extends Model\n{\n    public function scopeActive($q) {}\n\n    public function scopeRecent($q) {}\n}\n";
+        let found = rewrites(text, at(text, "scopeActive"));
+        let all = found.iter().find(|r| r.title == "Use #[Scope] on all scope methods").unwrap();
+        let out = apply(text, all);
+        assert_eq!(out.matches("#[Scope]").count(), 2, "{out}");
+        assert_eq!(out.matches("Attributes\\Scope;").count(), 1, "{out}");
+        assert!(out.contains("function recent($q)") && out.contains("function active($q)"), "{out}");
     }
 
     #[test]

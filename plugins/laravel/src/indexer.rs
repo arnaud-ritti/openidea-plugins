@@ -2,8 +2,9 @@
 //! file declares a key, a marker is a gutter icon going to the definitions of
 //! its key. Keys: `model#Post`, `model-table#posts`, `factory#Post`,
 //! `policy#Post`, `observer#Post`, `seeder#Post`, `migration#posts`,
-//! `event#Registered`, `listener#Registered`. Routes, views and controllers keep
-//! the provider's gutter markers, so nothing here duplicates them.
+//! `event#Registered`, `listener#Registered`, `controller#PostController`,
+//! `route#PostController`. Routes link to the controller class from any file; the provider's
+//! own markers keep the action and view links.
 
 use crate::{index, php, project_for};
 use openidea_plugin::indexing::{Anchor, Document, DocumentIndexer, Edges};
@@ -25,6 +26,8 @@ enum Role {
     Migration,
     Event,
     Listener,
+    Route,
+    Controller,
 }
 
 const DIRECTORIES: &[(&str, Role)] = &[
@@ -36,6 +39,8 @@ const DIRECTORIES: &[(&str, Role)] = &[
     ("/database/migrations/", Role::Migration),
     ("/app/Events/", Role::Event),
     ("/app/Listeners/", Role::Listener),
+    ("/routes/", Role::Route),
+    ("/app/Http/Controllers/", Role::Controller),
 ];
 
 /// The role of a file, the project root and the file's name without `.php`.
@@ -173,6 +178,26 @@ pub fn edges_of(path: &str, text: &str, exists: &dyn Fn(&str) -> bool) -> Edges 
             definition(format!("event#{stem}"), range);
             markers.push(Anchor { key: format!("listener#{stem}"), range });
         }
+        Role::Route => {
+            let mut seen: Vec<(String, usize)> = Vec::new();
+            for def in crate::routes::parse(&masked) {
+                let Some((class, _)) = def.controller else { continue };
+                if seen.contains(&(class.clone(), def.offset)) {
+                    continue;
+                }
+
+                let range = range_of(text, def.offset, def.width);
+                definition(format!("route#{class}"), range);
+                markers.push(Anchor { key: format!("controller#{class}"), range });
+                seen.push((class, def.offset));
+            }
+        }
+        Role::Controller => {
+            let Some(at) = class_name(&masked, stem) else { return Edges::default() };
+            let range = range_of(text, at, stem.len());
+            definition(format!("controller#{stem}"), range);
+            markers.push(Anchor { key: format!("route#{stem}"), range });
+        }
         Role::Listener => {
             let Some(at) = class_name(&masked, stem) else { return Edges::default() };
             let range = range_of(text, at, stem.len());
@@ -272,6 +297,17 @@ mod tests {
 
         let scalar = "<?php\nclass A\n{\n    public function handle($x) {}\n}\n";
         assert!(edges_of("/p/app/Listeners/A.php", scalar, &nothing_exists).definitions.is_empty());
+    }
+
+    #[test]
+    fn routes_and_controllers_meet_through_the_class_name() {
+        let routes = "<?php\nRoute::get('/a', [PostController::class, 'index'])->name('a');\nRoute::resource('posts', PostController::class);\n";
+        let edges = edges_of("/p/routes/web.php", routes, &nothing_exists);
+        assert_eq!(keys(&edges.definitions), ["route#PostController", "route#PostController"]);
+        assert_eq!(keys(&edges.markers), ["controller#PostController", "controller#PostController"]);
+
+        let controller = edges_of("/p/app/Http/Controllers/Admin/PostController.php", "<?php\nclass PostController extends Controller\n{\n}\n", &nothing_exists);
+        assert_eq!((keys(&controller.definitions), keys(&controller.markers)), (vec!["controller#PostController"], vec!["route#PostController"]));
     }
 
     #[test]

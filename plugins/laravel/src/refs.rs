@@ -407,11 +407,13 @@ fn query_target(text: &str, site: &Site) -> Option<Option<String>> {
         return table.map(|t| Some(format!("table:{t}")));
     }
 
-    for (at, _) in statement.match_indices("::") {
-        let word_start = statement[..at].rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\')).map_or(0, |i| i + 1);
-        let word = &statement[word_start..at];
-        if word.rsplit('\\').next().is_some_and(|short| short.starts_with(|c: char| c.is_ascii_uppercase())) {
-            return class_of(word).map(|class| class.map(|name| with_hops(&name, &hops_after_static(&statement[at + 2..]))));
+    if let Some(found) = static_chain(statement, &class_of) {
+        return found;
+    }
+
+    if let Some(assigned) = assigned_chain(text, site, statement) {
+        if let Some(found) = static_chain(assigned, &class_of) {
+            return found;
         }
     }
 
@@ -423,6 +425,39 @@ fn query_target(text: &str, site: &Site) -> Option<Option<String>> {
     }
 
     Some(None)
+}
+
+fn static_chain(statement: &str, class_of: &dyn Fn(&str) -> Option<Option<String>>) -> Option<Option<Option<String>>> {
+    for (at, _) in statement.match_indices("::") {
+        let word_start = statement[..at].rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\')).map_or(0, |i| i + 1);
+        let word = &statement[word_start..at];
+        if word.rsplit('\\').next().is_some_and(|short| short.starts_with(|c: char| c.is_ascii_uppercase())) {
+            return Some(class_of(word).map(|class| class.map(|name| with_hops(&name, &hops_after_static(&statement[at + 2..])))));
+        }
+    }
+
+    None
+}
+
+/// The right side of the nearest earlier `$variable = …;` when the call is on `$variable->`.
+fn assigned_chain<'a>(text: &'a str, site: &Site, statement: &str) -> Option<&'a str> {
+    let head = if site.callee.starts_with('$') { site.callee.as_str() } else { statement.trim_start() };
+    let variable: String = head.strip_prefix('$')?.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    if variable.is_empty() || variable == "this" || !head[1 + variable.len()..].starts_with("->") {
+        return None;
+    }
+
+    let from = text.floor_char_boundary(site.callee_start.saturating_sub(4000));
+    let before = &text[from..site.callee_start];
+    let needle = format!("${variable}");
+    let at = before.rmatch_indices(&needle).find_map(|(at, _)| {
+        let preceded = before[..at].bytes().next_back().is_none_or(|b| !is_identifier(b));
+        let rest = before[at + needle.len()..].trim_start();
+        (preceded && rest.starts_with('=') && !rest.starts_with("==") && !rest.starts_with("=>")).then_some(at)
+    })?;
+    let rhs = &before[at + needle.len()..];
+    let rhs = rhs.trim_start().strip_prefix('=')?;
+    Some(&rhs[..rhs.find(';').unwrap_or(rhs.len())])
 }
 
 fn with_hops(model: &str, hops: &[String]) -> String {
