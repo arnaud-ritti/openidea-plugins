@@ -2,7 +2,7 @@
 //! check stays quiet when an annotation comes from a library other than
 //! Spring or a name is not a plain string literal.
 
-use crate::aop;
+use crate::{aop, injection_checks};
 use crate::model::{Bean, class_bean, method_bean, short_name};
 use crate::{World, file_name};
 use openidea_plugin::{Severity, host};
@@ -40,6 +40,7 @@ pub struct Groups {
     pub unresolved_references: bool,
     pub aop: bool,
     pub xml: bool,
+    pub injection: bool,
 }
 
 impl Default for Groups {
@@ -54,6 +55,7 @@ impl Default for Groups {
             unresolved_references: false,
             aop: true,
             xml: true,
+            injection: true,
         }
     }
 }
@@ -72,6 +74,7 @@ impl Groups {
             unresolved_references: on("checkUnresolvedReferences", defaults.unresolved_references),
             aop: on("checkAop", defaults.aop),
             xml: on("checkXml", defaults.xml),
+            injection: on("checkInjectionAnnotations", defaults.injection),
         }
     }
 }
@@ -97,6 +100,9 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         if groups.self_invocation {
             self_invocation(file, ty, text, &mut out);
         }
+        if groups.injection {
+            injection_checks::check(file, ty, &mut out);
+        }
         if groups.aop {
             pointcut_designators(path, file, ty, &mut out);
         }
@@ -109,7 +115,7 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
 }
 
 /// The annotation `name` unless the file imports another one of that name.
-fn spring<'a>(file: &JavaFile, annotations: &'a [Annotation], name: &str) -> Option<&'a Annotation> {
+pub(crate) fn spring<'a>(file: &JavaFile, annotations: &'a [Annotation], name: &str) -> Option<&'a Annotation> {
     let annotation = annotations.iter().find(|a| a.name == name)?;
     let suffix = format!(".{name}");
     let foreign = file

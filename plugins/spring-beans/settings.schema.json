@@ -40,6 +40,11 @@
       "title": "Report incomplete AOP configuration (aop:config, pointcuts, aspects, advisors, advice) in Spring XML files",
       "default": true
     },
+    "springBeans.checkInjectionAnnotations": {
+      "type": "boolean",
+      "title": "Report @Autowired, @Value, @Inject and @Resource on static members and conflicting @Autowired constructors",
+      "default": true
+    },
     "springBeans.checkXml": {
       "type": "boolean",
       "title": "Run the other checks on Spring XML configuration files",

@@ -6,6 +6,7 @@
 
 mod aop;
 mod checks;
+mod injection_checks;
 mod kotlin;
 mod model;
 mod sites;

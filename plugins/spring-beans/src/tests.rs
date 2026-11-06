@@ -1640,3 +1640,78 @@ fn style_fix_handles_unusual_parent_tags() {
     let els = xml::elements(text);
     assert!(xml_checks::attribute_style_edit(text, &els[2], &els).is_none());
 }
+
+#[test]
+fn autowired_static_field_is_reported() {
+    let text = "@Service\nclass A {\n    @Autowired\n    private static Repo repo;\n}\n";
+    assert_eq!(found(text), [pair("static-injection", "repo")]);
+    let constant = "@Service\nclass A {\n    @Value(\"${a}\")\n    static final String NAME = null;\n}\n";
+    assert_eq!(found(constant), [pair("static-injection", "NAME")]);
+}
+
+#[test]
+fn value_spel_on_static_field_reports_the_spel_code_only() {
+    let text = "@Service\nclass A {\n    @Value(\"#{systemProperties['x']}\")\n    static String x;\n}\n";
+    assert_eq!(found(text), [pair("static-spel-injection", "x")]);
+}
+
+#[test]
+fn inject_on_static_method_is_reported() {
+    let text = "import jakarta.inject.Inject;\n\n@Service\nclass A {\n    @Inject\n    static void setRepo(Repo r) {}\n}\n";
+    assert_eq!(found(text), [pair("static-injection", "setRepo")]);
+}
+
+#[test]
+fn two_required_autowired_constructors_are_reported() {
+    let text = "@Service\nclass A {\n    @Autowired\n    A(X x) {}\n    @Autowired(required = true)\n    A(Y y) {}\n}\n";
+    assert_eq!(found(text), [pair("autowired-constructors", "A")]);
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    assert_eq!(host.diagnostics()[&document.path][0].range.start.line, 5);
+}
+
+#[test]
+fn required_next_to_optional_constructor_is_reported() {
+    let text = "@Service\nclass A {\n    @Autowired\n    A(X x) {}\n    @Autowired(required = false)\n    A(Y y) {}\n}\n";
+    assert_eq!(found(text), [pair("autowired-constructors", "A")]);
+}
+
+#[test]
+fn optional_autowired_constructors_are_quiet() {
+    let text = "@Service\nclass A {\n    @Autowired(required = false)\n    A(X x) {}\n    @Autowired(required = false)\n    A(Y y) {}\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn injection_checks_are_quiet_for_library_or_dynamic_name() {
+    let foreign = "import com.acme.Autowired;\n\nclass A {\n    @Autowired\n    static Repo repo;\n    @Autowired\n    A(X x) {}\n    @Autowired\n    A(Y y) {}\n}\n";
+    assert!(found(foreign).is_empty());
+    let dynamic = "class A {\n    @Autowired(required = FLAG)\n    A(X x) {}\n    @Autowired\n    A(Y y) {}\n}\n";
+    assert!(found(dynamic).is_empty());
+    let lombok = "@RequiredArgsConstructor\n@Service\nclass A {\n    private final Repo repo;\n}\n";
+    assert!(found(lombok).is_empty());
+    let record = "record A(@Autowired static int x) {\n    @Autowired static Repo repo;\n}\n";
+    assert!(found(record).is_empty());
+    let instance = "@Service\nclass A {\n    @Autowired\n    private Repo repo;\n    @Autowired\n    void set(Repo r) {}\n    @Value(\"#{x}\")\n    String y;\n}\n";
+    assert!(found(instance).is_empty());
+}
+
+#[test]
+fn switched_off_injection_group_is_quiet() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkInjectionAnnotations", "false");
+    let text = "@Service\nclass A {\n    @Autowired\n    static Repo repo;\n}\n";
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", text).is_empty());
+}
+
+#[test]
+fn injection_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\nclass A {\n    @Qualifier(\"é\") @Autowired static Repo repo;\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let diagnostics = &host.diagnostics()[&document.path];
+    let diagnostic = diagnostics.iter().find(|d| d.code.as_deref() == Some("static-injection")).unwrap();
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 43));
+}
