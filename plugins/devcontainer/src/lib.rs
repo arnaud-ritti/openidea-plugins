@@ -429,6 +429,21 @@ mod tests {
     }
 
     #[test]
+    fn manifest_activates_on_file_events() {
+        let manifest = include_str!("../plugin.toml");
+
+        assert!(manifest.contains("activation = [\"on-event:file-opened\", \"on-event:file-saved\"]"));
+    }
+
+    #[test]
+    fn utf8_bom_is_skipped() {
+        let host = host();
+        open(&host, FILE, "\u{feff}{\"imge\": 1}");
+
+        assert_eq!(codes(&published(&host, FILE)), ["unknown-property"]);
+    }
+
+    #[test]
     fn oversized_file_publishes_empty_list() {
         let host = host();
         open(&host, FILE, &format!("{{\"imge\": \"{}\"}}", "x".repeat(MAX_BYTES)));

@@ -40,7 +40,8 @@ struct Member {
 pub fn check(text: &str) -> Vec<Finding> {
     let mut findings = vec![];
     let bytes = text.as_bytes();
-    let start = skip_trivia(bytes, 0);
+    let bom = if bytes.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 };
+    let start = skip_trivia(bytes, bom);
 
     for member in members(bytes, start) {
         if member.key == "features" {
