@@ -58,8 +58,7 @@ fn xml_tables_and_rollbacks(text: &str, found: &mut Found) {
     }
 }
 
-fn yaml_tables_and_rollbacks(text: &str, found: &mut Found) {
-    let keys = config::yaml(text);
+fn key_tables_and_rollbacks(keys: &[config::Key], text: &str, found: &mut Found) {
     for key in keys.iter().filter(|k| !k.value.is_empty()) {
         let Some((parent, last)) = key.key.rsplit_once('.') else { continue };
         if TABLE_ATTRS.contains(&last) {
@@ -92,7 +91,8 @@ fn collect(path: &str, text: &str, log: &Changelog) -> Found {
     }
     match log.format {
         changelog::Format::Xml => xml_tables_and_rollbacks(text, &mut found),
-        changelog::Format::Yaml => yaml_tables_and_rollbacks(text, &mut found),
+        changelog::Format::Yaml => key_tables_and_rollbacks(&config::yaml(text), text, &mut found),
+        changelog::Format::Json => key_tables_and_rollbacks(&crate::json::keys(text), text, &mut found),
         changelog::Format::Sql => {}
     }
     found
@@ -153,5 +153,17 @@ mod tests {
     fn non_changelogs_publish_nothing() {
         assert!(index("/p/other.xml", "<project/>").definitions.is_empty());
         assert!(index("/p/x.json", "{}").references.is_empty());
+        assert!(index("/p/package.json", "{\"name\": \"databaseChangeLog\"}").references.is_empty());
+    }
+
+    #[test]
+    fn json_defines_and_references() {
+        let json = r#"{"databaseChangeLog": [
+  {"include": {"file": "db/a.json"}},
+  {"changeSet": {"id": "2", "author": "bob", "changes": [{"createTable": {"tableName": "t"}}, {"dropTable": {"tableName": "old"}}]}}
+]}"#;
+        let edges = index("/p/master.json", json);
+        assert_eq!(keys(&edges.definitions), ["lb:file:master.json", "lb:cs:2::bob", "lb:table:t"]);
+        assert_eq!(keys(&edges.references), ["lb:file:a.json", "lb:table:old"]);
     }
 }

@@ -5,18 +5,19 @@ mod changelog;
 mod checks;
 mod complete;
 mod indexer;
+mod json;
 
 use changelog::{Changelog, Include, Target};
-use openidea_plugin::providers::{CompletionItem, Document, LineMarker, Providers};
+use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use spring_text::tree::Expansion;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use openidea_plugin::text::offset;
-use openidea_plugin::{Error, NotificationLevel, Invocation, Location, Plugin, Position, Project, Range, host, register_plugin};
+use openidea_plugin::{Error, NotificationLevel, Invocation, Location, Plugin, Position, Project, Range, host};
 use spring_text::index::project_of;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 
 const MAX_FILES: usize = 2000;
 const DISCOVERY_BUDGET: Duration = Duration::from_secs(3);
@@ -28,6 +29,8 @@ pub struct Liquibase {
     max_files: Option<usize>,
     /// File and 0-based line by tree item key, from the last render of the changesets view.
     targets: BTreeMap<String, (String, u32)>,
+    /// `git config user.name`, asked once; the outer `None`: not asked yet.
+    git_user: Option<Option<String>>,
 }
 
 impl Plugin for Liquibase {
@@ -187,12 +190,6 @@ fn project_properties(project: &Project, root: &str, path: &str, open: &Changelo
         if text.len() > MAX_CHANGELOG_BYTES {
             return None;
         }
-        if file.ends_with(".json") {
-            if text.contains("databaseChangeLog") {
-                return None;
-            }
-            continue;
-        }
         if let Some(log) = changelog::parse(&file, &text) {
             absorb(&file, &log)?;
         }
@@ -313,7 +310,7 @@ impl<'a> Walk<'a> {
     fn discover(&mut self) {
         let start = Instant::now();
         let mut paths = BTreeSet::new();
-        for glob in ["**/*.xml", "**/*.yaml", "**/*.yml", "**/*.sql"] {
+        for glob in ["**/*.xml", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.sql"] {
             let listed = self.project.find_files(glob, self.max_files as u32).unwrap_or_default();
             self.partial |= listed.len() >= self.max_files;
             paths.extend(listed);
@@ -438,16 +435,61 @@ impl<'a> Walk<'a> {
     }
 }
 
+impl Liquibase {
+    fn author(&mut self) -> Option<String> {
+        let configured = host::setting_string("author").filter(|a| !a.trim().is_empty());
+        if configured.is_some() {
+            return configured;
+        }
+        self.git_user
+            .get_or_insert_with(|| {
+                let output = host::run_process("git", &["config".into(), "user.name".into()], None).ok()?;
+                let name = output.stdout.trim().to_owned();
+                (!name.is_empty()).then_some(name)
+            })
+            .clone()
+    }
+
+    fn include_files(doc: &Document, include: &Include, from: usize, to: usize) -> Vec<CompletionItem> {
+        let Some(project) = project_of(&doc.path) else {
+            return Vec::new();
+        };
+        let Ok(root) = project.root() else {
+            return Vec::new();
+        };
+        let mut files = Vec::new();
+        for glob in ["**/*.xml", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.sql"] {
+            files.extend(project.find_files(glob, MAX_LISTED_FILES as u32).unwrap_or_default());
+        }
+        let paths = complete::file_paths(&doc.path, &root, include.relative, &files);
+        complete::value_items(&doc.text, from, to, &paths, CompletionKind::File)
+    }
+}
+
 impl Providers for Liquibase {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(caret) = offset(&doc.text, at) else {
             return Vec::new();
         };
-        let changelog = changelog::parse(&doc.path, &doc.text).is_some();
-        if doc.path.ends_with(".sql") {
-            return complete::sql(&doc.text, caret, changelog);
+        let Some(log) = changelog::parse(&doc.path, &doc.text) else {
+            return if doc.path.ends_with(".sql") { complete::sql(&doc.text, caret, false) } else { Vec::new() };
+        };
+        if let Some((from, to)) = complete::author_value(&doc.path, &doc.text, caret) {
+            let authors: Vec<String> = self.author().into_iter().collect();
+            return complete::value_items(&doc.text, from, to, &authors, CompletionKind::Value);
         }
-        if changelog && (doc.path.ends_with(".yaml") || doc.path.ends_with(".yml")) {
+        let blank_value = |i: &Include| i.path.is_empty() && caret >= i.at && doc.text[i.at..caret].trim().is_empty();
+        if let Some(include) = log.includes.iter().find(|i| !i.dir && (i.at <= caret && caret <= i.end || blank_value(i))) {
+            let (from, to) = if include.path.is_empty() { (caret, caret) } else { (include.at, include.end) };
+            return Self::include_files(doc, include, from, to);
+        }
+        if doc.path.ends_with(".sql") {
+            return complete::sql(&doc.text, caret, true);
+        }
+        if doc.path.ends_with(".xml") {
+            return complete::xml(&doc.text, caret);
+        }
+        if doc.path.ends_with(".yaml") || doc.path.ends_with(".yml") {
             return complete::yaml(&doc.text, caret);
         }
         Vec::new()
@@ -475,8 +517,9 @@ impl Providers for Liquibase {
         }
     }
 
-    /// Publishes the changelog's problems; there are no gutter markers.
+    /// Publishes the changelog's problems and marks each resolvable `include` with a gutter link to its file.
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        let mut markers = Vec::new();
         let problems = match changelog::parse(&doc.path, &doc.text) {
             Some(log) => {
                 let context = OnceCell::new();
@@ -487,9 +530,16 @@ impl Providers for Liquibase {
                         Some((project, root))
                     })
                 };
-                let resolve = |include: &Include| match context() {
-                    Some((project, root)) => target(project, root, &doc.path, include),
-                    None => Target::Unknown,
+                let resolved = RefCell::new(BTreeMap::new());
+                let resolve = |include: &Include| {
+                    resolved
+                        .borrow_mut()
+                        .entry(include.at)
+                        .or_insert_with(|| match context() {
+                            Some((project, root)) => target(project, root, &doc.path, include),
+                            None => Target::Unknown,
+                        })
+                        .clone()
                 };
                 let declared = OnceCell::new();
                 let from_project = OnceCell::new();
@@ -510,12 +560,24 @@ impl Providers for Liquibase {
                 };
                 let check = host::setting_bool("checkProperties").unwrap_or(true);
                 let defined: Option<&dyn Fn(&str) -> bool> = check.then_some(&defined);
-                checks::problems(&doc.path, &doc.text, &log, &resolve, defined)
+                let problems = checks::problems(&doc.path, &doc.text, &log, &resolve, defined);
+                for include in log.includes.iter().filter(|i| !i.dir) {
+                    let Target::Found(path) = resolve(include) else {
+                        continue;
+                    };
+                    markers.push(LineMarker {
+                        line: changelog::line_of(&doc.text, include.at),
+                        icon: Some("navigate".into()),
+                        tooltip: format!("Open {}", path.rsplit('/').next().unwrap_or(&path)),
+                        target: Some(Location { path, range: Range::new(Position::new(0, 0), Position::new(0, 0)) }),
+                    });
+                }
+                problems
             }
             None => Vec::new(),
         };
         let _ = host::publish_diagnostics(&doc.path, &problems);
-        Vec::new()
+        markers
     }
 }
 
@@ -655,6 +717,7 @@ mod tests {
         let language = match path.rsplit('.').next() {
             Some("xml") => "xml",
             Some("sql") => "sql",
+            Some("json") => "json",
             _ => "yaml",
         };
         Document { path: path.into(), language: language.into(), version: 1, text: text.into() }
@@ -1252,5 +1315,107 @@ mod tests {
     #[test]
     fn numeric_reference_is_quiet() {
         assert!(placeholder_in(PROPERTY_PATH, &PLACEHOLDER_XML.replace("${prefix}", "${1}")).is_empty());
+    }
+
+    #[test]
+    fn completes_include_files_authors_and_xml_names() {
+        let host = MockHost::install().with_capabilities(&["project.read", "process:git"]);
+        host.add_file("db/master.yaml", "databaseChangeLog:\n  - include:\n      file: \n");
+        host.add_file("db/changes/001.yaml", "databaseChangeLog: []\n");
+        host.add_file("db/changes/002.sql", "--liquibase formatted sql\n");
+        host.add_file("pom.xml", "<project/>");
+        host.on_process("git", |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "Ann\n".into(), stderr: String::new() }));
+
+        let text = "databaseChangeLog:\n  - include:\n      relativeToChangelogFile: true\n      file: ch";
+        let items = complete_at_end("/project/db/master.yaml", text);
+        assert_eq!(labels(&items), ["changes/001.yaml", "changes/002.sql"]);
+        assert_eq!(item(&items, "changes/001.yaml").replace, Some(spring_text::range(text, text.len() - 2, text.len())));
+        let absolute = complete_at_end("/project/db/master.yaml", "databaseChangeLog:\n  - include:\n      file: ");
+        assert_eq!(labels(&absolute), ["db/changes/001.yaml", "db/changes/002.sql", "pom.xml"]);
+
+        let xml = "<databaseChangeLog>\n<include file=\"\" relativeToChangelogFile=\"true\"/>\n</databaseChangeLog>";
+        let caret = xml.find("\"\"").unwrap() + 1;
+        let items = Liquibase::default().completion(&doc("/project/db/master.xml", xml), openidea_plugin::text::position(xml, caret), None);
+        assert_eq!(labels(&items), ["changes/001.yaml", "changes/002.sql", "master.yaml"]);
+
+        let author = "databaseChangeLog:\n  - changeSet:\n      id: 1\n      author: ";
+        assert_eq!(labels(&complete_at_end("/project/db/a.yaml", author)), ["Ann"]);
+        let sql = "--liquibase formatted sql\n--changeset ";
+        assert_eq!(labels(&complete_at_end("/project/db/a.sql", sql)), ["Ann"]);
+        assert!(!labels(&complete_at_end("/project/db/a.sql", "--liquibase formatted sql\n--changeset ann:")).contains(&"Ann"));
+        let xml_author = "<databaseChangeLog>\n<changeSet id=\"1\" author=\"\">\n</changeSet>\n</databaseChangeLog>";
+        let caret = xml_author.find("author=\"").unwrap() + 8;
+        let items = Liquibase::default().completion(&doc("/project/db/a.xml", xml_author), openidea_plugin::text::position(xml_author, caret), None);
+        assert_eq!(labels(&items), ["Ann"]);
+
+        let tag = "<databaseChangeLog>\n<changeSet id=\"1\" author=\"a\">\n<creat";
+        let items = complete_at_end("/project/db/a.xml", tag);
+        assert!(labels(&items).contains(&"createTable") && labels(&items).contains(&"comment"));
+        assert_eq!(item(&items, "createTable").replace, Some(spring_text::range(tag, tag.len() - 5, tag.len())));
+        let in_table = "<databaseChangeLog>\n<changeSet id=\"1\" author=\"a\">\n<createTable tableName=\"t\">\n<";
+        assert_eq!(labels(&complete_at_end("/project/db/a.xml", in_table)), ["column"]);
+        assert!(complete_at_end("/project/db/a.xml", "<databaseChangeLog>\n<").is_empty());
+
+        let attrs = "<databaseChangeLog>\n<changeSet id=\"1\" ru";
+        let items = complete_at_end("/project/db/a.xml", attrs);
+        assert!(labels(&items).contains(&"runOnChange") && !labels(&items).contains(&"id") && !labels(&items).contains(&"changes"));
+        assert_eq!(item(&items, "runOnChange").insert_text, "runOnChange=\"$0\"");
+        assert!(complete_at_end("/project/db/a.xml", "<databaseChangeLog>\n<changeSet id=\"1\" author=\"x").is_empty());
+
+        let schema = "<databaseChangeLog xsi:schemaLocation=\"x y\">\n<changeSet id=\"1\">\n<creat";
+        assert!(complete_at_end("/project/db/a.xml", schema).is_empty());
+    }
+
+    #[test]
+    fn author_is_a_setting_or_nothing_without_git() {
+        let host = MockHost::install().with_capabilities(&["project.read"]);
+        let author = "databaseChangeLog:\n  - changeSet:\n      author: ";
+        assert!(complete_at_end("/project/db/a.yaml", author).is_empty());
+        host.set_setting("author", "\"Bo\"");
+        assert_eq!(labels(&complete_at_end("/project/db/a.yaml", author)), ["Bo"]);
+    }
+
+    const JSON_LOG: &str = "{\"databaseChangeLog\": [\n{\"include\": {\"file\": \"nope.json\"}},\n{\"changeSet\": {\"id\": \"1\", \"author\": \"a\", \"changes\": [{\"frobnicate\": {}}]}},\n{\"changeSet\": {\"id\": \"1\", \"author\": \"a\"}},\n{\"changeSet\": {\"id\": \"2\"}}\n]}";
+
+    #[test]
+    fn checks_json_changelogs_and_stays_silent_on_other_json() {
+        let host = MockHost::install();
+        let codes: Vec<String> = checked(&host, "/project/db/log.json", JSON_LOG).into_iter().map(|(code, _)| code).collect();
+        assert_eq!(codes, ["unresolved-include", "unknown-change-type", "duplicate-changeset", "incomplete-changeset"]);
+        assert!(checked(&host, "/project/package.json", "{\"name\": \"x\"}").is_empty());
+    }
+
+    #[test]
+    fn goes_to_json_includes_and_lists_json_changesets() {
+        let host = MockHost::install();
+        host.add_file("db/master.json", "{\"databaseChangeLog\": [{\"include\": {\"file\": \"db/child.json\"}}]}");
+        host.add_file("db/child.json", "{\"databaseChangeLog\": [{\"changeSet\": {\"id\": \"7\", \"author\": \"x\", \"changes\": [{\"dropTable\": {}}]}}]}");
+        host.add_file("package.json", "{\"name\": \"x\"}");
+        let text = "{\"databaseChangeLog\": [{\"include\": {\"file\": \"db/child.json\"}}]}";
+        let caret = text.find("db/child").unwrap() + 2;
+        let found = Liquibase::default().definition(&doc("/project/db/master.json", text), openidea_plugin::text::position(text, caret));
+        assert_eq!(found.iter().map(|l| l.path.as_str()).collect::<Vec<_>>(), ["/project/db/child.json"]);
+
+        let rows = tree_rows(&host, &mut Liquibase::default());
+        assert!(rows.iter().any(|(_, label, detail)| label == "7 (x)" && detail.as_deref() == Some("dropTable")), "{rows:?}");
+    }
+
+    #[test]
+    fn marks_each_resolvable_include_in_every_format() {
+        let host = MockHost::install();
+        host.add_file("db/a.yaml", "databaseChangeLog: []\n");
+        host.add_file("db/a.json", "{\"databaseChangeLog\": []}");
+        let cases = [
+            ("/project/db/m.yaml", "databaseChangeLog:\n  - include:\n      file: db/a.yaml\n  - include:\n      file: db/none.yaml\n", 2),
+            ("/project/db/m.xml", "<databaseChangeLog>\n<include file=\"db/a.yaml\"/>\n<include file=\"db/none.yaml\"/>\n</databaseChangeLog>", 1),
+            ("/project/db/m.json", "{\"databaseChangeLog\": [\n{\"include\": {\"file\": \"db/a.json\"}}\n]}", 1),
+        ];
+        for (path, text, line) in cases {
+            let markers = Liquibase::default().line_markers(&doc(path, text));
+            assert_eq!(markers.len(), 1, "{path}");
+            assert_eq!(markers[0].line, line, "{path}");
+            assert!(markers[0].target.as_ref().is_some_and(|t| t.path.starts_with("/project/db/a.")), "{path}");
+        }
+        assert!(Liquibase::default().line_markers(&doc("/project/db/a.sql", "--liquibase formatted sql\n")).is_empty());
     }
 }

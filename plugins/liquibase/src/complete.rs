@@ -4,6 +4,7 @@ use crate::catalog::*;
 use openidea_plugin::providers::{CompletionItem, CompletionKind};
 use spring_text::config::yaml_parent;
 use spring_text::range;
+use spring_text::xml;
 
 /// The line around byte `at`: its start and its end without trailing blanks.
 fn line_bounds(text: &str, at: usize) -> (usize, usize) {
@@ -139,4 +140,150 @@ pub fn sql(text: &str, at: usize, changelog: bool) -> Vec<CompletionItem> {
         items.push(item("--comment", "--comment: ", false));
     }
     items
+}
+
+const CHANGELOG_EXTENSIONS: [&str; 5] = ["xml", "yaml", "yml", "json", "sql"];
+
+fn dir_of(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// Changelog files as an `include` would write them: beside `changelog` when `relative`, else from the classpath root
+/// (`src/main/resources`) or the project root.
+pub fn file_paths(changelog: &str, root: &str, relative: bool, files: &[String]) -> Vec<String> {
+    let base = if relative {
+        dir_of(changelog).to_owned()
+    } else if let Some(i) = changelog.find("/src/main/resources/") {
+        changelog[..i + "/src/main/resources".len()].to_owned()
+    } else {
+        root.trim_end_matches('/').to_owned()
+    };
+    let prefix = format!("{base}/");
+    let mut out: Vec<String> = files
+        .iter()
+        .filter(|f| f.as_str() != changelog)
+        .filter(|f| f.rsplit_once('.').is_some_and(|(_, ext)| CHANGELOG_EXTENSIONS.contains(&ext)))
+        .filter_map(|f| f.strip_prefix(&prefix))
+        .map(str::to_owned)
+        .collect();
+    out.sort();
+    out
+}
+
+/// Replaces the value `from..to` with each of `values`.
+pub fn value_items(text: &str, from: usize, to: usize, values: &[String], kind: CompletionKind) -> Vec<CompletionItem> {
+    let replace = range(text, from, to);
+    values
+        .iter()
+        .map(|v| CompletionItem { replace: Some(replace), ..CompletionItem::new(v, kind) })
+        .collect()
+}
+
+/// The `author` value being typed at `caret`, as its start and end: in YAML (`author: ...`), an XML `author="..."` or a
+/// formatted SQL `--changeset ...` line.
+pub fn author_value(path: &str, text: &str, caret: usize) -> Option<(usize, usize)> {
+    if path.ends_with(".xml") {
+        let elements = xml::elements(text);
+        let element = &elements[xml::element_at(&elements, caret)?];
+        let author = element.attr("author").filter(|a| a.holds(caret))?;
+        return (element.local() == "changeSet").then_some((author.value_at, author.value_end));
+    }
+    let (line_start, _) = line_bounds(text, caret);
+    let before = &text[line_start..caret];
+    if path.ends_with(".sql") {
+        let typed = before.trim_start().strip_prefix("--changeset")?.strip_prefix(' ')?;
+        return (!typed.contains(':')).then_some((caret - typed.len(), caret));
+    }
+    let value = before.trim_start().trim_start_matches("- ").trim_start().strip_prefix("author:")?;
+    let from = caret - value.trim_start().len();
+    let (parent, _) = yaml_parent(text, line_start + before.len() - before.trim_start().len());
+    parent.ends_with(".changeSet").then_some((from, caret))
+}
+
+fn xml_attributes(name: &str) -> Option<Vec<&'static str>> {
+    let not_children = |keys: &[&'static str]| keys.iter().copied().filter(|k| !["changes", "rollback", "comment", "preConditions", "columns", "constraints"].contains(k)).collect();
+    match name {
+        "changeSet" => Some(not_children(CHANGE_SET)),
+        "include" => Some(INCLUDE.to_vec()),
+        "includeAll" => Some(INCLUDE_ALL.to_vec()),
+        "column" => Some(not_children(COLUMN)),
+        "constraints" => Some(CONSTRAINTS.to_vec()),
+        _ => change_type(name).map(not_children),
+    }
+}
+
+fn xml_children(name: &str) -> Vec<&'static str> {
+    let types = || CHANGE_TYPES.iter().map(|(n, _)| *n);
+    match name {
+        "changeSet" => ["comment", "preConditions", "rollback", "validCheckSum"].into_iter().chain(types()).collect(),
+        "rollback" => types().collect(),
+        "column" => vec!["constraints"],
+        _ if change_type(name).is_some_and(|attrs| attrs.contains(&"columns")) => vec!["column"],
+        _ => Vec::new(),
+    }
+}
+
+/// Element names after `<` and attribute names inside a start tag, for the Liquibase elements. Quiet outside a
+/// `changeSet` and in files that declare a schema (the XML language server completes those).
+pub fn xml(text: &str, caret: usize) -> Vec<CompletionItem> {
+    let elements = xml::elements(text);
+    if elements.first().is_some_and(|root| root.attrs.iter().any(|a| a.local() == "schemaLocation")) {
+        return Vec::new();
+    }
+    let inside_change_set = |mut at: Option<usize>| {
+        while let Some(i) = at {
+            if elements[i].local() == "changeSet" {
+                return true;
+            }
+            at = elements[i].parent;
+        }
+        false
+    };
+
+    let before = &text[..caret];
+    let word_start = before.rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')).map_or(0, |i| i + 1);
+    if before[..word_start].ends_with('<') {
+        let lt = word_start - 1;
+        let Some(parent) = elements.iter().rposition(|e| e.tag_end <= lt && lt < e.end) else {
+            return Vec::new();
+        };
+        if !inside_change_set(Some(parent)) {
+            return Vec::new();
+        }
+        let word_end = caret + text[caret..].find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')).unwrap_or(text.len() - caret);
+        let replace = range(text, word_start, word_end);
+        return xml_children(elements[parent].local())
+            .into_iter()
+            .map(|name| CompletionItem { replace: Some(replace), ..CompletionItem::new(name, CompletionKind::Module) })
+            .collect();
+    }
+
+    let in_tag = |e: &xml::Element| e.start < caret && (caret < e.tag_end || caret == e.tag_end && !text[..e.tag_end].ends_with('>'));
+    let Some(i) = elements.iter().rposition(in_tag) else {
+        return Vec::new();
+    };
+    let element = &elements[i];
+    if element.attrs.iter().any(|a| a.holds(caret) && a.value_at > a.at + a.name.len()) {
+        return Vec::new();
+    }
+    if caret <= element.at + element.name.len() || !inside_change_set(Some(i)) {
+        return Vec::new();
+    }
+    let Some(names) = xml_attributes(element.local()) else {
+        return Vec::new();
+    };
+    let word_start = before.rfind(|c: char| c.is_whitespace()).map_or(0, |i| i + 1);
+    let word_end = caret + text[caret..].find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')).unwrap_or(text.len() - caret);
+    let followed_by_value = text[word_end..].trim_start().starts_with('=');
+    let replace = range(text, word_start, word_end);
+    names
+        .into_iter()
+        .filter(|name| !element.attrs.iter().any(|a| a.name == *name && !(a.at <= caret && caret <= a.at + a.name.len())))
+        .map(|name| CompletionItem {
+            insert_text: if followed_by_value { name.to_owned() } else { format!("{name}=\"$0\"") },
+            snippet: !followed_by_value,
+            replace: Some(replace),
+            ..CompletionItem::new(name, CompletionKind::Property)
+        })
+        .collect()
 }

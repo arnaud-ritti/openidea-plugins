@@ -1,8 +1,8 @@
 # Liquibase Changelogs
 
-Liquibase changelog support for XML, YAML and formatted SQL in OpenIDEA. The
+Liquibase changelog support for XML, YAML, JSON and formatted SQL in OpenIDEA. The
 plugin reads the source text only. A file is treated as a changelog when it is
-an XML file with a `databaseChangeLog` root, a YAML file with a
+an XML file with a `databaseChangeLog` root, a YAML or JSON file with a
 `databaseChangeLog` key, or a `.sql` file that starts with `--liquibase
 formatted sql` or contains a `--changeset` line. Other files, such as a
 `pom.xml`, `application.yml` or a plain SQL script, get no checks and no
@@ -37,7 +37,7 @@ Changelogs are checked as you type, without saving.
 |---|---|---|
 | `duplicate-changeset` | error | A changeset with the same id and author is already defined in the file. The first definition is linked. Ids compare as text, so `id: 1` and `id: "1"` are the same. |
 | `incomplete-changeset` | error | A changeset without an id, without an author, or without both. In SQL the message shows `--changeset author:id`. |
-| `unknown-change-type` | warning | A YAML entry under `changes:` that isn't a built-in Liquibase change type (`createTabel`). |
+| `unknown-change-type` | warning | A YAML or JSON entry under `changes` that isn't a built-in Liquibase change type (`createTabel`). |
 | `unresolved-include` | error | An `include` file or an `includeAll` directory that can't be found. Not reported when `errorIfMissing` (`errorIfMissingOrEmpty` for `includeAll`) is `false`. |
 | `unresolved-property` | warning | A `${name}` placeholder that no changelog of the project declares (properties are global, so the master and sibling changelogs count) and the project's `liquibase.properties` / `application*.properties|yaml|yml` (profile and module files included; `liquibase.parameters.<name>`, `spring.liquibase.parameters.<name>`) do not set. `database.*` names are built in. Quiet when none of those config files can be read, when a scan cap is hit (1000 listed files, 200 changelogs, 256 KB per file, 20 config files), when any changelog uses `includeAll`, an include that cannot be resolved or `property file=`, when the configuration uses `defaultsFile` or `spring.config.import`/`location`/`activate`, for escaped (`$${x}`, `\${x}`), numeric or dynamic names, and inside comments. Quiet when a `pom.xml` or `build.gradle(.kts)` above the changelog mentions `expressionVariables`, `expressionVars`, `changelogParameters`, `changeLogParameters`, `liquibaseProperties` or `propertyFile`. Parameters passed with `-D` or the environment are invisible: turn the check off with `checkProperties` if you rely on them. |
 | `missing-header` | warning | A formatted SQL changelog whose first non-blank line isn't `--liquibase formatted sql`. |
@@ -75,16 +75,34 @@ already followed by a colon is replaced without adding a second one.
 
 In formatted SQL, typing `--` offers `--liquibase formatted sql` on the first
 line and, in a changelog, `--changeset author:id`, `--rollback` and
-`--comment`. XML gets no completion from this plugin.
+`--comment`.
+
+In XML changelogs the plugin completes, inside a `<changeSet>` only, the
+elements after `<` (change types, `comment`, `rollback`, `column`,
+`constraints`) and the attribute names of `changeSet`, `include`, `includeAll`,
+`column`, `constraints` and the change types. It stays quiet when the root
+element declares a `schemaLocation`, because the XML language server completes
+those files.
+
+In every format, the value of an `include` file is completed with the project's
+changelog files (`.xml`, `.yaml`, `.yml`, `.json`, `.sql`), written relative to
+the changelog with `relativeToChangelogFile` and otherwise relative to
+`src/main/resources` or the project root. The list comes from the host's file
+search, which skips hidden directories and ignored paths. An `author` value
+(XML attribute, YAML key, `--changeset ` line before the colon) is completed
+with the `author` setting or, when it is empty, with `git config user.name`
+(needs the optional `process:git` permission; nothing is offered without it).
 
 ## Definition
 
-Go to Definition on the value of an `include` file (XML or YAML) opens the
-included changelog. `includeAll` directories have no single target.
+Go to Definition on the value of an `include` file (XML, YAML or JSON) opens the
+included changelog. A gutter link on the `include` line opens it too (only for
+includes that resolve). `includeAll` directories have no single target.
 
 ## Templates
 
-New › Liquibase Changelog (XML), (YAML) and (Formatted SQL).
+New › Liquibase Changelog (XML), (YAML) and (Formatted SQL). Files named
+`db.changelog-*` and `liquibase.properties` get the Liquibase icon.
 
 ## Run configurations
 
@@ -102,14 +120,16 @@ records, rather than paths relative to wherever the CLI runs.
 
 ## Limits
 
-- XML completion comes from lemminx and the changelog's XSD, not from this
-  plugin. Only the checks above run on XML.
-- JSON changelogs aren't supported.
+- XML files with a `schemaLocation` get completion from lemminx and the
+  changelog's XSD, not from this plugin.
+- JSON changelogs get the checks, the changesets view, Go to Definition and the
+  project index, but no completion and no run icon on the gutter marker.
+- The gutter marker only navigates; the run icon is not used.
 - Includes resolve against `src/main/resources`, `src/test/resources` or the
   project root. Other classpath layouts aren't modelled.
 - Only open files are checked.
 - After you create a missing included file, the master's "Cannot find" stays until the master is edited or reopened.
-- Unknown change types are reported in YAML only, under `changes:`.
+- Unknown change types are reported in YAML and JSON only, under `changes`.
 - Run configurations take fixed arguments, so `rollback-count` and per-changelog
   runs aren't offered.
 
