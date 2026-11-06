@@ -30,6 +30,7 @@ const DETAILS: &str = "merge-request";
 const CHANGES: &str = "merge-request-changes";
 const PROJECTS: &str = "gitlab-projects";
 const NEW_MR: &str = "new-merge-request";
+const NEW_SNIPPET: &str = "new-snippet";
 
 const FILTER_KEY: &str = "filter";
 const SELECTED_KEY: &str = "selected";
@@ -266,6 +267,7 @@ pub struct GitLab {
     /// The project's branches, the only values the target branch can take.
     branches: Option<Vec<String>>,
     form_status: Option<String>,
+    new_snippet: forms::SnippetForm,
 }
 
 impl GitLab {
@@ -859,11 +861,8 @@ fn file_link(ctx: &Invocation) -> Result<String, Error> {
     Ok(api::blob_url(&repo.path, revision, &relative.replace('\\', "/"), selected_lines(&editor)))
 }
 
-fn create_snippet(ctx: &Invocation) -> Result<Option<String>, Error> {
-    if !host::secret_is_set(api::TOKEN) {
-        return Err(NO_TOKEN.into());
-    }
-
+/// The focused file's repository path (its name outside the repository) and the selection, or the whole file.
+fn snippet_content(ctx: &Invocation) -> Result<(String, String), Error> {
     let editor = ctx.editor().ok_or("No file is open.")?;
     let document = editor.document()?;
     let selected = editor
@@ -878,17 +877,50 @@ fn create_snippet(ctx: &Invocation) -> Result<Option<String>, Error> {
     }
 
     let path = editor.path();
-    let name = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(&path);
     let root = ctx.project().and_then(|p| p.vcs_status().ok().flatten()).map(|s| s.root);
-    let file_path = root.as_deref().and_then(|r| relative_path(r, &path)).unwrap_or(&name).replace('\\', "/");
+    let file_path = root.as_deref().and_then(|r| relative_path(r, &path)).unwrap_or(name).replace('\\', "/");
 
+    Ok((file_path, content))
+}
+
+fn post_snippet(draft: &api::SnippetDraft) -> Result<(), Error> {
     let _task = host::begin_task("Creating snippet", false);
-    let url = api::create_snippet(&name, &file_path, &content)?;
+    let url = api::create_snippet(draft)?;
     let copied = host::copy_to_clipboard(&url).is_ok();
     let body = if copied { format!("{url}\nLink copied to the clipboard.") } else { url };
     host::notify(NotificationLevel::Info, "Snippet created", &body);
 
+    Ok(())
+}
+
+fn create_snippet(ctx: &Invocation) -> Result<Option<String>, Error> {
+    if !host::secret_is_set(api::TOKEN) {
+        return Err(NO_TOKEN.into());
+    }
+
+    let (file_path, content) = snippet_content(ctx)?;
+    let title = file_path.rsplit('/').next().unwrap_or(&file_path).to_owned();
+    post_snippet(&api::SnippetDraft { title, description: String::new(), visibility: "private".into(), file_path, content, project: None })?;
+
     Ok(None)
+}
+
+/// Unverified that the host sets `ctx.editor()` while a view button is clicked; without it the form says so.
+fn create_snippet_from_form(form: &forms::SnippetForm, ctx: &Invocation) -> Result<(), Error> {
+    if ctx.editor().is_none() {
+        return Err("Focus a file first.".into());
+    }
+
+    let (path, content) = snippet_content(ctx)?;
+    post_snippet(&form.draft(path, content, &snippet_scopes(ctx))?)
+}
+
+/// `Personal`, and `Project <group/name>` when the repository has a gitlab.com remote.
+fn snippet_scopes(ctx: &Invocation) -> Vec<String> {
+    let project = gitlab_project(ctx).ok().map(|repo| format!("Project {}", repo.path));
+
+    std::iter::once(forms::PERSONAL.to_owned()).chain(project).collect()
 }
 
 impl Plugin for GitLab {
@@ -1058,6 +1090,38 @@ impl GitLab {
         Ok(())
     }
 
+    fn handle_new_snippet(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        let form = &mut self.new_snippet;
+        let pending = form.confirm_public;
+        match event {
+            ViewEvent::Field(key, value) => {
+                if key != "scope" || snippet_scopes(ctx).contains(&value) {
+                    form.field(&key, &value);
+                }
+                if pending == form.confirm_public {
+                    return Ok(());
+                }
+                form.status = None;
+            }
+            ViewEvent::Button(id) if id == "create" && form.visibility == "public" => {
+                form.confirm_public = true;
+                form.status = Some("Public snippets are visible to everyone, signed in or not. Click Confirm public to create it.".into());
+            }
+            ViewEvent::Button(id) if id == "create" || (id == "confirm-public" && pending) => {
+                form.confirm_public = false;
+                match create_snippet_from_form(form, ctx) {
+                    Ok(()) => self.new_snippet = forms::SnippetForm::default(),
+                    Err(e) => form.status = Some(e.to_string()),
+                }
+            }
+            _ => return Ok(()),
+        }
+
+        host::refresh_view(NEW_SNIPPET);
+
+        Ok(())
+    }
+
     fn check_ci_files(&mut self, events: &[Event], ctx: &Invocation) {
         let Some(project) = ctx.project() else { return };
 
@@ -1138,6 +1202,8 @@ impl Views for GitLab {
             PROJECTS => self.render_projects(ctx),
             NEW_MR if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
             NEW_MR => self.render_new_merge_request(ctx),
+            NEW_SNIPPET if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
+            NEW_SNIPPET => Ok(self.new_snippet.render(&snippet_scopes(ctx))),
             _ => return Err(Error::NotFound(format!("view {view}"))),
         };
 
@@ -1158,6 +1224,7 @@ impl Views for GitLab {
             CHANGES => self.handle_changes(event, ctx),
             PROJECTS => self.handle_projects(event, ctx),
             NEW_MR if forms_enabled() => self.handle_new_merge_request(event, ctx),
+            NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
             _ => Ok(()),
         }
     }

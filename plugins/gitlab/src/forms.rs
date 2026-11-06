@@ -3,7 +3,7 @@
 use openidea_plugin::Error;
 use openidea_plugin::views::{Body, Button, Field, FieldValue, View};
 
-use crate::api::{self, NewMergeRequest};
+use crate::api::{self, NewMergeRequest, SnippetDraft};
 use crate::safe;
 
 /// The fields of the Create Merge Request view. The source branch is the checked-out one, never a field.
@@ -100,6 +100,98 @@ impl MergeRequestForm {
             labels: self.labels.split(',').map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect(),
             squash: self.squash,
             remove_source_branch: self.remove_source,
+        })
+    }
+}
+
+pub const PERSONAL: &str = "Personal";
+
+/// The fields of the Create Snippet view; the content is the focused file or its selection.
+pub struct SnippetForm {
+    pub title: String,
+    pub description: String,
+    pub visibility: String,
+    /// `Personal` or `Project <group/name>`, one of the listed scopes.
+    pub scope: String,
+    pub file_path: String,
+    /// Create was clicked on a public snippet; only `confirm-public` posts it.
+    pub confirm_public: bool,
+    pub status: Option<String>,
+}
+
+impl Default for SnippetForm {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            description: String::new(),
+            visibility: "private".into(),
+            scope: PERSONAL.into(),
+            file_path: String::new(),
+            confirm_public: false,
+            status: None,
+        }
+    }
+}
+
+impl SnippetForm {
+    pub fn render(&self, scopes: &[String]) -> View {
+        let visibilities = api::VISIBILITIES.map(str::to_owned).to_vec();
+        let fields = vec![
+            Field::new("title", "Title (empty: the file name)", FieldValue::Text(self.title.clone())),
+            Field::new("description", "Description", FieldValue::Multiline(self.description.clone())),
+            Field::new("visibility", "Visibility", FieldValue::Choice(visibilities, self.visibility.clone())),
+            Field::new("scope", "Snippet of", FieldValue::Choice(scopes.to_vec(), self.scope.clone())),
+            Field::new("file-path", "File name (empty: the focused file's path)", FieldValue::Text(self.file_path.clone())),
+        ];
+
+        let create = match self.confirm_public {
+            true => Button::new("confirm-public", "Confirm public").icon("warning"),
+            false => Button::new("create", "Create Snippet").icon("plus"),
+        };
+        let view = View::new(Body::Form(fields)).button(create);
+
+        match &self.status {
+            Some(status) => view.status(status),
+            None => view,
+        }
+    }
+
+    /// The caller checks a `scope` value against the listed scopes first.
+    pub fn field(&mut self, key: &str, value: &str) {
+        match key {
+            "title" => self.title = value.to_owned(),
+            "description" => self.description = value.to_owned(),
+            "visibility" if api::VISIBILITIES.contains(&value) => self.visibility = value.to_owned(),
+            "scope" => self.scope = value.to_owned(),
+            "file-path" => self.file_path = value.to_owned(),
+            _ => return,
+        }
+
+        self.confirm_public = false;
+    }
+
+    /// `path` is the focused file's repository path, or its name outside the repository.
+    pub fn draft(&self, path: String, content: String, scopes: &[String]) -> Result<SnippetDraft, Error> {
+        if !scopes.contains(&self.scope) {
+            return Err("Choose what the snippet belongs to.".into());
+        }
+
+        let file_path = match self.file_path.trim() {
+            "" => path,
+            typed => safe::repo_file_path(typed)?.to_owned(),
+        };
+        let title = match self.title.trim() {
+            "" => file_path.rsplit('/').next().unwrap_or(&file_path).to_owned(),
+            typed => typed.to_owned(),
+        };
+
+        Ok(SnippetDraft {
+            title,
+            description: self.description.clone(),
+            visibility: self.visibility.clone(),
+            file_path,
+            content,
+            project: self.scope.strip_prefix("Project ").map(str::to_owned),
         })
     }
 }

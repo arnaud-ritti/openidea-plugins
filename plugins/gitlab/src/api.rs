@@ -413,13 +413,37 @@ pub fn current_user() -> Result<User, Error> {
     parse(rest("GET", "/user", None)?)
 }
 
-pub fn create_snippet(title: &str, file_path: &str, content: &str) -> Result<String, Error> {
-    let body = json!({
-        "title": title,
-        "visibility": "private",
-        "files": [{ "file_path": file_path, "content": content }],
+pub const VISIBILITIES: [&str; 3] = ["private", "internal", "public"];
+
+pub struct SnippetDraft {
+    pub title: String,
+    pub description: String,
+    pub visibility: String,
+    pub file_path: String,
+    pub content: String,
+    /// `group/name` for a project snippet, `None` for a personal one.
+    pub project: Option<String>,
+}
+
+pub fn create_snippet(draft: &SnippetDraft) -> Result<String, Error> {
+    if !VISIBILITIES.contains(&draft.visibility.as_str()) {
+        return Err(format!("Unknown visibility {:?}.", draft.visibility).into());
+    }
+
+    let mut body = json!({
+        "title": draft.title,
+        "visibility": draft.visibility,
+        "files": [{ "file_path": draft.file_path, "content": draft.content }],
     });
-    let snippet = rest("POST", "/snippets", Some(body))?;
+    if !draft.description.is_empty() {
+        body["description"] = json!(draft.description);
+    }
+
+    let path = match &draft.project {
+        Some(project) => Project(project).path("/snippets"),
+        None => "/snippets".to_owned(),
+    };
+    let snippet = rest("POST", &path, Some(body))?;
 
     snippet["web_url"].as_str().map(str::to_owned).ok_or_else(|| "GitLab returned no snippet URL.".into())
 }

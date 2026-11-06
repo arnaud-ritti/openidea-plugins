@@ -68,6 +68,7 @@ fn gitlab(req: &HttpRequest) -> Result<HttpResponse, Error> {
         ("GET", p) if p.starts_with("/api/v4/users?") => ok("[]"),
         ("POST", "/api/v4/projects/g%2Fp/merge_requests") => ok(r#"{"iid": 8, "title": "Add parser", "web_url": "https://gitlab.com/g/p/-/merge_requests/8"}"#),
         ("POST", "/api/v4/snippets") => ok(r#"{"web_url": "https://gitlab.com/-/snippets/9"}"#),
+        ("POST", "/api/v4/projects/g%2Fp/snippets") => ok(r#"{"web_url": "https://gitlab.com/g/p/-/snippets/10"}"#),
         ("POST", "/api/v4/projects") => ok(
             r#"{"web_url": "https://gitlab.com/me/project", "http_url_to_repo": "https://gitlab.com/me/project.git",
                 "ssh_url_to_repo": "git@gitlab.com:me/project.git"}"#,
@@ -690,6 +691,9 @@ fn the_token_never_appears_in_requests_logs_notifications_or_views() {
     plugin.handle(NEW_MR, field("assignee", "ann"), &host.invocation()).unwrap();
     plugin.handle(NEW_MR, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
     views.push(format!("{:?}", plugin.render(NEW_MR, None, &host.invocation()).unwrap()));
+    host.open_editor("/project/src/a.rs", "rust", "fn main() {}\n", &[(0, 0, 0, 0)]);
+    plugin.handle(NEW_SNIPPET, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap()));
     host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
     GitLab::default().run_command("share-project", &host.invocation(), None).unwrap();
 
@@ -1699,6 +1703,190 @@ mod merge_request_form_tests {
         let (_, view) = open(&host);
 
         assert_eq!(view.body, Body::Message(NO_TOKEN.into()));
+        assert!(host.requests().is_empty());
+    }
+}
+
+mod snippet_form_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn open(host: &MockHost) -> (GitLab, View) {
+        let mut plugin = GitLab::default();
+        let view = plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap();
+        (plugin, view)
+    }
+
+    fn fill(plugin: &mut GitLab, host: &MockHost, fields: &[(&str, &str)]) {
+        for (key, value) in fields {
+            plugin.handle(NEW_SNIPPET, field(key, value), &host.invocation()).unwrap();
+        }
+    }
+
+    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
+        plugin.handle(NEW_SNIPPET, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
+        plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap()
+    }
+
+    fn posted(host: &MockHost) -> Vec<(String, Value)> {
+        writes(host).into_iter().map(|(_, url, body)| (url, serde_json::from_str(&body).unwrap())).collect()
+    }
+
+    fn with_file(text: &str, selection: (u32, u32, u32, u32)) -> MockHost {
+        let host = setup();
+        host.open_editor("/project/src/a.rs", "rust", text, &[selection]);
+        host
+    }
+
+    #[test]
+    fn form_creates_a_private_personal_snippet_from_the_selection() {
+        let host = with_file("fn main() {}\n", (0, 3, 0, 7));
+        let (mut plugin, view) = open(&host);
+        fill(&mut plugin, &host, &[("description", "The entry point")]);
+
+        click(&mut plugin, &host, "create");
+
+        assert_eq!(buttons(&view), ["create"]);
+        let posted = writes(&host);
+        assert_eq!(posted[0].1, "https://gitlab.com/api/v4/snippets");
+        assert_eq!(
+            posted[0].2,
+            r#"{"description":"The entry point","files":[{"content":"main","file_path":"src/a.rs"}],"title":"a.rs","visibility":"private"}"#
+        );
+        assert_eq!(host.clipboard().as_deref(), Some("https://gitlab.com/-/snippets/9"));
+        assert_eq!(host.notifications()[0].title, "Snippet created");
+    }
+
+    #[test]
+    fn project_scope_posts_to_the_encoded_project_path() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        let (mut plugin, view) = open(&host);
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+        let scope = &fields.iter().find(|f| f.key == "scope").unwrap().value;
+        assert_eq!(scope, &FieldValue::Choice(vec!["Personal".into(), "Project g/p".into()], "Personal".into()));
+        fill(&mut plugin, &host, &[("title", "Mine"), ("file-path", "notes/x.txt"), ("scope", "Project g/p")]);
+
+        click(&mut plugin, &host, "create");
+
+        let posted = posted(&host);
+        assert_eq!(posted[0].0, "https://gitlab.com/api/v4/projects/g%2Fp/snippets");
+        assert_eq!(posted[0].1["title"], "Mine");
+        assert_eq!(posted[0].1["files"][0]["file_path"], "notes/x.txt");
+    }
+
+    #[test]
+    fn public_visibility_needs_a_second_click() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("visibility", "public")]);
+
+        let view = click(&mut plugin, &host, "create");
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(label(&view, "confirm-public"), "Confirm public");
+
+        click(&mut plugin, &host, "confirm-public");
+
+        let posted = posted(&host);
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].1["visibility"], "public");
+    }
+
+    #[test]
+    fn changing_any_field_cancels_the_pending_public_confirm() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("visibility", "public")]);
+        click(&mut plugin, &host, "create");
+
+        fill(&mut plugin, &host, &[("title", "Other")]);
+        let view = click(&mut plugin, &host, "confirm-public");
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(buttons(&view), ["create"]);
+    }
+
+    #[test]
+    fn a_visibility_outside_the_choices_is_ignored() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("visibility", "internal"), ("visibility", "everyone"), ("scope", "Project evil/x")]);
+
+        click(&mut plugin, &host, "create");
+
+        let posted = posted(&host);
+        assert_eq!(posted[0].0, "https://gitlab.com/api/v4/snippets");
+        assert_eq!(posted[0].1["visibility"], "internal");
+    }
+
+    #[test]
+    fn file_path_traversal_is_refused() {
+        for path in ["../../x", "/etc/x"] {
+            let host = with_file("x\n", (0, 0, 0, 0));
+            let (mut plugin, _) = open(&host);
+            fill(&mut plugin, &host, &[("file-path", path)]);
+
+            let view = click(&mut plugin, &host, "create");
+
+            assert!(writes(&host).is_empty(), "{path}");
+            assert!(view.status.as_deref().unwrap().contains("refusing the file path"), "{view:?}");
+        }
+    }
+
+    #[test]
+    fn no_focused_file_says_focus_a_file_first() {
+        let host = setup();
+        let (mut plugin, _) = open(&host);
+
+        let view = click(&mut plugin, &host, "create");
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(view.status.as_deref(), Some("Focus a file first."));
+    }
+
+    #[test]
+    fn an_empty_selection_falls_back_to_the_whole_file_and_an_empty_file_is_refused() {
+        let host = with_file("a\nb\n", (1, 0, 1, 0));
+        let (mut plugin, _) = open(&host);
+        click(&mut plugin, &host, "create");
+        assert_eq!(posted(&host)[0].1["files"][0]["content"], "a\nb\n");
+
+        let host = with_file("", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        let view = click(&mut plugin, &host, "create");
+        assert!(writes(&host).is_empty());
+        assert_eq!(view.status.as_deref(), Some("The file is empty."));
+    }
+
+    #[test]
+    fn crlf_content_is_sent_unchanged() {
+        let host = with_file("a\r\nb\r\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+
+        click(&mut plugin, &host, "create");
+
+        assert_eq!(posted(&host)[0].1["files"][0]["content"], "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn multibyte_selection_is_cut_on_utf16_columns() {
+        let host = with_file("a😀b", (0, 3, 0, 5));
+        let (mut plugin, _) = open(&host);
+
+        click(&mut plugin, &host, "create");
+
+        assert_eq!(posted(&host)[0].1["files"][0]["content"], "b");
+    }
+
+    #[test]
+    fn the_form_is_quiet_when_forms_setting_is_off() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        host.set_setting("forms", "false");
+
+        let (mut plugin, view) = open(&host);
+        click(&mut plugin, &host, "create");
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
         assert!(host.requests().is_empty());
     }
 }

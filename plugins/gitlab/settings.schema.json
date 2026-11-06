@@ -27,7 +27,7 @@
     },
     "forms": {
       "type": "boolean",
-      "title": "Show the GitLab form views (Create Merge Request)",
+      "title": "Show the GitLab form views (Create Merge Request, Create Snippet, Share Project)",
       "default": true
     },
     "cloneUsingSsh": {
