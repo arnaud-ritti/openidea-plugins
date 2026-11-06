@@ -6,7 +6,7 @@ authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0: first release. OSV.dev checks of pom.xml, build.gradle, build.gradle.kts, package.json, package-lock.json, composer.json and composer.lock on open and save, an upgrade quick fix, and Scan Project with the Vulnerable Dependencies tool window."
 categories = ["linters", "tools"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved", "on-view:vulnerabilities"]
 
