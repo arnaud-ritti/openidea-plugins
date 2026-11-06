@@ -16,3 +16,7 @@ required = ["project.read"]
 [[contributes.providers]]
 kinds = ["completion", "code-actions", "line-markers"]
 languages = ["java", "kotlin", "xml"]
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Spring Security"
