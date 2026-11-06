@@ -695,4 +695,82 @@ mod tests {
         flyway.handle("migrations", ViewEvent::Activate(items[0].key.clone()), &host.invocation()).unwrap();
         assert!(host.opened_locations().is_empty());
     }
+
+    /// Each `[[contributes.runDetectors]]` table of the manifest as key → JSON value
+    /// (TOML strings and string arrays are valid JSON).
+    fn run_detectors() -> Vec<serde_json::Map<String, serde_json::Value>> {
+        let manifest = include_str!("../plugin.toml");
+        manifest
+            .split("[[contributes.runDetectors]]")
+            .skip(1)
+            .map(|block| {
+                block
+                    .lines()
+                    .skip(1)
+                    .take_while(|line| !line.starts_with('['))
+                    .filter_map(|line| line.split_once(" = "))
+                    .map(|(key, value)| (key.trim().to_owned(), serde_json::from_str(value.trim()).unwrap()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn args(detector: &serde_json::Map<String, serde_json::Value>) -> Vec<&str> {
+        detector["args"].as_array().unwrap().iter().map(|arg| arg.as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn run_detectors_cover_info_validate_and_migrate_only() {
+        let manifest = run_detectors();
+        let detectors: Vec<(&str, Vec<&str>)> = manifest.iter().map(|d| (d["id"].as_str().unwrap(), args(d))).collect();
+        assert_eq!(
+            detectors,
+            vec![("info", vec!["info"]), ("validate", vec!["validate"]), ("migrate", vec!["migrate"])]
+        );
+    }
+
+    #[test]
+    fn run_detectors_never_include_clean_or_repair() {
+        let detectors = run_detectors();
+        assert!(!detectors.is_empty());
+        for detector in &detectors {
+            for arg in args(detector) {
+                assert!(!["clean", "repair", "undo"].contains(&arg), "{arg}");
+            }
+        }
+    }
+
+    #[test]
+    fn run_detectors_match_both_config_file_names_at_the_root() {
+        let detectors = run_detectors();
+        assert!(!detectors.is_empty());
+        for detector in &detectors {
+            assert_eq!(detector["files"], serde_json::json!(["flyway.toml", "flyway.conf"]));
+            for file in detector["files"].as_array().unwrap() {
+                let file = file.as_str().unwrap();
+                assert!(!file.contains(['/', '\\', '*', '?', '[', '{']), "{file}");
+            }
+        }
+    }
+
+    #[test]
+    fn run_detectors_use_the_flyway_program_only() {
+        let detectors = run_detectors();
+        assert!(!detectors.is_empty());
+        for detector in &detectors {
+            assert_eq!(detector["command"], "flyway");
+            for arg in args(detector) {
+                for secret in ["-url", "-password", "-user", "-environment", "${"] {
+                    assert!(!arg.contains(secret), "{arg}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn migrate_detector_is_labelled_as_writing() {
+        let detectors = run_detectors();
+        let migrate = detectors.iter().find(|d| d["id"] == "migrate").unwrap();
+        assert_eq!(migrate["name"], "Flyway: migrate (writes to the database)");
+    }
 }
