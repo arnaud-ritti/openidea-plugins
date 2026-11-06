@@ -36,6 +36,7 @@ fn invalid_syntax_values_offer_both_syntaxes() {
 
 #[test]
 fn completes_syntax_values_in_hgignore_only() {
+    let _host = MockHost::install();
     let mut plugin = IgnorePlugin::default();
     let items = plugin.completion(&doc("/p/.hgignore", "syntax: g"), Position::new(0, 9), None);
     assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["glob", "regexp", "rootglob"]);
@@ -462,4 +463,41 @@ fn dismissing_the_ignore_file_pick_changes_nothing() {
 
     assert_eq!(message, None);
     assert_eq!(host.editor_text(), "/dist\n");
+}
+
+#[test]
+fn completes_entries_from_the_files_below_the_ignore_file() {
+    let host = MockHost::install();
+    host.set_project_root(Some("/project"));
+    host.add_file("/project/web/.gitignore", "");
+    host.add_file("/project/web/dist/app.js", "");
+    host.add_file("/project/web/dist/vendor/lib.js", "");
+    host.add_file("/project/web/docs.md", "");
+    host.add_file("/project/web/src/main.ts", "");
+    let mut plugin = IgnorePlugin::default();
+    let labels = |plugin: &mut IgnorePlugin, text: &str| -> Vec<String> {
+        let at = Position::new(0, text.len() as u32);
+        plugin.completion(&doc("/project/web/.gitignore", text), at, None).into_iter().map(|i| i.label).collect()
+    };
+
+    assert_eq!(labels(&mut plugin, "d"), ["dist/", "docs.md"]);
+    assert_eq!(labels(&mut plugin, "!/dist/"), ["app.js", "vendor/"]);
+    assert_eq!(labels(&mut plugin, "dist/v"), ["vendor/"]);
+    assert!(labels(&mut plugin, "dist/*").is_empty());
+    assert!(labels(&mut plugin, "# d").is_empty());
+    assert!(labels(&mut plugin, "../x").is_empty());
+
+    let item = plugin.completion(&doc("/project/web/.gitignore", "dist/ap"), Position::new(0, 7), None).remove(0);
+    assert_eq!(item.replace, Some(Range::new(Position::new(0, 5), Position::new(0, 7))));
+}
+
+#[test]
+fn regexp_ignore_files_get_no_path_completion() {
+    let host = MockHost::install();
+    host.set_project_root(Some("/project"));
+    host.add_file("/project/build/a.o", "");
+    let mut plugin = IgnorePlugin::default();
+
+    assert!(plugin.completion(&doc("/project/.boringignore", "b"), Position::new(0, 1), None).is_empty());
+    assert!(plugin.completion(&doc("/project/.hgignore", "b"), Position::new(0, 1), None).is_empty());
 }

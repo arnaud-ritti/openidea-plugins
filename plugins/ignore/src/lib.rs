@@ -252,6 +252,50 @@ fn entry_target(doc: &Document, at: Position) -> Option<Location> {
     Some(Location { path, range: Range::default() })
 }
 
+/// Entries named from the files below the ignore file's folder. The host
+/// hides dot paths and ignored files from `find_files`, so those are never offered.
+fn path_completions(doc: &Document, offset: usize, line: &str) -> Vec<CompletionItem> {
+    let body = line.strip_prefix('!').unwrap_or(line);
+    if body.starts_with(|c: char| c.is_whitespace() || c == '#') || body.contains(['*', '?', '[', '\\']) {
+        return Vec::new();
+    }
+    let Some((project, root, relative)) = project_of(&doc.path) else { return Vec::new() };
+
+    let path = body.strip_prefix('/').unwrap_or(body);
+    let (typed_dir, partial) = path.rsplit_once('/').map_or(("", path), |(dir, rest)| (dir, rest));
+    if typed_dir.split('/').any(|part| part == "..") {
+        return Vec::new();
+    }
+
+    let own_dir = relative.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let base = [own_dir, typed_dir].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/");
+    let (glob, prefix) = if base.is_empty() {
+        ("**/*".to_owned(), format!("{root}/"))
+    } else {
+        (format!("{base}/**/*"), format!("{root}/{base}/"))
+    };
+    let Ok(files) = project.find_files(&glob, 2000) else { return Vec::new() };
+
+    let mut names: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
+    for file in &files {
+        let Some(rest) = file.strip_prefix(&prefix) else { continue };
+        let (name, is_dir) = rest.split_once('/').map_or((rest, false), |(name, _)| (name, true));
+        if name.starts_with(partial) {
+            *names.entry(name).or_default() |= is_dir;
+        }
+    }
+
+    let replace = Range::new(text::position(&doc.text, offset - partial.len()), text::position(&doc.text, offset));
+    names
+        .into_iter()
+        .map(|(name, is_dir)| {
+            let mut item = CompletionItem::new(&if is_dir { format!("{name}/") } else { name.to_owned() }, if is_dir { CompletionKind::Folder } else { CompletionKind::File });
+            item.replace = Some(replace);
+            item
+        })
+        .collect()
+}
+
 fn template_label(name: &str) -> (&str, Option<&str>) {
     match name.rsplit_once('/') {
         Some((group, label)) => (label, Some(group)),
@@ -428,17 +472,22 @@ impl openidea_plugin::Plugin for IgnorePlugin {
 
 impl Providers for IgnorePlugin {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
-        if !dialect(&doc.path).is_some_and(|d| d.switchable) {
-            return Vec::new();
-        }
+        let Some(dialect) = dialect(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
         let line = &doc.text[doc.text[..offset].rfind('\n').map_or(0, |i| i + 1)..offset];
-        let Some(value) = line.trim_start().strip_prefix("syntax:") else { return Vec::new() };
-        if !value.trim_start().chars().all(|c| c.is_ascii_alphabetic()) {
-            return Vec::new();
+
+        if dialect.switchable {
+            let Some(value) = line.trim_start().strip_prefix("syntax:") else { return Vec::new() };
+            if !value.trim_start().chars().all(|c| c.is_ascii_alphabetic()) {
+                return Vec::new();
+            }
+            return ["glob", "regexp", "rootglob"].map(|s| CompletionItem::new(s, CompletionKind::Keyword)).into();
         }
 
-        ["glob", "regexp", "rootglob"].map(|s| CompletionItem::new(s, CompletionKind::Keyword)).into()
+        if dialect.syntax != check::Syntax::Glob {
+            return Vec::new();
+        }
+        path_completions(doc, offset, line)
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
