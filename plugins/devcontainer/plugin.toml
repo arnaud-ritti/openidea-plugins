@@ -1,6 +1,6 @@
 id = "aritti.devcontainer"
 name = "Dev Container CLI"
-version = "0.2.0" # x-release-please-version
+version = "0.1.0" # x-release-please-version
 description = "Starts, rebuilds and stops the project's Dev Container (containers.dev) and opens a shell in it, using the devcontainer CLI. Adds a devcontainer.json template to the New menu. Requires the devcontainer CLI (npm i -g @devcontainers/cli) and Docker. The IDE itself keeps running on the host."
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"
