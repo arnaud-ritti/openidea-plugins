@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 mod checks;
 mod endpoints;
+mod generate;
 
 pub(crate) const MAPPINGS: [&str; 6] =
     ["RequestMapping", "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping"];
@@ -508,7 +509,8 @@ impl Providers for WebTools {
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
-        problems(doc)
+        let mut actions = generate::actions(&doc.path, &doc.text, selection);
+        actions.extend(problems(doc)
             .into_iter()
             .filter(|p| contains(p.diagnostic.range, selection.start))
             .filter_map(|p| p.fix)
@@ -518,8 +520,8 @@ impl Providers for WebTools {
                 preferred: true,
                 edits: vec![(doc.path.clone(), vec![edit])],
                 data: None,
-            })
-            .collect()
+            }));
+        actions
     }
 }
 
