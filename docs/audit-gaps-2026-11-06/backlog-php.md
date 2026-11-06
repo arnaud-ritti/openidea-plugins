@@ -1,5 +1,13 @@
 # Backlog: PHP group (symfony, twig, blade, laravel) after API 1.2
 
+## Status (2026-11-06, after the backlog implementation pass)
+
+Derived from `change-notes`, README and code on branch `arnaud-ritti/implement-new-feature`. DONE = built per the change-notes/README; every item is tested against the mock host only and unverified in the IDE. 'not verified' = I could not confirm it from the change-notes, README or code.
+
+- DONE: SY1, SY3, SY4, SY6, SY7, SY8, SY9, SY10, SY11, SY12, TW1, TW2, LA1, LA2, LA3, LA4, LA7, LA8, LA9, LA10 (the `config/app.php` `providers` completion: not verified). BL1 decided: directive completion stays in `aritti.laravel`, recorded in the blade README.
+- PARTIAL: SY2, SY5, SY13 (checks and settings without a public rule were left out). LA5 (Find Unused Views done; RemoveModelPhpDocs not verified). LA6 (indexer links done; the check that the counterpart file exists was skipped).
+- SKIPPED: TW3 (formatter: OpenIDEA accepts only Prettier and Ruff in a language definition, neither parses Twig or Blade).
+
 Inputs: [C-php.md](C-php.md) (row ids), [reclass-C-php.md](reclass-C-php.md), [implementation-plan.md](implementation-plan.md), current code at `f288eda`. Row ids: SI = Symfony inspections table, SInt = intentions, SA = actions, SO = other extension points, TW/BL = Twig/Blade rows, LI = Laravel Idea gap rows, FL = free Laravel rows. Nothing here is verified in the IDE.
 
 Rules for every package: rules come from public docs (Symfony/Doctrine/Laravel/Livewire docs, UPGRADE files), never from the proprietary originals (Laravel Idea, Twig, Blade are feature inventory only; the Symfony Plugin is MIT but 51 of its 104 inspections are paid, so those are written from docs). F* checks stay quiet unless the project class/key is in our index and no trait, parent outside the project, `__call` or dynamic name is involved. Test approach unless noted: unit tests on the pure scanner with positive, negative and "must stay silent" cases (vendor class, dynamic name, CRLF, multibyte), then one MockHost test that the code is published on `FileOpened`; `cargo test` and `openidea-plugin build` in the plugin dir. Sizes: S under a day, M 1-3 days, L about a week.

@@ -202,7 +202,7 @@ The provider kinds are `completion`, `inline-completion`, `code-actions`, `defin
 
 - **Twig `paths:` namespaces:** `@ns/…` templates resolve and complete from `config/packages/twig.yaml` (map form, quoted or unquoted keys, `%kernel.project_dir%`, an empty namespace is the main one). Limits: only that one file is read (not `when@` overrides or other `packages/` files); names starting with `@` are still never reported as missing.
 - **Symfony Profiler view:** `symfony-profiler` lists the latest 100 requests from `var/cache/dev/profiler/index.csv` (sub-requests hidden, times in UTC). Limits: rows can't be opened (no panels); the command `show-profiler` refreshes the view but a command can't open it; the view reads the file when rendered.
-- **Twig completion and checks:** tags (with their `end` forms), filters, functions and tests are completed from static lists taken from Twig's documentation, and an unclosed block tag is reported (`unclosed-tag`; verbatim and comment bodies, inline `{% block t 'x' %}` and the tags `block if for macro embed apply autoescape with verbatim cache sandbox` are handled). These come from `aritti.symfony` for the `twig` language, not from `aritti.twig` (adding providers to the language plugin needs the hand-written registration described in "Twig needed its own language plugin"). Limits: the lists are static, so filters, functions and tests of the project's own Twig extensions and of bundles are not offered; completion and the check only run in projects `aritti.symfony` recognises as Symfony (`symfony/framework-bundle` in `composer.json`); a stray `{% endx %}` with no opener is not reported; the function list is offered at every expression position; the `{% set x %}…{% endset %}` capture form is not checked. Template-path completion (`extends`, `include`, `embed`, `import`, `from`, `use`) was already there.
+- **Twig completion and checks:** tags (with their `end` forms), filters, functions and tests are completed from static lists taken from Twig's documentation, and an unclosed block tag is reported (`unclosed-tag`; verbatim and comment bodies, inline `{% block t 'x' %}` and the tags `block if for macro embed apply autoescape with verbatim cache sandbox` are handled). These come from `aritti.symfony` for the `twig` language in a Symfony project. Outside one, `aritti.twig` now has its own provider (same lists, thirteen snippets, `unclosed-tag`, end tags without an opener, `unterminated-delimiter`, setting `diagnostics`) and leaves name completion and the unclosed-tag check to `aritti.symfony` when `symfony.lock` or `symfony/framework-bundle` is present, so nothing is listed or reported twice (the registration was hand-combined, see "Twig needed its own language plugin"). Limits: the lists are static, so filters, functions and tests of the project's own Twig extensions and of bundles are not offered; completion and the check only run in projects `aritti.symfony` recognises as Symfony (`symfony/framework-bundle` in `composer.json`); a stray `{% endx %}` with no opener is not reported; the function list is offered at every expression position; the `{% set x %}…{% endset %}` capture form is not checked. Template-path completion (`extends`, `include`, `embed`, `import`, `from`, `use`) was already there.
 - **Duplicate XML service ids:** a second `<service id>` with the same id in one `config` XML file is a warning (`duplicate-service`). Ids defined in different files are not reported, because Symfony lets later files such as `services_dev.xml` override an id.
 - **Unquoted YAML values:** a plain scalar starting with `@` or `%` in YAML under `/config/` and `/translations/` (block values, `- ` items and flow collections) is reported (`unquoted-yaml-scalar`) with a quick fix that wraps it in single quotes.
 
@@ -245,6 +245,17 @@ Branch `gap-f-php`, tested against the mock host only. The public Symfony Plugin
 - **More keys (js/ts added to the extensions):** `command#name` (`#[AsCommand]`, `$defaultName`; used by `bin/console x` in any indexed file and `->find('x')`), `param#name` (YAML `parameters:` and XML `<parameter key>`; used by `%x%` in YAML/XML and `getParameter()`/`hasParameter()`), `twig-filter#`, `twig-function#`, `twig-test#` (`new TwigFilter('x')`, `#[AsTwigFilter]` and the function/test forms; used by `|x`, `x(` and `is x` inside `{{ }}`/`{% %}`), `twig-component#` (`#[AsTwigComponent]`, `templates/components/**`; used by `<twig:X>` and `component('X')`) and `stimulus#` (`assets/controllers/*_controller.js`; used by `data-controller` and `stimulus_controller()`). Go to Declaration only. Not covered: commands registered by the `console.command` tag or `setName()`, composer scripts (`json` is not indexed), `setParameter()`, parameters from bundles or `.env`, vendor Twig extensions, `{% component %}` tags, UX components from `config/packages/twig_component.yaml` namespaces, Stimulus controllers in `controllers.json`. A name with no definition (a built-in filter, `path`) simply does not jump. Twig scanning is textual, so a quoted `foo(` inside `{{ }}` counts as a function use.
 - **Gutter markers moved onto the index (the `line-markers` provider is gone):** a controller `render()` goes to its template, a template to all controllers rendering it, a block to the parent's block and to every child overriding it, a PHP class to its service definitions, a service `class` to the class, a route to all `path()`/`generate()` uses (chooser when several). Changes: the icon is the host's default (no "overriding" icon, the allowlist cannot be chosen per index marker); a block's parent is the one named by `{% extends %}` directly (no walk up to a grandparent that defines the block); templates are named by their path under `templates/` (and `bundles/`), so `twig.yaml` paths and `twigNamespaces` are not applied; a marker appears once the host has indexed the project, not before.
 - **Commands (window, not provider):** `run-console-command` lists `php bin/console list --raw` (needs `process:php`) plus the indexed `#[AsCommand]` names, asks for arguments, and opens a terminal tab; `go-to-route|service|console-command|template` pick from the plugin's index and `open_location` (no type-ahead filter is documented, so big lists are unverified); `twig-extends` (editor context, `editor.read`/`editor.write`) picks a template and inserts `{% extends '...' %}` at the top of the focused editor. Not done: a run configuration (the terminal tab is the replacement), Search Everywhere contributors (no API).
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Twig (`aritti.twig`):** completion of tags, filters, functions and tests, thirteen snippets (`blk`, `mcr`, `esc`, `emb`, `ext`, `for`, `from`, `if`, `imp`, `inc`, `sbx`, `spl`, `verb`) in HTML text, and the inspections `unclosed-tag`, end tag without opener and `unterminated-delimiter` (`{{`, `{%`, `{#`). A stray `}}` is not reported (common in HTML text). In a Symfony project `aritti.symfony` owns name completion and unclosed-tag. Unverified: that the provider is called in `.twig` files with no language server (see the empty-answer limit above) and that snippets expand as plain text.
+- **No Twig formatter (TW3, skipped):** OpenIDEA drives only Prettier and Ruff from a language definition, and neither parses Twig.
+- **Index (`aritti.symfony`):** project-wide Go to Declaration for service ids and route names (YAML and XML services, attribute, YAML and XML routes; `@service`, `path()`, `generate()` references), plus `command#`, `param#`, Twig extension filters, functions and tests, UX components, Stimulus controllers, events, macros, voters and validators; gutter markers moved onto the index (a template lists all its controllers, a block all overriding templates, a route its `path()` uses).
+- **Checks and actions (text based, not verified in the IDE):** Twig (assets tags, `enum()` classes, content outside blocks in extending templates, hard-coded paths with a quick fix), container references (unknown `%parameters%`, missing service classes, deprecated classes), service wiring (argument count and types, tag interfaces, listener methods, `!php/const`), practice hints and version-gated deprecations for PHP, Doctrine removed-API checks, typo quick fixes (routes, templates, keys, domains), rewrites (Doctrine alias to `::class`, command to invokable, Twig extension to attributes), generators (service definition, argument resync, tags), Extract translation, Add form fields. Settings `extraServiceFiles`, `extraRoutingFiles`, `practiceChecks`. Classes outside the project's sources are unknown and silence a check.
+- **Commands:** Run Console Command, Go to Route, Service, Console Command and Template, Extend Twig Template (pick lists from the index; a quick fix still cannot ask).
+- **Not verified in the IDE:** the index key set against a real project size, the `pick` list type-ahead, the edits of the rewrite actions applied against original coordinates.
 
 ## Laravel (`aritti.laravel`) and Blade (`aritti.blade`)
 
@@ -297,7 +308,7 @@ Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus feat
 - Dropped and renamed columns (`dropColumn`, `renameColumn`) and columns added by a package's published migrations outside `database/migrations`; irregular plurals for a model without `$table` (`Person` is not `people`).
 - Custom validation rule classes (`app/Rules`) are objects, not strings, so only Laravel's own rule names are completed, and a rule's parameters (`exists:users,email`) are not.
 - Gate resource abilities (`Gate::resource('posts', …)` registers `posts.view` and friends) are not read.
-- Artisan `make:*` commands: there is no input dialog for the name.
+- Artisan `make:*` commands: closed in API 1.2, they ask for names and options and run in a terminal (see "Run configurations: artisan").
 - Intentions on the open file are code actions (⌥⏎): validation string to array (not offered when a rule is `regex:`/`not_regex:`, whose pattern may hold pipes), `'UserController@index'` to `[UserController::class, 'index']` (only when the routes file is in the controllers namespace or imports the class with a plain `use`), and the Blade `{{ }}` / `{!! !!}` toggle. `Rule::exists/unique/in/notIn` calls are rewritten in the open file (see the gap F pass below); a custom rule class would need a new file, which plugins can't create.
 
 ### Added by the feasible-parity pass (2026-11-06)
@@ -312,6 +323,15 @@ Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus feat
 - **Gap F limits:** the facade import is silently skipped in rare code where a word pair looks like a class declaration (`$class = Auth::user()`).
 - **Not verified in the IDE (gap F):** several edits of one code action applied against the original coordinates; the snippet `\$` escape, 4-space indentation and `$0`.
 - **Not verified in the IDE:** the language ids `vue`, `javascriptreact` and `typescriptreact` (files are also matched by extension, but the host calls a provider only for declared ids); `on-file:resources/js/**` activation for a `.vue` file opened first; mid-word replacement in the editor; completion on `@`; the quick fix of `simplify-order-by` and the rules intention, which depend on prefilled code-action edits being applied without a resolve step; for Blade, that the file that first activates the plugin is checked only on its next open or save (events are subscribed in `activate`), and that `on-language:blade` loads the plugin before any `.blade.php` event.
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Closed:** Artisan `make:*` generators ask for names and options (`host::input`/`pick`) and run `php artisan make:*` in a terminal (Run Artisan Command..., Generate with artisan make..., New Eloquent Model..., Generate for Model..., Create Missing View, Component or Controller); the file is created by PHP, not by the plugin. Needs the optional `process:php`; `editor.read` for Create Missing.
+- **Added:** Livewire method and route controller/method problems (quiet for invokables, vendor controllers, classes with a trait or a parent other than `Component`), Find Unused Views, model/factory/policy/observer/event gutter links from a document indexer (a marker exists only when the counterpart is at its conventional path; the LA6 check that the counterpart exists was skipped), component attribute and slot completion, relation-aware column completion, container name completion (`app()`, `@inject`, config providers), intentions for scopes, constructors, facades, translations and rules (not offered when the variable is reassigned, captured by `compact`, or a use is in a static method), and 11 more file templates. Limits as for the rest of the plugin: no types, models resolved by import under `App\`.
+- **Blade:** directive completion and its snippets are provided by `aritti.laravel`, not `aritti.blade` (Blade has no `completion` provider).
+- **Not verified in the IDE:** the indexer markers, snippet escapes, and that the terminal receives `make:*` arguments unquoted.
 
 ## aritti.dotenv (port of ru.adelf.idea.dotenv)
 
@@ -395,6 +415,17 @@ Plan: [docs/superpowers/plans/2026-11-06-gap-f-spring-core.md](docs/superpowers/
 - **Limits:** supertypes are linked through aliases published from every file's type declarations (not verified in the real host); name strings in Kotlin files are not references (the Kotlin site scanner does not exist); the bean-to-injection-points marker stays on the provider path because index markers go only to definitions; `@Primary`, profiles and `@Conditional*` are not part of keys, so the chooser lists every candidate.
 - **Unverified in the IDE:** the real host's batching and invalidation; the combined providers, views and indexing component (built by hand because `register_plugin!` has no arm for it).
 
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Commands:** Check Spring Configuration and Dump Spring Configuration (Tools menu, results in the *Spring Configuration Report* view; the check runs over the indexed project files, so it is as incomplete as the index), Move Annotation String to Property (editor menu, `pick` the properties file). Generate Setter, Constructor, Autowired Dependency and Event Listener (editor menu).
+- **Inspections:** direct `@Bean` calls in `proxyBeanMethods = false` classes, `@Cacheable` SpEL bracket and attribute conflicts, `initMethod`/`destroyMethod`, `@TestBean` and `@Required` targets, same-class overloads in self-invocation (reported only when every overload carries the annotation), XML `component-scan` filters, missing `<import resource>`, bean class checks (abstract, `factory-method`, `constructor-arg` count, init/destroy, `@Required`; skipped when a supertype is outside the project), inactive profile blocks, `META-INF/spring.handlers`/`spring.schemas` checks. Opt in (`springBeans.checkUnresolvedReferences`): unresolved `@Lookup`/`@Scheduled(scheduler)`/`@MockitoSpyBean` names, missing `@ImportResource`/`@PropertySource`/`@ContextConfiguration`/`@Sql` files (read from `src/main/resources` and `src/test/resources`; quiet for `classpath*:`, placeholders, wildcards), and unresolved XML `ref`/`parent`/`depends-on`/placeholders.
+- **Navigation:** setter completion and definition for `<property name>`, index keys for profiles, resource files, packages and `@Value` placeholders (added, none renamed), markers between event publishers and listeners and between classes and XML beans, project-wide Go to Declaration from the host's document index.
+- **Kotlin:** redundant `open` with kotlin-spring (Hint), router `pathVariable`, `getBean(Foo::class.java)` hint.
+- **File templates:** component, service, configuration, Boot application, Boot test, configuration properties (Java and Kotlin). Not verified: `$PACKAGE$`, `$NAME$` and `$END$`.
+- **Skipped:** the snippet items of the TPL package (completion snippets). Not verified in the IDE: all of the above.
+
 ## Spring plugins (aritti.spring-*: ports of com.intellij.spring.*)
 
 Covers `spring-beans` (com.intellij.spring), `spring-boot`, `spring-initializr`, `spring-data`, `spring-security`,
@@ -416,8 +447,8 @@ section above, with its plugin-specific details.
 | No references (Find Usages) provider | Bean usages, channel/destination usages, GraphQL field usages and Batch step references can't join Find Usages. Go to Definition is the only cross-reference. The IDE's own config-key usages are not extensible | A `references` provider kind: `references(doc, at) -> list<location>` |
 | No rename / refactoring provider | Renaming a bean, property key, channel, destination, step id, flow state or command name doesn't update the string references | A `rename` provider: `prepare-rename(doc, at)` and `rename(doc, at, new-name) -> workspace edits` |
 | Code actions can only edit existing files. No file creation and no other write API (see memory: plugins can't create files) | No "create missing template / view / package-info.java / schema", no generators (Spring Data repository for an entity, controller from an entity). The Modulith "open module" fix only works when the target `package-info.java` already exists | Resource operations in code-action edits (`create-file(path, text)`), or `workspace.create-file` under a write capability |
-| Line markers: one target each, and icons from a fixed allowlist (`implemented`, `implementing`, `overridden`, `overriding`, `run`, `navigate`) | Several candidate beans, listeners, producers or handlers per line: the gutter opens the first one and the tooltip lists the rest (Go to Definition shows them all). No Spring bean, autowire, endpoint or channel icons | A `targets: list<location>` field on line markers (the IDE shows a chooser) and package SVG icons for markers |
-| No popup, quick pick or input API, and a command can't open or focus a view | Chooser- and dialog-style actions (pick a profile, pick a bean, pick a run target, enter a name) are only possible as `Form` views the user opens themselves. Diagram and tool views can't be opened from a gutter or quick fix | `ui.show-quick-pick`, `ui.show-input`, `views.reveal(view)` |
+| Line markers: one target each, and icons from a fixed allowlist (`implemented`, `implementing`, `overridden`, `overriding`, `run`, `navigate`) | Several candidate beans, listeners, producers or handlers per line: a provider marker opens the first one and the tooltip lists the rest (Go to Definition shows them all); markers from the document indexer (`spring-beans`) open a chooser. No Spring bean, autowire, endpoint or channel icons | A `targets: list<location>` field on line markers (the IDE shows a chooser) and package SVG icons for markers |
+| No popup, quick pick or input API, and a command can't open or focus a view | Closed for commands in API 1.2 (`host::pick`, `pick_many`, `input`, `confirm`: used by the Generate commands, Change Active Spring Profiles, Check Spring Configuration, Move Annotation String to Property). Still open: they return `Invalid` in code actions, providers and events, so a quick fix can't ask; diagram and tool views can't be opened from a gutter or quick fix | `pick` allowed in `resolve_code_action`, `views.reveal(view)` |
 | No structure-view / outline provider for built-in languages. The syntax provider's `outline` is only called for languages a plugin owns | Spring Modulith module structure, Web Flow states, Batch jobs/steps and Integration channels can't appear in the Structure tool window for `java` / `xml` files. Tool windows are used instead | An `outline` provider kind for any language id (merged with the built-in outline) |
 | No Project view decorations | Spring Modulith open/closed module badges, bean/configuration file icons and "Spring facet" markers in the Project view are missing | A `project-view-decorations` provider: `(path) -> badge, icon, tooltip` |
 | The built-in Endpoints tool window and HTTP client aren't extensible | GraphQL operations, STOMP destinations, Feign clients and messaging destinations can't be listed in Endpoints, and there is no "generate request" for GraphQL. Plugin tool windows are used instead | An `endpoints` provider contribution (kind, URL/destination, location) feeding the Endpoints view and the HTTP client |
@@ -487,6 +518,20 @@ Checks and views for `spring-boot`, `spring-data`, `spring-web`, `spring-securit
 - **spring-websocket:** the WebSocket Destinations view is the plugin's own; a plugin cannot add items to the Endpoints view of `spring-web` (see the Endpoints row above).
 - **Unverified in the IDE:** the removal quick fix on the annotation line; whether Java documents request code actions from `spring-boot`; the refactor actions with the caret in blank class space; how the Endpoints and Destinations views render.
 
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **spring-boot:** `invalid-property-value` (`Integer`, `Long`, `Short`, `Double`, `Boolean`, `Duration`, `DataSize`; quiet for `${}`, `#{}`, lists, maps, enums and custom types); Go to Definition from `spring.config.import` (placeholders and other schemes skipped) and from class-valued keys; completion of logger packages (from `package` lines), profiles and `${}` keys; checks of `(additional-)spring-configuration-metadata.json` (unknown fields, malformed `type`, duplicates, missing description) with a define-key fix that appends to an existing additional file only (a quick fix cannot create one); Reactor debug agent hint; opt-in `springBoot.checkDriverDependency` (transitive drivers invisible); Spring Boot file templates. Not done: the `@EventListener` visibility rule (no documented source). Unverified: the `json` provider routing and the `$` placeholders.
+- **spring-data:** `query-parameter-type` (Info; both sides well-known simple types of different kinds), return kinds per query verb, `mongo-unknown-field` (top-level keys of a Mongo `@Query`; nested documents not followed), `jdbc-shared-entity`, derived-query tooltips, Show Repository Inherited Members (static list of Spring Data's own interfaces), a repository file template.
+- **spring-web:** URL gutter markers on mappings (no target; setting `springWeb.showUrlMarkers`), mapping URL completion in test URL literals, Go to Definition from static resource literals, `getm`/`postm`/`putm`/`delm`/`patm`/`reqm` snippets, Controller/REST Controller/Controller Advice templates (Java and Kotlin), Kotlin path variable checks, opt-in unresolved view hint (`springWeb.reportUnresolvedViews`), `<mvc:...>` attribute checks from a hard-coded table, `apiVersion()` hint in tests, Copy as curl on the Endpoints tree (optional `clipboard`). Unverified: completion inside string literals, the `xml` provider activation.
+- **spring-security:** Info for bean references no project bean answers (`springSecurity.checkBeanReferences`), table checks of `<http>`, `<intercept-url>`, `<user>` and related XML, opt-in self-invocation of method-security methods (`springSecurity.checkSelfInvocation`, wrong with AspectJ mode), Go to Definition from request matcher patterns to the controller mappings they cover. Library beans are invisible, hence Info.
+- **spring-cloud:** Feign Clients view, legacy `@StreamListener`/`@SendTo` channel checks (`springCloud.checkLegacyStream`, quiet unless every `@EnableBinding` type is a project interface or `Sink`/`Source`/`Processor`), hint for `@BootstrapConfiguration` classes that component scanning finds. Key hints (CLOUD-MISC) skipped: `spring-boot` covers them.
+- **spring-graphql:** GraphQL Endpoints view (paths from `spring.graphql.*`, schema files), Info for schema fields with arguments that no controller or data fetcher serves (`springGraphql.reportUnmappedFields`).
+- **spring-messaging:** destinations named by `static final String` / `const val` constants (project constants only), XML checks for Rabbit and JMS listener elements (hand-written tables), `ref`/`method` of XML listeners link to the bean and its methods.
+- **spring-websocket:** `<websocket:...>` XML checks (required attributes, Info for unknown handler beans). **spring-batch:** required attributes and boolean values of batch XML elements (hand-written tables, not the XSD), `jobParameters['…']` key completion in XML and Java (unverified in Java strings). **spring-osgi:** unresolved `ref` as Info, `ref` completion sorts implementors of the exported interfaces first (never hides), `osgix` tag completion, Generate OSGi Service/Reference Bean in the XML editor menu.
+- **Not verified in the IDE:** every item above (mock host only). Skipped or partial from the audit: Qute support (not in this repo), overload handling beyond same-class, rules with no public source.
+
 ## aritti.devcontainer (clean-room, inspired by org.jetbrains.plugins.docker.gateway)
 
 Drives the devcontainer CLI (`@devcontainers/cli`) and Docker: Start, Rebuild, Open Shell, Stop and
@@ -527,8 +572,8 @@ inside the container, needs work in OpenIDEA itself: see _Upstream work_.
 
 ### Not ported
 
-- Creating a dev container from a Git repository URL (clone, then open in the container): no API clones or opens a project.
-- Browsing and adding Dev Container Features or templates: no picker. The New menu offers fixed starter configurations (see the templates row above).
+- Creating a dev container from a Git repository URL: closed in part, *Clone Repository and Start…* clones with git and starts the container (below); it still does not open the folder as a project.
+- Browsing Dev Container templates: the New menu offers fixed starter configurations (see the templates row above). Feature ids are completed from the public index since the backlog pass (below); there is no picker.
 - Applying the configuration's IDE customisations (extensions, settings) inside the container: nothing in OpenIDEA maps them.
 
 ### Added by the feasible-parity pass (2026-11-06)
@@ -545,6 +590,15 @@ inside the container, needs work in OpenIDEA itself: see _Upstream work_.
 - Files over 256 KB publish nothing for either the checks or the completion.
 
 - **Clone sources into a container (DC7):** *Dev Container: Clone Repository and Start…* asks for a URL and a folder (default: next to the project), runs `git clone -- URL FOLDER` (optional `process:git`) and then `devcontainer up --workspace-folder FOLDER` in a terminal. It does not open the new folder as a project, does not clone into a Docker volume as JetBrains does, and does not check what the clone contains. Unverified: that the host accepts a clone target outside the project root.
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Dev Containers view** (`on-view:containers`): running containers from `docker ps` by the `devcontainer.local_folder` label, with Open Shell and Stop (double-click opens a shell). Needs `process:docker`; the label is from the CLI's behaviour and not checked against every CLI version. It lists only containers started from this folder.
+- **Feature id completion** in the `features` object from `containers.dev/static/devcontainer-index.json`, kept in plugin storage, refreshed by *Dev Container: Refresh Feature List* (optional `storage`, `net:containers.dev`; a setting switches it off). The index may lag the registry; the download is not verified in a live IDE.
+- **Clone Repository and Start…:** see the gap F bullet above; unverified that the host accepts a clone target outside the project root.
+- **Not done (DC-2 partial):** no gutter marker on `image` that starts the container, because a gutter marker can open a location but not run a command.
 
 ## JPA Assist (`aritti.jpa-assist`)
 
@@ -709,6 +763,15 @@ The plugin API is the same in both.
 - **`parse_class` accepts classes only:** an entity on an interface or enum drops out of the structure view and the generators. A later entity after a non-class marker in the same file is not parsed.
 - A preceding `Audit::class` in an annotation no longer counts as the class keyword.
 
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **New checks (text based, quiet when a class is outside the project):** two associations on one attribute, an association on a basic or collection type, `@Id` with `@EmbeddedId`, mixed getter and field annotations; listener without a public no-arg constructor; the `kotlin-jpa` plugin read from `build.gradle(.kts)` and `pom.xml` up to the root (missing, redundant no-arg constructor, redundant `open` under allopen; quiet for version catalogs, convention plugins and `noArg`), with a quick fix that edits the Gradle file; unknown attribute names in `@AttributeOverride`, `@MapsId`, `@MapKey`, `@NamedAttributeNode`; `:parameters` of `@Query` and unknown named queries (quiet with `orm.xml`); `persistence.xml` and `orm.xml` classes and values, with class name completion in `<class>`.
+- **Actions:** *Add inverse attribute* on ManyToOne, OneToOne and ManyToMany (writes the other file only; not offered when the target already mirrors the association).
+- **Commands:** *New Entity* (class name, table, ID strategy, auditing, version, equals/hashCode) and *New Attribute* (type or association, cascade, fetch, nullability; appended to the end of the entity class with imports). A plugin cannot create a file: New Entity copies the text, or writes it into an empty file in focus.
+- **Not verified in the IDE:** the empty-file write, the prompt chain order, the Gradle edit.
+
 ## aritti.kube-explorer (clean-room, inspired by JetBrains Kubernetes 263.7307.101)
 
 Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plugin API change since
@@ -764,6 +827,15 @@ Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plug
 - **Known limit that predates this pass:** the port-forward `ports` text can carry extra kubectl flags.
 - **Prompts (API 1.2):** Create Helm Chart (`input` a name, `helm create` in the project root), Configure Helm Parameters (release name, values file and `--set`, stored, appended to Preview Helm Template and Lint Helm Chart), Customize Namespaces (`pick_many` over `kubectl get namespaces`, stored; the Namespace node lists only those plus the current one, none picked shows all), Select Log Sources (`pick_many` over a pod's containers or a workload's pods, found through `spec.selector.matchLabels`; one terminal each) and Debug Resource, which asks for the image (default: the latest recent one, else the `debugImage` setting) and remembers the last 10; Edit Recent Debug Images removes entries with `pick_many`. Prompts need a command: the tree's Debug button still uses the setting without asking, and the Logs buttons still follow everything. Values are unvalidated beyond refusing a leading `-` and control characters; `--set` is passed as one `--set=` argument, so a value with commas is Helm's own syntax. Create Helm Chart needs `process:helm`, an open project and fails if the folder exists (Helm's message is shown). Tested against the mock host only.
 - **Manifest references (document indexer on `yaml`/`yml`):** a resource's `metadata.name` defines `kube:<Kind>/<name>`; `secretName`, `serviceName`, `claimName`, `serviceAccountName`, `name` under `configMapKeyRef`/`configMapRef`/`configMap`/`secretKeyRef`/`secretRef`/`service`, and `scaleTargetRef` refer to it. Go to Declaration only (no find usages, rename or hover); the key ignores the namespace, so equal names in two namespaces clash; label selectors, `ownerReferences`, templated values (`{{ }}`, `${ }`) and CRD references are not indexed. The parser is line-based (indentation), so flow-style YAML (`{name: x}`) is missed. Capped at 4096 anchors per file.
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Edit Secret** (needs `allowRevealSecrets`): a form of the decoded keys, saved with `kubectl replace` with only `data` changed; binary values are kept and not shown. Values are visible on screen. **Log Viewer:** a filtered snapshot of `kubectl logs` (text or regex, case, start time, wrap, copy), not a stream; *Select Log Sources* picks pods or containers.
+- **Manifests:** `k*` abbreviations, Helm `.Values` and `include` completion, problems for unknown or deprecated keys, unknown kinds and server-owned fields of core, apps, batch, networking and rbac kinds only, hints for `.Values` paths and includes the chart does not define, Chart.yaml quick fixes (add a dependency, repository URL or alias; a quick fix cannot run helm or ask), Go to Declaration and gutter markers between a resource and the manifests that use it (open YAML files, not by namespace, so equal names in two namespaces can pick the wrong one). Settings `notifySuccess`, `nonKubernetesGlobs`.
+- **Commands:** Create Helm Chart, Configure Helm Parameters, Customize Namespaces, Choose Kubeconfig (one file in use, not a merge), Telepresence Connect and Quit (optional `process:telepresence`), Edit Recent Debug Images. **Dropped (KE-7):** reload of the kubeconfig on change, because of the 50 ms provider budget.
+- **Not verified in the IDE:** all of the above (mock host only).
 
 ## aritti.tasks (port of com.intellij.tasks)
 
@@ -948,10 +1020,19 @@ Port of `org.jetbrains.plugins.gitlab` 263.7307.200 (intellij-community tag
 - **Commits (`commitsView`):** the merge request's commits; a double click shows that commit's diff read-only in the Changes view. In commit mode there are no comments and no viewed marks. Refresh can show a misleading status, and Open on GitLab opens the merge request page.
 - **Pipelines (`pipelineView`):** the newest 20 pipelines of the merge request with their jobs by stage; retry a job or pipeline, cancel a pipeline (second click), open in browser. No job log, no manual play; stage order can change after a retry.
 - **Merge request attributes (API 1.2):** the details button *Edit Labels, People, Milestone* and *GitLab: Edit Merge Request* (acts on the selected merge request, else the branch's) pick the attribute, then labels (`pick_many`, replaces the set), assignees and reviewers (`pick_many` of the project's members, replaces the set), milestone (`pick` of active milestones, or none) or the title (`input`). Not ported: target branch, new labels or milestones, group labels and members beyond the project's `members/all` (first 10 pages of 100). Unverified that a view button may prompt; where the host refuses, the status line names the command, which can.
-- **Open on GitLab menus:** `projectView.context` now carries selected paths (API 1.2), but Open on GitLab and Copy Link are not wired to it; the log menus don't exist.
+- **Open on GitLab menus:** closed for the Project view by the backlog pass (Open on GitLab on `projectView.context`, below); Copy Link is not wired to it and the log menus don't exist.
 - **Input guards (`src/safe.rs`):** branch and ref names, remote names, usernames, commit SHAs, discussion ids, emoji names, GitLab URLs, repository paths and clone URLs are checked before they reach a URL or a git argument, and a value that fails is refused with a message (at most 40 characters of it quoted). A branch or path outside `[A-Za-z0-9._/@+-]` can't be pushed or cloned through the plugin, SHA-256 repositories fail the 40-hex SHA cap, and a project path longer than 64 characters can't be cloned. The clone, fetch, remote and push calls put `--` before their arguments; `checkout` and `merge` can't, because git would read the names as paths.
 - **Left alone in older code:** *Add Me as Reviewer* sends id 0 when `me.id` is 0, `open_url(mr.web_url)` in the details view isn't checked, `looks_secret` misses `.npmrc`, `*.p12` and `.netrc`, and error text after a bare `<` is dropped when stripping HTML.
 - **Not verified in the IDE:** `ctx.editor()` during a view click (Create Snippet says "Focus a file first." without it); whether `open_terminal` joins its arguments into a shell line; whether a `Choice` field sends the option string and its field event arrives before the button click; `vcs_status` being None without a repository; tree `Activate` on a double click in a right-side view; icon names at runtime.
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Open on GitLab** on the Project view menu (a file or folder). **CI:** completion of CI keywords and `CI_*` variables in `.gitlab-ci.yml` (the popup opens on letters, not on `$`); `include: local:` files count for job and stage checks, which stay quiet when an included file can't be read.
+- **Edit Merge Request** (Details button or *GitLab: Edit Merge Request*): labels, assignees, reviewers, milestone and title chosen from the project's labels, members and milestones; the list *Filter* button picks a quick filter or an author, reviewer, label or text filter.
+- **Skipped (P10, trackers):** discontinued trackers were not ported. **P7 partial:** snippet creation from the Project view takes single files; no file-selection tree, a form snippet holds one file.
+- **Not verified in the IDE:** the Project view menu context, the filter picks.
 
 ## Ideolog (`aritti.ideolog`)
 
@@ -1070,7 +1151,7 @@ Java, Python, .NET, PHP, Ruby, Go, Node, Dart (`file://`, `package:`) and Swift
 
 - **Blocks:** Ideolog's settings page with tables of parsing and highlighting patterns.
 - **Why:** same as *Settings are scalars only* in the Symfony section.
-- **Workaround:** one multiline string setting that takes Ideolog's exported XML (`<LogParsingPattern/>`, `<LogHighlightingPattern/>`).
+- **Workaround:** one multiline string setting that takes Ideolog's exported XML (`<LogParsingPattern/>`, `<LogHighlightingPattern/>`). Closed in part by the backlog pass: the *Ideolog Patterns* view adds and removes formats and patterns without XML (below).
 - **Would need:** an `array` of objects setting type shown as an editable table.
 
 ### No editor banners
@@ -1092,6 +1173,13 @@ Java, Python, .NET, PHP, Ruby, Go, Node, Dart (`file://`, `package:`) and Swift
   - Ideolog's large file editor for logs too big to open.
 - **Why:** no extension point for console or terminal output, and no paged or streamed document.
 - **Would need:** a console filter provider (line in → ranges with kinds and link targets); a read-only paged document or a custom editor with streamed content.
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Ideolog Patterns view:** add and remove custom formats and highlighting patterns without XML; stored in plugin storage (optional `storage`), the XML setting still works. **Status bar item** naming the detected log format (follows the focused editor, needs `events`). **`timeGapSeconds`** setting colours the time of events that follow a long pause (a colour on the time token, not a line or ruler mark).
+- **Not verified in the IDE:** the view's forms, the status item refresh on editor focus.
 
 ## aritti.flyway (clean-room, inspired by JetBrains' Flyway support)
 
@@ -1140,6 +1228,14 @@ The `migrations` view (bottom, icon `database`) is a read-only tree of migration
 - **`migrate` writes to the database** with one click (the entry is labelled so), unlike the Liquibase detectors, which only read.
 
 - **Cross-file Go to Declaration (indexer, FW8, FW11):** entity and migration tables (`@Entity`, `@Table(name)` or the snake_cased class name against `CREATE TABLE` in `V`/`U`/`R` migrations, gutter icons both ways) and `${placeholder}` in a migration to its `flyway.conf` or `flyway.toml` entry. Text rules, no entity model: `@Table` without a literal `name`, `@Id`/column mappings and naming strategies other than snake_case are not followed. Placeholders from `application.yml` (`spring.flyway.placeholders`) and custom prefixes and suffixes are not indexed. Only the first target is followed. 4096 anchors per file.
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Templates and icon:** New › Flyway SQL Migration, Java Migration, Kotlin Migration, Java Callback and SQL Callback; a template can't take the migration version prompt, so name the file first; Kotlin templates have no `package` line. Flyway icon on `V*__*.sql`, `U*__*.sql` and `R__*.sql` files.
+- **Clean:** closed in the confirmation limit above (`host::confirm`); kept as the 30-second rule on older hosts.
+- **Not verified in the IDE:** the icon name patterns, the template placeholders.
 
 ## Liquibase Changelogs (aritti.liquibase, clean-room)
 
@@ -1190,6 +1286,17 @@ The `changesets` view (bottom, icon `database`) shows changesets in execution or
 
 - **References (indexer, LQ7):** Go to Declaration from `include file` to the changelog of that file name, from `rollback changeSetId`/`changeSetAuthor` to its changeSet, and from `tableName`, `baseTableName` and `referencedTableName` to `createTable`. Includes resolve by file name only (the same name in two folders gives both targets), tables are matched case-insensitively and a `createTable` written in formatted SQL is not indexed. Columns, contexts and labels, completion and rename stay out (the index has no usages or rename). 4096 anchors per file.
 
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Gutter link** on each `include` to its changelog file (only for includes that resolve; `includeAll` has no single target); the marker only navigates, no run icon. Liquibase icon on `db.changelog-*` files.
+- **JSON changelogs:** checks, changesets view, Go to Definition on `include` and project index.
+- **Completion:** `include` file paths (XML, YAML); `changeSet` author names (setting or git `user.name`, optional `process:git`); in XML changesets without a declared schema, change type elements and attributes (quiet when the root declares a schema, whose XSD the editor's server uses).
+- **Index:** include to changelog, `rollback changeSetId` to its changeSet, table names to `createTable` (see the LQ7 bullet above).
+- **Commands:** *Update (Asks First)…* and *Rollback Count…* (see the closed limit above).
+- **Not verified in the IDE:** all of the above.
+
 ## aritti.openapi (clean-room, inspired by com.intellij.swagger)
 
 Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
@@ -1228,6 +1335,15 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 - **Reload:** the preview has a Reload button. Cargo cannot run the page script, so it is not verified.
 
 - **Compare with another spec (OA6):** *OpenAPI: Compare With Another Spec…* picks a base among the project's other specs (`find_files` skips dot-directories and ignored paths, files over 1 MiB are skipped) and lists added, removed and changed operations, `components`/`definitions` entries and top-level sections in the *OpenAPI Changes* view (base to current buffer; double-click opens it). The diff is on flat key paths and values: `$ref`s are not resolved, moved or renamed operations show as a removal plus an addition, and there is no side-by-side text diff or breaking-change classification. The view icon (`web`) is unverified.
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Editing:** keyword and enum completion in OpenAPI 3 YAML (quiet in JSON, Swagger 2 and flow style); *Extract inline schema to components/schemas* (YAML only; rename the new schema afterwards); *Copy Self-Contained Spec* (bundles external `$ref` into components; the target must be a block mapping; a recursive reference is copied once); *Copy Reference* to the key at the caret; *Compare With Last Revision* (git, optional, a committed file needed); operation gutter markers that open the operation's first local schema; setting `specGlobs`; a file icon.
+- **Preview:** a Redoc view (bundles Redoc 2.5.4, MIT) next to Swagger UI; not verified in a live IDE (it needs a worker, scripts in `Html` views may be blocked).
+- **Skipped (OA-2 partial):** the JSON edits (extract, bundle, schema modeline) are YAML only.
+- **Not verified in the IDE:** marker behaviour and all page scripts.
 
 ## aritti.dependency-audit (clean-room, inspired by JetBrains' package vulnerability checks)
 
@@ -1301,7 +1417,17 @@ Settings `quarkus.checkSyntax`, `quarkus.checkValues`, `quarkus.checkExpressions
 - **Syntax:** `duplicate-key` (properties and YAML, per `---` document), `missing-separator` (a line with a single token only; `key value` is valid Java properties syntax), `unassigned-value` (hint, only for a known non-map property whose metadata has a default).
 - **`invalid-value`, conservative:** booleans are never flagged (SmallRye reads anything but a few spellings as false); closed enums from the metadata compare case-, `-`- and `_`-insensitively and accept the property's default; log levels take the JUL and common names or an integer; durations take an integer, ISO `P...` or `<number><unit>` runs; list, map and `${`/`\` values are skipped. The enum leniency is assumed, not verified. A rule that over-accepts on non-JUL closed enums is possible.
 - **`undefined-expression`:** only in `application.properties|yaml|yml`, and only a typo candidate: a name of six or more characters, not environment-shaped, not a system prefix, catalog key or defined key, within edit distance 2 of a key defined in the same file. A typo rule can fire on sibling numbered names defined only elsewhere. The `quarkus.` prefix is treated as a system prefix, which silences that catalog check.
-- **Not done:** required-property check (`missing-required`): the bundled metadata has no required or optional information.
+- **Not done:** required-property check (`missing-required`): the bundled metadata has no required or optional information. Closed in part by the backlog pass: the opt-in setting `quarkus.checkRequired` (below).
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Named instances:** `quarkus.datasource."users".jdbc.url` completes and is checked as the unnamed key, for the roots the metadata lists as named (datasource, hibernate-orm, flyway, liquibase, mongodb, redis, oidc, oidc-client, mailer…).
+- **Required keys (opt-in `quarkus.checkRequired`):** an Info note on a key whose sibling is set while a required key (no default, not `Optional`) is missing from every `application*` file and `.env`. Keys of extensions that are not in the bundled catalog are unknown.
+- **Java (text only):** completion in `@ConfigProperty(name)` and `@ConfigMapping(prefix)`, checks for `@RestClient` without `@RegisterRestClient` (`quarkus.checkAnnotations`) and `@Scheduled` expressions, opt-in `quarkus.checkUnassigned`, quick fixes to add a `defaultValue` or the key to `application.properties` (existing file only); Go to Declaration and gutter markers between config keys and `@ConfigProperty`/`@ConfigMapping` declarations, both ways.
+- **Skipped (P5 #12):** Qute support (needs qute-ls, see above).
+- **Not verified in the IDE:** the Java provider routing and the markers.
 
 ## aritti.ignore (port of mobi.hsz.idea.gitignore)
 
@@ -1322,6 +1448,14 @@ Implemented since: the redundant-entry check also flags a glob with literal lead
 
 Added by the gap F pass on tooling (2026-11-06): the setting `unignoreActions` (default on) turns the unignore variant of the quick fix off; starred templates are kept in storage and shown in a *Starred* group (how the group renders in the IDE is not verified), and deleting a user template drops its star; *Add to .gitignore* appends keep a CRLF file CRLF. The original's import and export of templates and the template filter are still not built.
 
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+- **Path completion** of entries in glob-syntax ignore files (visible files and folders only: `find_files` skips ignored and hidden paths; `.hgignore` `syntax:` lines get none).
+- **Add Selected Paths** now asks which ignore file to add to (the open one or a root `.gitignore`, `.dockerignore`…); a file that is not open is opened first and the command must be run again, because a command edits only the focused editor.
+- **Not verified in the IDE:** the open-then-rerun flow and the path popup.
+
 ## aritti.properties (port of com.intellij.properties)
 
 Navigation covers `.html`, `.htm` and `.xhtml` (host language `html`) and `.jsp` and `.jspx` (host language `jsp`). Key navigation and the missing-key warning are text scans, not type resolution. Source port (Apache-2.0); the HTML/JSP sites and the missing-key warning are clean-room from the Spring and Thymeleaf documentation.
@@ -1337,6 +1471,12 @@ Navigation covers `.html`, `.htm` and `.xhtml` (host language `html`) and `.jsp`
 | Warnings refreshed when a `.properties` file changes | diagnostics are published on open and save of the code file | reopen or save the file |
 
 Added by the gap F pass on tooling (2026-11-06): New › Properties File, declared in the manifest only, so it can't be switched off. Its template body is a single newline; `openidea-plugin check` accepted it, but whether the host accepts a file template with an empty body was not tested in the IDE.
+
+### Added by the backlog pass (2026-11-06)
+
+Branch `arnaud-ritti/implement-new-feature`. Mock host only; nothing below is verified in the IDE unless it says so. Checks stay quiet when a name or class is not in project sources.
+
+Live unused keys as hints (setting, off by default; they run on open and save, not while typing), Go to Declaration lists every locale of a bundle, the Resource Bundle editor opens another locale's file when its cell is edited (a plugin can't write to a file that isn't the focused editor) and can show incomplete keys only. Not verified in the IDE (mock host only).
 
 ## All plugins
 

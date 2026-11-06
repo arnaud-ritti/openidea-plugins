@@ -1,5 +1,13 @@
 # Backlog: tooling plugins (group D), rows still F or F*
 
+## Status (2026-11-06, after the backlog implementation pass)
+
+Derived from `change-notes`, README and code on branch `arnaud-ritti/implement-new-feature`. DONE = built per the change-notes/README; every item is tested against the mock host only and unverified in the IDE. 'not verified' = I could not confirm it from the change-notes, README or code.
+
+- DONE: P1 (Open on GitLab), P2 (CI keywords and `CI_*` completion; `!reference` handling not verified), P3 (quarkus Java checks), P4 (named instances, opt-in required keys), P6 (properties unused keys and locale navigation), P8 (Patterns view, format status item, time gaps).
+- PARTIAL: P5 (key to declaration done; #12 Qute skipped). P7 (the bundle editor opens another locale's file and filters incomplete keys; single-file edits only, no sibling writes). P9 (#7 path completion and Add Selected Paths picking an ignore file done; #4 New menu per type skipped, a bare dot-name file can't be created from the New menu and the plugin can only edit the focused editor).
+- SKIPPED: P10 (FogBugz, Lighthouse, Pivotal Tracker: discontinued trackers).
+
 Source: [D-tooling.md](D-tooling.md) after [reclass-D-tooling.md](reclass-D-tooling.md) (API 1.2), checked against the code at `f288eda` on 2026-11-06. Row ids are `plugin #row` as in D-tooling.md. Nothing here is verified in the IDE; the mock host proves logic only. B rows are out of scope (blockers listed at the end).
 
 Result of the check: 21 rows are F or F* and open (gitlab 4, ignore 2, properties 3, ideolog 3, quarkus 8, tasks 1, dotenv 0, dependency-audit has no audit rows). 15 rows were closed since the audit.

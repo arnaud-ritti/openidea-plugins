@@ -1,5 +1,14 @@
 # Backlog: Spring rows still F or F* (2026-11-06)
 
+## Status (2026-11-06, after the backlog implementation pass)
+
+Derived from `change-notes`, README and code on branch `arnaud-ritti/implement-new-feature`. DONE = built per the change-notes/README; every item is tested against the mock host only and unverified in the IDE. 'not verified' = I could not confirm it from the change-notes, README or code.
+
+- DONE: SP-FND (`crates/spring-text` changed), BOOT-VAL, BEANS-ANN-a, BEANS-ANN-b, BEANS-XML-REF, BEANS-XML-CLASS, BEANS-REFS, BEANS-KOTLIN, BEANS-CMD, OSGI, BOOT-META, BOOT-CFG-NAV, DATA-TYPES, DATA-MONGO, WEB-VIEW, WEB-URL, SEC-REFS, CLOUD-STREAM, GQL, MSG, BATCH, WS-XML.
+- PARTIAL: TPL (file templates for spring-beans, spring-boot, spring-data, spring-web done; spring-beans snippet items skipped, spring-web snippets `getm`... done). BOOT-BUILD (Reactor debug agent hint and opt-in JDBC driver check done; the `@EventListener` visibility rule stays dropped, no documented source). CLOUD-MISC (Feign Clients view and `@BootstrapConfiguration` hint done; key hints skipped, `spring-boot` covers them).
+- DONE per change-notes, detail not verified: DATA-NAV (derived query tooltips, Show Repository Inherited Members), WEB-KX (Copy as curl, templates).
+- SKIPPED: Qute (P5 #12, tooling backlog) is not part of this file.
+
 Basis: `A1-spring-core.md`, `A2-spring-rest.md`, `reclass-A1-spring-core.md` (API 1.2), `implementation-plan.md`, checked against `plugins/spring-*/src` and the `plugin.toml` files on this branch. Row ids: `A1#n`, `OSGi#n`, `Boot#n`, `Data#n`, `MVC#n`, `Sec#n`, `Cloud#n`, `GQL#n`, `Msg#n`, `Batch#n`, `WS#n`. Nothing is verified in the IDE.
 
 Rules for every package: F* checks are quiet unless sure (project sources only; a name or class the plugin cannot see is never reported; opt-in setting when the false-positive risk stays high). Tests: MockHost unit test per problem code (positive, quiet case, library-bean case), direct `index()` tests for indexers, then `cargo test` and `openidea-plugin build`; update `LIMITATIONS.md`, the README, `change-notes`, and flip the row in `reclass-A1-spring-core.md`. `change-notes` in `plugin.toml` is shared by all packages of one plugin: merge those lines last.

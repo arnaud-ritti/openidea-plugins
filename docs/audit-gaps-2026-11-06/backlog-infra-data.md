@@ -1,5 +1,12 @@
 # Backlog: infra and data plugins (open F and F* rows after the 1.2 reclass)
 
+## Status (2026-11-06, after the backlog implementation pass)
+
+Derived from `change-notes`, README and code on branch `arnaud-ritti/implement-new-feature`. DONE = built per the change-notes/README; every item is tested against the mock host only and unverified in the IDE. 'not verified' = I could not confirm it from the change-notes, README or code.
+
+- DONE: KE-1, KE-2, KE-3, KE-4, KE-5, KE-6, KE-8 (kube-explorer), FW-1, LQ-1, LQ-2, LQ-3, OA-1, OA-3, OA-4, OA-5, DC-1, JPA-1, JPA-2, JPA-3 (`@NamedEntityGraph` names: not verified), JPA-4, JPA-5. KE-1 covers core, apps, batch, networking and rbac kinds only.
+- PARTIAL: KE-7 (Chart.yaml quick fixes, Select Log Sources and debug image prompt done; the kubeconfig reload on change was dropped because of the 50 ms provider budget). OA-2 (extract inline schema, self-contained copy and reference copy done for YAML; the JSON edits were skipped). DC-2 (Dev Containers view with Open Shell and Stop done; gutter markers that run commands skipped, a marker can only open a location).
+
 Sources: [B-infra-data.md](B-infra-data.md) (row ids: K-I, K-N, K-A, K-LT, K-X = kube-explorer; FW, LQ, OA, DC, JPA by row number), [reclass-B-infra-data.md](reclass-B-infra-data.md), [implementation-plan.md](implementation-plan.md), [api-facts.md](api-facts.md). Checked against the plugin sources and READMEs in this worktree (HEAD `f288eda`). Nothing here was run in the IDE.
 
 Conventions for every package: MockHost tests for success and each dismissal; `cargo test` and `openidea-plugin build` in the plugin directory; `change-notes` in `plugin.toml`; update the plugin README limits and flip the row in `reclass-B-infra-data.md`. F* checks follow quiet-unless-sure: report only when the text proves the problem, stay silent on anything dynamic (anchors, `tpl`, library bases, unknown kinds).
