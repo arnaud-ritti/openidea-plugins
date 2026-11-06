@@ -1,5 +1,6 @@
 //! Ziggy route names in JavaScript, TypeScript and Vue: `route('name')` and
-//! `route().current('name')`. Line-local scan, no parsing of the document.
+//! `route().current('name')`. One forward scan of the text before the cursor tracks strings and comments;
+//! nothing else is parsed.
 
 use std::ops::Range;
 
@@ -19,7 +20,7 @@ fn is_word(byte: u8) -> bool {
 
 /// Byte range of the route name inside the string literal at `at`, when that
 /// string is the first argument of `route(` or `route().current(`.
-// ponytail: a string spanning lines or a block comment opened above the line is not seen.
+// ponytail: strings never span lines, so a name inside a multi-line template literal is only seen after a `route(` restart.
 pub fn route_name_at(text: &str, at: usize) -> Option<Range<usize>> {
     let (quote, quote_at) = open_string(text, at)?;
     if !is_route_call(&text[..quote_at]) {
@@ -40,8 +41,8 @@ pub fn route_name_at(text: &str, at: usize) -> Option<Range<usize>> {
 }
 
 /// The quote and offset of the string literal open at `at`; none inside a
-/// comment or outside any string. Quotes end at the line break, backticks don't.
-// ponytail: no regex-literal or Vue text awareness; an apostrophe in template text opens a string until the line ends.
+/// comment or outside any string. Every quote kind ends at the line break.
+// ponytail: no regex-literal or Vue text awareness; a stray quote pairs with the next same-character quote on its line and can hide a route call there.
 fn open_string(text: &str, at: usize) -> Option<(u8, usize)> {
     #[derive(Clone, Copy)]
     enum State {
@@ -73,7 +74,7 @@ fn open_string(text: &str, at: usize) -> Option<(u8, usize)> {
                 state
             }
             State::Str(quote, _) if byte == quote => State::Code,
-            State::Str(quote, _) if quote != b'`' && byte == b'\n' => State::Code,
+            State::Str(_, _) if byte == b'\n' => State::Code,
             State::Str(_, _) if matches!(byte, b'\'' | b'"' | b'`') && is_route_call(&text[..i]) => State::Str(byte, i),
             other => other,
         };

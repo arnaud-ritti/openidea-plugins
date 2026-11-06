@@ -1235,3 +1235,14 @@ fn real_line_comment_still_silences() {
 fn template_literal_interpolation_is_quiet() {
     assert!(route_names("route(`a${x}|`)").is_empty());
 }
+
+#[test]
+fn stray_backtick_does_not_poison_later_lines() {
+    assert_eq!(route_names("const r = /`/;\nroute('|')"), ROUTES);
+    assert_eq!(route_names("const r = /`/;\nroute(`|`)"), ROUTES);
+}
+
+#[test]
+fn backtick_glob_does_not_open_a_block_comment_after_a_stray_backtick() {
+    assert_eq!(route_names("const r = /`/;\nconst g = import.meta.glob(`./Pages/**/*.vue`);\nroute('|')"), ROUTES);
+}

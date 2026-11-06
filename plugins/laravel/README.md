@@ -136,7 +136,7 @@ Declaring a provider for these languages makes the host load the plugin for
 them, so activation is limited to `on-file:resources/js/**`. The language ids
 `vue`, `javascriptreact` and `typescriptreact` are declared but unverified in
 the IDE; files are also recognised by extension. Comments and strings are
-tracked with a simple scan (no regex literals, no Vue text awareness).
+tracked with a simple scan (no regex literals, no Vue text awareness; a stray quote can pair with a later one on the same line).
 
 ## Not ported
 
