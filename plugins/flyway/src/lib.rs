@@ -253,12 +253,13 @@ impl Flyway {
                 let file_name = path.rsplit('/').next().unwrap_or(path);
                 let Name::Migration { kind, version, description } = parse(file_name, naming) else { return None };
                 if migration.kind == Kind::Repeatable {
-                    return (kind == Kind::Repeatable && same_description(&description)).then_some((path, true));
+                    return (kind == Kind::Repeatable && same_description(&description)).then_some((path, (false, false)));
                 }
-                (kind == migration.kind && version_key(&version) == version_key(&migration.version))
-                    .then(|| (path, same_description(&description)))
+                let compatible = kind == migration.kind || (migration.kind == Kind::Baseline && kind == Kind::Versioned);
+                (compatible && version_key(&version) == version_key(&migration.version))
+                    .then(|| (path, (kind != migration.kind, !same_description(&description))))
             })
-            .min_by_key(|(_, matches)| !matches)
+            .min_by_key(|(_, rank)| *rank)
             .map(|(path, _)| path);
         if let Some(path) = found {
             return Some(path.clone());
@@ -326,7 +327,9 @@ impl Views for Flyway {
             ViewEvent::Button(button) if button == "refresh" => host::refresh_view(view),
             ViewEvent::Activate(key) => {
                 if let Some(path) = self.targets.get(&key) {
-                    let _ = host::open_location(path, 0, 0);
+                    if host::open_location(path, 0, 0).is_err() {
+                        host::notify(NotificationLevel::Warning, TITLE, &format!("Could not open {path}."));
+                    }
                 }
             }
             _ => {}
@@ -635,5 +638,43 @@ mod tests {
         }
         let opened: Vec<String> = host.opened_locations().into_iter().map(|l| l.0).collect();
         assert_eq!(opened, [format!("{DIR}/U2__x.sql"), "/project/sql/V9__elsewhere.sql".to_owned()]);
+    }
+
+    fn run_info(host: &MockHost, json: &'static str) {
+        host.on_process("flyway", move |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: json.into(), stderr: String::new() }));
+    }
+
+    #[test]
+    fn baseline_row_opens_b_or_v_file() {
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "process:flyway"]);
+        host.add_file("src/main/resources/db/migration/V5__old.sql", "");
+        host.add_file("src/main/resources/db/migration/B7__real.sql", "");
+        host.add_file("src/main/resources/db/migration/V7__real.sql", "");
+        run_info(&host, r#"{"migrations":[
+          {"category":"Baseline","version":"5","description":"old","state":"Baseline"},
+          {"category":"Baseline","version":"7","description":"real","state":"Baseline"},
+          {"category":"Baseline","version":"1","description":"<< Flyway Baseline >>","state":"Baseline"}]}"#);
+        let mut flyway = Flyway::default();
+        let items = tree(&host, &mut flyway);
+        for item in &items {
+            flyway.handle("migrations", ViewEvent::Activate(item.key.clone()), &host.invocation()).unwrap();
+        }
+        let opened: Vec<String> = host.opened_locations().into_iter().map(|l| l.0).collect();
+        assert_eq!(opened, [format!("{DIR}/V5__old.sql"), format!("{DIR}/B7__real.sql")]);
+    }
+
+    #[test]
+    fn a_failing_open_warns_instead_of_crashing() {
+        let host = info_host();
+        run_info(&host, INFO_JSON);
+        let mut flyway = Flyway::default();
+        let items = tree(&host, &mut flyway);
+        let denied = host.with_capabilities(&["events"]);
+        let result = flyway.handle("migrations", ViewEvent::Activate(items[0].key.clone()), &denied.invocation());
+        assert!(result.is_ok());
+        let notes = denied.notifications();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].level, NotificationLevel::Warning);
+        assert!(notes[0].body.starts_with("Could not open"), "{}", notes[0].body);
     }
 }
