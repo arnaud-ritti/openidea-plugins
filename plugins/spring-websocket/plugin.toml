@@ -8,7 +8,7 @@ change-notes = "0.1.0 (first release): STOMP destination index, gutter arrows on
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-language:kotlin", "on-language:javascript", "on-language:javascriptreact", "on-language:typescript", "on-language:typescriptreact", "on-language:vue"]
+activation = ["on-language:java", "on-language:kotlin", "on-language:javascript", "on-language:javascriptreact", "on-language:typescript", "on-language:typescriptreact", "on-language:vue", "on-view:destinations"]
 
 [capabilities]
 required = ["project.read"]
@@ -16,6 +16,12 @@ required = ["project.read"]
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
 languages = ["java", "kotlin", "javascript", "javascriptreact", "typescript", "typescriptreact", "vue"]
+
+[[contributes.views]]
+id = "destinations"
+title = "WebSocket Destinations"
+icon = "send"
+location = "left"
 
 [contributes.settings]
 schema = "settings.schema.json"
