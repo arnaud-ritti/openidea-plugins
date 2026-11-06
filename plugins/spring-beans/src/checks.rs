@@ -193,7 +193,7 @@ fn is_dynamic(annotation: &Annotation, keys: &[&str]) -> bool {
     named.is_some_and(|a| a.strings.is_empty())
 }
 
-fn capitalised(name: &str) -> bool {
+pub(crate) fn capitalised(name: &str) -> bool {
     let mut chars = name.chars();
     match (chars.next(), chars.next()) {
         (Some(a), Some(b)) => a.is_uppercase() && !b.is_uppercase(),
@@ -217,11 +217,11 @@ fn naming(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     }
 }
 
-fn names_of(bean: &Bean) -> impl Iterator<Item = &str> {
+pub(crate) fn names_of(bean: &Bean) -> impl Iterator<Item = &str> {
     std::iter::once(bean.name.as_str()).chain(bean.aliases.iter().map(String::as_str))
 }
 
-fn profiles_overlap(a: &[String], b: &[String]) -> bool {
+pub(crate) fn profiles_overlap(a: &[String], b: &[String]) -> bool {
     if a.is_empty() || b.is_empty() {
         return true;
     }
@@ -292,7 +292,7 @@ fn pointcut_designators(path: &str, file: &JavaFile, ty: &TypeDecl, out: &mut Ve
 }
 
 /// Beans only clash inside one build module and one source set (main or test).
-fn same_scope(a: &str, b: &str) -> bool {
+pub(crate) fn same_scope(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }

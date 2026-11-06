@@ -3,7 +3,8 @@
 
 use crate::World;
 use crate::aop;
-use crate::checks::{Groups, weaving_plugin_in_build};
+use crate::checks::{Groups, capitalised, profiles_overlap, same_scope, weaving_plugin_in_build};
+use crate::model::is_xml_ref;
 use openidea_plugin::TextEdit;
 use openidea_plugin::text::offset;
 use openidea_plugin::{Position, Severity};
@@ -16,7 +17,7 @@ const AOP_NS: &str = "http://www.springframework.org/schema/aop";
 pub const KNOWN_SCOPES: [&str; 7] = ["singleton", "prototype", "request", "session", "application", "websocket", "bundle"];
 const ADVICE: [&str; 5] = ["before", "after", "after-returning", "after-throwing", "around"];
 
-pub fn check_xml(path: &str, text: &str, _world: &World, groups: Groups) -> Vec<Finding> {
+pub fn check_xml(path: &str, text: &str, world: &World, groups: Groups) -> Vec<Finding> {
     let els = xml::elements(text);
     if !is_beans_file(&els) {
         return Vec::new();
@@ -26,7 +27,14 @@ pub fn check_xml(path: &str, text: &str, _world: &World, groups: Groups) -> Vec<
         aop_structure(&els, &mut out);
         pointcut_designators(path, &els, &mut out);
     }
+    if groups.naming {
+        name_conventions(&els, &mut out);
+    }
+    if groups.duplicate_names {
+        duplicate_names(path, &els, world, &mut out);
+    }
     if groups.xml {
+        abstract_references(&els, world, &mut out);
         bean_attributes(&els, &mut out);
         injection_values(&els, &mut out);
         bean_scopes(&els, &mut out);
@@ -115,6 +123,99 @@ fn error(from: usize, to: usize, code: &'static str, message: &str) -> Finding {
 
 fn beans_elements<'a>(els: &'a [xml::Element], name: &'a str) -> impl Iterator<Item = (usize, &'a xml::Element)> {
     els.iter().enumerate().filter(move |(i, e)| e.local() == name && in_namespace(els, *i, BEANS_NS))
+}
+
+/// The explicit, literal names of a `<bean>`: `(name, start, end)` of each `id` or `name` token.
+fn bean_names(e: &xml::Element) -> Vec<(&str, usize, usize)> {
+    let mut found = Vec::new();
+    for attr in e.attrs.iter().filter(|a| matches!(a.name.as_str(), "id" | "name")) {
+        if dynamic(&attr.value) {
+            continue;
+        }
+        let mut from = 0;
+        for token in attr.value.split_inclusive([',', ';', ' ']) {
+            let name = token.trim_end_matches([',', ';', ' ']);
+            let start = attr.value_at + from;
+            from += token.len();
+            if !name.is_empty() && !name.contains('#') {
+                found.push((name, start, start + name.len()));
+            }
+        }
+    }
+    found
+}
+
+fn name_conventions(els: &[xml::Element], out: &mut Vec<Finding>) {
+    for (_, e) in beans_elements(els, "bean") {
+        for (name, from, to) in bean_names(e).into_iter().filter(|(n, _, _)| capitalised(n)) {
+            let message = format!(
+                "Bean names conventionally start with a lowercase letter (\"{}\"), as the default names Spring derives do.",
+                spring_text::decapitalize(name)
+            );
+            out.push(Finding::new(from, to, "bean-name-convention", message).with_severity(Severity::Hint));
+        }
+    }
+}
+
+fn profiles_of(els: &[xml::Element], i: usize) -> Vec<String> {
+    let mut profiles = Vec::new();
+    let mut up = els[i].parent;
+    while let Some(p) = up {
+        if let Some(profile) = els[p].value("profile") {
+            profiles.extend(profile.split([',', ' ']).filter(|s| !s.is_empty()).map(str::to_owned));
+        }
+        up = els[p].parent;
+    }
+    profiles
+}
+
+/// Same-file clashes inside one `<beans>` element, and clashes with beans declared in code.
+fn duplicate_names(path: &str, els: &[xml::Element], world: &World, out: &mut Vec<Finding>) {
+    let mut seen: Vec<(Option<usize>, &str)> = Vec::new();
+    for (i, e) in beans_elements(els, "bean").filter(|(_, e)| e.parent.is_some_and(|p| els[p].local() == "beans")) {
+        let profiles = profiles_of(els, i);
+        for (name, from, to) in bean_names(e) {
+            if seen.contains(&(e.parent, name)) {
+                let message = format!("Another bean in this file is already named \"{name}\": a second definition in one beans element is rejected.");
+                out.push(Finding::new(from, to, "duplicate-bean-name", message));
+                continue;
+            }
+            seen.push((e.parent, name));
+            let clash = world.named(name).into_iter().find(|(other_path, other)| {
+                !other.kind.starts_with('<')
+                    && !other.conditional
+                    && crate::checks::names_of(other).any(|n| n == name)
+                    && profiles_overlap(&profiles, &other.profiles)
+                    && same_scope(path, other_path)
+            });
+            if let Some((other_path, _)) = clash {
+                let message = format!(
+                    "Another bean named \"{name}\" is defined in {}: two beans with one name make the context fail or silently replace one.",
+                    crate::file_name(other_path)
+                );
+                out.push(Finding::new(from, to, "duplicate-bean-name", message));
+            }
+        }
+    }
+}
+
+fn abstract_references(els: &[xml::Element], world: &World, out: &mut Vec<Finding>) {
+    for (i, e) in els.iter().enumerate() {
+        for a in e.attrs.iter().filter(|a| a.local() != "parent" && !dynamic(&a.value) && is_xml_ref(els, i, a)) {
+            let mut from = a.value_at;
+            for token in a.value.split_inclusive([',', ';', ' ']) {
+                let name = token.trim_end_matches([',', ';', ' ']);
+                let start = from;
+                from += token.len();
+                let defined = world.named(name);
+                if name.is_empty() || defined.is_empty() || !defined.iter().all(|(_, b)| b.is_abstract) {
+                    continue;
+                }
+                let message = format!("\"{name}\" is an abstract bean and cannot be injected or depended on; reference it as a parent instead.");
+                out.push(error(start, start + name.len(), "xml-abstract-reference", &message));
+            }
+        }
+    }
 }
 
 fn bean_attributes(els: &[xml::Element], out: &mut Vec<Finding>) {

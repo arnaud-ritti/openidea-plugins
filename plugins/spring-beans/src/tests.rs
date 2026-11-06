@@ -1115,6 +1115,100 @@ fn xml_attribute_checks_use_utf16_columns_and_crlf_lines() {
 }
 
 #[test]
+fn xml_bean_name_with_capital_is_hinted() {
+    let found = aop_found("<bean id=\"Dispatcher\" name=\"alias, Other\" class=\"x.Y\"/>");
+    assert_eq!(found, [pair("bean-name-convention", "Dispatcher"), pair("bean-name-convention", "Other")]);
+}
+
+#[test]
+fn duplicate_xml_ids_in_one_file_are_reported() {
+    let found = aop_found("<bean id=\"a\" class=\"x.Y\"/>\n<bean id=\"b\" name=\"a\" class=\"x.Y\"/>");
+    assert_eq!(found, [pair("duplicate-bean-name", "a")]);
+    let host = MockHost::install();
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"/>\n<bean id=\"a\" class=\"x.Y\"/>");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character), (3, 10));
+}
+
+#[test]
+fn xml_bean_clashing_with_java_bean_is_reported() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Dispatcher.java", "@Service(\"dispatcher\")\nclass Dispatcher {}\n");
+    let found = xml_findings(&host, &beans_xml("<bean id=\"dispatcher\" class=\"x.Y\"/>"));
+    assert_eq!(found, [pair("duplicate-bean-name", "dispatcher")]);
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Dispatcher.java", "@Service(\"dispatcher\")\n@Profile(\"dev\")\nclass Dispatcher {}\n");
+    let other_profile = beans_xml("<beans profile=\"prod\"><bean id=\"dispatcher\" class=\"x.Y\"/></beans>");
+    assert!(xml_findings(&host, &other_profile).is_empty());
+}
+
+#[test]
+fn same_id_in_different_profile_blocks_is_quiet() {
+    let body = "<beans profile=\"dev\"><bean id=\"a\" class=\"x.Y\"/></beans><beans profile=\"prod\"><bean id=\"a\" class=\"x.Z\"/></beans>";
+    assert!(aop_found(body).is_empty());
+}
+
+#[test]
+fn same_id_in_two_xml_files_is_quiet() {
+    let host = MockHost::install();
+    host.add_file("src/main/resources/other.xml", &beans_xml("<bean id=\"a\" class=\"x.Y\"/>"));
+    assert!(xml_findings(&host, &beans_xml("<bean id=\"a\" class=\"x.Z\"/>")).is_empty());
+}
+
+#[test]
+fn generated_names_are_quiet() {
+    let body = "<bean id=\"x.Y#0\" class=\"x.Y\"/><bean id=\"x.Y#0\" class=\"x.Y\"/>";
+    assert!(aop_found(body).is_empty());
+}
+
+#[test]
+fn xml_names_are_quiet_for_library_or_dynamic_name() {
+    let dynamic = "<bean id=\"${A}\" class=\"x.Y\"/><bean id=\"${A}\" class=\"x.Y\"/><bean id=\"A#{b}\" class=\"x.Y\"/>";
+    assert!(aop_found(dynamic).is_empty());
+    let other_file = "<project xmlns=\"urn:other\"><bean id=\"A\"/><bean id=\"A\"/></project>";
+    assert!(xml_findings(&MockHost::install(), other_file).is_empty());
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkNaming", "false");
+    host.set_setting("springBeans.checkDuplicateNames", "false");
+    assert!(xml_findings(&host, &beans_xml("<bean id=\"A\" class=\"x.Y\"/><bean id=\"A\" class=\"x.Y\"/>")).is_empty());
+}
+
+#[test]
+fn ref_to_abstract_bean_is_reported() {
+    let body = "<bean id=\"base\" abstract=\"true\"/>\n<bean id=\"a\" class=\"x.Y\" depends-on=\"base\"><property name=\"p\" ref=\"base\"/><property name=\"q\"><ref bean=\"base\"/></property></bean>";
+    let found: Vec<_> = aop_found(body).into_iter().filter(|(code, _)| code == "xml-abstract-reference").collect();
+    assert_eq!(found, vec![pair("xml-abstract-reference", "base"); 3]);
+}
+
+#[test]
+fn parent_to_abstract_bean_is_quiet() {
+    assert!(aop_found("<bean id=\"base\" abstract=\"true\"/><bean id=\"a\" parent=\"base\"/>").is_empty());
+}
+
+#[test]
+fn ref_to_bean_with_a_concrete_definition_is_quiet() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Base.java", "@Service(\"base\")\nclass Base {}\n");
+    let body = "<bean id=\"base\" abstract=\"true\"/><bean id=\"a\" class=\"x.Y\"><property name=\"p\" ref=\"base\"/></bean>";
+    let found = xml_findings(&host, &beans_xml(body));
+    assert!(found.iter().all(|(code, _)| code != "xml-abstract-reference"));
+}
+
+#[test]
+fn xml_name_findings_use_utf16_columns_and_crlf_lines() {
+    let host = MockHost::install();
+    let text = beans_xml("<!-- caf\u{e9}\u{1F600} --><bean id=\"Ab\" class=\"x.Y\"/>");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (2, 25, 27));
+    let text = beans_xml("<bean id=\"base\" abstract=\"true\"/>\n<bean class=\"x.Y\"\n  depends-on=\"base\"/>").replace('\n', "\r\n");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (4, 14, 18));
+}
+
+#[test]
 fn switched_off_xml_group_is_quiet() {
     let host = MockHost::install();
     host.set_setting("springBeans.checkXml", "false");

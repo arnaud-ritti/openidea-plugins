@@ -53,6 +53,8 @@ pub struct Bean {
     pub qualifiers: Vec<String>,
     /// Carries a `@Conditional*` annotation: it may not exist at run time.
     pub conditional: bool,
+    /// `<bean abstract="true">`: a template, never instantiated.
+    pub is_abstract: bool,
     pub range: Range,
 }
 
@@ -200,6 +202,7 @@ pub fn class_bean(text: &str, name: &str, short_name: &str, at: usize, annotatio
         profiles: values(annotations, &["Profile"]),
         qualifiers: values(annotations, &["Qualifier", "Named"]),
         conditional: is_conditional(annotations),
+        is_abstract: false,
         range: range(text, at, at + name.len()),
     })
 }
@@ -218,6 +221,7 @@ pub fn method_bean(text: &str, name: &str, at: usize, ty: &str, annotations: &[A
         profiles: if profiles.is_empty() { class.to_vec() } else { profiles },
         qualifiers: values(annotations, &["Qualifier", "Named"]),
         conditional: is_conditional(annotations),
+        is_abstract: false,
         range: range(text, at, at + name.len()),
     }
 }
@@ -349,6 +353,7 @@ fn xml_model(text: &str) -> FileModel {
                 profiles,
                 qualifiers: Vec::new(),
                 conditional: false,
+                is_abstract: e.value("abstract") == Some("true"),
                 range: at,
             });
             owners[i] = Some(out.beans.len() - 1);
