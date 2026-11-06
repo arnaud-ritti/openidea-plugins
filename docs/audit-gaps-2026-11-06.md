@@ -59,6 +59,8 @@ Reading the totals:
 
 ## Done
 
+### Plan 1: Spring core and OSGi
+
 Status of the F rows after the gap F pass (branch `gap-f-spring-core`, [plan](superpowers/plans/2026-11-06-gap-f-spring-core.md), tests against the mock host only, nothing run in the IDE). Row numbers refer to [A1-spring-core.md](audit-gaps-2026-11-06/A1-spring-core.md).
 
 **Spring core -> `spring-beans` (+ `spring-boot`).** Rows 1, 2, 5, 6, 7, 13, 14, 15, 19, 23, 25, 26, 30, 32, 33 and 34 are built.
@@ -74,20 +76,23 @@ Status of the F rows after the gap F pass (branch `gap-f-spring-core`, [plan](su
 
 **Spring OSGi -> `spring-osgi`.** Row 1 (enumerated attribute values: `cardinality`, `greedy-proxying`, `ranking` and others; `osgi-attribute-value`, Error) is built. Row 7 (`bundle` scope) is built by accepting `bundle` in the `spring-beans` scope check. The value rendering in the IDE is unverified.
 
-## Limits of this audit
+### Plan 2: rest of Spring
 
-- **Behaviour is inferred, not observed.** The proprietary originals were read through descriptors, bundles and description pages only. A description says what a check reports, not its exact rules, messages or false-positive behaviour. Every new check built from this list must be specified from public documentation.
-- **Counts depend on grouping.** Rows group features, and the agents grouped differently (for example the Kubernetes live templates, the Symfony inspections by theme). Compare rows within a pair, not across pairs. The per-feature counts in each detail file's own summary are approximate.
-- **Inventory gaps.** The Spring core inventory names only 5 of its 10 intentions; the Kubernetes, OpenAPI and Dev Containers headers count more intentions than they list; the Spring Initializr inventory has almost nothing user-facing, so its two rows come from public knowledge of the New Project wizard. Of the 104 Symfony inspections, 53 are in the public source and 51 were judged from names and description text.
-- **Quarkus Java side.** Hover and definition support in the Quarkus plugin was checked only in `plugin.toml` and `lib.rs`.
-- **Nothing was run in the IDE.** "Done" is evidenced by code; "F" and "F\*" are API-level judgements. The unverified IDE behaviours listed in `LIMITATIONS.md` (template placeholders, prefilled code-action edits, language ids, activation, completion on `@`) still apply to every F\* row that depends on them.
-- **Licence.** The proprietary originals are used for a feature inventory only. No code, messages, templates or icons from them are in this repository, and everything built from this list must be written from documentation.
+Branch `gap-f-spring-rest`, [plan](superpowers/plans/2026-11-06-gap-f-spring-rest.md). Built with unit tests against the mock host; nothing was run in the IDE.
 
-## Suggested order for the F rows
+**Spring Boot -> spring-boot.** `@ConfigurationProperties` (prefix part only), early application events and invalid application setup are done. The icon row is done as a file icon for `application*` and `bootstrap*` config files; it shows only under an icon theme that merges plugin icons, which is unverified.
 
-Largest volume at the lowest risk first: Spring XML diagnostics (the index already holds XML beans, the checks only run on Java), the Symfony inspections that are in the public source, the GitLab actions (7), the Kubernetes feasible rows (9), JPA (7), the OpenAPI rows (5) and the Laravel Idea rows (8). The full list of F rows follows. Each is a candidate task; none has been scheduled.
+**Spring Data -> spring-data.** All four rows are done. `Page` without `Pageable` is flagged; `Slice` without one is valid and not flagged. `@Modifying` covers update and delete `@Query`. The JDBC sequence row checks only an empty `sequence` attribute. `@MappedCollection` key column is a Hint.
 
-## Done
+**Spring MVC -> spring-web.** The version format row covers a lone literal in `version` of Java mapping annotations; Kotlin and functional routes are not covered. The generate row is two Java-only refactor actions (caret not moved, placeholder path). The Endpoints row is an Endpoints view for literal annotated mappings and functional routes, not the IDE's own window.
+
+**Spring Security -> spring-security.** Done: a `**` before the last path segment is flagged in `requestMatchers`, `mvcMatchers`, `securityMatcher` and Kotlin `authorize`. No quick fix; possible false positive with `ant_path_matcher`.
+
+**Spring GraphQL -> spring-graphql.** Done as a deny-list of `@BatchMapping` return types in Java and Kotlin. `Collection` and `Set` are valid, raw `Mono` and custom wrappers are quiet, and a Kotlin `= { ... }` lambda body still warns.
+
+**Spring WebSocket -> spring-websocket.** Done as the plugin's own "WebSocket Destinations" view; a plugin cannot add items to the Endpoints view of `spring-web`.
+
+Known limits and unverified items are in the "Added by gap F, plan 2" section of [LIMITATIONS.md](../LIMITATIONS.md).
 
 ### Plan 3: infra and data
 
@@ -102,6 +107,41 @@ Branch `gap-f-infra-data` ([plan](superpowers/plans/2026-11-06-gap-f-infra-data.
 **flyway.** Done: run configuration producer and info providers, narrowed to three detectors (`info`, `validate`, `migrate`) on a root `flyway.toml` or `flyway.conf`. They ignore the `runner` and `arguments` settings, a config in `conf/` is not detected, and `migrate` writes to the database in one click. Whether the host matches `files` at the project root only is unverified.
 
 **jpa-assist.** Done: the three Kotlin rows (val attributes, immutable collections, data class without `equals`, `hashCode` and `toString`), persistent object class signature, entity listener warnings, and seven Add @X callback actions. Narrowed: the Kotlin checks cover the first class in a file and judge collection types by simple name (a user-defined `List` is flagged, `@Version val` still warns); listeners are found by simple file name; `parse_class` accepts classes only, so entities on an interface or enum drop out of the structure view and the generators. Ruled out: immutable not-nullable property (Kotlin), not implemented.
+
+### Plan 4: PHP ecosystem
+
+Branch `gap-f-php`, [plan](superpowers/plans/2026-11-06-gap-f-php.md). Unit tests against the mock host only; the public Symfony Plugin and free Laravel plugin repositories were unreachable, so rules follow the plan text and the upstream documentation.
+
+Symfony Plugin -> `symfony`: done are the Twig checks (route compare, translation domain, `for` condition, component block syntax, component self import), `deprecated-factory-setting`, `yaml-unescaped-backslash` (with quick fix), `yaml-unquoted-colon`, the five PHP class checks, six Doctrine checks (`doctrineChecks`), the route, parameter, form type and block-override code actions, tag-name completion, the `twigNamespaces` setting, the three service-config templates, file icons (own glyph) and the `symfony` status item. Narrowed: `from-callable-option` flags the option set of UPGRADE-8.1.md, `tagged-collection-default-method` reads string literals only, `orm-inverse-side-join-column` is a hint and quiet for `JoinTable` and a positional `OneToMany` argument, the lifecycle-callbacks check covers `#[ORM\Entity]` only. Ruled out: `RouteAttributeNamespaceDeprecated` (UPGRADE 6.4/7.0 do not deprecate it), and the Doctrine `LifecycleMethodVisibility` and discriminator-map duplicate checks (the Doctrine docs state no such rule).
+
+Blade -> `blade`: no change in `aritti.blade`; the directive snippets of this pair are built in `aritti.laravel` (see below). The row for completion in `blade` itself stays open.
+
+Laravel Idea -> `laravel`: done are `LaravelFunctionsInspection` as `env-outside-config`, the `latest(col)`/`oldest(col)` suggestions for date columns, the class-directive, bulk-rule, bulk-controller, rule-object and facade-import rewrites (the `Context` facade imports `Illuminate\Support\Facades\Context`), the `controllersNamespace` setting, and about 45 Blade directive snippets. Narrowed: the rule-object rewrite covers `exists`, `unique`, `in` and `not_in`; the facade import is skipped in rare code such as `$class = Auth::user()`; the `switch` snippet has no `@case`.
+
+Free Laravel plugin -> `laravel`: `ide-blade.json` namespaces are read from the project root and `.idea/` only, `\uXXXX` escapes are not decoded, and a blank namespace adds a plain view root.
+
+### Plan 5: tooling
+
+Branch `gap-f-tooling` ([plan](superpowers/plans/2026-11-06-gap-f-tooling.md)). Built with unit tests against the mock host; nothing was run in the IDE. Details and the unverified items are in the "Gap F pass on tooling" part of `PARITY.md` and the `aritti.gitlab` section of `LIMITATIONS.md`.
+
+GitLab -> gitlab: six of the seven F rows are done, each narrower than the original. Create Merge Request is a form view without pickers or milestone (at most 1000 branches). Create Snippet takes only the focused file or selection, and a public snippet needs a second click. Share Project runs an optional `git init` and an initial commit behind a confirm bound to the listed files, refuses secret-looking files and has no file-selection tree. Note edit, delete and award emoji work on your own non-system notes with a fixed list of 8 emoji. The commit list shows a commit's diff read-only, without comments or viewed marks. The pipeline view lists the newest 20 pipelines with retry, cancel and open in browser, and has no job log or manual play. The row ruled out is Open on GitLab menus, reclassed **B**: commands in the Project view menu get no selection. Not a gap row, but added in the same pass: `safe.rs` input guards, which refuse a branch or path outside `[A-Za-z0-9._/@+-]`, and `--` in the clone and share git calls.
+
+.ignore -> ignore: the one F row is done: the `unignoreActions` setting and starred templates kept in storage. Appends now keep CRLF files CRLF.
+
+Properties -> properties: the one F row is done: New > Properties File, declared in the manifest only, so it cannot be switched off. Whether the host accepts the one-newline template body is unverified.
+
+## Limits of this audit
+
+- **Behaviour is inferred, not observed.** The proprietary originals were read through descriptors, bundles and description pages only. A description says what a check reports, not its exact rules, messages or false-positive behaviour. Every new check built from this list must be specified from public documentation.
+- **Counts depend on grouping.** Rows group features, and the agents grouped differently (for example the Kubernetes live templates, the Symfony inspections by theme). Compare rows within a pair, not across pairs. The per-feature counts in each detail file's own summary are approximate.
+- **Inventory gaps.** The Spring core inventory names only 5 of its 10 intentions; the Kubernetes, OpenAPI and Dev Containers headers count more intentions than they list; the Spring Initializr inventory has almost nothing user-facing, so its two rows come from public knowledge of the New Project wizard. Of the 104 Symfony inspections, 53 are in the public source and 51 were judged from names and description text.
+- **Quarkus Java side.** Hover and definition support in the Quarkus plugin was checked only in `plugin.toml` and `lib.rs`.
+- **Nothing was run in the IDE.** "Done" is evidenced by code; "F" and "F\*" are API-level judgements. The unverified IDE behaviours listed in `LIMITATIONS.md` (template placeholders, prefilled code-action edits, language ids, activation, completion on `@`) still apply to every F\* row that depends on them.
+- **Licence.** The proprietary originals are used for a feature inventory only. No code, messages, templates or icons from them are in this repository, and everything built from this list must be written from documentation.
+
+## Suggested order for the F rows
+
+Largest volume at the lowest risk first: Spring XML diagnostics (the index already holds XML beans, the checks only run on Java), the Symfony inspections that are in the public source, the GitLab actions (7), the Kubernetes feasible rows (9), JPA (7), the OpenAPI rows (5) and the Laravel Idea rows (8). The full list of F rows follows. Each is a candidate task; none has been scheduled.
 
 ## Appendix: gap rows classed F (feasible with the current API)
 
@@ -262,44 +302,3 @@ Row text is shortened; the detail files hold the evidence and the exact basis.
 - pipeline and job details in MR (REST pipelines/jobs + buttons)
 - Open on GitLab menus (add `projectView.context` entry (log menus not available))
 
-## Done
-
-### Plan 2: rest of Spring
-
-Branch `gap-f-spring-rest`, [plan](superpowers/plans/2026-11-06-gap-f-spring-rest.md). Built with unit tests against the mock host; nothing was run in the IDE.
-
-**Spring Boot -> spring-boot.** `@ConfigurationProperties` (prefix part only), early application events and invalid application setup are done. The icon row is done as a file icon for `application*` and `bootstrap*` config files; it shows only under an icon theme that merges plugin icons, which is unverified.
-
-**Spring Data -> spring-data.** All four rows are done. `Page` without `Pageable` is flagged; `Slice` without one is valid and not flagged. `@Modifying` covers update and delete `@Query`. The JDBC sequence row checks only an empty `sequence` attribute. `@MappedCollection` key column is a Hint.
-
-**Spring MVC -> spring-web.** The version format row covers a lone literal in `version` of Java mapping annotations; Kotlin and functional routes are not covered. The generate row is two Java-only refactor actions (caret not moved, placeholder path). The Endpoints row is an Endpoints view for literal annotated mappings and functional routes, not the IDE's own window.
-
-**Spring Security -> spring-security.** Done: a `**` before the last path segment is flagged in `requestMatchers`, `mvcMatchers`, `securityMatcher` and Kotlin `authorize`. No quick fix; possible false positive with `ant_path_matcher`.
-
-**Spring GraphQL -> spring-graphql.** Done as a deny-list of `@BatchMapping` return types in Java and Kotlin. `Collection` and `Set` are valid, raw `Mono` and custom wrappers are quiet, and a Kotlin `= { ... }` lambda body still warns.
-
-**Spring WebSocket -> spring-websocket.** Done as the plugin's own "WebSocket Destinations" view; a plugin cannot add items to the Endpoints view of `spring-web`.
-
-Known limits and unverified items are in the "Added by gap F, plan 2" section of [LIMITATIONS.md](../LIMITATIONS.md).
-
-### Plan 4: PHP ecosystem
-
-Branch `gap-f-php`, [plan](superpowers/plans/2026-11-06-gap-f-php.md). Unit tests against the mock host only; the public Symfony Plugin and free Laravel plugin repositories were unreachable, so rules follow the plan text and the upstream documentation.
-
-Symfony Plugin -> `symfony`: done are the Twig checks (route compare, translation domain, `for` condition, component block syntax, component self import), `deprecated-factory-setting`, `yaml-unescaped-backslash` (with quick fix), `yaml-unquoted-colon`, the five PHP class checks, six Doctrine checks (`doctrineChecks`), the route, parameter, form type and block-override code actions, tag-name completion, the `twigNamespaces` setting, the three service-config templates, file icons (own glyph) and the `symfony` status item. Narrowed: `from-callable-option` flags the option set of UPGRADE-8.1.md, `tagged-collection-default-method` reads string literals only, `orm-inverse-side-join-column` is a hint and quiet for `JoinTable` and a positional `OneToMany` argument, the lifecycle-callbacks check covers `#[ORM\Entity]` only. Ruled out: `RouteAttributeNamespaceDeprecated` (UPGRADE 6.4/7.0 do not deprecate it), and the Doctrine `LifecycleMethodVisibility` and discriminator-map duplicate checks (the Doctrine docs state no such rule).
-
-Blade -> `blade`: no change in `aritti.blade`; the directive snippets of this pair are built in `aritti.laravel` (see below). The row for completion in `blade` itself stays open.
-
-Laravel Idea -> `laravel`: done are `LaravelFunctionsInspection` as `env-outside-config`, the `latest(col)`/`oldest(col)` suggestions for date columns, the class-directive, bulk-rule, bulk-controller, rule-object and facade-import rewrites (the `Context` facade imports `Illuminate\Support\Facades\Context`), the `controllersNamespace` setting, and about 45 Blade directive snippets. Narrowed: the rule-object rewrite covers `exists`, `unique`, `in` and `not_in`; the facade import is skipped in rare code such as `$class = Auth::user()`; the `switch` snippet has no `@case`.
-
-Free Laravel plugin -> `laravel`: `ide-blade.json` namespaces are read from the project root and `.idea/` only, `\uXXXX` escapes are not decoded, and a blank namespace adds a plain view root.
-
-### Plan 5: tooling
-
-Branch `gap-f-tooling` ([plan](superpowers/plans/2026-11-06-gap-f-tooling.md)). Built with unit tests against the mock host; nothing was run in the IDE. Details and the unverified items are in the "Gap F pass on tooling" part of `PARITY.md` and the `aritti.gitlab` section of `LIMITATIONS.md`.
-
-GitLab -> gitlab: six of the seven F rows are done, each narrower than the original. Create Merge Request is a form view without pickers or milestone (at most 1000 branches). Create Snippet takes only the focused file or selection, and a public snippet needs a second click. Share Project runs an optional `git init` and an initial commit behind a confirm bound to the listed files, refuses secret-looking files and has no file-selection tree. Note edit, delete and award emoji work on your own non-system notes with a fixed list of 8 emoji. The commit list shows a commit's diff read-only, without comments or viewed marks. The pipeline view lists the newest 20 pipelines with retry, cancel and open in browser, and has no job log or manual play. The row ruled out is Open on GitLab menus, reclassed **B**: commands in the Project view menu get no selection. Not a gap row, but added in the same pass: `safe.rs` input guards, which refuse a branch or path outside `[A-Za-z0-9._/@+-]`, and `--` in the clone and share git calls.
-
-.ignore -> ignore: the one F row is done: the `unignoreActions` setting and starred templates kept in storage. Appends now keep CRLF files CRLF.
-
-Properties -> properties: the one F row is done: New > Properties File, declared in the manifest only, so it cannot be switched off. Whether the host accepts the one-newline template body is unverified.

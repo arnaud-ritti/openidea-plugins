@@ -2,7 +2,7 @@
   "properties": {
     "springData.checkPageable": {
       "type": "boolean",
-      "title": "Warn when a repository method returning Page or Slice has no Pageable parameter",
+      "title": "Warn when a repository method returning Page has no Pageable parameter",
       "default": true
     },
     "springData.checkModifying": {
