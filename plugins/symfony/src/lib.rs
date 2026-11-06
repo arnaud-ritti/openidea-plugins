@@ -607,6 +607,14 @@ pub struct Main {
     expanded: BTreeSet<String>,
 }
 
+fn concrete_method(route: &Route) -> Route {
+    let mut route = route.clone();
+    if route.method == "ANY" {
+        route.method = "GET".into();
+    }
+    route
+}
+
 impl Main {
     fn index_project(&mut self, project: &Project) {
         let Ok(root) = project.root() else { return };
@@ -842,13 +850,13 @@ impl Plugin for Main {
             "run-console-command" => self.run_console_command(ctx),
             "route-copy-curl" => {
                 if let Some(route) = self.selected_route() {
-                    routes::copy_as_curl(route, DEFAULT_BASE_URL)?;
+                    routes::copy_as_curl(&concrete_method(route), DEFAULT_BASE_URL)?;
                 }
                 Ok(None)
             }
             "route-create-http" => {
                 if let Some(route) = self.selected_route() {
-                    routes::create_http_file(route, DEFAULT_BASE_URL, None)?;
+                    routes::create_http_file(&concrete_method(route), DEFAULT_BASE_URL, None)?;
                 }
                 Ok(None)
             }
@@ -1993,7 +2001,54 @@ mod tests {
         plugin.handle(VIEW, ViewEvent::Select(rows[0].key.clone()), &ctx).unwrap();
         host.answer_next_prompt(Some(&["http://localhost:8000"]));
         plugin.run_command("route-copy-curl", &ctx, None).unwrap();
-        assert_eq!(host.clipboard().as_deref(), Some("curl -X ANY 'http://localhost:8000/blog'"));
+        assert_eq!(host.clipboard().as_deref(), Some("curl -X GET 'http://localhost:8000/blog'"));
+    }
+
+    #[test]
+    fn dismissed_base_url_prompt_copies_nothing() {
+        let host = MockHost::install().with_capabilities(&["project.read", "clipboard"]);
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+
+        plugin.handle(VIEW, ViewEvent::Select(rows[0].key.clone()), &ctx).unwrap();
+        host.answer_next_prompt(None);
+        plugin.run_command("route-copy-curl", &ctx, None).unwrap();
+        assert_eq!(host.clipboard(), None);
+    }
+
+    #[test]
+    fn project_without_routes_shows_the_empty_message() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        host.add_file("config/routes.yaml", "");
+        host.add_file("src/Controller/BlogController.php", "<?php\nclass BlogController {}\n");
+        plugin.run_command("reindex", &host.invocation(), None).unwrap();
+
+        let view = plugin.render(VIEW, None, &host.invocation()).unwrap();
+        assert!(matches!(view.body, Body::Message(ref text) if text.contains("No routes")), "{:?}", view.body);
+    }
+
+    #[test]
+    fn filter_on_a_vanished_controller_falls_back_to_all_routes() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+        host.add_file(
+            "src/Controller/UserController.php",
+            "<?php\nnamespace App\\Controller;\nclass UserController\n{\n    #[Route('/users', name: 'users')]\n    public function index() {}\n}\n",
+        );
+        plugin.run_command("reindex", &ctx, None).unwrap();
+        plugin.render(VIEW, None, &ctx).unwrap();
+        host.answer_next_prompt(Some(&["UserController"]));
+        plugin.handle(VIEW, ViewEvent::Button("routes:filter".into()), &ctx).unwrap();
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+        assert_eq!(rows.len(), 1);
+
+        host.add_file("src/Controller/UserController.php", "<?php\nclass UserController {}\n");
+        plugin.run_command("reindex", &ctx, None).unwrap();
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]

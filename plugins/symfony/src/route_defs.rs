@@ -82,6 +82,7 @@ pub fn php_route_defs(file: &str, text: &str) -> Vec<RouteDef> {
     let Some((class, _)) = php_class(text) else { return Vec::new() };
     let class_at = class_declaration(text).unwrap_or(0);
     let mut prefix = String::new();
+    let mut class_route = None;
     let mut defs = Vec::new();
 
     let attributes = text.match_indices("Route(").filter(|(at, _)| {
@@ -100,13 +101,23 @@ pub fn php_route_defs(file: &str, text: &str) -> Vec<RouteDef> {
         };
         let (path, path_offset) = path_at.and_then(|from| quoted(text, from)).map_or((String::new(), at), |(p, o)| (p.to_owned(), o));
 
+        let name = keyword_value(text, args.clone(), "name").and_then(|from| quoted(text, from)).map(|(name, _)| name.to_owned());
+        let methods = keyword_value(text, args, "methods").map(|from| string_list(text, from)).unwrap_or_default();
+
         if at < class_at {
+            class_route = Some(RouteDef {
+                name,
+                path: path.clone(),
+                methods,
+                class: short_class(&class).to_owned(),
+                member: Some("__invoke".to_owned()).filter(|_| text.contains("function __invoke")),
+                file: file.to_owned(),
+                at: text::position(text, path_offset),
+            });
             prefix = path;
             continue;
         }
 
-        let name = keyword_value(text, args.clone(), "name").and_then(|from| quoted(text, from)).map(|(name, _)| name.to_owned());
-        let methods = keyword_value(text, args, "methods").map(|from| string_list(text, from)).unwrap_or_default();
         defs.push(RouteDef {
             name,
             path: format!("{prefix}{path}"),
@@ -116,6 +127,10 @@ pub fn php_route_defs(file: &str, text: &str) -> Vec<RouteDef> {
             file: file.to_owned(),
             at: text::position(text, path_offset),
         });
+    }
+
+    if defs.is_empty() {
+        defs.extend(class_route);
     }
 
     defs
@@ -156,6 +171,14 @@ pub fn yaml_route_defs(file: &str, text: &str) -> Vec<RouteDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invokable_class_route_is_listed_under_the_class() {
+        let text = "<?php\nnamespace App\\Controller;\n#[Route('/inv', name: 'inv')]\nclass InvController\n{\n    public function __invoke() {}\n}\n";
+        let defs = php_route_defs("src/InvController.php", text);
+        assert_eq!(defs.len(), 1);
+        assert_eq!((defs[0].class.as_str(), defs[0].path.as_str(), defs[0].member.as_deref(), defs[0].name.as_deref()), ("InvController", "/inv", Some("__invoke"), Some("inv")));
+    }
 
     #[test]
     fn reads_attribute_routes_with_class_prefix_methods_and_members() {
