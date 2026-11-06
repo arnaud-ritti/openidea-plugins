@@ -15,6 +15,8 @@ use spring_text::{parse_source, range, source_calls};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+mod xml_checks;
+
 const DEFAULT_USER_PREFIX: &str = "/user/";
 /// Receivers named like a STOMP messaging template.
 const STOMP_RECEIVERS: [&str; 4] = ["messaging", "simp", "stomp", "websocket"];
@@ -332,6 +334,7 @@ pub struct WebSocketTools {
     /// Project roots known to serve STOMP: a build file names the dependency, or a Java/Kotlin file was opened.
     stomp_roots: BTreeSet<String>,
     expansion: Expansion,
+    beans: Indexes<Vec<String>>,
 }
 
 impl Default for WebSocketTools {
@@ -343,6 +346,7 @@ impl Default for WebSocketTools {
             ),
             stomp_roots: BTreeSet::new(),
             expansion: Expansion::default(),
+            beans: Indexes::new(&spring_text::beans::GLOBS, xml_checks::bean_names),
         }
     }
 }
@@ -504,8 +508,27 @@ impl Views for WebSocketTools {
     }
 }
 
+impl WebSocketTools {
+    /// Publishes the table checks of a Spring XML file, with bean references once every bean of the project was read.
+    fn check_xml(&mut self, doc: &Document) {
+        let names: Option<BTreeSet<String>> = self
+            .beans
+            .for_document(&doc.path, &doc.text, PROVIDER_BUDGET)
+            .filter(|index| index.complete())
+            .map(|index| index.iter().flat_map(|(_, n)| n.clone()).collect());
+        let is_bean = |name: &str| names.as_ref().is_some_and(|n| n.contains(name));
+        let found = xml_checks::check(&doc.text, names.is_some().then_some(&is_bean as &dyn Fn(&str) -> bool));
+        let diagnostics: Vec<Diagnostic> = found.iter().map(|f| f.diagnostic(&doc.text)).collect();
+        let _ = host::publish_diagnostics(&doc.path, &diagnostics);
+    }
+}
+
 impl Providers for WebSocketTools {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        if doc.language == "xml" || doc.path.ends_with(".xml") {
+            self.check_xml(doc);
+            return Vec::new();
+        }
         let snap = self.snapshot(doc);
         let mut markers = Vec::new();
         let mut problems = Vec::new();
@@ -1117,5 +1140,16 @@ client.onConnect = () => {
         let column: u32 = second.key.split(':').nth(3).unwrap().parse().unwrap();
         let line = "    void f() { messagingTemplate.convertAndSend(\"/topic/\u{1F600}\", \"é😀\"); messagingTemplate.convertAndSend(\"";
         assert_eq!(column as usize, line.encode_utf16().count());
+    }
+
+    #[test]
+    fn websocket_xml_is_checked_against_project_beans() {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/ws.xml", r#"<bean id="echoHandler" class="com.acme.Echo"/>"#);
+        let text = r#"<beans xmlns:websocket="http://www.springframework.org/schema/websocket"><websocket:handlers><websocket:mapping path="/e" handler="echoHandler"/><websocket:mapping path="/g" handler="ghost"/></websocket:handlers><websocket:stomp-endpoint/></beans>"#;
+        let d = Document { path: "/project/src/main/resources/ws2.xml".into(), language: "xml".into(), version: 1, text: text.into() };
+        assert!(WebSocketTools::default().line_markers(&d).is_empty());
+        let found: Vec<_> = host.diagnostics()[&d.path].iter().map(|x| (x.code.clone().unwrap(), x.severity)).collect();
+        assert_eq!(found, [("unresolved-reference".to_owned(), Severity::Info), ("missing-attribute".to_owned(), Severity::Warning)]);
     }
 }

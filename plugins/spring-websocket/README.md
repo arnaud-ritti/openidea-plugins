@@ -13,6 +13,8 @@ Matching is text-based, on destination literals as written; `${…}` placeholder
 
   JS/TS/Vue documents are only read and linked in a project whose root `pom.xml`, `build.gradle` or `build.gradle.kts` mentions `spring-boot-starter-websocket`, `spring-messaging` or `spring-websocket`, or once a Java or Kotlin file of the project has been opened in the session; elsewhere they are left alone (no scan of the project). A backend in a sub-module with no such root build file is picked up only after one of its Java/Kotlin files is opened.
 
+- **Spring XML** (`http://www.springframework.org/schema/websocket`): required attributes of `stomp-endpoint` (`path`), `mapping` (`path`, `handler`), `simple-broker` and `stomp-broker-relay` (`prefix`) and `handshake-handler` (`ref`); a `handler`/`ref` that names no bean of the project is an Info (beans of libraries are invisible; quiet until the whole project was read). The tables are hard-coded since no schema is at hand. Unverified in the IDE: the `xml` provider activation.
+
 Not ported: raw `WebSocketHandler` registration checks, SockJS options.
 
 ```sh
