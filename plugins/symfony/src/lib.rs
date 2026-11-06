@@ -6,6 +6,7 @@
 //! Brault; MIT), see README.md for what was and wasn't ported.
 
 mod checks;
+mod config_checks;
 mod index;
 #[allow(dead_code)] // used by the checks added after this foundation
 mod php_text;
@@ -191,7 +192,7 @@ fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '~', '$', '#'])
 }
 
-fn is_quoted_config(path: &str) -> bool {
+pub(crate) fn is_quoted_config(path: &str) -> bool {
     path.contains("/config/") || path.contains("/translations/")
 }
 
@@ -250,14 +251,6 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
         }
     }
 
-    if language == "yaml" && is_quoted_config(path) {
-        for range in yaml_quotes::unquoted(text) {
-            let first = text[range.start..].chars().next().unwrap_or('@');
-            let message = format!("A YAML value starting with \"{first}\" must be quoted.");
-            problem(range.start, range.end, "unquoted-yaml-scalar", message);
-        }
-    }
-
     if language == "xml" && !path.contains("/var/cache/") {
         let mut services: Vec<(String, Position)> = Vec::new();
         index::xml_services(path, text, &mut services);
@@ -301,6 +294,7 @@ struct Groups {
 }
 
 impl Groups {
+    #[cfg(test)]
     fn all_on() -> Groups {
         Groups {
             controllers: true,
@@ -360,6 +354,14 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
         findings.extend(twig_checks::syntax(text));
     }
 
+    if groups.services {
+        findings.extend(config_checks::deprecated_factory_settings(path, language, text));
+    }
+
+    if groups.yaml_syntax {
+        findings.extend(config_checks::yaml_scalars(path, language, text));
+    }
+
     findings
 }
 
@@ -368,7 +370,7 @@ fn fixes(index: &Index, path: &str, language: &str, text: &str) -> Vec<checks::F
     let project = project_for(path);
     let read = |file: &str| project.as_ref().and_then(|project| project.read_file(file).ok());
 
-    findings(index, Groups::all_on(), &read, path, language, text)
+    findings(index, Groups::from_settings(), &read, path, language, text)
         .into_iter()
         .filter(|finding| finding.replacement.is_some())
         .collect()
@@ -668,7 +670,7 @@ impl Providers for Main {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let mut actions = Vec::new();
 
-        if doc.language == "yaml" && is_quoted_config(&doc.path) {
+        if doc.language == "yaml" && is_quoted_config(&doc.path) && Groups::from_settings().yaml_syntax {
             actions.extend(
                 yaml_quotes::unquoted(&doc.text)
                     .into_iter()
@@ -1295,7 +1297,8 @@ mod tests {
         let yaml = doc("/project/config/services.yaml", "yaml", text);
 
         let index = plugin.index_for("/project/x").unwrap();
-        let found = problems(index, &yaml.path, "yaml", text);
+        let read = |_: &str| None;
+        let found = extra_problems(index, Groups::all_on(), &read, &yaml.path, "yaml", text);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].code.as_deref(), Some("unquoted-yaml-scalar"));
         assert_eq!(found[0].range, Range::new(Position::new(2, 20), Position::new(2, 27)));
@@ -1308,7 +1311,22 @@ mod tests {
 
         let other = doc("/project/docker/compose.yaml", "yaml", "a: @x\n");
         assert!(plugin.code_actions(&other, at).is_empty());
-        assert!(problems(plugin.index_for("/project/x").unwrap(), &other.path, "yaml", &other.text).is_empty());
+        assert!(extra_problems(plugin.index_for("/project/x").unwrap(), Groups::all_on(), &read, &other.path, "yaml", &other.text).is_empty());
+    }
+
+    #[test]
+    fn quick_fixes_honour_the_group_settings() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let text = "a: @x\nb: \"App\\Foo\"\n";
+        let yaml = doc("/project/config/services.yaml", "yaml", text);
+        let all = Range::new(Position::new(0, 0), Position::new(2, 0));
+
+        let titles: Vec<String> = plugin.code_actions(&yaml, all).into_iter().map(|a| a.title).collect();
+        assert_eq!(titles, ["Quote '@x'", "Replace with \\\\"]);
+
+        host.set_setting("yamlSyntaxChecks", "false");
+        assert!(plugin.code_actions(&yaml, all).is_empty());
     }
 
     #[test]

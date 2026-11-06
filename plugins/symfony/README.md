@@ -90,8 +90,18 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     `<twig:Name>` element; `twig-component-self-import` (error), `_self` as
     the source of `{% from %}` / `{% import %}` inside a component. An
     unbalanced `<twig:...>` file is left alone.
+  - _YAML syntax_ (`yamlSyntaxChecks`, files under `config/` and
+    `translations/`): `unquoted-yaml-scalar` (also a value starting with a
+    backtick, or with `|` or `>` that is no block scalar header),
+    `yaml-unescaped-backslash` (hint), a backslash in a double-quoted string
+    that starts no escape, and `yaml-unquoted-colon` (hint), a `: ` inside an
+    unquoted value. Also in the _service_ group (`serviceChecks`):
+    `deprecated-factory-setting`, `factory_class` / `factory_method` /
+    `factory_service` (YAML) or `factory-class` / `factory-method` /
+    `factory-service` (XML) on a service, removed in Symfony 3.0; use `factory`.
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
-  YAML files; on an unquoted `@` / `%` YAML value, quote it.
+  YAML files; on an unquoted `@` / `%` YAML value, quote it; on an unescaped backslash in a
+  double-quoted YAML string, double it. Quick fixes follow the check settings.
 - Gutter: controller `render()` → template; template → controllers rendering
   it; `{% block %}` → the parent block it overrides; PHP class → its service
   definition; YAML service → its class file.

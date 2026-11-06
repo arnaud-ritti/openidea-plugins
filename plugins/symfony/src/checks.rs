@@ -24,7 +24,6 @@ pub(crate) struct Finding {
     pub replacement: Option<String>,
 }
 
-#[allow(dead_code)] // `hint` and `error` are used by the checks added after this foundation
 impl Finding {
     fn with_severity(range: Range<usize>, code: &'static str, message: String, severity: Severity) -> Finding {
         Finding { start: range.start, end: range.end, code, message, severity, replacement: None }
@@ -38,6 +37,7 @@ impl Finding {
         Finding::with_severity(range, code, message, Severity::Hint)
     }
 
+    #[allow(dead_code)] // used by the checks added after this foundation
     pub(crate) fn error(range: Range<usize>, code: &'static str, message: String) -> Finding {
         Finding::with_severity(range, code, message, Severity::Error)
     }
@@ -82,7 +82,7 @@ fn is_route_file(path: &str) -> bool {
     path.contains("/config/routes") || path.contains("/config/routing") || path.contains("/Resources/config/routing")
 }
 
-fn is_service_file(path: &str) -> bool {
+pub(crate) fn is_service_file(path: &str) -> bool {
     path.contains("/config/") && !is_route_file(path) && !path.contains("/var/cache/")
 }
 
