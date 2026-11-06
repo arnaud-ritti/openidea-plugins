@@ -228,3 +228,17 @@ Row text is shortened; the detail files hold the evidence and the exact basis.
 - commit list and per-commit diffs in MR (REST commits/diffs + view)
 - pipeline and job details in MR (REST pipelines/jobs + buttons)
 - Open on GitLab menus (add `projectView.context` entry (log menus not available))
+
+## Done
+
+### Plan 4: PHP ecosystem
+
+Branch `gap-f-php`, [plan](superpowers/plans/2026-11-06-gap-f-php.md). Unit tests against the mock host only; the public Symfony Plugin and free Laravel plugin repositories were unreachable, so rules follow the plan text and the upstream documentation.
+
+Symfony Plugin -> `symfony`: done are the Twig checks (route compare, translation domain, `for` condition, component block syntax, component self import), `deprecated-factory-setting`, `yaml-unescaped-backslash` (with quick fix), `yaml-unquoted-colon`, the five PHP class checks, six Doctrine checks (`doctrineChecks`), the route, parameter, form type and block-override code actions, tag-name completion, the `twigNamespaces` setting, the three service-config templates, file icons (own glyph) and the `symfony` status item. Narrowed: `from-callable-option` flags the option set of UPGRADE-8.1.md, `tagged-collection-default-method` reads string literals only, `orm-inverse-side-join-column` is a hint and quiet for `JoinTable` and a positional `OneToMany` argument, the lifecycle-callbacks check covers `#[ORM\Entity]` only. Ruled out: `RouteAttributeNamespaceDeprecated` (UPGRADE 6.4/7.0 do not deprecate it), and the Doctrine `LifecycleMethodVisibility` and discriminator-map duplicate checks (the Doctrine docs state no such rule).
+
+Blade -> `blade`: no change in `aritti.blade`; the directive snippets of this pair are built in `aritti.laravel` (see below). The row for completion in `blade` itself stays open.
+
+Laravel Idea -> `laravel`: done are `LaravelFunctionsInspection` as `env-outside-config`, the `latest(col)`/`oldest(col)` suggestions for date columns, the class-directive, bulk-rule, bulk-controller, rule-object and facade-import rewrites (the `Context` facade imports `Illuminate\Support\Facades\Context`), the `controllersNamespace` setting, and about 45 Blade directive snippets. Narrowed: the rule-object rewrite covers `exists`, `unique`, `in` and `not_in`; the facade import is skipped in rare code such as `$class = Auth::user()`; the `switch` snippet has no `@case`.
+
+Free Laravel plugin -> `laravel`: `ide-blade.json` namespaces are read from the project root and `.idea/` only, `\uXXXX` escapes are not decoded, and a blank namespace adds a plain view root.

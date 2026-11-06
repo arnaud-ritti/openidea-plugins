@@ -218,7 +218,7 @@ which the OpenIDEA plugin API has no equivalent for:
 - container `get()` return types, Twig variable types (`{{ post.| }}`),
   form types and options, Doctrine (QueryBuilder, repositories, DQL),
   serializer, event dispatcher, constraint validators;
-- the remaining inspections (deprecated Twig, …) and intentions (they need resolved PHP types);
+- the remaining inspections and intentions (they need resolved PHP types);
 - refactorings, find usages, MCP tools, the profiler's per-request panels;
 - a "create template" quick fix: plugin code actions can only edit existing
   files.

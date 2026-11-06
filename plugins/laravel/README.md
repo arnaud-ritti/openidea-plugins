@@ -85,7 +85,8 @@ and `@` inside `{{ }}` are left alone. Directives registered by vendor packages 
     `Rule::unique(...)`, `Rule::in([...])`, `Rule::notIn([...])` with the
     `Illuminate\Validation\Rule` import (not offered when another `Rule` is imported).
   - `Route::`, `Auth::`, `Str::` and the other core facades get their `use` line
-    when the file has a namespace and does not import the name.
+    when the file has a namespace and does not import the name (skipped in rare
+    code where a word pair reads as a class declaration, such as `$class = Auth::user()`).
 - Setting `controllersNamespace` (default `App\Http\Controllers`): the namespace
   that `'Name@action'` strings resolve in.
 - Gutter: `view()` → view file; controller method → its route; view → views
