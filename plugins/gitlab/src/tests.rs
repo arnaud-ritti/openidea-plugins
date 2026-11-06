@@ -580,6 +580,22 @@ fn a_failed_diff_comment_reports_to_the_page_without_redrawing_it() {
     let (view, posted) = &host.view_messages()[0];
     assert_eq!(view, DETAILS);
     assert!(posted.contains(r#""type":"error""#) && posted.contains("line_code is invalid"), "{posted}");
+    assert!(host.view_messages().iter().all(|(view, _)| view == DETAILS));
+}
+
+#[test]
+fn a_failing_section_keeps_the_section_buttons() {
+    let host = setup();
+    let mut plugin = selected(&host);
+    host.on_fetch(|r| match r.url.contains("/diffs") {
+        true => Ok(HttpResponse { status: 500, headers: vec![], body: br#"{"message":"boom"}"#.to_vec() }),
+        false => gitlab(r),
+    });
+
+    let view = changes_view(&mut plugin, &host).unwrap();
+
+    assert!(section_buttons(&view).iter().any(|(id, _)| *id == "section:overview"), "{view:?}");
+    assert!(view.toolbar.iter().any(|b| b.id == "refresh"));
 }
 
 #[test]

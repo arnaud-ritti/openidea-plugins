@@ -804,7 +804,8 @@ impl GitLab {
             Section::Commits => self.render_commits(ctx),
             Section::Files => self.render_files(ctx),
             Section::Pipelines => self.render_pipelines(ctx),
-        }?;
+        }
+        .unwrap_or_else(|e| View::message(&e.to_string()).button(Button::new("refresh", "Refresh").icon("refresh")));
 
         Ok(sections::with_sections(view, section, &self.badges()))
     }
