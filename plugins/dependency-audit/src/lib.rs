@@ -340,7 +340,7 @@ impl Plugin for DependencyAudit {
 
 impl Providers for DependencyAudit {
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
-        if !matches!(kind(&doc.path), Some(Kind::Pom | Kind::Gradle | Kind::PackageJson | Kind::ComposerJson)) {
+        if !matches!(kind(&doc.path), Some(Kind::Pom | Kind::Gradle | Kind::PackageJson | Kind::ComposerJson | Kind::VersionCatalog | Kind::Requirements)) {
             return Vec::new();
         }
 

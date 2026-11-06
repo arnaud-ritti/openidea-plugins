@@ -605,3 +605,38 @@ fn pypi_names_are_normalised() {
     let names: Vec<&str> = body["queries"].as_array().unwrap().iter().map(|q| q["package"]["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["django", "my-pkg-name"]);
 }
+
+const CATALOG: &str = r#"[versions]
+jackson = "2.12.3"
+
+[libraries]
+databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+core = "com.fasterxml.jackson.core:jackson-databind:2.12.3"
+"#;
+
+#[test]
+fn quick_fix_upgrades_version_catalog_entries() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("gradle/libs.versions.toml", CATALOG);
+
+    opened(&host, "/project/gradle/libs.versions.toml");
+    let catalog = document("/project/gradle/libs.versions.toml", "toml", CATALOG);
+
+    for (selected, edited) in [(4, 1), (5, 5)] {
+        let actions = DependencyAudit::default().code_actions(&catalog, line(selected));
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Upgrade jackson-databind to 2.12.7.1");
+        assert_eq!(actions[0].edits[0].1[0].range.start.line, edited);
+    }
+}
+
+#[test]
+fn requirements_versions_are_replaceable() {
+    let text = "flask==2.0.0 # web\n";
+    let deps = crate::manifest::parse("/p/requirements.txt", text, None);
+
+    let (from, to) = deps[0].version_at.unwrap();
+    assert_eq!(&text[from..to], "2.0.0");
+}
