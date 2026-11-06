@@ -350,6 +350,29 @@ public class MailProperties {
     }
 
     #[test]
+    fn spring_cloud_key_completes() {
+        let _host = setup();
+        let items = complete(PROPS, "spring.cloud.config.u");
+        assert_eq!(find(&items, "spring.cloud.config.uri").insert_text, "spring.cloud.config.uri=");
+        assert!(labels(&complete(PROPS, "eureka.client.service-u")).contains(&"eureka.client.service-url."));
+        assert!(labels(&complete(PROPS, "spring.cloud.gateway.server.webflux.rou"))
+            .contains(&"spring.cloud.gateway.server.webflux.routes"));
+
+        let items = complete(YAML, "spring:\n  cloud:\n    config:\n      ur");
+        assert_eq!(find(&items, "uri").insert_text, "uri: ");
+    }
+
+    #[test]
+    fn unknown_key_inside_known_cloud_group_is_reported() {
+        let text = "spring.cloud.config.ur=x\nspring.cloud.config.uri=x\nspring.cloud.unheard.of=1\n";
+        let found = problems(PROPS, text);
+        assert_eq!(codes(&found), [(
+            "unknown-property",
+            "`spring.cloud.config.ur` is not a known property of `spring.cloud.config`."
+        )]);
+    }
+
+    #[test]
     fn checks_cron_values_in_config_and_java() {
         let text = "app.cleanup.cron=0 0 * * *\napp.report-cron=0 0 6 * * MON-FRI\napp.other.cron=${CRON:-}\n";
         let found = problems(PROPS, text);
