@@ -81,9 +81,23 @@ impl Plugin for Ideolog {
             return Ok(None);
         }
 
+        if id == "remove-highlightings" {
+            let removed = patterns::remove_highlightings()?;
+            host::refresh_view(patterns::VIEW);
+            host::notify(NotificationLevel::Info, "Ideolog", &format!("Removed {removed} highlighting pattern(s)."));
+            return Ok(None);
+        }
+
         let editor = ctx.editor().ok_or("No file is open.")?;
         if !matches!(editor.language().as_str(), "ideolog" | "log") {
             return Err("Not a log file.".into());
+        }
+
+        if id == "highlight-selection" {
+            let text = selected_text(&editor)?;
+            patterns::highlight_text(&text)?;
+            host::refresh_view(patterns::VIEW);
+            return Ok(None);
         }
 
         let config = self.config();
@@ -326,6 +340,18 @@ fn go_to(
 
 /// A stack frame on the caret line (the one under the caret first), else the
 /// source line that logged the event.
+fn selected_text(editor: &TextEditor) -> Result<String, Error> {
+    let document = editor.document()?;
+    let selection = editor.selections()?.into_iter().next().ok_or("Select the text to highlight.")?;
+    let start = text::offset(&document.text, selection.start);
+    let end = text::offset(&document.text, selection.end);
+    let selected = start.zip(end).and_then(|(a, b)| document.text.get(a..b)).unwrap_or_default();
+    if selected.trim().is_empty() || selected.contains('\n') {
+        return Err("Select some text on one line to highlight.".into());
+    }
+    Ok(selected.to_owned())
+}
+
 fn jump_to_source(config: &Config, ctx: &Invocation, editor: &TextEditor) -> Result<Option<String>, Error> {
     let project = ctx.project().ok_or("No project is open.")?;
     let text = editor.document()?.text;
@@ -698,6 +724,27 @@ java.lang.IllegalStateException: boom
         open_log(&host, 4, 10);
         Ideolog::default().run_command("jump-to-source", &host.invocation(), None).unwrap();
         assert_eq!(host.opened_locations(), [("/p/src/main/java/com/example/Foo.java".to_owned(), 41, 0)]);
+    }
+
+    #[test]
+    fn highlight_selection_adds_the_escaped_text_as_a_pattern() {
+        let host = MockHost::install().with_capabilities(&["editor.read", "storage"]);
+        host.open_editor("/p/a.log", "ideolog", "x a.b(1) y\n", &[(0, 2, 0, 8)]);
+        host.answer_next_prompt(Some(&["HIGHLIGHT_MATCH"]));
+        host.answer_next_prompt(Some(&["green"]));
+        Ideolog::default().run_command("highlight-selection", &host.invocation(), None).unwrap();
+        let stored = patterns::stored();
+        assert!(stored.contains("pattern=\"a\\.b\\(1\\)\""), "{stored}");
+        assert!(stored.contains("HIGHLIGHT_MATCH"));
+        Ideolog::default().run_command("remove-highlightings", &host.invocation(), None).unwrap();
+        assert!(patterns::stored().trim().is_empty());
+    }
+
+    #[test]
+    fn highlight_selection_needs_a_selection() {
+        let host = MockHost::install().with_capabilities(&["editor.read", "storage"]);
+        host.open_editor("/p/a.log", "ideolog", "abc\n", &[(0, 1, 0, 1)]);
+        assert!(Ideolog::default().run_command("highlight-selection", &host.invocation(), None).is_err());
     }
 
     #[test]

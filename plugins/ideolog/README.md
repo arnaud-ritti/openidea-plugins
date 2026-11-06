@@ -33,7 +33,8 @@ or a file from Ideolog's [custom log formats](https://github.com/JetBrains/ideol
 included. Highlighting colours map to the nearest theme colour; `HIDE` patterns are ignored.
 **Ideolog: Custom Formats and Highlighting** opens the Patterns view: a table of the patterns you
 added, with Add Format (name, regex, per-column groups), Add Highlighting (regex, line/field/match,
-one of six colours) and Remove. They are kept in the plugin's storage next to the setting. Invalid
+one of six colours), Edit (re-asks the fields with the current values), Move Up and Remove.
+**Ideolog: Highlight Selection** (editor menu) adds the selected text, escaped, as a highlighting pattern; **Remove Custom Highlightings** deletes them all. They are kept in the plugin's storage next to the setting. Invalid
 regexes are refused with a notification.
 Open logs pick up a change when they're edited or reopened.
 

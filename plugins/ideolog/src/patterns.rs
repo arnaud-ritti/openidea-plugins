@@ -95,6 +95,8 @@ pub fn render() -> View {
     View::new(body)
         .button(Button::new("add-format", "Add Format").icon("add"))
         .button(Button::new("add-highlight", "Add Highlighting").icon("add"))
+        .button(Button::new("edit", "Edit").icon("edit").enabled(!entries().is_empty()))
+        .button(Button::new("move-up", "Move Up").icon("arrow-up").enabled(entries().len() > 1))
         .button(Button::new("remove", "Remove").icon("remove").enabled(!entries().is_empty()))
         .status(&status)
 }
@@ -115,28 +117,55 @@ fn add(element: String) -> Result<(), Error> {
     save(&all)
 }
 
+fn format_dialog(defaults: [&str; 6]) -> Result<Option<String>, Error> {
+    let Some(name) = ask("Format name", defaults[0])? else { return Ok(None) };
+    let Some(pattern) = ask("Regular expression with a group per column", defaults[1])? else { return Ok(None) };
+    let Some(line_pattern) = ask("Regular expression the first line of an event matches", defaults[2])? else { return Ok(None) };
+    let Some(time) = ask("Group of the time column (-1: none)", defaults[3])? else { return Ok(None) };
+    let Some(severity) = ask("Group of the level column (-1: none)", defaults[4])? else { return Ok(None) };
+    let Some(category) = ask("Group of the category column (-1: none)", defaults[5])? else { return Ok(None) };
+    Ok(Some(format_element(&name, &pattern, &line_pattern, &time, &severity, &category)))
+}
+
+fn highlight_dialog(pattern: &str) -> Result<Option<String>, Error> {
+    let items: Vec<PickItem> = ACTIONS.iter().map(|(id, label)| PickItem { key: (*id).into(), label: (*label).into(), description: None }).collect();
+    let Some(action) = host::pick("What to highlight", &items)? else { return Ok(None) };
+    let items: Vec<PickItem> = COLOURS.iter().map(|(id, label, _)| PickItem { key: (*id).into(), label: (*label).into(), description: None }).collect();
+    let Some(colour) = host::pick("Colour", &items)? else { return Ok(None) };
+    let argb = COLOURS.iter().find(|(id, ..)| *id == colour).map_or(0, |(.., argb)| *argb);
+    Ok(Some(highlight_element(pattern, &action, argb)))
+}
+
 fn add_format() -> Result<(), Error> {
-    let Some(name) = ask("Format name", "")? else { return Ok(()) };
-    let Some(pattern) = ask("Regular expression with a group per column", "^(\\S+) (\\w+) (.*)$")? else { return Ok(()) };
-    let Some(line_pattern) = ask("Regular expression the first line of an event matches", "^")? else { return Ok(()) };
-    let Some(time) = ask("Group of the time column (-1: none)", "0")? else { return Ok(()) };
-    let Some(severity) = ask("Group of the level column (-1: none)", "1")? else { return Ok(()) };
-    let Some(category) = ask("Group of the category column (-1: none)", "-1")? else { return Ok(()) };
-    add(format_element(&name, &pattern, &line_pattern, &time, &severity, &category))
+    match format_dialog(["", "^(\\S+) (\\w+) (.*)$", "^", "0", "1", "-1"])? {
+        Some(element) => add(element),
+        None => Ok(()),
+    }
 }
 
 fn add_highlight() -> Result<(), Error> {
     let Some(pattern) = ask("Regular expression (case-insensitive)", "")? else { return Ok(()) };
-    let items: Vec<PickItem> = ACTIONS.iter().map(|(id, label)| PickItem { key: (*id).into(), label: (*label).into(), description: None }).collect();
-    let Some(action) = host::pick("What to highlight", &items)? else { return Ok(()) };
-    let items: Vec<PickItem> = COLOURS.iter().map(|(id, label, _)| PickItem { key: (*id).into(), label: (*label).into(), description: None }).collect();
-    let Some(colour) = host::pick("Colour", &items)? else { return Ok(()) };
-    let argb = COLOURS.iter().find(|(id, ..)| *id == colour).map_or(0, |(.., argb)| *argb);
-    add(highlight_element(&pattern, &action, argb))
+    match highlight_dialog(&pattern)? {
+        Some(element) => add(element),
+        None => Ok(()),
+    }
 }
 
-fn remove() -> Result<(), Error> {
+pub fn highlight_text(text: &str) -> Result<(), Error> {
+    match highlight_dialog(&fancy_regex::escape(text))? {
+        Some(element) => add(element),
+        None => Ok(()),
+    }
+}
+
+pub fn remove_highlightings() -> Result<usize, Error> {
     let all = entries();
+    let kept: Vec<String> = all.iter().filter(|e| !e.starts_with("<LogHighlightingPattern")).cloned().collect();
+    save(&kept)?;
+    Ok(all.len() - kept.len())
+}
+
+fn pick_entry(title: &str, all: &[String]) -> Result<Option<usize>, Error> {
     let items: Vec<PickItem> = all
         .iter()
         .enumerate()
@@ -145,8 +174,46 @@ fn remove() -> Result<(), Error> {
             PickItem { key: n.to_string(), label: format!("{}: {}", row[0], row[2]), description: Some(row[1].clone()) }
         })
         .collect();
-    let Some(chosen) = host::pick("Remove pattern", &items)? else { return Ok(()) };
-    let at = chosen.parse::<usize>().map_err(|_| Error::Invalid(chosen))?;
+    let Some(chosen) = host::pick(title, &items)? else { return Ok(None) };
+    chosen.parse::<usize>().map(Some).map_err(|_| Error::Invalid(chosen))
+}
+
+fn edit() -> Result<(), Error> {
+    let mut all = entries();
+    let Some(at) = pick_entry("Edit pattern", &all)? else { return Ok(()) };
+    let Some((kind, attrs)) = log::elements(&all[at]).into_iter().next() else { return Err("This pattern cannot be edited.".into()) };
+    let get = |name: &str| log::attr(&attrs, name).unwrap_or_default().to_owned();
+
+    let edited = if kind == "LogParsingPattern" {
+        format_dialog([&get("name"), &get("pattern"), &get("linePattern"), &get("timeId"), &get("severityId"), &get("categoryId")])?
+    } else {
+        match ask("Regular expression (case-insensitive)", &get("pattern"))? {
+            Some(pattern) => highlight_dialog(&pattern)?,
+            None => None,
+        }
+    };
+    let Some(element) = edited else { return Ok(()) };
+
+    if let Some(error) = Config::with_custom(&element).errors.first() {
+        host::notify(NotificationLevel::Warning, "Ideolog", &format!("Pattern not changed: {error}"));
+        return Ok(());
+    }
+    all[at] = element;
+    save(&all)
+}
+
+fn move_up() -> Result<(), Error> {
+    let mut all = entries();
+    let Some(at) = pick_entry("Move pattern up", &all)? else { return Ok(()) };
+    if at > 0 {
+        all.swap(at, at - 1);
+    }
+    save(&all)
+}
+
+fn remove() -> Result<(), Error> {
+    let all = entries();
+    let Some(at) = pick_entry("Remove pattern", &all)? else { return Ok(()) };
     save(&all.iter().enumerate().filter(|(n, _)| *n != at).map(|(_, e)| e.clone()).collect::<Vec<_>>())
 }
 
@@ -155,6 +222,8 @@ pub fn handle(event: ViewEvent) -> Result<(), Error> {
     match id.as_str() {
         "add-format" => add_format()?,
         "add-highlight" => add_highlight()?,
+        "edit" => edit()?,
+        "move-up" => move_up()?,
         "remove" => remove()?,
         _ => return Ok(()),
     }
@@ -175,6 +244,26 @@ mod tests {
             assert!(config.errors.is_empty());
             assert_eq!(log::colour_kind_of(*argb), Some(kind));
         }
+    }
+
+    #[test]
+    fn editing_replaces_a_pattern_in_place_and_move_up_reorders() {
+        let host = openidea_plugin::mock::MockHost::install();
+        save(&[highlight_element("one", "HIGHLIGHT_LINE", -39836), highlight_element("two", "HIGHLIGHT_LINE", -39836)]).unwrap();
+
+        host.answer_next_prompt(Some(&["1"]));
+        host.answer_next_prompt(Some(&["three"]));
+        host.answer_next_prompt(Some(&["HIGHLIGHT_FIELD"]));
+        host.answer_next_prompt(Some(&["blue"]));
+        edit().unwrap();
+        let all = entries();
+        assert_eq!(all.len(), 2);
+        assert!(all[1].contains("pattern=\"three\"") && all[1].contains("HIGHLIGHT_FIELD"));
+        assert!(all[0].contains("pattern=\"one\""));
+
+        host.answer_next_prompt(Some(&["1"]));
+        move_up().unwrap();
+        assert!(entries()[0].contains("three"));
     }
 
     #[test]
