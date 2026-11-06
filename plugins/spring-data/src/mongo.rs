@@ -47,6 +47,50 @@ pub fn top_level_keys(query: &str) -> Vec<(usize, usize, String)> {
     keys
 }
 
+/// `query` with the entries of its outer object ordered by key, or `None` when they already are or the text is not one object.
+pub fn sorted_entries(query: &str) -> Option<String> {
+    let bytes = query.as_bytes();
+    let open = query.find('{')?;
+    let close = query.rfind('}')?;
+    if open >= close || !query[..open].trim().is_empty() || !query[close + 1..].trim().is_empty() {
+        return None;
+    }
+    let body = &query[open + 1..close];
+    let (mut entries, mut depth, mut from, mut quote) = (Vec::new(), 0usize, open + 1, None);
+    let mut i = open + 1;
+    while i < close {
+        let c = bytes[i];
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), b'\\') => i += 1,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(c),
+            (None, b'{' | b'[' | b'(') => depth += 1,
+            (None, b'}' | b']' | b')') => depth = depth.checked_sub(1)?,
+            (None, b',') if depth == 0 => {
+                entries.push(&query[from..i]);
+                from = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    entries.push(&query[from..close]);
+    if entries.len() < 2 || quote.is_some() || depth != 0 {
+        return None;
+    }
+    let key = |e: &str| e.split(':').next().unwrap_or("").trim().trim_matches(['\'', '"']).to_lowercase();
+    let mut ordered = entries.clone();
+    ordered.sort_by_key(|e| key(e));
+    if ordered == entries || entries.iter().any(|e| !e.contains(':')) {
+        return None;
+    }
+    let lead = &body[..body.len() - body.trim_start().len()];
+    let tail = &body[body.trim_end().len()..];
+    let joined: Vec<&str> = ordered.iter().map(|e| e.trim()).collect();
+    Some(format!("{}{{{lead}{}{tail}}}{}", &query[..open], joined.join(", "), &query[close + 1..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +112,13 @@ mod tests {
         let q = "{ 'last' : ?0 }";
         let (from, to, _) = top_level_keys(q)[0].clone();
         assert_eq!(&q[from..to], "last");
+    }
+
+    #[test]
+    fn orders_entries_without_splitting_nested_values() {
+        assert_eq!(sorted_entries("{ 'b': ?0, a: { $in: [1, 2] } }").as_deref(), Some("{ a: { $in: [1, 2] }, 'b': ?0 }"));
+        assert_eq!(sorted_entries("{ a: 1, b: 2 }"), None);
+        assert_eq!(sorted_entries("{ a: 1 }"), None);
+        assert_eq!(sorted_entries("not json"), None);
     }
 }

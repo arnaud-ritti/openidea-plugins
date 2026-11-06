@@ -3,9 +3,9 @@
 //! repositories to their entities and checks `@Query` parameters.
 //! Text-based: types match by simple name among the project's Java and Kotlin sources.
 
-use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
-use openidea_plugin::{Diagnostic, Error, Invocation, Location, NotificationLevel, PickItem, Plugin, Position, Range, Severity, host, register_plugin};
+use openidea_plugin::{Diagnostic, Error, Invocation, Location, NotificationLevel, PickItem, Plugin, Position, Range, Severity, TextEdit, host, register_plugin};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET};
 use spring_text::java::{self, JavaFile, Member, TypeDecl, TypeRef};
 use spring_text::{SOURCE_GLOBS, is_kotlin, parse_source, range};
@@ -800,6 +800,29 @@ fn describe(name: &str, parts: &[Part]) -> String {
 }
 
 /// The repository whose body holds byte `at`, and its domain type.
+/// The `repository` live template at the top level of a file: an interface extending a Spring Data repository.
+fn repository_snippets(doc: &Document, offset: usize) -> Vec<CompletionItem> {
+    let word = doc.text[..offset].rsplit(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+    if word.len() < 3 || !"repository".starts_with(word) {
+        return Vec::new();
+    }
+    let file = parse_source(&doc.path, &doc.text);
+    if file.types.iter().any(|t| t.start < offset && offset <= t.end) {
+        return Vec::new();
+    }
+    let insert_text = if is_kotlin(&doc.path) {
+        "interface ${1:Entity}Repository : ${2:JpaRepository}<${1:Entity}, ${3:Long}> {\n    $0\n}"
+    } else {
+        "public interface ${1:Entity}Repository extends ${2:JpaRepository}<${1:Entity}, ${3:Long}> {\n    $0\n}"
+    };
+    vec![CompletionItem {
+        detail: Some("Spring Data repository".into()),
+        insert_text: insert_text.into(),
+        snippet: true,
+        ..CompletionItem::new("repository", CompletionKind::Snippet)
+    }]
+}
+
 fn repository_at(file: &JavaFile, at: usize) -> Option<(&TypeDecl, String)> {
     repositories(file).into_iter().rev().map(|(i, d)| (&file.types[i], d)).find(|(t, _)| t.start <= at && at <= t.end)
 }
@@ -982,8 +1005,36 @@ impl Providers for DataTools {
         Vec::new()
     }
 
+    fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        if !doc.text.contains("springframework.data.mongodb") {
+            return Vec::new();
+        }
+        let file = parse_source(&doc.path, &doc.text);
+        let mut actions = Vec::new();
+        for (ti, _) in repositories(&file) {
+            for query in file.types[ti].methods().filter_map(|m| m.annotation("Query")) {
+                for s in query.strings(&["value"]).into_iter().filter(|s| s.value.len() == s.end - s.at) {
+                    let covered = range(&doc.text, s.at, s.end);
+                    let Some(sorted) = mongo::sorted_entries(&s.value).filter(|_| spring_text::contains(covered, selection.start)) else { continue };
+                    actions.push(CodeAction {
+                        title: "Sort the query fields alphabetically".into(),
+                        kind: Some("refactor.rewrite".into()),
+                        preferred: false,
+                        edits: vec![(doc.path.clone(), vec![TextEdit { range: covered, text: sorted }])],
+                        data: None,
+                    });
+                }
+            }
+        }
+        actions
+    }
+
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(off) = offset(&doc.text, at) else { return Vec::new() };
+        let templates = repository_snippets(doc, off);
+        if !templates.is_empty() {
+            return templates;
+        }
         let queried = self.query_completion(doc, off);
         if !queried.is_empty() {
             return queried;
@@ -1491,6 +1542,30 @@ public interface UserRepository extends JpaRepository<User, Long> {
     }
 
     const MONGO_PERSON: &str = "package com.acme;\n@Document\nclass Person {\n    @Id String id;\n    String lastname;\n    @Field(\"first_name\") String firstname;\n    Address address;\n}\n";
+
+    #[test]
+    fn sort_action_reorders_mongo_query_fields() {
+        let repo = "import org.springframework.data.mongodb.repository.Query;\ninterface PersonRepository extends MongoRepository<Person, String> {\n    @Query(\"{ 'lastname': ?0, age: ?1 }\")\n    List<Person> find(String a, int b);\n}\n";
+        let _host = setup();
+        let caret = repo.find("lastname").unwrap();
+        let at = openidea_plugin::text::position(repo, caret);
+        let actions = DataTools::default().code_actions(&doc(repo), Range::new(at, at));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].edits[0].1[0].text, "{ age: ?1, 'lastname': ?0 }");
+        let outside = DataTools::default().code_actions(&doc(repo), Range::new(Position::new(0, 0), Position::new(0, 0)));
+        assert!(outside.is_empty());
+    }
+
+    #[test]
+    fn repository_snippet_completes_at_top_level_only() {
+        let _host = setup();
+        let top = "package com.acme;\n\nrepo";
+        let items = DataTools::default().completion(&doc(top), openidea_plugin::text::position(top, top.len()), None);
+        assert!(items.iter().any(|i| i.label == "repository" && i.snippet));
+        let inside = "interface A extends JpaRepository<User, Long> {\n    repo";
+        let items = DataTools::default().completion(&doc(inside), openidea_plugin::text::position(inside, inside.len()), None);
+        assert!(items.iter().all(|i| i.label != "repository"));
+    }
 
     #[test]
     fn mongo_query_fields_must_exist_on_the_document() {
