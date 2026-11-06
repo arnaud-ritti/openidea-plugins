@@ -643,12 +643,18 @@ fn twig(path: &str, text: &str, out: &mut Collected) {
     }
 }
 
+const MAX_INDEXED_BYTES: usize = 1_000_000;
+
 impl DocumentIndexer for Main {
     fn index(&mut self, doc: &Document) -> Edges {
         let path = doc.path.as_str();
         let text = doc.text.as_str();
         let Some(language) = language(path) else { return Edges::default() };
         if path.contains("/vendor/") || path.contains("/var/cache/") || path.contains("/node_modules/") {
+            return Edges::default();
+        }
+
+        if text.len() > MAX_INDEXED_BYTES {
             return Edges::default();
         }
 
@@ -931,5 +937,15 @@ mod tests {
         let many = "<?php\nclass A {\n".to_owned() + &"function f() { $d->dispatch($e, 'ev.x'); }\n".repeat(5000) + "}\n";
         let edges = index("/p/src/A.php", &many);
         assert!(edges.references.len() <= MAX_ANCHORS && edges.markers.len() <= MAX_ANCHORS);
+    }
+
+    #[test]
+    fn minified_single_line_files_index_in_linear_time() {
+        let bundle = "var a=['x','y'];".repeat(60_000);
+        let started = std::time::Instant::now();
+        let edges = index("/p/public/js/app.js", &bundle);
+
+        assert!(edges.references.is_empty());
+        assert!(started.elapsed().as_secs() < 5);
     }
 }

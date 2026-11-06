@@ -307,6 +307,12 @@ pub fn references(language: &str, text: &str) -> Vec<Reference> {
             continue;
         }
 
+        let (line_start, line_end) = line_bounds(text, i);
+        if line_end - line_start > MAX_LINE {
+            i = line_end;
+            continue;
+        }
+
         let opening = literal_at(language, text, i + 1).is_some_and(|(start, _, _)| start == i + 1);
         let reference = opening.then(|| reference_at(language, text, i + 1)).flatten();
         match reference {
