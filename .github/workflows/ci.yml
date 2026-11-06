@@ -14,7 +14,7 @@ jobs:
     outputs:
       plugins: ${{ steps.list.outputs.plugins }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: list
         run: |
@@ -32,7 +32,7 @@ jobs:
       run:
         working-directory: plugins/${{ matrix.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
