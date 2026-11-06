@@ -1,21 +1,21 @@
 id = "aritti.spring-messaging"
 name = "Spring Messaging Tools"
 version = "0.1.0"
-description = "Kafka, RabbitMQ and JMS (ActiveMQ/Artemis) destinations in Spring Java projects: links @KafkaListener, @RabbitListener and @JmsListener consumers to the template sends, @SendTo replies and topic/queue/exchange declarations of the same destination with gutter arrows and Go to Definition, completes known destination names, and lists them all in a Messaging tool window. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "Kafka, RabbitMQ and JMS (ActiveMQ/Artemis) destinations in Spring Java and Kotlin projects: links @KafkaListener, @RabbitListener and @JmsListener consumers to the template sends, @SendTo replies and topic/queue/exchange declarations of the same destination with gutter arrows and Go to Definition, completes known destination names, and lists them all in a Messaging tool window. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0 (first release): Kafka/RabbitMQ/JMS destination index, consumer ↔ producer navigation, destination completion, Messaging tool window."
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-view:messaging"]
+activation = ["on-language:java", "on-language:kotlin", "on-view:messaging"]
 
 [capabilities]
 required = ["project.read"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
-languages = ["java"]
+languages = ["java", "kotlin", "xml"]
 
 [[contributes.views]]
 id = "messaging"

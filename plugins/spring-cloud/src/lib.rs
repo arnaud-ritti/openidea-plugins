@@ -1,7 +1,7 @@
 //! Spring Cloud Tools for OpenIDEA: OpenFeign client methods ↔ the controller
 //! endpoints they call, Spring Cloud Stream function beans ↔ their bindings in
 //! configuration files, and Spring Cloud Gateway route predicates and filters.
-//! Text-based and Java only: names and paths match as written.
+//! Text-based, Java and Kotlin: names and paths match as written.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
@@ -9,9 +9,8 @@ use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position,
 use spring_text::config::{self, Key};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java;
-use spring_text::{contains, range};
+use spring_text::{SOURCE_GLOBS, contains, parse_source, range, source_calls};
 
-const JAVA_GLOBS: &[&str] = &["**/*.java"];
 const CONFIG_GLOBS: &[&str] = &[
     "**/application*.yml",
     "**/application*.yaml",
@@ -130,7 +129,11 @@ pub struct JavaFacts {
 }
 
 pub fn java_facts(text: &str) -> JavaFacts {
-    let file = java::parse(text);
+    facts_in("A.java", text)
+}
+
+pub fn facts_in(path: &str, text: &str) -> JavaFacts {
+    let file = parse_source(path, text);
     let span = |at: usize, s: &str| range(text, at, at + s.len());
     let mut out = JavaFacts::default();
     for c in &file.types {
@@ -184,7 +187,7 @@ pub fn java_facts(text: &str) -> JavaFacts {
         }
     }
     if text.contains("send(") {
-        out.sent = java::calls(text)
+        out.sent = source_calls(path, text)
             .into_iter()
             .filter(|c| c.name == "send")
             .filter_map(|c| Some(c.args.first()?.string.as_ref()?.value.clone()))
@@ -280,11 +283,15 @@ fn route_list(key: &str) -> Option<(&'static str, bool)> {
     (index(&rest[list.len()..])? == rest.len() - list.len()).then_some((list, mvc))
 }
 
-fn java_file(_path: &str, text: &str) -> Option<JavaFacts> {
+fn is_jvm(doc: &Document) -> bool {
+    matches!(doc.language.as_str(), "java" | "kotlin")
+}
+
+fn java_file(path: &str, text: &str) -> Option<JavaFacts> {
     if !JAVA_HINTS.iter().any(|w| text.contains(w)) {
         return None;
     }
-    let facts = java_facts(text);
+    let facts = facts_in(path, text);
     (facts != JavaFacts::default()).then_some(facts)
 }
 
@@ -421,7 +428,7 @@ pub struct CloudTools {
 
 impl Default for CloudTools {
     fn default() -> Self {
-        Self { java: Indexes::new(JAVA_GLOBS, java_file), config: Indexes::new(CONFIG_GLOBS, config_file) }
+        Self { java: Indexes::new(SOURCE_GLOBS, java_file), config: Indexes::new(CONFIG_GLOBS, config_file) }
     }
 }
 
@@ -431,7 +438,7 @@ impl CloudTools {
         let project = project_of(&doc.path)?;
         let java = self.java.get(&project, PROVIDER_BUDGET / 2);
         let config = self.config.get(&project, PROVIDER_BUDGET / 2);
-        if doc.language == "java" {
+        if is_jvm(doc) {
             java.update(&doc.path, &doc.text);
         } else if config::is_config_file(&doc.path) {
             config.update(&doc.path, &doc.text);
@@ -440,7 +447,7 @@ impl CloudTools {
     }
 
     fn java_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        let facts = java_facts(&doc.text);
+        let facts = facts_in(&doc.path, &doc.text);
         let problems: Vec<Diagnostic> = facts
             .unmapped
             .iter()
@@ -574,7 +581,7 @@ impl Providers for CloudTools {
     }
 
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        if doc.language == "java" {
+        if is_jvm(doc) {
             return self.java_markers(doc);
         }
         self.config_problems(doc);
@@ -582,8 +589,8 @@ impl Providers for CloudTools {
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
-        if doc.language == "java" {
-            let facts = java_facts(&doc.text);
+        if is_jvm(doc) {
+            let facts = facts_in(&doc.path, &doc.text);
             let Some(client) = facts.clients.into_iter().find(|c| contains(c.range, at)) else { return Vec::new() };
             let Some((java, _)) = self.indexes(doc) else { return Vec::new() };
             return java
@@ -765,6 +772,61 @@ spring.cloud.gateway.routes[0].predicates[0]=Host=**.acme.com
         assert_eq!(fns, [("process", "Function"), ("audit", "Consumer"), ("ticks", "Supplier"), ("uppercase", "Function")]);
         assert_eq!(stream.sent, ["alerts-out-0"]);
         assert_eq!(stream.factories, ["Token"]);
+    }
+
+    const KOTLIN_CLIENT: &str = r#"package com.acme.client
+
+@FeignClient(name = "users", path = "/api")
+interface UserClient {
+    @GetMapping(path = ["/users/{id}"])
+    suspend fun find(@PathVariable id: Long): User
+
+    @PostMapping("/users")
+    fun save(@RequestBody u: User): User
+
+    fun missing(): Int
+}
+"#;
+
+    const KOTLIN_FUNCTIONS: &str = r#"package com.acme.stream
+
+@Configuration
+class StreamFunctions {
+    @Bean
+    fun process(): Function<Order, Invoice> = Function { null }
+
+    @Bean("ticks")
+    fun clock(): Supplier<Long> {
+        return Supplier { 1L }
+    }
+
+    fun publish(bridge: StreamBridge) { bridge.send("alerts-out-0", "x") }
+}
+"#;
+
+    #[test]
+    fn kotlin_feign_client_is_indexed() {
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/client/UserClient.kt", KOTLIN_CLIENT);
+        let facts = facts_in("UserClient.kt", KOTLIN_CLIENT);
+        let ends: Vec<_> = facts.clients.iter().map(|e| (e.verb.as_str(), e.path.as_str())).collect();
+        assert_eq!(ends, [("GET", "/api/users/{id}"), ("POST", "/api/users")]);
+        assert_eq!(facts.unmapped.len(), 1);
+        let stream = facts_in("StreamFunctions.kt", KOTLIN_FUNCTIONS);
+        let fns: Vec<_> = stream.functions.iter().map(|f| (f.name.as_str(), f.kind.as_str())).collect();
+        assert_eq!(fns, [("process", "Function"), ("ticks", "Supplier")]);
+        assert_eq!(stream.sent, ["alerts-out-0"]);
+
+        let mut tools = CloudTools::default();
+        let kt = doc("src/main/kotlin/com/acme/client/UserClient.kt", "kotlin", KOTLIN_CLIENT);
+        let tips: Vec<_> = tools.line_markers(&kt).into_iter().map(|m| m.tooltip).collect();
+        assert_eq!(tips, [
+            "Calls UserController.get() (GET /api/users/{userId})",
+            "Calls UserController.save() (POST /api/users)"
+        ]);
+        let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/client/UserClient.kt"];
+        assert_eq!(problems.len(), 1);
+        assert_eq!(java_facts(CLIENT).clients.len(), 3);
     }
 
     #[test]

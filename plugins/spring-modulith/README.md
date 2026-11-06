@@ -10,7 +10,10 @@ Spring Modulith support for Java projects in OpenIDEA:
 
 Matching is text-based and goes by imports: fully qualified names in code, imports from libraries and code under `src/test/` are not checked. Packages are expected to follow the lowercase naming convention (`com.acme.order.Order.Inner` is type `Order` of package `com.acme.order`).
 
-Not ported: module documentation generation (C4/PlantUML), the event publication registry, `@ApplicationModuleTest` support, import cycle detection, `sharedModules`, jMolecules annotations, Kotlin.
+- **Module Diagram** tool window (bottom): modules as nodes, one arrow per module importing from another; arrows that break the rules (internal types, not in `allowedDependencies`) are drawn as warnings and labelled. Click a node to open the module.
+- **Spring Modulith: Copy Module Diagram (PlantUML)** copies a PlantUML component diagram of the modules and dependencies to the clipboard (needs the optional `clipboard` permission; without it a notification explains how to allow it).
+
+Not ported: the other documentation outputs (C4, module canvases, `Documenter` export to files), the event publication registry, `@ApplicationModuleTest` support, import cycle detection, `sharedModules`, jMolecules annotations, Kotlin.
 
 ```sh
 cargo test

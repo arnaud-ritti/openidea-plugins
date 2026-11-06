@@ -8,7 +8,7 @@ change-notes = "0.1.0 (first release): channel index (Java annotations, Java DSL
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-language:xml"]
+activation = ["on-language:java", "on-language:xml", "on-view:diagram"]
 
 [capabilities]
 required = ["project.read"]
@@ -16,3 +16,9 @@ required = ["project.read"]
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
 languages = ["java", "xml"]
+
+[[contributes.views]]
+id = "diagram"
+title = "Integration Channels"
+icon = "hierarchy"
+location = "bottom"

@@ -1,6 +1,6 @@
 # Spring Web Services Tools
 
-Spring Web Services support for Java projects in OpenIDEA:
+Spring Web Services support for Java and Kotlin projects in OpenIDEA:
 
 - **Endpoint ↔ schema**: on an `@Endpoint` class, a `@PayloadRoot(namespace = …, localPart = "x")` method gets a gutter arrow to the top-level element `x` of a schema with that target namespace; Go to Definition on the `localPart` literal does the same. In the schema, the element gets an arrow back to the method that handles it.
 - **Completion** of element names in `localPart = "…"`, from the schemas of the method's namespace.
@@ -10,7 +10,7 @@ Spring Web Services support for Java projects in OpenIDEA:
 
 Schemas are the `xs:schema` elements (any prefix) of the project's `.xsd` files and those inside `.wsdl` files. The namespace may be a string literal or a string constant of the same file (`NAMESPACE_URI`); otherwise elements of every schema match. Matching is text-based. Schemas from libraries are not read, and `@SoapAction`/`@Action` methods are ignored because they name no schema element.
 
-Not ported: Spring OXM marshaller configuration checks, Apache CXF, WSDL generation, the `<sws:…>` XML namespace configuration, `@PayloadRoots`, Kotlin.
+Not ported: Spring OXM marshaller configuration checks, Apache CXF, WSDL generation, the `<sws:…>` XML namespace configuration, `@PayloadRoots`.
 
 ```sh
 cargo test
