@@ -428,6 +428,18 @@ New checks in the other Spring plugins (all on by default, each with a setting, 
 - **spring-websocket:** the destination check is the existing `unrouted-destination` (`checkBrokerPrefixes`), only when broker prefixes are configured. A `@MessageMapping` without `@Controller` is not reported.
 - **Shared:** `Finding` (range, code, message, severity) lives in `crates/spring-text`; the diagnostics carry no fix.
 
+### Added by gap F, plan 2: rest of Spring (2026-11-06)
+
+Checks and views for `spring-boot`, `spring-data`, `spring-web`, `spring-security`, `spring-graphql` and `spring-websocket` ([plan](docs/superpowers/plans/2026-11-06-gap-f-spring-rest.md)). Text-based like the rest, quiet on dynamic input, each with a setting. Nothing was run in the IDE.
+
+- **spring-boot:** `config-properties-prefix` checks the prefix part of `@ConfigurationProperties` only. `early-event-listener`, `default-package-application`, `redundant-component-scan` and `redundant-enable-auto-configuration` are new. A file icon applies to `application*` and `bootstrap*` config files; it shows only under an icon theme that merges plugin icons (unverified), and the dashed-stroke gear SVG was never rendered, so at 16 px it may look like a dotted ring.
+- **spring-data:** `page-without-pageable` flags a `Page` return without a `Pageable`; a `Slice` without one is valid and not flagged. A same-package custom `Page` with no import still warns. `query-needs-modifying` covers update and delete `@Query`. `jdbc-empty-sequence-name` checks only an empty `sequence` attribute of `@Sequence`. `mapped-collection-key-column` is a Hint.
+- **spring-web:** `invalid-api-version` reads a lone literal in `version` of Java mapping annotations; Kotlin and functional routes are not covered. A bad literal can fire both `invalid-api-version` and `api-version-mismatch`. The `api_versioning || version_format` wiring has no test. The two generate actions (Java only) are refactor actions, do not move the caret and insert a placeholder `/path`; running one twice makes duplicate handlers. The Endpoints view lists literal annotated mappings and functional routes only.
+- **spring-security:** `obsolete-path-pattern` flags a `**` before the last path segment in `requestMatchers`, `mvcMatchers`, `securityMatcher` and Kotlin `authorize`. No quick fix. It can be a false positive when the project uses `ant_path_matcher`.
+- **spring-graphql:** `batch-mapping-return-type` is a deny-list (Java and Kotlin). Raw `Mono` and custom wrappers stay quiet; `Collection` and `Set` are valid. A Kotlin expression body without a declared type is quiet, but a `= { ... }` lambda body still warns.
+- **spring-websocket:** the WebSocket Destinations view is the plugin's own; a plugin cannot add items to the Endpoints view of `spring-web` (see the Endpoints row above).
+- **Unverified in the IDE:** the removal quick fix on the annotation line; whether Java documents request code actions from `spring-boot`; the refactor actions with the caret in blank class space; how the Endpoints and Destinations views render.
+
 ## aritti.devcontainer (clean-room, inspired by org.jetbrains.plugins.docker.gateway)
 
 Drives the devcontainer CLI (`@devcontainers/cli`) and Docker: Start, Rebuild, Open Shell, Stop and

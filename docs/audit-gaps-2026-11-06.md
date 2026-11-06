@@ -228,3 +228,23 @@ Row text is shortened; the detail files hold the evidence and the exact basis.
 - commit list and per-commit diffs in MR (REST commits/diffs + view)
 - pipeline and job details in MR (REST pipelines/jobs + buttons)
 - Open on GitLab menus (add `projectView.context` entry (log menus not available))
+
+## Done
+
+### Plan 2: rest of Spring
+
+Branch `gap-f-spring-rest`, [plan](superpowers/plans/2026-11-06-gap-f-spring-rest.md). Built with unit tests against the mock host; nothing was run in the IDE.
+
+**Spring Boot -> spring-boot.** `@ConfigurationProperties` (prefix part only), early application events and invalid application setup are done. The icon row is done as a file icon for `application*` and `bootstrap*` config files; it shows only under an icon theme that merges plugin icons, which is unverified.
+
+**Spring Data -> spring-data.** All four rows are done. `Page` without `Pageable` is flagged; `Slice` without one is valid and not flagged. `@Modifying` covers update and delete `@Query`. The JDBC sequence row checks only an empty `sequence` attribute. `@MappedCollection` key column is a Hint.
+
+**Spring MVC -> spring-web.** The version format row covers a lone literal in `version` of Java mapping annotations; Kotlin and functional routes are not covered. The generate row is two Java-only refactor actions (caret not moved, placeholder path). The Endpoints row is an Endpoints view for literal annotated mappings and functional routes, not the IDE's own window.
+
+**Spring Security -> spring-security.** Done: a `**` before the last path segment is flagged in `requestMatchers`, `mvcMatchers`, `securityMatcher` and Kotlin `authorize`. No quick fix; possible false positive with `ant_path_matcher`.
+
+**Spring GraphQL -> spring-graphql.** Done as a deny-list of `@BatchMapping` return types in Java and Kotlin. `Collection` and `Set` are valid, raw `Mono` and custom wrappers are quiet, and a Kotlin `= { ... }` lambda body still warns.
+
+**Spring WebSocket -> spring-websocket.** Done as the plugin's own "WebSocket Destinations" view; a plugin cannot add items to the Endpoints view of `spring-web`.
+
+Known limits and unverified items are in the "Added by gap F, plan 2" section of [LIMITATIONS.md](../LIMITATIONS.md).
