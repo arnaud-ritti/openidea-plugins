@@ -3,20 +3,26 @@
 //! them both ways. Text-based: types and fields match by name, as written.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
+use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::text::offset;
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin,
+    Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host, register_plugin,
 };
-use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
+use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, Member, Str, TypeDecl};
 use spring_text::kotlin;
-use spring_text::{contains, range};
+use spring_text::tree::Expansion;
+use spring_text::{config, contains, range};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 mod checks;
 
 const SCHEMA_GLOBS: &[&str] = &["**/*.graphqls", "**/*.graphql"];
 const JAVA_GLOBS: &[&str] = &["**/*.java", "**/*.kt"];
+const CONFIG_GLOBS: &[&str] = &["**/application*.properties", "**/application*.yml", "**/application*.yaml"];
+/// Text that registers data fetchers by hand, outside the annotated controllers.
+const WIRING: [&str; 5] = ["DataFetcher", "RuntimeWiring", "GraphQlSourceBuilderCustomizer", "TypeRuntimeWiring", "DataLoader"];
 const DOCUMENT_DIR: &str = "/graphql-documents/";
 /// (annotation, operation, default root type).
 const ROOTS: [(&str, &str, &str); 3] = [
@@ -410,14 +416,45 @@ fn annotation_slot(text: &str, at: usize, is_kotlin: bool) -> Option<(Slot, Str)
     None
 }
 
+/// A `spring.graphql.*` or context path setting: key, value and where it is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Setting {
+    key: String,
+    value: String,
+    at: Range,
+}
+
+fn endpoint_settings(path: &str, text: &str) -> Option<Vec<Setting>> {
+    let found: Vec<Setting> = config::keys(path, text)
+        .into_iter()
+        .map(|k| (config::canonical(&k.key), k))
+        .filter(|(key, k)| (key.starts_with("spring.graphql.") || key == "server.servlet.contextpath") && !k.value.is_empty())
+        .map(|(key, k)| Setting { key, value: k.value, at: range(text, k.at, k.end) })
+        .collect();
+    (!found.is_empty()).then_some(found)
+}
+
+fn mentions_wiring(_path: &str, text: &str) -> Option<bool> {
+    WIRING.iter().any(|w| text.contains(w)).then_some(true)
+}
+
 pub struct GraphQlTools {
     schemas: Indexes<Schema>,
     java: Indexes<Vec<Handler>>,
+    wiring: Indexes<bool>,
+    settings: Indexes<Vec<Setting>>,
+    expansion: Expansion,
 }
 
 impl Default for GraphQlTools {
     fn default() -> Self {
-        Self { schemas: Indexes::new(SCHEMA_GLOBS, schema_file), java: Indexes::new(JAVA_GLOBS, java_file) }
+        Self {
+            schemas: Indexes::new(SCHEMA_GLOBS, schema_file),
+            java: Indexes::new(JAVA_GLOBS, java_file),
+            wiring: Indexes::new(JAVA_GLOBS, mentions_wiring),
+            settings: Indexes::new(CONFIG_GLOBS, endpoint_settings),
+            expansion: Expansion::default(),
+        }
     }
 }
 
@@ -652,6 +689,22 @@ impl GraphQlTools {
                 links.push((t.name.clone(), f, found));
             }
         }
+        if host::setting_bool("springGraphql.reportUnmappedFields").unwrap_or(true) {
+            let wired = self.wiring.get(&project, PROVIDER_BUDGET / 2);
+            if java.complete() && wired.complete() && wired.files().is_empty() {
+                let objects: Vec<String> = parse_schema(&doc.text).types.into_iter().filter(|t| t.kind == "type").map(|t| t.name).collect();
+                for (ty, f, found) in &links {
+                    let handled_type = java.iter().flat_map(|(_, hs)| hs).any(|h| &type_of(h, schemas) == ty);
+                    if found.is_empty() && !f.args.is_empty() && !roots.contains(ty) && objects.contains(ty) && !handled_type {
+                        let message = format!(
+                            "`{ty}.{}` takes arguments, but no controller method or data fetcher serves `{ty}`; the default property fetcher ignores them.",
+                            f.name
+                        );
+                        problems.push(Diagnostic::new(f.range, Severity::Info, message).code("unmapped-field"));
+                    }
+                }
+            }
+        }
         let _ = host::publish_diagnostics(&doc.path, &problems);
         links
     }
@@ -738,13 +791,126 @@ impl Providers for GraphQlTools {
     }
 }
 
+const DEFAULT_HTTP_PATH: &str = "/graphql";
+const DEFAULT_GRAPHIQL_PATH: &str = "/graphiql";
+
+fn join_url(prefix: &str, path: &str) -> String {
+    format!("{}/{}", prefix.trim_end_matches('/'), path.trim_start_matches('/'))
+}
+
+/// The endpoint rows of the `spring.graphql.*` settings: label, what the path comes from and where it is written.
+fn endpoint_rows(settings: &[Setting]) -> Vec<(String, String, Option<Range>)> {
+    let find = |key: &str| settings.iter().find(|s| s.key == config::canonical(key));
+    let enabled = |key: &str| find(key).is_some_and(|s| s.value == "true");
+    let prefix = find("server.servlet.context-path").map_or("", |s| s.value.as_str());
+    let mut rows = Vec::new();
+    let mut row = |label: String, key: &str, source: Option<&Setting>| {
+        let detail = source.map_or_else(|| "default".to_owned(), |_| key.to_owned());
+        rows.push((label, detail, source.map(|s| s.at)));
+    };
+    let http = find("spring.graphql.path");
+    row(format!("POST {}", join_url(prefix, http.map_or(DEFAULT_HTTP_PATH, |s| s.value.as_str()))), "spring.graphql.path", http);
+    if let Some(ws) = find("spring.graphql.websocket.path") {
+        row(format!("WebSocket {}", join_url(prefix, &ws.value)), "spring.graphql.websocket.path", Some(ws));
+    }
+    if enabled("spring.graphql.graphiql.enabled") {
+        let graphiql = find("spring.graphql.graphiql.path");
+        row(format!("GET {}", join_url(prefix, graphiql.map_or(DEFAULT_GRAPHIQL_PATH, |s| s.value.as_str()))), "spring.graphql.graphiql.path", graphiql);
+    }
+    if enabled("spring.graphql.schema.printer.enabled") {
+        let base = http.map_or(DEFAULT_HTTP_PATH, |s| s.value.as_str());
+        row(format!("GET {}", join_url(prefix, &format!("{}/schema", base.trim_end_matches('/')))), "spring.graphql.schema.printer.enabled", find("spring.graphql.schema.printer.enabled"));
+    }
+    rows
+}
+
+impl GraphQlTools {
+    fn endpoints_view(&mut self, view: &str, project: &Project, budget: Duration) -> View {
+        let settings_index = self.settings.get(project, budget / 2);
+        let complete = settings_index.complete();
+        let mut settings: Vec<Setting> = Vec::new();
+        let mut files: BTreeMap<String, String> = BTreeMap::new();
+        for (path, found) in settings_index.iter() {
+            for s in found {
+                if !settings.iter().any(|x| x.key == s.key) {
+                    settings.push(s.clone());
+                    files.insert(s.key.clone(), path.to_owned());
+                }
+            }
+        }
+        let schemas = self.schemas.get(project, budget / 2);
+        let schema_complete = schemas.complete();
+        if !complete || !schema_complete {
+            host::refresh_view(view);
+        }
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+
+        let mut items = vec![TreeItem::new("endpoints", "Endpoints").icon("globe")];
+        for (n, (label, detail, at)) in endpoint_rows(&settings).into_iter().enumerate() {
+            let source = settings.iter().find(|s| Some(s.at) == at).and_then(|s| files.get(&s.key).map(|f| (f.clone(), s.at)));
+            let key = match source {
+                Some((path, at)) => format!("c:{}:{}:{path}", at.start.line, at.start.character),
+                None => format!("d:{n}"),
+            };
+            items.push(TreeItem::new(&key, &label).parent("endpoints").detail(&detail).icon("send"));
+        }
+        let mut schema_files: Vec<_> = schemas.iter().map(|(p, s)| (p.to_owned(), s.types.len())).collect();
+        schema_files.sort();
+        items.push(TreeItem::new("schemas", "Schema files").detail(&schema_files.len().to_string()).icon("file"));
+        for (path, types) in schema_files {
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
+            items.push(TreeItem::new(&format!("c:0:0:{path}"), &name).parent("schemas").detail(&format!("{types} types")).icon("file"));
+        }
+        self.expansion.apply(&mut items);
+        let status = if complete && schema_complete { "GraphQL endpoints".to_owned() } else { "GraphQL endpoints · scanning…".to_owned() };
+        View::new(Body::Tree(items)).button(refresh).status(&status)
+    }
+}
+
+impl Views for GraphQlTools {
+    fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let Some(project) = ctx.project() else {
+            return Ok(View::message("Open a project to see its GraphQL endpoints."));
+        };
+        Ok(self.endpoints_view(view, &project, COMMAND_BUDGET))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if self.expansion.handle(&event) {
+            host::refresh_view(view);
+            return Ok(());
+        }
+        match event {
+            ViewEvent::Button(b) if b == "refresh" => {
+                if let Some(project) = ctx.project()
+                    && self.settings.get(&project, Duration::ZERO).complete()
+                {
+                    self.settings.reset();
+                    self.schemas.reset();
+                }
+                host::refresh_view(view);
+            }
+            ViewEvent::Activate(key) => {
+                let mut parts = key.splitn(4, ':');
+                if let (Some("c"), Some(line), Some(column), Some(path)) = (parts.next(), parts.next(), parts.next(), parts.next())
+                    && let (Ok(line), Ok(column)) = (line.parse(), column.parse())
+                {
+                    host::open_location(path, line, column)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 impl Plugin for GraphQlTools {
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         Err(Error::NotFound(format!("command {id}")))
     }
 }
 
-register_plugin!(GraphQlTools, providers);
+register_plugin!(GraphQlTools, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -1210,5 +1376,58 @@ class BookController {
         let found = doc_links("src/main/resources/graphql-documents/find.gql", "graphql", text, "bookById");
         assert_eq!(found.len(), 1);
         assert!(doc_links("src/main/resources/other/find.gql", "graphql", text, "bookById").is_empty());
+    }
+
+    fn tree(view: View) -> Vec<TreeItem> {
+        match view.body {
+            Body::Tree(items) => items,
+            _ => panic!("not a tree"),
+        }
+    }
+
+    #[test]
+    fn endpoint_view_lists_configured_paths_and_schema_files() {
+        let host = setup();
+        host.add_file(
+            "src/main/resources/application.yml",
+            "server:\n  servlet:\n    context-path: /app\nspring:\n  graphql:\n    path: /api/gql\n    graphiql:\n      enabled: true\n    websocket:\n      path: /ws\n",
+        );
+        let mut tools = GraphQlTools::default();
+        let project = project_of("/project/x").unwrap();
+        let mut view = tools.endpoints_view("endpoints", &project, Duration::from_secs(5));
+        if !matches!(view.body, Body::Tree(_)) {
+            view = tools.endpoints_view("endpoints", &project, Duration::from_secs(5));
+        }
+        let labels: Vec<_> = tree(view).into_iter().map(|i| i.label).collect();
+        assert_eq!(labels, ["Endpoints", "POST /app/api/gql", "WebSocket /app/ws", "GET /app/graphiql", "Schema files", "schema.graphqls"]);
+    }
+
+    #[test]
+    fn endpoint_view_defaults_to_graphql() {
+        let _host = setup();
+        let mut tools = GraphQlTools::default();
+        let project = project_of("/project/x").unwrap();
+        let labels: Vec<_> = tree(tools.endpoints_view("endpoints", &project, Duration::from_secs(5))).into_iter().map(|i| (i.label, i.detail)).collect();
+        assert_eq!(labels[1], ("POST /graphql".to_owned(), Some("default".to_owned())));
+    }
+
+    const ARGS_SCHEMA: &str = "type Query { author(id: ID!): Author }\ntype Author { name: String books(first: Int): [Book] }\ntype Book { title(upper: Boolean): String }\n";
+
+    #[test]
+    fn unmapped_fields_with_arguments_are_info_when_nothing_serves_the_type() {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/graphql/schema.graphqls", ARGS_SCHEMA);
+        host.add_file(
+            "src/main/java/com/acme/AuthorController.java",
+            "@Controller class A { @QueryMapping public Author author(@Argument String id) { return null; } @SchemaMapping(typeName = \"Book\") public String title(Book b) { return null; } }",
+        );
+        let schema = doc("src/main/resources/graphql/schema.graphqls", "graphql", ARGS_SCHEMA);
+        GraphQlTools::default().line_markers(&schema);
+        let found: Vec<_> = host.diagnostics()[&schema.path].iter().map(|d| (d.code.clone().unwrap(), d.severity)).collect();
+        assert_eq!(found, [("unmapped-field".to_owned(), Severity::Info)], "Author.books only; Book is served");
+
+        host.add_file("src/main/java/com/acme/Wiring.java", "class W { RuntimeWiringConfigurer c() { return null; } }");
+        GraphQlTools::default().line_markers(&schema);
+        assert!(host.diagnostics().get(&schema.path).is_none_or(Vec::is_empty), "hand wiring anywhere silences it");
     }
 }

@@ -9,6 +9,11 @@
       "type": "boolean",
       "title": "Warn when a @BatchMapping method returns a type Spring for GraphQL does not accept",
       "default": true
+    },
+    "springGraphql.reportUnmappedFields": {
+      "type": "boolean",
+      "title": "Report (Info) a field with arguments on a schema type that no controller method or data fetcher serves",
+      "default": true
     }
   }
 }

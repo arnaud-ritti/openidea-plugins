@@ -17,6 +17,9 @@ How matching works: every `*.graphqls`/`*.graphql` file outside `node_modules` i
 - Checks of client documents (unknown fields, arguments), completion inside them, and documents built from variables or concatenation.
 - Federation directives (`@key`, `@external`…) are skipped, not understood.
 
+- **Endpoints view**: GraphQL Endpoints tool window with the HTTP path (`spring.graphql.path`, default `/graphql`), the WebSocket path, GraphiQL and the schema printer when enabled, prefixed with `server.servlet.context-path`, and the schema files. Rows from a configuration file open it at the key.
+- **Unmapped fields** (Info, setting `springGraphql.reportUnmappedFields`): in a schema file, a field with arguments on an object type that no controller method serves (`@SchemaMapping`, `@BatchMapping`) is reported, because the default property fetcher ignores arguments. Quiet when any source mentions `DataFetcher`, `RuntimeWiring`, `GraphQlSourceBuilderCustomizer` or `DataLoader`, and for root types.
+
 ```sh
 cargo test
 openidea-plugin build

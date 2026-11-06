@@ -4,12 +4,12 @@ version = "0.1.0" # x-release-please-version
 description = "Spring for GraphQL in Java and Kotlin projects: links @QueryMapping, @MutationMapping, @SubscriptionMapping, @SchemaMapping and @BatchMapping controller methods to their schema fields (.graphqls) both ways with gutter arrows and Go to Definition, completes type and field names in the annotations, flags handlers or @Argument names the schema doesn't declare, and follows the fields of client documents (graphql-documents/*.graphql, inline .document(...)) to the schema. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0 (first release): schema index, handler ↔ schema field navigation, annotation completion, unknown field/argument checks, unmapped root field hints."
+change-notes = "Unreleased: GraphQL Endpoints view (paths from spring.graphql.*, schema files), Info for schema fields with arguments that no controller or data fetcher serves. 0.1.0 (first release): schema index, handler ↔ schema field navigation, annotation completion, unknown field/argument checks, unmapped root field hints."
 categories = ["frameworks"]
 icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-language:kotlin", "on-language:graphql"]
+activation = ["on-language:java", "on-language:kotlin", "on-language:graphql", "on-view:endpoints"]
 
 [capabilities]
 required = ["project.read"]
@@ -21,6 +21,12 @@ languages = ["java", "kotlin"]
 [[contributes.providers]]
 kinds = ["definition", "line-markers"]
 languages = ["graphql"]
+
+[[contributes.views]]
+id = "endpoints"
+title = "GraphQL Endpoints"
+icon = "icon.svg"
+location = "left"
 
 [contributes.settings]
 schema = "settings.schema.json"
