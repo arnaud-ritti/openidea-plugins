@@ -11,7 +11,7 @@ Matching is text-based, on destination literals as written; `${…}` placeholder
 
 - **JavaScript/TypeScript STOMP clients** (`.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, outside `node_modules`, `dist`, `build`): `client.subscribe('/topic/x', …)` links to the matching `@SendTo`/`convertAndSend`/`@SubscribeMapping`, and `client.publish({ destination: '/app/x' })` or `client.send('/app/x', …)` links to the `@MessageMapping` handler (application prefix applied). The Java side lists the client usages in its gutter tooltip. A call counts when its receiver name contains `stomp`, or was assigned `new Client(`, `new StompJs.Client(`, `Stomp.over(` or `Stomp.client(` in the same file (`httpClient.send` and the like are ignored). Only plain string literals starting with `/` count; template strings with `${…}` and concatenations are skipped. One target opens per marker; the tooltip lists the rest.
 
-Not ported: raw `WebSocketHandler` registration checks, SockJS options, Kotlin.
+Not ported: raw `WebSocketHandler` registration checks, SockJS options.
 
 ```sh
 cargo test

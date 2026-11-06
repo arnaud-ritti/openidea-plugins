@@ -9,8 +9,7 @@ use openidea_plugin::{
     Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin,
 };
 use spring_text::index::{Indexes, PROVIDER_BUDGET};
-use spring_text::java;
-use spring_text::range;
+use spring_text::{parse_source, range, source_calls};
 use std::collections::BTreeSet;
 
 const DEFAULT_USER_PREFIX: &str = "/user/";
@@ -180,9 +179,9 @@ pub fn parse(path: &str, text: &str) -> Option<WsFile> {
     if !HINTS.iter().any(|h| text.contains(h)) {
         return None;
     }
-    let file = java::parse(text);
+    let file = parse_source(path, text);
     let mut out = WsFile::default();
-    let push = |out: &mut WsFile, kind, dest: String, via: &str, s: &java::Str| {
+    let push = |out: &mut WsFile, kind, dest: String, via: &str, s: &spring_text::java::Str| {
         if !is_placeholder(&dest) {
             let range = range(text, s.at, s.end);
             out.uses.push(Use { kind, dest, via: via.to_owned(), at: s.at, end: s.end, range });
@@ -215,7 +214,7 @@ pub fn parse(path: &str, text: &str) -> Option<WsFile> {
         t.supers().any(|s| s.name.contains("WebSocketMessageBrokerConfigurer"))
             || t.methods().any(|m| m.name == "configureMessageBroker" || m.name == "registerStompEndpoints")
     });
-    for c in java::calls(text) {
+    for c in source_calls(path, text) {
         let strings = || c.args.iter().filter_map(|a| a.string.as_ref().map(|s| s.value.clone()));
         let receiver = c.receiver.as_deref().unwrap_or("").to_lowercase();
         let literal = |i: usize| c.args.get(i).and_then(|a| a.string.as_ref());
@@ -311,7 +310,7 @@ pub struct WebSocketTools {
 impl Default for WebSocketTools {
     fn default() -> Self {
         Self { index: Indexes::new(
-                &["**/*.java", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.vue"],
+                &["**/*.java", "**/*.kt", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.vue"],
                 parse,
             ) }
     }
@@ -496,6 +495,49 @@ public class ChatController {
             version: 1,
             text: text.into(),
         }
+    }
+
+    const KOTLIN_CHAT: &str = r#"package com.acme.chat
+
+@Controller
+@MessageMapping("/kchat")
+class KtChatController(private val messagingTemplate: SimpMessagingTemplate) {
+    @MessageMapping("/send")
+    @SendTo("/topic/ktmessages")
+    suspend fun send(m: Message): Message = m
+
+    @SubscribeMapping(value = ["/krooms"])
+    fun rooms(): List<Room> = emptyList()
+
+    fun broadcast(m: Message) {
+        messagingTemplate.convertAndSend("/topic/ktmessages", m)
+        messagingTemplate.convertAndSendToUser("bob", "/queue/replies", m)
+        kafkaTemplate.send("orders", m)
+    }
+}
+"#;
+
+    #[test]
+    fn kotlin_message_mapping_is_indexed() {
+        let chat = parse("KtChat.kt", KOTLIN_CHAT).unwrap();
+        let uses: Vec<_> = chat.uses.iter().map(|u| (u.kind, u.dest.as_str(), u.via.as_str())).collect();
+        assert_eq!(uses, [
+            (Kind::Message, "/kchat/send", "@MessageMapping"),
+            (Kind::Send, "/topic/ktmessages", "@SendTo"),
+            (Kind::Subscribe, "/kchat/krooms", "@SubscribeMapping"),
+            (Kind::Send, "/topic/ktmessages", "convertAndSend"),
+            (Kind::SendToUser, "/queue/replies", "convertAndSendToUser"),
+        ]);
+        assert_eq!(parse("", CHAT).unwrap().uses.len(), 8);
+
+        let host = setup();
+        host.add_file("src/main/kotlin/com/acme/chat/KtChatController.kt", KOTLIN_CHAT);
+        let mut tools = WebSocketTools::default();
+        let path = "/project/src/main/kotlin/com/acme/chat/KtChatController.kt";
+        let kt = Document { path: path.into(), language: "kotlin".into(), version: 1, text: KOTLIN_CHAT.into() };
+        let tips: Vec<_> = tools.line_markers(&kt).into_iter().map(|m| (m.line, m.tooltip)).collect();
+        assert!(tips.iter().any(|(l, t)| *l == 5 && t.starts_with("SEND /app/kchat/send")), "{tips:?}");
+        assert!(tips.iter().any(|(l, t)| *l == 13 && t.contains("KtChatController.kt:7 (@SendTo)")), "{tips:?}");
     }
 
     #[test]
