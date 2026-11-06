@@ -18,7 +18,7 @@ features that need PhpStorm's PSI are missing (container type inference, Doctrin
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:php", "on-language:twig", "on-language:yaml", "on-language:xml"]
+activation = ["on-language:php", "on-language:twig", "on-language:yaml", "on-language:xml", "on-view:symfony-profiler"]
 
 [capabilities]
 required = ["project.read", "events"]
