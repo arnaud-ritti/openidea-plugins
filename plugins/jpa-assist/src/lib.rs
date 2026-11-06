@@ -29,7 +29,7 @@ use openidea_plugin::{
 
 use checks::{CALLBACKS, Finding, inspect_attribute_types, inspect_class_signature, is_empty_listener, listener_references, unused_listener, inspect_callbacks, inspect_entity, inspect_kotlin_entity, inspect_repository, missing_id};
 use generate::{Dialect, Known, callback_import, callback_method, ddl, dto, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
-use model::{Class, Edit, Kind, Relation, annotations, has_word, import_edit, language_of, mask, parse_class};
+use model::{Class, Edit, Kind, Relation, annotations, decapitalize, has_word, import_edit, language_of, mask, parse_class, words};
 use queries::{ItemKind, Prop, complete, parse_repository};
 
 /// Time one provider call may spend reading repositories.
@@ -547,10 +547,19 @@ impl Providers for JpaAssist {
 
         let declared: Vec<&str> = annotations(&masked).iter().map(|a| a.name).collect();
 
+        let declares_method = |name: &str| words(&masked, name).any(|i| masked[i + name.len()..].trim_start().starts_with('('));
+        let crlf = text.contains("\r\n");
+
         for callback in CALLBACKS.iter().filter(|c| !declared.contains(c)) {
+            if declares_method(&decapitalize(callback)) {
+                continue;
+            }
             let Some(method) = callback_method(&class, callback) else { continue };
             let mut edits: Vec<Edit> = import_edit(text, &[&callback_import(&class, callback)], kotlin).into_iter().collect();
             edits.push(method);
+            if crlf {
+                edits.iter_mut().for_each(|e| e.text = e.text.replace('\n', "\r\n"));
+            }
             actions.push(action(doc, &format!("Add @{callback} callback"), "source", false, &edits));
         }
 
@@ -1225,6 +1234,25 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
         let titles: Vec<String> = actions_at("src/shop/E.java", text, 1).into_iter().map(|a| a.title).collect();
         assert_eq!(titles.len(), 5);
         assert!(!titles.iter().any(|t| t.contains("PrePersist") || t.contains("PostLoad")));
+    }
+
+    #[test]
+    fn callback_action_is_skipped_when_its_method_name_is_taken() {
+        let text = "@Entity\nclass E {\n  @Id Long id;\n  void prePersist() {}\n  void postLoad (String s) {}\n  String preUpdateNote;\n}\n";
+        let titles: Vec<String> = actions_at("src/shop/E.java", text, 1).into_iter().map(|a| a.title).collect();
+        assert_eq!(titles.len(), 5, "{titles:?}");
+        assert!(!titles.iter().any(|t| t.contains("PrePersist") || t.contains("PostLoad")), "{titles:?}");
+        assert!(titles.iter().any(|t| t.contains("PreUpdate")), "a field of a similar name does not count");
+    }
+
+    #[test]
+    fn callback_action_keeps_crlf_line_endings() {
+        let text = BARE.replace('\n', "\r\n");
+        let action = &actions_at("src/shop/E.java", &text, 1)[0];
+        for edit in &action.edits[0].1 {
+            assert!(!edit.text.replace("\r\n", "").contains('\n'), "{:?}", edit.text);
+        }
+        assert_eq!(action.edits[0].1.last().unwrap().text, "\r\n    @PrePersist void prePersist() {}\r\n");
     }
 
     #[test]
