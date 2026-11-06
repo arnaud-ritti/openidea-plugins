@@ -451,7 +451,7 @@ fn rules_in(text: &str, code: &str, kotlin: bool, scope: (usize, usize)) -> Vec<
             let close = closing(code, open);
             (close, argument_ranges(code, open, close))
         };
-        let mut rule = |any_request: bool, method, patterns| Rule { at: i, name_end: end, any_request, method, patterns };
+        let rule = |any_request: bool, method, patterns| Rule { at: i, name_end: end, any_request, method, patterns };
         if name == "anyRequest" {
             out.push(rule(true, None, Vec::new()));
         } else if has_args && MATCHER_CALLS.contains(&name) {
