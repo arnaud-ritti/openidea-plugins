@@ -19,8 +19,20 @@ pub struct Operation {
     pub operation_id: Option<String>,
 }
 
+pub fn scan(text: &str) -> Vec<Key> {
+    if is_json(text) {
+        return crate::json::keys(text);
+    }
+
+    spring_text::config::yaml(text)
+}
+
+pub fn is_json(text: &str) -> bool {
+    text.trim_start().starts_with(['{', '['])
+}
+
 pub fn parse(text: &str) -> Option<Spec> {
-    let keys = spring_text::config::yaml(text);
+    let keys = scan(text);
     let version = keys
         .iter()
         .find(|k| k.key == "openapi" || k.key == "swagger")
@@ -85,6 +97,7 @@ pub fn refs(text: &str) -> Vec<Ref> {
     };
     let line_end = |from: usize| text[from..].find(['\n', '\r']).map_or(text.len(), |n| from + n);
 
+    let json = is_json(text);
     let mut found = Vec::new();
     let mut from = 0;
     while let Some(n) = text[from..].find("$ref") {
@@ -93,7 +106,8 @@ pub fn refs(text: &str) -> Vec<Ref> {
         from = i;
         let line_start = text[..found_at].rfind(['\n', '\r']).map_or(0, |n| n + 1);
         let before = &text[line_start..found_at];
-        if before.match_indices('#').any(|(j, _)| j == 0 || before.as_bytes()[j - 1].is_ascii_whitespace()) {
+        if !json
+            && before.match_indices('#').any(|(j, _)| j == 0 || before.as_bytes()[j - 1].is_ascii_whitespace()) {
             continue;
         }
         if matches!(bytes.get(i), Some(b'"' | b'\'')) {
