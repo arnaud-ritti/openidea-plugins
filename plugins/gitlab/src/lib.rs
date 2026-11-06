@@ -10,6 +10,7 @@ mod api;
 mod attributes;
 mod branch;
 mod ci;
+mod ci_data;
 mod forms;
 mod repo;
 mod review;
@@ -20,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use api::{Approvals, Commit, Discussion, DraftNote, FileDiff, Job, MergeRequest, Note, Pipeline, ProjectInfo, TimelineEvent, User};
 use branch::BranchReview;
 use openidea_plugin::host::{self, storage};
-use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
     Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, PickItem, Plugin, Position, Range, RepositoryStatus, register_plugin, text,
@@ -1161,6 +1162,31 @@ fn file_link(ctx: &Invocation) -> Result<String, Error> {
     Ok(api::blob_url(&repo.path, revision, &relative.replace('\\', "/"), selected_lines(&editor)))
 }
 
+fn selected_link(ctx: &Invocation, path: &str) -> Result<String, Error> {
+    let repo = gitlab_project(ctx)?;
+    let relative = match path == repo.status.root {
+        true => "",
+        false => relative_path(&repo.status.root, path).ok_or("The selection is not in the repository.")?,
+    };
+    let revision = repo.status.commit.as_deref().ok_or("The repository has no commits.")?;
+    let relative = relative.replace('\\', "/");
+    let is_file = ctx.project().is_some_and(|p| p.read_file(path).is_ok());
+
+    Ok(match is_file {
+        true => api::blob_url(&repo.path, revision, &relative, None),
+        false => api::tree_url(&repo.path, revision, &relative),
+    })
+}
+
+fn open_link(ctx: &Invocation) -> Result<(), Error> {
+    let link = match ctx.selected_paths().first() {
+        Some(path) => selected_link(ctx, path)?,
+        None => file_link(ctx)?,
+    };
+
+    host::open_url(&link)
+}
+
 /// The focused file's repository path (its name outside the repository) and the selection, or the whole file.
 fn snippet_content(ctx: &Invocation) -> Result<(String, String), Error> {
     let editor = ctx.editor().ok_or("No file is open.")?;
@@ -1279,7 +1305,7 @@ impl Plugin for GitLab {
         api::begin_budget();
         match id {
             "new-token" => host::open_url(&api::new_token_url())?,
-            "open-in-browser" => host::open_url(&file_link(ctx)?)?,
+            "open-in-browser" => open_link(ctx)?,
             "copy-link" => copy_link(&file_link(ctx)?)?,
             "create-snippet" => return create_snippet(ctx),
             "share-project" => {
@@ -1855,7 +1881,9 @@ impl GitLab {
                 }
                 continue;
             };
-            let problems = ci::check(&ci::parse(&source))
+            let mut file = ci::parse(&source);
+            resolve_local_includes(&mut file, &project);
+            let problems = ci::check(&file)
                 .into_iter()
                 .filter(|f| ci_group_enabled(f.code))
                 .map(|f| {
@@ -1871,6 +1899,16 @@ impl GitLab {
             self.publish_review(path);
         }
     }
+}
+
+fn resolve_local_includes(file: &mut ci::CiFile, project: &host::Project) {
+    let Some(root) = project.vcs_status().ok().flatten().map(|s| s.root) else {
+        file.has_include |= !file.local_includes.is_empty();
+        file.local_includes.clear();
+        return;
+    };
+
+    ci::resolve_includes(file, &|path| project.read_file(&format!("{root}/{}", path.trim_start_matches('/'))).ok());
 }
 
 fn ci_group_enabled(code: &str) -> bool {
@@ -1895,6 +1933,22 @@ impl Providers for GitLab {
 
         let range = Range::new(text::position(&doc.text, target.start), text::position(&doc.text, target.end));
         vec![Location { path: doc.path.clone(), range }]
+    }
+
+    fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        match ci::is_ci_path(&doc.path) {
+            true => ci::completions(&doc.text, text::offset(&doc.text, at)),
+            false => Vec::new(),
+        }
+        .into_iter()
+        .map(|c| {
+            let kind = if c.variable { CompletionKind::Variable } else { CompletionKind::Keyword };
+            let mut item = CompletionItem::new(&c.label, kind);
+            item.insert_text = c.insert;
+            item.replace = Some(Range::new(text::position(&doc.text, c.from), at));
+            item
+        })
+        .collect()
     }
 
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {

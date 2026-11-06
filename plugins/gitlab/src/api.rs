@@ -324,6 +324,12 @@ pub fn blob_url(project: &str, revision: &str, path: &str, lines: Option<(u32, u
     }
 }
 
+pub fn tree_url(project: &str, revision: &str, path: &str) -> String {
+    let path: Vec<String> = path.split('/').map(encode).collect();
+
+    format!("{SERVER}/{project}/-/tree/{revision}/{}", path.join("/"))
+}
+
 pub fn new_merge_request_url(project: &str, source_branch: &str) -> String {
     format!("{SERVER}/{project}/-/merge_requests/new?merge_request%5Bsource_branch%5D={}", encode(source_branch))
 }

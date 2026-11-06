@@ -89,7 +89,8 @@ the last two, and `noteActions` the comment actions.
 
 - **Create Merge Request**: title, description, target branch (up to 1000
   branches), one assignee, reviewers by username, labels as text, and the Draft,
-  Squash and Delete source branch checkboxes. No pickers, no milestone.
+  Squash and Delete source branch checkboxes. No pickers here and no milestone;
+  GitLab: Edit Merge Request picks labels, people and milestone from lists.
 - **Create Snippet**: title, description, visibility and personal or project.
   It uses the focused file, or its selection. A public snippet needs a second
   click, which posts only the file and content the warning named.
@@ -144,7 +145,7 @@ applying. It only edits the open file; nothing is posted to GitLab.
 
 | Command | Does | Menus |
 |---|---|---|
-| GitLab: Open on GitLab | opens the file at the current commit on gitlab.com, with the selected lines (`#L3-L5`) | editor and editor tab context |
+| GitLab: Open on GitLab | opens the file at the current commit on gitlab.com, with the selected lines (`#L3-L5`) | editor, editor tab and Project view context (first selected file or folder, linked at the current commit) |
 | GitLab: Copy Link | copies the same link | none |
 | GitLab: Create Snippet | creates a private snippet from the selection, or the whole file, named after the file; the URL is copied and shown | editor and editor tab context |
 | GitLab: Create Merge Request | opens gitlab.com's new merge request page for the current branch | Tools |
@@ -181,10 +182,17 @@ Settings › Plugins › GitLab:
 
 In the CI files below, problems appear on open and save, and Cmd+click on a job
 name in `needs`, `dependencies` or `extends` opens the job, and on a `stage`
-value opens its entry in `stages`. Checks stay quiet when the file has
-`include:` (the included jobs and stages are not read), and for `needs` entries
+value opens its entry in `stages`. `include: local:` files are read (up to three
+levels) so their jobs and stages count; checks stay quiet when the file has a
+remote, project, template or component include, a glob, or a local file that
+can't be read, and for `needs` entries
 with `project:` or `pipeline:`, and for names built from variables. The reader
 is a line scanner, not a YAML parser: unusual shapes are skipped.
+
+Completion in these files: top-level keywords, job keywords one level inside a
+job or `default`, and the predefined `CI_*` variables after `$` or `${`. The
+lists are typed from the GitLab docs as of November 2026 and may miss newer
+names; the popup opens on letters, not on `$`.
 
 ## File icons
 
@@ -206,12 +214,10 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
 - Threads in the editor don't move with unsaved edits.
 - Notes are plain text: no markdown rendering, `@mention` completion or
   attachments.
-- Filtering is limited to the five quick filters; no search by author, label
-  or text.
+- Filtering: the five quick filters plus author, reviewer, label and text
+  filters from the Filter button.
 - The form views have no pickers (users, labels, milestone), no file chooser
-  and no file-selection tree; a snippet holds one file.
-- No Open on GitLab entry in the Project view menu: commands there get no
-  selection.
+  and no file-selection tree; a form snippet holds one file.
 - A file counts as viewed until a later merge request commit touches it; that
   needs the commits in the local checkout, else the head commit is used.
 - Not ported: usage statistics, `.gitlab-ci.yml` schema validation, completion and inspections beyond the four listed under CI files; included files are not followed. Applying a suggestion doesn't mark it as applied on GitLab.

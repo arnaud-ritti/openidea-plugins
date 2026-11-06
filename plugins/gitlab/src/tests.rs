@@ -3239,3 +3239,112 @@ fn editing_the_title_with_a_command_and_dismissing() {
     assert_eq!(message, None);
     assert_eq!(writes(&host).len(), 1);
 }
+
+#[test]
+fn project_view_opens_a_file_blob_and_a_folder_tree() {
+    let host = setup();
+    host.add_file("/project/src/a b.rs", "x");
+
+    host.select_paths(&["/project/src/a b.rs"]);
+    GitLab::default().run_command("open-in-browser", &host.invocation(), None).unwrap();
+    host.select_paths(&["/project/src"]);
+    GitLab::default().run_command("open-in-browser", &host.invocation(), None).unwrap();
+
+    assert_eq!(
+        host.opened_urls(),
+        ["https://gitlab.com/g/p/-/blob/abc123/src/a%20b.rs", "https://gitlab.com/g/p/-/tree/abc123/src"]
+    );
+}
+
+mod ci_aid_tests {
+    use super::*;
+    use crate::ci;
+    use openidea_plugin::Position;
+
+    fn labels(yaml_with_cursor: &str) -> Vec<String> {
+        let at = yaml_with_cursor.find('|').unwrap();
+        let yaml = yaml_with_cursor.replace('|', "");
+        ci::completions(&yaml, Some(at)).into_iter().map(|c| c.label).collect()
+    }
+
+    fn codes(host: &MockHost, yaml: &str) -> Vec<String> {
+        host.add_file("/project/.gitlab-ci.yml", yaml);
+        let mut plugin = GitLab::default();
+        plugin.handle_events(&[Event::FileSaved("/project/.gitlab-ci.yml".into())], &host.invocation());
+        let found = host.diagnostics().get("/project/.gitlab-ci.yml").cloned().unwrap_or_default();
+
+        found.into_iter().filter_map(|d| d.code).collect()
+    }
+
+    #[test]
+    fn top_level_keys_complete_to_global_keywords() {
+        assert_eq!(labels("sta|"), ["stages"]);
+        assert!(labels("|").contains(&"include".to_owned()));
+    }
+
+    #[test]
+    fn job_keys_complete_inside_a_job_but_not_inside_variables() {
+        assert_eq!(labels("build:\n  scr|"), ["script"]);
+        assert!(labels("variables:\n  scr|").is_empty());
+        assert!(labels("build:\n  script:\n    - ech|").is_empty());
+    }
+
+    #[test]
+    fn ci_variables_complete_after_dollar_and_braces() {
+        assert_eq!(labels("build:\n  script:\n    - echo $CI_COMMIT_SHORT|"), ["CI_COMMIT_SHORT_SHA"]);
+        assert!(labels("a: ${CI_PROJECT_P|").contains(&"CI_PROJECT_PATH".to_owned()));
+    }
+
+    #[test]
+    fn completion_replaces_the_typed_prefix_and_ignores_other_files() {
+        let mut plugin = GitLab::default();
+        let doc = Document { path: "/project/.gitlab-ci.yml".into(), text: "b:\n  scr".into(), ..Document::default() };
+        let items = plugin.completion(&doc, Position::new(1, 5), None);
+
+        assert_eq!(items[0].insert_text, "script:");
+        assert_eq!(items[0].replace, Some(Range::new(Position::new(1, 2), Position::new(1, 5))));
+        let other = Document { path: "/project/a.yml".into(), ..doc };
+        assert!(plugin.completion(&other, Position::new(1, 5), None).is_empty());
+    }
+
+    #[test]
+    fn reference_tags_in_scripts_give_no_findings() {
+        let host = MockHost::install();
+        let yaml = "build:\n  script:\n    - !reference [.setup, script]\n    - echo hi\n";
+
+        assert!(codes(&host, yaml).is_empty());
+    }
+
+    #[test]
+    fn local_include_supplies_jobs_and_stages() {
+        let host = MockHost::install();
+        host.set_vcs_status(Some(status("main")));
+        host.add_file("/project/ci/base.yml", "stages: [lint]\n.base:\n  script: [ls]\n");
+        let yaml = "include:\n  - local: /ci/base.yml\nbuild:\n  extends: .base\n  stage: lint\n";
+
+        assert!(codes(&host, yaml).is_empty());
+        assert_eq!(codes(&host, "include: ci/base.yml\nbuild:\n  extends: .nope\n  stage: other\n"), ["undefined-job", "undefined-stage"]);
+    }
+
+    #[test]
+    fn remote_or_unreadable_include_stays_quiet() {
+        let host = MockHost::install();
+        host.set_vcs_status(Some(status("main")));
+        let remote = "include:\n  - local: /ci/base.yml\n  - remote: https://x.test/a.yml\nbuild:\n  extends: .nope\n";
+        assert!(codes(&host, remote).is_empty());
+
+        host.add_file("/project/ci/base.yml", "x:\n  script: [ls]\n");
+        assert!(codes(&host, remote).is_empty());
+        assert!(codes(&host, "include:\n  - local: /missing.yml\nbuild:\n  extends: .nope\n").is_empty());
+    }
+
+    #[test]
+    fn include_cycles_terminate() {
+        let host = MockHost::install();
+        host.set_vcs_status(Some(status("main")));
+        host.add_file("/project/a.yml", "include: b.yml\n.a:\n  script: [ls]\n");
+        host.add_file("/project/b.yml", "include: a.yml\n");
+
+        assert!(codes(&host, "include: a.yml\nbuild:\n  extends: .a\n").is_empty());
+    }
+}

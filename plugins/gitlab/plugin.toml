@@ -12,7 +12,7 @@ authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "JetBrains s.r.o. and contri
 homepage = "https://github.com/JetBrains/intellij-community/tree/master/plugins/gitlab"
 license = "Apache-2.0"
 change-notes = """\
-Unreleased: Edit labels, assignees, reviewers, milestone and title of a merge request from the Details button or GitLab: Edit Merge Request, choosing from the project's labels, members and milestones. The list Filter button picks a quick filter or an author, reviewer, label or text filter. \
+Unreleased: Open on GitLab in the Project view menu (a file or folder). Completion of CI keywords and CI_* variables in .gitlab-ci.yml, and `include: local:` files count for job and stage checks. Edit labels, assignees, reviewers, milestone and title of a merge request from the Details button or GitLab: Edit Merge Request, choosing from the project's labels, members and milestones. The list Filter button picks a quick filter or an author, reviewer, label or text filter. \
 0.3.0: Create Snippet from the files selected in the Project view, with a title prompt; the status item and Create Merge Request bring their views to the front. Needs OpenIDEA API 1.2. \
 0.2.0: Merge Request Changes tool window (diff, comments on lines, pending review, viewed files), Submit Review, \
 timeline events, the current branch's merge request in the status bar and the editor, Check Out Branch, and cloning \
@@ -44,7 +44,7 @@ kinds = ["line-markers", "code-actions"]
 languages = ["*"]
 
 [[contributes.providers]]
-kinds = ["definition"]
+kinds = ["definition", "completion"]
 languages = ["yaml"]
 
 [[contributes.secrets]]
@@ -171,6 +171,10 @@ command = "open-in-browser"
 [[contributes.menus]]
 menu = "editorTab.context"
 command = "create-snippet"
+
+[[contributes.menus]]
+menu = "projectView.context"
+command = "open-in-browser"
 
 [[contributes.menus]]
 menu = "projectView.context"

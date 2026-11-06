@@ -7,6 +7,8 @@ use std::ops::Range;
 
 use openidea_plugin::Severity;
 
+use crate::ci_data;
+
 const RESERVED: &[&str] = &[
     "stages", "variables", "default", "include", "workflow", "image", "services", "before_script", "after_script",
     "cache", "types", "<<",
@@ -42,7 +44,11 @@ pub struct CiFile {
     pub stages: Option<Vec<Ref>>,
     /// `stages:` is present but not fully read (alias, tag, multi-line flow list): its contents are unknown.
     pub stages_unknown: bool,
+    /// An `include:` that is not read: remote, project, template, component, a glob, or a local file that failed to read.
     pub has_include: bool,
+    pub local_includes: Vec<String>,
+    pub included_jobs: HashSet<String>,
+    pub included_stages: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -362,7 +368,7 @@ pub fn parse(text: &str) -> CiFile {
                         file.stages_unknown = count == 0 || stages.len() != count;
                         file.stages = Some(stages);
                     }
-                    "include" => file.has_include = true,
+                    "include" => read_includes(text, &mut file, items(text, body, rest)),
                     _ if RESERVED.contains(&name) => {}
                     _ => {
                         let range = ls[i].start + key.start..ls[i].start + key.end;
@@ -378,18 +384,78 @@ pub fn parse(text: &str) -> CiFile {
     file
 }
 
+fn read_includes(text: &str, file: &mut CiFile, entries: Vec<Item>) {
+    if entries.is_empty() {
+        file.has_include = true;
+    }
+
+    for item in &entries {
+        let head = &text[item.head.clone()];
+        let keyed = head.starts_with('{') || split_key(head).is_some();
+        let target = match keyed {
+            false => scalar_ref(text, item.head.clone()).filter(|r| !r.name.starts_with("http")),
+            true => {
+                let segments = match head.starts_with('{') && head.ends_with('}') {
+                    true => split_commas(text, item.head.start + 1..item.head.end - 1),
+                    false => std::iter::once(item.head.clone()).chain(item.tail.iter().cloned()).collect(),
+                };
+                let (_, range) = pairs(text, &segments).into_iter().find(|(k, _)| k == "local").unzip();
+                range.and_then(|r| scalar_ref(text, r))
+            }
+        };
+
+        match target.filter(|r| !r.name.contains('*')) {
+            Some(local) => file.local_includes.push(local.name),
+            None => file.has_include = true,
+        }
+    }
+}
+
+const MAX_INCLUDE_DEPTH: usize = 3;
+
+/// Reads each local include through `read` (given the path as written in the file) and adds its jobs and
+/// stages. Anything unreadable, or nested deeper than three files, counts as an unread include.
+pub fn resolve_includes(file: &mut CiFile, read: &dyn Fn(&str) -> Option<String>) {
+    let mut seen = HashSet::new();
+    let paths = std::mem::take(&mut file.local_includes);
+    let mut queue: Vec<(String, usize)> = paths.into_iter().map(|p| (p, 1)).collect();
+
+    while let Some((path, depth)) = queue.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+
+        let Some(included) = read(&path).filter(|_| depth <= MAX_INCLUDE_DEPTH).map(|t| parse(&t)) else {
+            file.has_include = true;
+            continue;
+        };
+
+        file.included_jobs.extend(included.jobs.iter().map(|j| j.name.clone()));
+        file.has_include |= included.has_include || included.stages_unknown;
+        if let Some(stages) = included.stages {
+            let names = stages.into_iter().map(|s| s.name);
+            file.included_stages.get_or_insert_with(Vec::new).extend(names);
+        }
+        queue.extend(included.local_includes.into_iter().map(|p| (p, depth + 1)));
+    }
+}
+
 fn finding(range: &Range<usize>, code: &'static str, message: String, severity: Severity) -> Finding {
     Finding { start: range.start, end: range.end, code, message, severity }
 }
 
 pub fn check(file: &CiFile) -> Vec<Finding> {
     let mut out = Vec::new();
-    let defined: HashSet<&str> = file.jobs.iter().map(|j| j.name.as_str()).collect();
+    let defined: HashSet<&str> = file.jobs.iter().map(|j| j.name.as_str()).chain(file.included_jobs.iter().map(String::as_str)).collect();
+    let unread = file.has_include || !file.local_includes.is_empty();
     let stages: Option<HashSet<&str>> = match &file.stages {
         Some(_) if file.stages_unknown => None,
         Some(stages) => Some(stages.iter().map(|s| s.name.as_str()).collect()),
-        None if file.has_include => None,
-        None => Some(DEFAULT_STAGES.into()),
+        None if unread => None,
+        None => match &file.included_stages {
+            Some(listed) => Some(listed.iter().map(String::as_str).collect()),
+            None => Some(DEFAULT_STAGES.into()),
+        },
     };
 
     for job in &file.jobs {
@@ -401,7 +467,7 @@ pub fn check(file: &CiFile) -> Vec<Finding> {
                     out.push(finding(&entry.range, "duplicate-job-usage", message, Severity::Warning));
                 }
 
-                if !file.has_include && !defined.contains(entry.name.as_str()) {
+                if !unread && !defined.contains(entry.name.as_str()) {
                     let message = format!("`{keyword}` names `{}`, which is not a job in this file", entry.name);
                     out.push(finding(&entry.range, "undefined-job", message, Severity::Warning));
                 }
@@ -493,4 +559,65 @@ pub fn target_at(file: &CiFile, offset: usize) -> Option<Range<usize>> {
     }
 
     None
+}
+
+pub struct Candidate {
+    pub label: String,
+    pub insert: String,
+    /// Byte offset where the typed prefix starts.
+    pub from: usize,
+    pub variable: bool,
+}
+
+/// Predefined variables after `$` or `${`, else keywords for the key being typed: globals at the top level,
+/// job keywords one level inside a job or `default`.
+pub fn completions(text: &str, offset: Option<usize>) -> Vec<Candidate> {
+    let Some(offset) = offset.filter(|o| text.is_char_boundary(*o)) else { return Vec::new() };
+    let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let before = &text[line_start..offset];
+    let typed = before.trim_start_matches(' ');
+    let word = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+    let word_in_line = before.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(0, |i| i + 1);
+    let word_start = line_start + word_in_line;
+    let after_dollar = before[..word_in_line].trim_end_matches('{').ends_with('$');
+    if after_dollar {
+        let prefix = &text[word_start..offset];
+        return ci_data::CI_VARIABLES
+            .iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| Candidate { label: (*name).into(), insert: (*name).into(), from: word_start, variable: true })
+            .collect();
+    }
+
+    if !word(typed) {
+        return Vec::new();
+    }
+
+    let indent = before.len() - typed.len();
+    let keywords = match indent {
+        0 => ci_data::GLOBAL_KEYWORDS,
+        _ if parent_is_job(&text[..line_start], indent) => ci_data::JOB_KEYWORDS,
+        _ => return Vec::new(),
+    };
+    let from = line_start + indent;
+
+    keywords
+        .iter()
+        .filter(|name| name.starts_with(typed))
+        .map(|name| Candidate { label: (*name).into(), insert: format!("{name}:"), from, variable: false })
+        .collect()
+}
+
+fn parent_is_job(above: &str, indent: usize) -> bool {
+    let parent = above
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .find(|l| l.len() - l.trim_start_matches(' ').len() < indent);
+    let Some(parent) = parent else { return false };
+    let name = parent.trim_end().strip_suffix(':').unwrap_or("");
+    let top_level = !parent.starts_with(' ') && !name.is_empty() && !name.contains(' ');
+
+    top_level && (name == "default" || !RESERVED.contains(&name))
 }
