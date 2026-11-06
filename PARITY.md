@@ -66,6 +66,8 @@ Ratings moved only where a listed main gap closed: `twig` (Low to Low-Medium), `
 - everything built on web or `Html` views: the openapi preview (fetch override, postMessage round trip, id filter), and the gitlab viewed marking (needs page scripts);
 - the Flyway state spellings and the Flyway view, the `kubectl` custom-resource listing, the `devcontainer read-configuration` output shape and template image tags, the `spring` CLI terminal arguments, the XML provider routing for `spring-messaging`, and secret substitution for `spring-runtime`, all tested against the mock host only;
 - whether the New > Ignore File template accepts an empty name, and whether prefilled code-action edits apply without a resolve step (Laravel intentions);
+- the node click in the Integration, Batch, Modulith, Web Flow and Bean diagrams (they share `spring_text::diagram`, whose click handler is an inline script the desktop IDE is documented to block), so clicking a node may not navigate;
+- the host language ids `jsp`, `vue`, `javascriptreact` and `typescriptreact`, used by activation and provider languages of several plugins;
 - indexing cost of the added `**/*.kt` and script globs on large projects.
 
 ## Cross-cutting gaps (largest effect first)
@@ -89,7 +91,7 @@ Original features with no OpenIDEA equivalent, so no port is possible yet: Sprin
 
 ## Laravel Idea 13.4.1 feature inventory (paid baseline)
 
-Source: the extension descriptors, action ids, inspection/intention names and template names of `laravel-idea-13.4.1.261.jar`, read at the user's request on 2026-11-06 (no decompiled code was read or kept). Only feature names are recorded here; no code, text or icons were copied. The extraction lives outside the repo in `/tmp/li`.
+Source: the extension descriptors, action ids, inspection/intention names and template names of `laravel-idea-13.4.1.261.jar`, the feature list was compiled at the owner's request on 2026-11-06 from the plugin's descriptor and action and template names. No code, strings or icons were copied. This deviates from the repo's clean-room default for paid plugins.
 
 Scale: about 3,300 classes, 15 descriptors (Blade, JS/Inertia, Twig, YAML, CSS, dotenv, database, terminal, endpoints, MCP, LLM, Qodana, git), 33 actions, 11 intentions, 14 inspections, ~50 file templates.
 
