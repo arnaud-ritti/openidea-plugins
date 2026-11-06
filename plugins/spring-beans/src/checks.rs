@@ -2,7 +2,9 @@
 //! check stays quiet when an annotation comes from a library other than
 //! Spring or a name is not a plain string literal.
 
+use crate::{annotation_checks, aop, injection_checks};
 use crate::model::{Bean, class_bean, method_bean, short_name};
+use crate::xml_checks::dynamic;
 use crate::{World, file_name};
 use openidea_plugin::{Severity, host};
 use spring_text::finding::Finding;
@@ -21,7 +23,10 @@ const PROXY_ANNOTATIONS: [&str; 11] = [
     "PostFilter",
     "Retryable",
 ];
-const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+pub(crate) const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const ASPECTJ_WEAVING: [&str; 4] = ["aspectj-maven-plugin", "aspectj-gradle-plugin", "freefair.aspectj", "aspectjtools"];
+const ASPECTJ_PACKAGE: &str = "org.aspectj.";
+const POINTCUT_ANNOTATIONS: [&str; 6] = ["Pointcut", "Before", "After", "AfterReturning", "AfterThrowing", "Around"];
 const SPRING_PACKAGES: [&str; 3] = ["org.springframework.", "jakarta.transaction.", "javax.transaction."];
 
 /// Which groups of checks run.
@@ -34,6 +39,13 @@ pub struct Groups {
     pub naming: bool,
     pub self_invocation: bool,
     pub unresolved_references: bool,
+    pub aop: bool,
+    pub xml: bool,
+    pub injection: bool,
+    pub profiles: bool,
+    pub async_methods: bool,
+    pub cache: bool,
+    pub kotlin_plugin: bool,
 }
 
 impl Default for Groups {
@@ -46,6 +58,13 @@ impl Default for Groups {
             naming: true,
             self_invocation: false,
             unresolved_references: false,
+            aop: true,
+            xml: true,
+            injection: true,
+            profiles: true,
+            async_methods: true,
+            cache: true,
+            kotlin_plugin: true,
         }
     }
 }
@@ -62,12 +81,24 @@ impl Groups {
             naming: on("checkNaming", defaults.naming),
             self_invocation: on("checkSelfInvocation", defaults.self_invocation),
             unresolved_references: on("checkUnresolvedReferences", defaults.unresolved_references),
+            aop: on("checkAop", defaults.aop),
+            xml: on("checkXml", defaults.xml),
+            injection: on("checkInjectionAnnotations", defaults.injection),
+            profiles: on("checkProfiles", defaults.profiles),
+            async_methods: on("checkAsync", defaults.async_methods),
+            cache: on("checkCache", defaults.cache),
+            kotlin_plugin: on("checkKotlinSpringPlugin", defaults.kotlin_plugin),
         }
     }
 }
 
 pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups: Groups) -> Vec<Finding> {
     let mut out = Vec::new();
+    if groups.cache {
+        for ty in file.types.iter().filter(|t| t.kind == "class" || t.kind == "interface") {
+            annotation_checks::check_cache(file, ty, &mut out);
+        }
+    }
     for ty in file.types.iter().filter(|t| t.kind == "class") {
         if groups.proxy_methods {
             proxy_methods(file, ty, &mut out);
@@ -87,6 +118,18 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         if groups.self_invocation {
             self_invocation(file, ty, text, &mut out);
         }
+        if groups.injection {
+            injection_checks::check(file, ty, &mut out);
+        }
+        if groups.profiles {
+            annotation_checks::check_profiles(file, ty, &mut out);
+        }
+        if groups.async_methods {
+            annotation_checks::check_async(file, ty, &mut out);
+        }
+        if groups.aop {
+            pointcut_designators(path, file, ty, &mut out);
+        }
         if groups.unresolved_references && world.complete {
             depends_on(file, ty, world, &mut out);
             component_scan(file, ty, world, &mut out);
@@ -96,7 +139,7 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
 }
 
 /// The annotation `name` unless the file imports another one of that name.
-fn spring<'a>(file: &JavaFile, annotations: &'a [Annotation], name: &str) -> Option<&'a Annotation> {
+pub(crate) fn spring<'a>(file: &JavaFile, annotations: &'a [Annotation], name: &str) -> Option<&'a Annotation> {
     let annotation = annotations.iter().find(|a| a.name == name)?;
     let suffix = format!(".{name}");
     let foreign = file
@@ -180,7 +223,7 @@ fn is_dynamic(annotation: &Annotation, keys: &[&str]) -> bool {
     named.is_some_and(|a| a.strings.is_empty())
 }
 
-fn capitalised(name: &str) -> bool {
+pub(crate) fn capitalised(name: &str) -> bool {
     let mut chars = name.chars();
     match (chars.next(), chars.next()) {
         (Some(a), Some(b)) => a.is_uppercase() && !b.is_uppercase(),
@@ -204,11 +247,15 @@ fn naming(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     }
 }
 
-fn names_of(bean: &Bean) -> impl Iterator<Item = &str> {
+pub(crate) fn names_of(bean: &Bean) -> impl Iterator<Item = &str> {
     std::iter::once(bean.name.as_str()).chain(bean.aliases.iter().map(String::as_str))
 }
 
-fn profiles_overlap(a: &[String], b: &[String]) -> bool {
+/// Whether two beans can be active together; a `${...}` or `#{...}` profile is unknown, so never.
+pub(crate) fn profiles_overlap(a: &[String], b: &[String]) -> bool {
+    if a.iter().chain(b).any(|p| dynamic(p)) {
+        return false;
+    }
     if a.is_empty() || b.is_empty() {
         return true;
     }
@@ -223,12 +270,16 @@ fn is_test_source(path: &str) -> bool {
 }
 
 /// The nearest ancestor directory holding a build file.
-fn build_module(path: &str) -> Option<String> {
+pub(crate) fn build_module(path: &str) -> Option<String> {
     let project = spring_text::index::project_of(path)?;
     let root = project.root().ok()?;
+    let root = root.trim_end_matches('/');
+    if path.split('/').any(|part| part == ".." || part == ".") {
+        return None;
+    }
     let mut dir = path;
     while let Some((parent, _)) = dir.rsplit_once('/') {
-        if !parent.starts_with(&root) {
+        if parent != root && !parent.starts_with(&format!("{root}/")) {
             return None;
         }
         if BUILD_FILES.iter().any(|f| project.read_file(&format!("{parent}/{f}")).is_ok()) {
@@ -239,8 +290,64 @@ fn build_module(path: &str) -> Option<String> {
     None
 }
 
+/// Whether AspectJ weaves the module, which makes every designator valid: its `META-INF/aop.xml`
+/// (load-time weaving), or a weaving plugin named by its build file or one above it in the project.
+pub fn weaving_plugin_in_build(path: &str) -> bool {
+    let Some(module) = build_module(path) else { return false };
+    let Some(project) = spring_text::index::project_of(path) else { return false };
+    let Ok(root) = project.root() else { return false };
+    let root = root.trim_end_matches('/');
+    if project.read_file(&format!("{module}/src/main/resources/META-INF/aop.xml")).is_ok() {
+        return true;
+    }
+    let mut dir = module.as_str();
+    loop {
+        let weaves = BUILD_FILES
+            .iter()
+            .filter_map(|f| project.read_file(&format!("{dir}/{f}")).ok())
+            .any(|build| ASPECTJ_WEAVING.iter().any(|marker| build.contains(marker)));
+        if weaves {
+            return true;
+        }
+        let Some((parent, _)) = dir.rsplit_once('/') else { return false };
+        if dir == root || !parent.starts_with(root) {
+            return false;
+        }
+        dir = parent;
+    }
+}
+
+/// The AspectJ annotation `name` unless the file imports another one of that name.
+fn aspectj<'a>(file: &JavaFile, annotations: &'a [Annotation], name: &str) -> Option<&'a Annotation> {
+    let annotation = annotations.iter().find(|a| a.name == name)?;
+    let suffix = format!(".{name}");
+    let foreign = file.imports.iter().filter(|i| !i.is_static && i.path.ends_with(&suffix)).any(|i| !i.path.starts_with(ASPECTJ_PACKAGE));
+    (!foreign).then_some(annotation)
+}
+
+fn pointcut_designators(path: &str, file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
+    if aspectj(file, &ty.annotations, "Aspect").is_none() {
+        return;
+    }
+    let mut found = Vec::new();
+    for method in ty.methods() {
+        for name in POINTCUT_ANNOTATIONS {
+            let Some(annotation) = aspectj(file, &method.annotations, name) else { continue };
+            let Some(arg) = ["value", "pointcut"].iter().find_map(|k| annotation.arg(k)) else { continue };
+            let [literal] = arg.strings.as_slice() else { continue };
+            if arg.text.contains('\\') || arg.text.matches('"').count() != 2 || !arg.text.starts_with('"') || !arg.text.ends_with('"') {
+                continue;
+            }
+            found.extend(aop::findings(&literal.value, literal.at));
+        }
+    }
+    if !found.is_empty() && !weaving_plugin_in_build(path) {
+        out.extend(found);
+    }
+}
+
 /// Beans only clash inside one build module and one source set (main or test).
-fn same_scope(a: &str, b: &str) -> bool {
+pub(crate) fn same_scope(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }

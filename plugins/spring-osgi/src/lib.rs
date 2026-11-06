@@ -334,6 +334,7 @@ fn check(doc: &OsgiXml, index: &Index<Info>) -> Vec<Diagnostic> {
             }
             _ => {}
         }
+        check_values(doc, i, &mut out);
         match e.local() {
             "service" => {
                 if e.attr("ref").is_some() && has("bean") {
@@ -352,6 +353,59 @@ fn check(doc: &OsgiXml, index: &Index<Info>) -> Vec<Diagnostic> {
         }
     }
     out
+}
+
+const BOOLEANS: &[&str] = &["true", "false"];
+
+/// The enumerated and numeric attributes of the Spring DM schema: allowed values per element.
+fn check_values(doc: &OsgiXml, i: usize, out: &mut Vec<Diagnostic>) {
+    let e = &doc.els[i];
+    let local = e.local();
+    let importer = matches!(local, "reference" | "list" | "set");
+    let comparator_basis = local == "natural" && e.parent.is_some_and(|p| doc.els[p].local() == "comparator");
+    let enumerated: &[(&str, &[&str])] = match local {
+        "service" => &[
+            ("auto-export", &["disabled", "interfaces", "class-hierarchy", "all-classes"]),
+            ("context-class-loader", &["unmanaged", "service-provider"]),
+        ],
+        "reference" => &[
+            ("cardinality", &["0..1", "1..1"]),
+            ("context-class-loader", &["client", "service-provider", "unmanaged"]),
+        ],
+        "list" | "set" => &[
+            ("cardinality", &["0..N", "1..N"]),
+            ("context-class-loader", &["client", "service-provider", "unmanaged"]),
+            ("member-type", &["service-object", "service-reference"]),
+        ],
+        "natural" if comparator_basis => &[("basis", &["service", "service-reference"])],
+        _ => &[],
+    };
+    let booleans = (importer || local == "service").then_some(("greedy-proxying", BOOLEANS));
+    for &(name, allowed) in enumerated.iter().chain(booleans.iter()) {
+        let Some(a) = e.attr(name) else {
+            continue;
+        };
+        if a.value.contains("${") || allowed.contains(&a.value.trim()) {
+            continue;
+        }
+        let message = format!("Invalid value '{}' for '{name}': must be one of {}", a.value.trim(), allowed.join(", "));
+        out.push(problem(doc.text, (a.value_at, a.value_end), message, "osgi-attribute-value"));
+    }
+    let numeric: Option<(&str, &str, bool)> = match local {
+        "service" => Some(("ranking", "an integer", false)),
+        _ if importer => Some(("timeout", "a non-negative integer", true)),
+        _ => None,
+    };
+    if let Some((name, expected, non_negative)) = numeric
+        && let Some(a) = e.attr(name)
+        && !a.value.contains("${")
+    {
+        let valid = a.value.trim().parse::<i64>().is_ok_and(|n| !non_negative || n >= 0);
+        if !valid {
+            let message = format!("Invalid value '{}' for '{name}': must be {expected}", a.value.trim());
+            out.push(problem(doc.text, (a.value_at, a.value_end), message, "osgi-attribute-value"));
+        }
+    }
 }
 
 /// `SpringOsgiServiceCommonInspection`: the service bean implements every exported interface.
@@ -683,6 +737,153 @@ public class AuditListener implements OsgiServiceLifecycleListener {
         let d = doc("context.xml", CONTEXT);
         let registration = p.completion(&d, after(CONTEXT, "unregistration-method=\"mi"), None);
         assert_eq!(labels(registration), ["bound"], "(ServiceType, Map) only");
+    }
+
+    fn values(name: &str, body: &str) -> Vec<(String, String)> {
+        let host = setup();
+        let text = format!(
+            "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:osgi=\"http://www.springframework.org/schema/osgi\">\n{body}\n</beans>\n"
+        );
+        SpringOsgi::default().line_markers(&doc(name, &text));
+        let found = host.diagnostics().get(&format!("{ROOT}resources/META-INF/spring/{name}")).cloned().unwrap_or_default();
+        assert!(found.iter().all(|d| d.code.as_deref() == Some("osgi-attribute-value") && d.severity == Severity::Error));
+        found
+            .iter()
+            .map(|d| {
+                let line = text.lines().nth(d.range.start.line as usize).unwrap();
+                let at = line[d.range.start.character as usize..d.range.end.character as usize].to_owned();
+                (at, d.message.clone())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wrong_cardinality_is_reported() {
+        let found = values("c1.xml", r#"<osgi:reference interface="a.B" cardinality="0..N"/>"#);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "0..N");
+        assert!(found[0].1.contains("0..1") && found[0].1.contains("1..1"), "{}", found[0].1);
+    }
+
+    #[test]
+    fn cardinality_for_list_and_reference_differ() {
+        let found = values(
+            "c2.xml",
+            r#"<osgi:reference interface="a.B" cardinality="1..1"/>
+<osgi:list interface="a.B" cardinality="1..N"/>
+<osgi:set interface="a.B" cardinality="0..N"/>
+<osgi:list interface="a.B" cardinality="1..1"/>
+<osgi:set interface="a.B" cardinality="0..1"/>"#,
+        );
+        assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["1..1", "0..1"]);
+        assert!(found[0].1.contains("0..N") && found[0].1.contains("1..N"));
+    }
+
+    #[test]
+    fn wrong_auto_export_is_reported() {
+        let found = values("a.xml", r#"<osgi:service ref="x" auto-export="everything"/>"#);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "everything");
+        for allowed in ["disabled", "interfaces", "class-hierarchy", "all-classes"] {
+            assert!(found[0].1.contains(allowed), "{}", found[0].1);
+        }
+    }
+
+    #[test]
+    fn wrong_context_class_loader_is_reported() {
+        let found = values(
+            "l.xml",
+            r#"<osgi:service ref="x" context-class-loader="client"/>
+<osgi:reference interface="a.B" context-class-loader="client"/>
+<osgi:list interface="a.B" context-class-loader="bogus"/>"#,
+        );
+        assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["client", "bogus"]);
+        assert!(!found[0].1.contains("client,") && found[0].1.contains("unmanaged") && found[0].1.contains("service-provider"));
+        assert!(found[1].1.contains("client"));
+    }
+
+    #[test]
+    fn non_integer_ranking_is_reported() {
+        let found = values(
+            "r.xml",
+            r#"<osgi:service ref="x" ranking="high"/>
+<osgi:service ref="x" ranking="-3"/>
+<osgi:reference interface="a.B" timeout="-1"/>
+<osgi:reference interface="a.B" timeout="soon"/>
+<osgi:list interface="a.B" timeout="5"/>"#,
+        );
+        assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["high", "-1", "soon"]);
+    }
+
+    #[test]
+    fn wrong_member_type_is_reported() {
+        let found = values(
+            "m.xml",
+            r#"<osgi:list interface="a.B" member-type="service-object"/>
+<osgi:set interface="a.B" member-type="proxy"/>"#,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "proxy");
+        assert!(found[0].1.contains("service-object") && found[0].1.contains("service-reference"));
+    }
+
+    #[test]
+    fn wrong_ordering_basis_is_reported() {
+        let found = values(
+            "b.xml",
+            r#"<osgi:list interface="a.B"><osgi:comparator><osgi:natural basis="service-reference"/></osgi:comparator></osgi:list>
+<osgi:list interface="a.B"><osgi:comparator><osgi:natural basis="object"/></osgi:comparator></osgi:list>"#,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "object");
+        assert!(found[0].1.contains("service") && found[0].1.contains("service-reference"));
+    }
+
+    #[test]
+    fn attribute_values_are_quiet_for_library_or_dynamic_name() {
+        let found = values(
+            "q.xml",
+            r#"<osgi:service ref="x" auto-export="all-classes" ranking="${rank}" context-class-loader="${l}"/>
+<osgi:reference interface="a.B" cardinality="${card}" timeout="${t}" greedy-proxying="${g}"/>
+<osgi:list interface="a.B" member-type="service-reference" greedy-proxying="true"/>
+<foo:service xmlns:foo="urn:other" auto-export="nonsense" ranking="x"/>
+<bean id="b" class="a.B" cardinality="nonsense"/>"#,
+        );
+        assert!(found.is_empty(), "{found:?}");
+        let host = setup();
+        let text = DEFAULT_NS.replace("interface=", "cardinality=\"bad\" greedy-proxying=\"maybe\" interface=");
+        SpringOsgi::default().line_markers(&doc("default.xml", &text));
+        let found = &host.diagnostics()[&format!("{ROOT}resources/META-INF/spring/default.xml")];
+        let at: Vec<_> = found.iter().map(|d| &text.lines().nth(d.range.start.line as usize).unwrap()[d.range.start.character as usize..d.range.end.character as usize]).collect();
+        assert_eq!(at, ["bad", "maybe"]);
+        let host = setup();
+        SpringOsgi::default().line_markers(&doc("default.xml", DEFAULT_NS));
+        assert!(host.diagnostics().get(&format!("{ROOT}resources/META-INF/spring/default.xml")).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn value_ranges_use_utf16_columns_with_multibyte_text() {
+        let found = {
+            let host = setup();
+            let text = "<beans xmlns:osgi=\"http://www.springframework.org/schema/osgi\"><!-- \u{1F600}\u{e9} --><osgi:service ref=\"x\" auto-export=\"bad\"/></beans>";
+            SpringOsgi::default().line_markers(&doc("u.xml", text));
+            let d = host.diagnostics()[&format!("{ROOT}resources/META-INF/spring/u.xml")].clone();
+            let prefix = text.find("bad").unwrap();
+            let utf16 = text[..prefix].encode_utf16().count() as u32;
+            (d, utf16)
+        };
+        assert_eq!(found.0.len(), 1);
+        assert_eq!((found.0[0].range.start.character, found.0[0].range.end.character), (found.1, found.1 + 3));
+    }
+
+    #[test]
+    fn value_lines_are_right_in_crlf_files() {
+        let host = setup();
+        let text = "<beans xmlns:osgi=\"http://www.springframework.org/schema/osgi\">\r\n<osgi:service ref=\"x\"\r\n    auto-export=\"bad\"/>\r\n</beans>\r\n";
+        SpringOsgi::default().line_markers(&doc("crlf.xml", text));
+        let d = &host.diagnostics()[&format!("{ROOT}resources/META-INF/spring/crlf.xml")];
+        assert_eq!(d.len(), 1);
+        assert_eq!((d[0].range.start.line, d[0].range.start.character, d[0].range.end.character), (2, 17, 20));
     }
 
     #[test]

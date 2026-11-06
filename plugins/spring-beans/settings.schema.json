@@ -34,6 +34,41 @@
       "type": "boolean",
       "title": "Warn about @DependsOn names no project bean defines and @ComponentScan packages without sources (beans from libraries and auto-configuration are invisible, so this may over-report)",
       "default": false
+    },
+    "springBeans.checkAop": {
+      "type": "boolean",
+      "title": "Report incomplete AOP configuration (aop:config, pointcuts, aspects, advisors, advice) in Spring XML files, and pointcut designators Spring AOP does not support in XML and Java @Aspect classes",
+      "default": true
+    },
+    "springBeans.checkInjectionAnnotations": {
+      "type": "boolean",
+      "title": "Report @Autowired, @Value, @Inject and @Resource on static members and conflicting @Autowired constructors",
+      "default": true
+    },
+    "springBeans.checkProfiles": {
+      "type": "boolean",
+      "title": "Report malformed @Profile expressions",
+      "default": true
+    },
+    "springBeans.checkAsync": {
+      "type": "boolean",
+      "title": "Report @Async methods that return a value instead of void or a Future",
+      "default": true
+    },
+    "springBeans.checkCache": {
+      "type": "boolean",
+      "title": "Report cache annotations without a cache name, on interfaces, or combining @Cacheable with @CachePut",
+      "default": true
+    },
+    "springBeans.checkKotlinSpringPlugin": {
+      "type": "boolean",
+      "title": "Report Kotlin classes Spring must proxy when the kotlin-spring compiler plugin is missing",
+      "default": true
+    },
+    "springBeans.checkXml": {
+      "type": "boolean",
+      "title": "Check Spring XML bean files: bean attributes, injected values, scopes, references to abstract beans, and value/ref style hints",
+      "default": true
     }
   }
 }

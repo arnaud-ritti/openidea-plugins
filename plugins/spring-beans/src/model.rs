@@ -31,6 +31,15 @@ pub fn is_xml_ref(els: &[xml::Element], i: usize, a: &xml::Attr) -> bool {
     false
 }
 
+/// The names of a `name`, `ref` or `profile` style list, with their byte offsets in `value`:
+/// Spring splits these on `,`, `;` and whitespace and drops empty tokens.
+pub fn name_tokens(value: &str) -> impl Iterator<Item = (usize, &str)> {
+    value
+        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .map(move |token| (token.as_ptr() as usize - value.as_ptr() as usize, token))
+}
+
 pub const INJECT: [&str; 3] = ["Autowired", "Inject", "Resource"];
 /// Hold one bean: `Optional<Foo>` is a `Foo`.
 const SINGLE_WRAPPERS: [&str; 4] = ["Optional", "ObjectProvider", "Provider", "Lazy"];
@@ -53,6 +62,8 @@ pub struct Bean {
     pub qualifiers: Vec<String>,
     /// Carries a `@Conditional*` annotation: it may not exist at run time.
     pub conditional: bool,
+    /// `<bean abstract="true">`: a template, never instantiated.
+    pub is_abstract: bool,
     pub range: Range,
 }
 
@@ -200,6 +211,7 @@ pub fn class_bean(text: &str, name: &str, short_name: &str, at: usize, annotatio
         profiles: values(annotations, &["Profile"]),
         qualifiers: values(annotations, &["Qualifier", "Named"]),
         conditional: is_conditional(annotations),
+        is_abstract: false,
         range: range(text, at, at + name.len()),
     })
 }
@@ -218,6 +230,7 @@ pub fn method_bean(text: &str, name: &str, at: usize, ty: &str, annotations: &[A
         profiles: if profiles.is_empty() { class.to_vec() } else { profiles },
         qualifiers: values(annotations, &["Qualifier", "Named"]),
         conditional: is_conditional(annotations),
+        is_abstract: false,
         range: range(text, at, at + name.len()),
     }
 }
@@ -322,8 +335,7 @@ fn xml_model(text: &str) -> FileModel {
         }
         let top = e.parent.is_some_and(|p| els[p].local() == "beans");
         let id = e.attr("id");
-        let names: Vec<String> =
-            e.value("name").unwrap_or("").split([',', ';', ' ']).filter(|n| !n.is_empty()).map(str::to_owned).collect();
+        let names: Vec<String> = name_tokens(e.value("name").unwrap_or("")).map(|(_, n)| n.to_owned()).collect();
         let class = e.value("class").unwrap_or("");
         let is_bean = e.local() == "bean" && (id.is_some() || !names.is_empty() || !class.is_empty());
         if is_bean || top && id.is_some() {
@@ -335,7 +347,7 @@ fn xml_model(text: &str) -> FileModel {
             let mut up = e.parent;
             while let Some(p) = up {
                 if let Some(profile) = els[p].value("profile") {
-                    profiles.extend(profile.split([',', ' ']).filter(|s| !s.is_empty()).map(str::to_owned));
+                    profiles.extend(name_tokens(profile).map(|(_, p)| p.to_owned()));
                 }
                 up = els[p].parent;
             }
@@ -349,13 +361,14 @@ fn xml_model(text: &str) -> FileModel {
                 profiles,
                 qualifiers: Vec::new(),
                 conditional: false,
+                is_abstract: e.value("abstract") == Some("true"),
                 range: at,
             });
             owners[i] = Some(out.beans.len() - 1);
         }
         let by_name = e.attrs.iter().filter(|a| is_xml_ref(&els, i, a));
         for a in by_name {
-            for name in a.value.split([',', ';', ' ']).filter(|n| !n.is_empty()) {
+            for (_, name) in name_tokens(&a.value) {
                 out.injections.push(Injection {
                     ty: String::new(),
                     name: name.to_owned(),

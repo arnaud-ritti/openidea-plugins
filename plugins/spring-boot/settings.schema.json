@@ -24,6 +24,11 @@
       "type": "boolean",
       "title": "Check @SpringBootApplication classes (default package, redundant annotations)",
       "default": true
+    },
+    "springBoot.checkTestLifecycle": {
+      "type": "boolean",
+      "title": "Check @DirtiesContext modes and @BeforeTransaction/@AfterTransaction signatures",
+      "default": true
     }
   }
 }

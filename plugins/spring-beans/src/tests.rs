@@ -1,6 +1,8 @@
 use super::*;
 use openidea_plugin::Event;
 use openidea_plugin::mock::MockHost;
+use spring_text::xml;
+use crate::annotation_checks;
 
 const SERVICE: &str = r#"package com.acme;
 
@@ -944,4 +946,1260 @@ fn unresolved_references_are_quiet_on_a_partial_index() {
     let world = World::new(&index);
     let found = checks::check_java(&format!("{ROOT}/Subject.java"), &file, text, &world, checks::Groups::from_settings());
     assert!(found.iter().all(|f| f.code != "unresolved-depends-on"));
+}
+
+const XML_PATH: &str = "/project/src/main/resources/aop.xml";
+
+fn beans_xml(body: &str) -> String {
+    format!(
+        "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:aop=\"http://www.springframework.org/schema/aop\">\n{body}\n</beans>\n"
+    )
+}
+
+fn xml_findings(host: &MockHost, text: &str) -> Vec<(String, String)> {
+    let document = doc(XML_PATH, text);
+    Navigator::default().line_markers(&document);
+    host.diagnostics()
+        .get(XML_PATH)
+        .into_iter()
+        .flatten()
+        .map(|d| {
+            let (from, to) = (offset(text, d.range.start).unwrap(), offset(text, d.range.end).unwrap());
+            (d.code.clone().unwrap(), text[from..to].to_owned())
+        })
+        .collect()
+}
+
+fn aop_found(body: &str) -> Vec<(String, String)> {
+    xml_findings(&MockHost::install(), &beans_xml(body))
+}
+
+#[test]
+fn aop_pointcut_without_expression_is_reported() {
+    let found = aop_found("<aop:config><aop:pointcut id=\"p\"/></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:pointcut")]);
+    assert_eq!(aop_found("<aop:config><aop:pointcut expression=\"within(a..*)\"/></aop:config>").len(), 1);
+}
+
+#[test]
+fn aop_aspect_without_ref_is_reported() {
+    let found = aop_found("<aop:config><aop:aspect id=\"a\"/></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:aspect")]);
+}
+
+#[test]
+fn aop_advice_without_pointcut_is_reported() {
+    let found = aop_found("<aop:config><aop:aspect ref=\"a\"><aop:before method=\"m\"/></aop:aspect></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:before")]);
+    let no_method = aop_found("<aop:config><aop:aspect ref=\"a\"><aop:around pointcut-ref=\"p\"/></aop:aspect></aop:config>");
+    assert_eq!(no_method, [pair("aop-structure", "aop:around")]);
+}
+
+#[test]
+fn aop_advice_with_both_pointcut_and_pointcut_ref_is_reported() {
+    let found = aop_found("<aop:config><aop:aspect ref=\"a\"><aop:after method=\"m\" pointcut=\"x\" pointcut-ref=\"p\"/></aop:aspect></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:after")]);
+}
+
+#[test]
+fn aop_advisor_without_advice_ref_is_reported() {
+    let found = aop_found("<aop:config><aop:advisor pointcut-ref=\"p\"/></aop:config>");
+    assert_eq!(found, [pair("aop-structure", "aop:advisor")]);
+}
+
+#[test]
+fn aop_structure_is_quiet_for_library_or_dynamic_name() {
+    let dynamic = "<aop:config><aop:aspect ref=\"${aspect}\"><aop:before method=\"m\" pointcut=\"${a}\" pointcut-ref=\"${b}\"/></aop:aspect></aop:config>";
+    assert!(aop_found(dynamic).is_empty());
+    let lookalike = "<x:config xmlns:x=\"urn:other\"><x:pointcut/><x:aspect/><x:advisor/></x:config>";
+    assert!(aop_found(lookalike).is_empty());
+    let outside_config = "<aop:pointcut id=\"p\"/>";
+    assert!(aop_found(outside_config).is_empty());
+    let dynamic_pair = "<aop:config><aop:aspect ref=\"a\"><aop:before method=\"m\" pointcut=\"x\" pointcut-ref=\"#{b}\"/></aop:aspect></aop:config>";
+    assert!(aop_found(dynamic_pair).is_empty());
+    let not_beans = "<project xmlns:aop=\"http://www.springframework.org/schema/aop\"><aop:config><aop:aspect/></aop:config></project>";
+    assert!(xml_findings(&MockHost::install(), not_beans).is_empty());
+}
+
+#[test]
+fn bean_with_class_and_factory_bean_is_reported() {
+    let found = aop_found("<bean id=\"a\" class=\"x.Y\" factory-bean=\"f\" factory-method=\"make\"/>");
+    assert_eq!(found, [pair("xml-bean-attributes", "factory-bean")]);
+    let host = MockHost::install();
+    xml_findings(&host, &beans_xml("<bean id=\"a\" class=\"x.Y\" factory-bean=\"f\" factory-method=\"make\"/>"));
+    assert_eq!(host.diagnostics()[XML_PATH][0].severity, Severity::Warning);
+    xml_findings(&host, &beans_xml("<bean id=\"a\" factory-bean=\"f\"/>"));
+    assert_eq!(host.diagnostics()[XML_PATH][0].severity, Severity::Error);
+}
+
+#[test]
+fn factory_bean_without_factory_method_is_reported() {
+    let found = aop_found("<bean id=\"a\" factory-bean=\"f\"/>");
+    assert_eq!(found, [pair("xml-bean-attributes", "factory-bean")]);
+}
+
+#[test]
+fn bean_without_class_parent_or_factory_bean_is_reported() {
+    let found = aop_found("<bean id=\"a\"/>");
+    assert_eq!(found, [pair("xml-bean-attributes", "bean")]);
+    assert!(aop_found("<bean id=\"a\" parent=\"b\"/>").is_empty());
+}
+
+#[test]
+fn abstract_bean_without_class_is_quiet() {
+    assert!(aop_found("<bean id=\"a\" abstract=\"true\"/>").is_empty());
+}
+
+#[test]
+fn property_with_ref_and_value_is_reported() {
+    let found = aop_found("<bean class=\"x.Y\"><property name=\"p\" ref=\"a\" value=\"b\"/></bean>");
+    assert_eq!(found, [pair("xml-injection-value", "property")]);
+    let arg = aop_found("<bean class=\"x.Y\"><constructor-arg ref=\"a\" value=\"b\"/></bean>");
+    assert_eq!(arg, [pair("xml-injection-value", "constructor-arg")]);
+}
+
+#[test]
+fn property_with_attribute_and_child_element_is_reported() {
+    let found = aop_found("<bean class=\"x.Y\"><property name=\"p\" value=\"b\"><list/></property></bean>");
+    assert_eq!(found, [pair("xml-injection-value", "property")]);
+    let described = aop_found("<bean class=\"x.Y\"><property name=\"p\" value=\"b\"><description>d</description></property></bean>");
+    assert!(described.is_empty());
+}
+
+#[test]
+fn property_with_nothing_is_reported() {
+    let found = aop_found("<bean class=\"x.Y\"><property name=\"p\"/></bean>");
+    assert_eq!(found, [pair("xml-injection-value", "property")]);
+    assert!(aop_found("<bean class=\"x.Y\"><property name=\"p\"><null/></property></bean>").is_empty());
+}
+
+#[test]
+fn constructor_arg_without_value_is_quiet() {
+    assert!(aop_found("<bean class=\"x.Y\"><constructor-arg index=\"0\"/></bean>").is_empty());
+}
+
+#[test]
+fn misspelled_scope_is_reported() {
+    let found = aop_found("<bean class=\"x.Y\" scope=\"Singleton\"/>");
+    assert_eq!(found, [pair("xml-scope", "Singleton")]);
+    let typo = aop_found("<bean class=\"x.Y\" scope=\"protoype\"/>");
+    assert_eq!(typo, [pair("xml-scope", "protoype")]);
+}
+
+#[test]
+fn bundle_scope_is_accepted() {
+    assert!(aop_found("<bean class=\"x.Y\" scope=\"bundle\"/>").is_empty());
+}
+
+#[test]
+fn custom_scope_is_quiet() {
+    assert!(aop_found("<bean class=\"x.Y\" scope=\"thread\"/>").is_empty());
+    assert!(aop_found("<bean class=\"x.Y\" scope=\"custom\"/>").is_empty());
+}
+
+#[test]
+fn xml_attribute_checks_are_quiet_for_library_or_dynamic_name() {
+    let dynamic = "<bean id=\"a\" class=\"${c}\" factory-bean=\"#{f}\" scope=\"${Singleton}\"><property name=\"p\" ref=\"${r}\" value=\"v\"/></bean>";
+    assert!(aop_found(dynamic).is_empty());
+    let other_ns = "<x:bean xmlns:x=\"urn:other\" id=\"a\" scope=\"Singleton\"><x:property name=\"p\"/></x:bean>";
+    assert!(aop_found(other_ns).is_empty());
+    let other_file = "<project xmlns=\"urn:other\"><bean id=\"a\" scope=\"Singleton\"><property name=\"p\"/></bean></project>";
+    assert!(xml_findings(&MockHost::install(), other_file).is_empty());
+}
+
+#[test]
+fn xml_attribute_checks_use_utf16_columns_and_crlf_lines() {
+    let host = MockHost::install();
+    let text = beans_xml("<!-- caf\u{e9}\u{1F600} --><bean id=\"a\"/>");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (2, 16, 20));
+    let text = beans_xml("<bean class=\"x.Y\"\n scope=\"Singleton\"/>").replace('\n', "\r\n");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (3, 8, 17));
+}
+
+#[test]
+fn xml_bean_name_with_capital_is_hinted() {
+    let found = aop_found("<bean id=\"Dispatcher\" name=\"alias, Other\" class=\"x.Y\"/>");
+    assert_eq!(found, [pair("bean-name-convention", "Dispatcher"), pair("bean-name-convention", "Other")]);
+}
+
+#[test]
+fn duplicate_xml_ids_in_one_file_are_reported() {
+    let found = aop_found("<bean id=\"a\" class=\"x.Y\"/>\n<bean id=\"b\" name=\"a\" class=\"x.Y\"/>");
+    assert_eq!(found, [pair("duplicate-bean-name", "a")]);
+    let host = MockHost::install();
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"/>\n<bean id=\"a\" class=\"x.Y\"/>");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character), (3, 10));
+}
+
+#[test]
+fn xml_bean_clashing_with_java_bean_is_reported() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Dispatcher.java", "@Service(\"dispatcher\")\nclass Dispatcher {}\n");
+    let found = xml_findings(&host, &beans_xml("<bean id=\"dispatcher\" class=\"x.Y\"/>"));
+    assert_eq!(found, [pair("duplicate-bean-name", "dispatcher")]);
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Dispatcher.java", "@Service(\"dispatcher\")\n@Profile(\"dev\")\nclass Dispatcher {}\n");
+    let other_profile = beans_xml("<beans profile=\"prod\"><bean id=\"dispatcher\" class=\"x.Y\"/></beans>");
+    assert!(xml_findings(&host, &other_profile).is_empty());
+}
+
+#[test]
+fn same_id_in_different_profile_blocks_is_quiet() {
+    let body = "<beans profile=\"dev\"><bean id=\"a\" class=\"x.Y\"/></beans><beans profile=\"prod\"><bean id=\"a\" class=\"x.Z\"/></beans>";
+    assert!(aop_found(body).is_empty());
+}
+
+#[test]
+fn same_id_in_two_xml_files_is_quiet() {
+    let host = MockHost::install();
+    host.add_file("src/main/resources/other.xml", &beans_xml("<bean id=\"a\" class=\"x.Y\"/>"));
+    assert!(xml_findings(&host, &beans_xml("<bean id=\"a\" class=\"x.Z\"/>")).is_empty());
+}
+
+#[test]
+fn generated_names_are_quiet() {
+    let body = "<bean id=\"x.Y#0\" class=\"x.Y\"/><bean id=\"x.Y#0\" class=\"x.Y\"/>";
+    assert!(aop_found(body).is_empty());
+}
+
+#[test]
+fn xml_names_are_quiet_for_library_or_dynamic_name() {
+    let dynamic = "<bean id=\"${A}\" class=\"x.Y\"/><bean id=\"${A}\" class=\"x.Y\"/><bean id=\"A#{b}\" class=\"x.Y\"/>";
+    assert!(aop_found(dynamic).is_empty());
+    let other_file = "<project xmlns=\"urn:other\"><bean id=\"A\"/><bean id=\"A\"/></project>";
+    assert!(xml_findings(&MockHost::install(), other_file).is_empty());
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkNaming", "false");
+    host.set_setting("springBeans.checkDuplicateNames", "false");
+    assert!(xml_findings(&host, &beans_xml("<bean id=\"A\" class=\"x.Y\"/><bean id=\"A\" class=\"x.Y\"/>")).is_empty());
+}
+
+#[test]
+fn ref_to_abstract_bean_is_reported() {
+    let body = "<bean id=\"base\" abstract=\"true\"/>\n<bean id=\"a\" class=\"x.Y\" depends-on=\"base\"><property name=\"p\" ref=\"base\"/><property name=\"q\"><ref bean=\"base\"/></property></bean>";
+    let found: Vec<_> = aop_found(body).into_iter().filter(|(code, _)| code == "xml-abstract-reference").collect();
+    assert_eq!(found, vec![pair("xml-abstract-reference", "base"); 3]);
+}
+
+#[test]
+fn parent_to_abstract_bean_is_quiet() {
+    assert!(aop_found("<bean id=\"base\" abstract=\"true\"/><bean id=\"a\" parent=\"base\"/>").is_empty());
+}
+
+#[test]
+fn ref_to_bean_with_a_concrete_definition_is_quiet() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Base.java", "@Service(\"base\")\nclass Base {}\n");
+    let body = "<bean id=\"base\" abstract=\"true\"/><bean id=\"a\" class=\"x.Y\"><property name=\"p\" ref=\"base\"/></bean>";
+    let found = xml_findings(&host, &beans_xml(body));
+    assert!(found.iter().all(|(code, _)| code != "xml-abstract-reference"));
+}
+
+#[test]
+fn xml_name_findings_use_utf16_columns_and_crlf_lines() {
+    let host = MockHost::install();
+    let text = beans_xml("<!-- caf\u{e9}\u{1F600} --><bean id=\"Ab\" class=\"x.Y\"/>");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (2, 25, 27));
+    let text = beans_xml("<bean id=\"base\" abstract=\"true\"/>\n<bean class=\"x.Y\"\n  depends-on=\"base\"/>").replace('\n', "\r\n");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (4, 14, 18));
+}
+
+#[test]
+fn switched_off_xml_group_is_quiet() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkXml", "false");
+    assert!(xml_findings(&host, &beans_xml("<bean id=\"a\"/>")).is_empty());
+}
+
+#[test]
+fn xml_ranges_use_utf16_columns_with_multibyte_text() {
+    let host = MockHost::install();
+    let text = beans_xml("<!-- caf\u{e9}\u{1F600} --><aop:config><aop:aspect id=\"a\"/></aop:config>");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (2, 28, 38));
+}
+
+#[test]
+fn xml_crlf_files_report_correct_lines() {
+    let host = MockHost::install();
+    let text = beans_xml("<aop:config>\n<aop:aspect id=\"a\"/>\n</aop:config>").replace('\n', "\r\n");
+    xml_findings(&host, &text);
+    let d = &host.diagnostics()[XML_PATH][0];
+    assert_eq!((d.range.start.line, d.range.start.character), (3, 1));
+}
+
+#[test]
+fn fixed_xml_file_publishes_empty_list() {
+    let host = MockHost::install();
+    let broken = beans_xml("<aop:config><aop:aspect id=\"a\"/></aop:config>");
+    assert_eq!(xml_findings(&host, &broken).len(), 1);
+    let fixed = broken.replace("id=\"a\"", "ref=\"a\"");
+    assert!(xml_findings(&host, &fixed).is_empty());
+    assert!(host.diagnostics().get(XML_PATH).is_none_or(Vec::is_empty), "no stale problem is left");
+}
+
+#[test]
+fn switched_off_aop_group_is_quiet() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkAop", "false");
+    assert!(xml_findings(&host, &beans_xml("<aop:config><aop:aspect id=\"a\"/></aop:config>")).is_empty());
+}
+
+#[test]
+fn saved_xml_is_checked_and_pom_is_not() {
+    let host = MockHost::install();
+    let broken = beans_xml("<aop:config><aop:aspect id=\"a\"/></aop:config>");
+    host.add_file("src/main/resources/aop.xml", &broken);
+    host.add_file("pom.xml", "<project><bean id=\"a\" class=\"x.Y\"/></project>");
+    let mut n = Navigator::default();
+    n.handle_events(&[Event::FileSaved(XML_PATH.into())], &host.invocation());
+    assert_eq!(host.diagnostics()[XML_PATH].len(), 1);
+    n.handle_events(&[Event::FileSaved("/project/pom.xml".into())], &host.invocation());
+    assert!(host.diagnostics().get("/project/pom.xml").is_none_or(Vec::is_empty));
+}
+
+const WEAVING_ASPECT: &str = "import org.aspectj.lang.annotation.*;\n\n@Aspect\nclass Tracing {\n    @Before(\"within(a..*) && call(* *(..))\")\n    void trace() {}\n}\n";
+
+#[test]
+fn unsupported_designator_in_java_advice_is_reported() {
+    assert_eq!(found(WEAVING_ASPECT), [pair("unsupported-pointcut-designator", "call")]);
+    let utf16 = "@Aspect\nclass T {\n    @Pointcut(\"within(é..*) && cflow(x())\")\n    void p() {}\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", utf16);
+    Navigator::default().line_markers(&document);
+    let diagnostic = &host.diagnostics()[&document.path][0];
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 31));
+    assert_eq!(diagnostic.range.end.character, 36);
+}
+
+#[test]
+fn unsupported_designator_in_xml_expression_is_reported() {
+    let body = "<aop:config><aop:pointcut id=\"p\" expression=\"call(* *(..))\"/>\
+        <aop:aspect ref=\"a\"><aop:before method=\"m\" pointcut=\"within(a..*) &amp;&amp; get(* x)\"/></aop:aspect></aop:config>";
+    assert_eq!(aop_found(body), [pair("unsupported-pointcut-designator", "call"), pair("unsupported-pointcut-designator", "get")]);
+    assert!(aop_found("<aop:config><aop:pointcut id=\"p\" expression=\"execution(* get(..))\"/></aop:config>").is_empty());
+}
+
+#[test]
+fn unsupported_designator_is_quiet_for_library_or_dynamic_name() {
+    let concatenated = WEAVING_ASPECT.replace("\"within(a..*) && call(* *(..))\"", "\"within(a..*) && \" + \"call(* *(..))\"");
+    assert!(found(&concatenated).is_empty());
+    let placeholder = WEAVING_ASPECT.replace("call(* *(..))", "${expr}");
+    assert!(found(&placeholder).is_empty());
+    let foreign = "import org.junit.Before;\n\n@Aspect\nclass T {\n    @Before(\"call(* *(..))\")\n    void p() {}\n}\n";
+    assert!(found(foreign).is_empty());
+    let not_an_aspect = "class T {\n    @Before(\"call(* *(..))\")\n    void p() {}\n}\n";
+    assert!(found(not_an_aspect).is_empty());
+    let host = MockHost::install();
+    host.add_file("pom.xml", "<project><build><plugin>aspectj-maven-plugin</plugin></build></project>");
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", WEAVING_ASPECT).is_empty());
+    let xml_host = MockHost::install();
+    xml_host.add_file("pom.xml", "<project>aspectjtools</project>");
+    let body = "<aop:config><aop:pointcut id=\"p\" expression=\"call(* *(..))\"/></aop:config>";
+    assert!(xml_findings(&xml_host, &beans_xml(body)).is_empty());
+    assert!(aop_found("<aop:config><aop:pointcut id=\"p\" expression=\"${expr}\"/></aop:config>").is_empty());
+}
+
+#[test]
+fn crlf_files_report_correct_lines() {
+    let text = "@Aspect\r\nclass T {\r\n    @Pointcut(\"within(a..*) && cflow(x())\")\r\n    void p() {}\r\n}\r\n";
+    let document = java("Subject.java", text);
+    let host = MockHost::install();
+    Navigator::default().line_markers(&document);
+    let range = host.diagnostics()[&document.path][0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.line, range.end.character), (2, 31, 2, 36));
+
+    let xml = beans_xml("<aop:config>\r\n<aop:pointcut id=\"p\" expression=\"within(a..*) &amp;&amp; call(* *(..))\"/>\r\n</aop:config>").replace('\n', "\r\n");
+    let host = MockHost::install();
+    Navigator::default().line_markers(&doc(XML_PATH, &xml));
+    let range = host.diagnostics()[XML_PATH][0].range;
+    assert_eq!((range.start.line, range.start.character, range.end.line, range.end.character), (3, 57, 3, 61));
+}
+
+#[test]
+fn escaped_literal_is_quiet() {
+    let escaped = WEAVING_ASPECT.replace("within(a..*) &&", "within(a..*) \\t&&");
+    assert!(found(&escaped).is_empty());
+}
+
+fn applied_xml_fix(text: &str) -> Option<String> {
+    let host = MockHost::install();
+    let document = doc(XML_PATH, text);
+    let mut navigator = Navigator::default();
+    navigator.line_markers(&document);
+    let hint = host.diagnostics()[XML_PATH].iter().find(|d| d.code.as_deref() == Some("xml-value-style"))?.range;
+    let actions = navigator.code_actions(&document, hint);
+    let edits = &actions.first()?.edits;
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].0, XML_PATH);
+    let mut fixed = text.to_owned();
+    for e in &edits[0].1 {
+        let (s, t) = (offset(&fixed, e.range.start).unwrap(), offset(&fixed, e.range.end).unwrap());
+        fixed.replace_range(s..t, &e.text);
+    }
+    Some(fixed)
+}
+
+#[test]
+fn value_element_is_hinted_and_rewritten_to_attribute() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\">\n<property name=\"n\">\n  <value>5 &amp; 6</value>\n</property>\n</bean>");
+    let host = MockHost::install();
+    assert_eq!(xml_findings(&host, &text), [pair("xml-value-style", "value")]);
+    assert_eq!(host.diagnostics()[XML_PATH][0].severity, Severity::Hint);
+    let constructor = beans_xml("<bean id=\"a\" class=\"x.Y\"><constructor-arg index=\"0\"><value>7</value></constructor-arg></bean>");
+    assert_eq!(xml_findings(&host, &constructor), [pair("xml-value-style", "value")]);
+    let fixed = applied_xml_fix(&text).unwrap();
+    assert!(fixed.contains("<property name=\"n\" value=\"5 &amp; 6\"/>\n</bean>"), "{fixed}");
+    let els = spring_text::xml::elements(&fixed);
+    let property = els.iter().find(|e| e.name == "property").unwrap();
+    assert_eq!(property.value("value"), Some("5 &amp; 6"));
+    assert!(els.iter().all(|e| e.name != "value"));
+}
+
+#[test]
+fn ref_element_is_hinted_and_rewritten_to_attribute() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\">\n<property name=\"n\"><ref bean=\"other\"/></property>\n</bean>");
+    let host = MockHost::install();
+    assert_eq!(xml_findings(&host, &text), [pair("xml-value-style", "ref")]);
+    let fixed = applied_xml_fix(&text).unwrap();
+    assert!(fixed.contains("<property name=\"n\" ref=\"other\"/>\n</bean>"), "{fixed}");
+    let els = spring_text::xml::elements(&fixed);
+    let property = els.iter().find(|e| e.name == "property").unwrap();
+    assert_eq!(property.value("ref"), Some("other"));
+    assert!(els.iter().all(|e| e.name != "ref"));
+    assert!(els.iter().any(|e| e.name == "bean"));
+}
+
+#[test]
+fn value_style_is_quiet_for_library_or_dynamic_name() {
+    let host = MockHost::install();
+    let quiet = |body: &str| {
+        let found = xml_findings(&host, &beans_xml(&format!("<bean id=\"a\" class=\"x.Y\">{body}</bean>")));
+        assert!(found.iter().all(|(code, _)| code != "xml-value-style"), "{body}: {found:?}");
+    };
+    quiet("<property name=\"n\"><value>one\ntwo</value></property>");
+    quiet("<property name=\"n\"><value><![CDATA[a<b]]></value></property>");
+    quiet("<property name=\"n\"><value type=\"java.lang.String\">v</value></property>");
+    quiet("<property name=\"n\"><value>say \"hi\"</value></property>");
+    quiet("<property name=\"n\"><value>a</value><value>b</value></property>");
+    quiet("<property name=\"n\"><value>a</value><description>d</description></property>");
+    quiet("<property name=\"n\"><ref local=\"o\"/></property>");
+    quiet("<property name=\"n\"><ref bean=\"o\" local=\"o\"/></property>");
+    quiet("<property name=\"n\"><ref bean=\"${o}\"/></property>");
+    quiet("<property name=\"n\"><value>${v}</value></property>");
+    quiet("<property name=\"n\" value=\"x\"><value>a</value></property>");
+    quiet("<property name=\"n\"/>");
+    quiet("<property name=\"n\"><!-- keep --><value>a</value></property>");
+    let other_ns = "<x:bean xmlns:x=\"urn:other\"><x:property name=\"n\"><x:value>a</x:value></x:property></x:bean>";
+    assert!(xml_findings(&host, other_ns).is_empty());
+    host.set_setting("springBeans.checkXml", "false");
+    let off = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\"><value>a</value></property></bean>");
+    assert!(xml_findings(&host, &off).is_empty());
+}
+
+#[test]
+fn rewrite_keeps_multibyte_text() {
+    let text = beans_xml("<!-- \u{1F600} --><bean id=\"a\" class=\"x.Y\">\n<property name=\"n\"><value>caf\u{e9} \u{1F600}</value></property>\n</bean>").replace('\n', "\r\n");
+    let host = MockHost::install();
+    xml_findings(&host, &text);
+    let hint = host.diagnostics()[XML_PATH][0].range;
+    assert_eq!((hint.start.line, hint.start.character), (3, 20));
+    let fixed = applied_xml_fix(&text).unwrap();
+    assert!(fixed.contains("<property name=\"n\" value=\"caf\u{e9} \u{1F600}\"/>\r\n</bean>"), "{fixed:?}");
+    let els = spring_text::xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "property").unwrap().value("value"), Some("caf\u{e9} \u{1F600}"));
+}
+
+#[test]
+fn code_action_applies_the_edit_to_the_open_file() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\"><value>v</value></property></bean>");
+    let host = MockHost::install();
+    let document = doc(XML_PATH, &text);
+    let mut navigator = Navigator::default();
+    navigator.line_markers(&document);
+    let hint = host.diagnostics()[XML_PATH][0].range;
+    let actions = navigator.code_actions(&document, hint);
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "Use the value attribute");
+    assert_eq!(actions[0].edits.len(), 1);
+    assert_eq!(actions[0].edits[0].0, XML_PATH);
+    let elsewhere = Range::new(Position::new(0, 1), Position::new(0, 1));
+    assert!(navigator.code_actions(&document, elsewhere).is_empty());
+
+    let reference = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\"><ref bean=\"o\"/></property></bean>");
+    let document = doc(XML_PATH, &reference);
+    navigator.line_markers(&document);
+    let hint = host.diagnostics()[XML_PATH][0].range;
+    assert_eq!(navigator.code_actions(&document, hint)[0].title, "Use the ref attribute");
+}
+
+fn apply_edits(text: &str, edits: &[TextEdit]) -> String {
+    let mut fixed = text.to_owned();
+    for e in edits {
+        let (s, t) = (offset(&fixed, e.range.start).unwrap(), offset(&fixed, e.range.end).unwrap());
+        fixed.replace_range(s..t, &e.text);
+    }
+    fixed
+}
+
+fn caret_in(text: &str, needle: &str) -> usize {
+    text.find(needle).unwrap() + 2
+}
+
+const P_NS: &str = "http://www.springframework.org/schema/p";
+
+#[test]
+fn p_namespace_moves_value_and_adds_declaration() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\">\n  <property name=\"n\" value=\"5\"/>\n  <property name=\"m\" value=\"6\"/>\n</bean>");
+    let edits = xml_actions::use_p_namespace(&text, caret_in(&text, "<property name=\"n\"")).unwrap();
+    let fixed = apply_edits(&text, &edits);
+    assert!(fixed.contains("class=\"x.Y\" p:n=\"5\">\n  <property name=\"m\" value=\"6\"/>\n</bean>"), "{fixed}");
+    let els = xml::elements(&fixed);
+    assert_eq!(els[0].value("xmlns:p"), Some(P_NS));
+    assert_eq!(els.iter().find(|e| e.name == "bean").unwrap().value("p:n"), Some("5"));
+    assert_eq!(els.iter().filter(|e| e.name == "property").count(), 1);
+    assert_eq!(xml::elements(&fixed).len(), 3);
+}
+
+#[test]
+fn p_namespace_reuses_bound_prefix() {
+    let text = format!("<beans xmlns=\"http://www.springframework.org/schema/beans\" xmlns:q='{P_NS}'>\n<bean id='a' class='x.Y'><property name='n' value='say \"hi\"'/></bean>\n</beans>");
+    let edits = xml_actions::use_p_namespace(&text, caret_in(&text, "<property")).unwrap();
+    let fixed = apply_edits(&text, &edits);
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "bean").unwrap().value("q:n"), Some("say \"hi\""));
+    assert!(els[0].attrs.iter().all(|a| a.name != "xmlns:p"));
+    assert!(els.iter().all(|e| e.name != "property"));
+}
+
+#[test]
+fn p_namespace_for_ref_uses_ref_suffix() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\" ref=\"b\"/></bean>");
+    let edits = xml_actions::use_p_namespace(&text, caret_in(&text, "<property")).unwrap();
+    let els = xml::elements(&apply_edits(&text, &edits));
+    assert_eq!(els.iter().find(|e| e.name == "bean").unwrap().value("p:n-ref"), Some("b"));
+}
+
+#[test]
+fn p_namespace_is_quiet_for_library_or_dynamic_name() {
+    let quiet = |text: &str| assert!(xml_actions::use_p_namespace(text, caret_in(text, "<property")).is_none(), "{text}");
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"my.n\" value=\"5\"/></bean>"));
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"my-n\" value=\"5\"/></bean>"));
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"${n}\" value=\"5\"/></bean>"));
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\" value=\"5\" ref=\"b\"/></bean>"));
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\"><value>5</value></property></bean>"));
+    quiet(&format!("<beans xmlns=\"http://www.springframework.org/schema/beans\" xmlns:p=\"{P_NS}\"><bean id=\"a\" class=\"x.Y\" p:n=\"1\"><property name=\"n\" value=\"5\"/></bean></beans>"));
+    quiet("<beans xmlns=\"http://www.springframework.org/schema/beans\" xmlns:p=\"urn:other\"><bean id=\"a\" class=\"x.Y\"><property name=\"n\" value=\"5\"/></bean></beans>");
+    quiet("<beans xmlns=\"http://www.springframework.org/schema/beans\"><x:bean xmlns:x=\"urn:o\"><property name=\"n\" value=\"5\"/></x:bean></beans>");
+    quiet("<project><bean><property name=\"n\" value=\"5\"/></bean></project>");
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\" value=\"5\"/></bean>");
+    assert!(xml_actions::use_p_namespace(&text, 0).is_none());
+}
+
+const INNER: &str = "<bean id=\"a\" class=\"x.Y\">\n  <property name=\"dao\">\n    <bean class=\"com.acme.UserDao\">\n      <property name=\"k\" value=\"1\"/>\n    </bean>\n  </property>\n</bean>";
+
+#[test]
+fn introduce_bean_moves_inner_bean_and_references_it() {
+    let text = beans_xml(INNER);
+    let edits = xml_actions::introduce_bean(&text, caret_in(&text, "<bean class"), BTreeSet::new).unwrap();
+    let fixed = apply_edits(&text, &edits);
+    let els = xml::elements(&fixed);
+    let names: Vec<_> = els.iter().map(|e| (e.name.as_str(), e.parent)).collect();
+    assert_eq!(names, [("beans", None), ("bean", Some(0)), ("property", Some(1)), ("bean", Some(0)), ("property", Some(3))]);
+    assert_eq!(els[2].value("ref"), Some("userDao"));
+    assert_eq!(els[3].value("id"), Some("userDao"));
+    assert_eq!(els[3].value("class"), Some("com.acme.UserDao"));
+    assert!(fixed.contains("</bean>\n<bean id=\"userDao\" class=\"com.acme.UserDao\">\n  <property name=\"k\" value=\"1\"/>\n</bean>\n</beans>"), "{fixed}");
+
+    let list = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"l\"><list><bean class=\"p.Q$R\"/></list></property></bean>");
+    let fixed = apply_edits(&list, &xml_actions::introduce_bean(&list, caret_in(&list, "<bean class"), BTreeSet::new).unwrap());
+    let els = xml::elements(&fixed);
+    let reference = els.iter().find(|e| e.name == "ref").unwrap();
+    assert_eq!(reference.value("bean"), Some("r"));
+    assert_eq!(els[reference.parent.unwrap()].name, "list");
+    assert_eq!(els.iter().find(|e| e.value("id") == Some("r")).unwrap().parent, Some(0));
+}
+
+#[test]
+fn introduce_bean_picks_an_unused_id() {
+    let text = beans_xml("<bean id=\"userDao\" class=\"a.B\"/><bean name=\"x, userDao2\" class=\"a.C\"/>\n<alias name=\"userDao\" alias=\"userDao3\"/>\n<bean id=\"a\" class=\"x.Y\"><constructor-arg><bean class=\"com.acme.UserDao\"/></constructor-arg></bean>");
+    let fixed = apply_edits(&text, &xml_actions::introduce_bean(&text, caret_in(&text, "<bean class"), BTreeSet::new).unwrap());
+    let els = xml::elements(&fixed);
+    assert!(els.iter().any(|e| e.name == "bean" && e.value("id") == Some("userDao4")), "{fixed}");
+    let arg = els.iter().find(|e| e.name == "constructor-arg").unwrap();
+    assert_eq!(arg.value("ref"), Some("userDao4"));
+}
+
+#[test]
+fn introduce_bean_is_quiet_when_bean_has_id() {
+    let quiet = |text: &str| assert!(xml_actions::introduce_bean(text, text.rfind("<bean").unwrap() + 2, BTreeSet::new).is_none(), "{text}");
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"d\"><bean class=\"c.D\" id=\"d\"/></property></bean>"));
+    let top = beans_xml("<bean class=\"c.D\"/>");
+    assert!(xml_actions::introduce_bean(&top, caret_in(&top, "<bean class"), BTreeSet::new).is_none());
+    quiet(&beans_xml("<bean id=\"a\"><property name=\"d\"><bean class=\"${c}\"/></property></bean>"));
+    quiet(&beans_xml("<bean id=\"a\"><property name=\"d\"><bean parent=\"p\"/></property></bean>"));
+    quiet(&beans_xml("<bean id=\"a\"><property name=\"d\"><bean class=\"c.D\">"));
+}
+
+const DTD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE beans PUBLIC \"-//SPRING//DTD BEAN 2.0//EN\" \"https://www.springframework.org/dtd/spring-beans-2.0.dtd\">\n<beans default-lazy-init=\"true\">\n  <bean id=\"a\" class=\"x.Y\"/>\n</beans>\n";
+
+#[test]
+fn update_schema_replaces_doctype() {
+    let fixed = apply_edits(DTD, &xml_actions::update_schema(DTD).unwrap());
+    assert!(!fixed.contains("DOCTYPE"), "{fixed}");
+    assert!(fixed.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<beans xmlns="), "{fixed}");
+    let els = xml::elements(&fixed);
+    assert_eq!(xml::namespace(&els, 0), Some("http://www.springframework.org/schema/beans"));
+    assert_eq!(els[0].value("xsi:schemaLocation"), Some("http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd"));
+    assert_eq!(els[0].value("xmlns:xsi"), Some("http://www.w3.org/2001/XMLSchema-instance"));
+    assert_eq!(els[0].value("default-lazy-init"), Some("true"));
+    assert_eq!(els.len(), 2);
+    assert_eq!(xml::namespace(&els, 1), Some("http://www.springframework.org/schema/beans"));
+}
+
+#[test]
+fn update_schema_is_quiet_for_schema_files() {
+    assert!(xml_actions::update_schema(&beans_xml("<bean id=\"a\" class=\"x.Y\"/>")).is_none());
+    let both = DTD.replace("<beans ", "<beans xmlns=\"http://www.springframework.org/schema/beans\" ");
+    assert!(xml_actions::update_schema(&both).is_none());
+    assert!(xml_actions::update_schema(&DTD.replace("beans PUBLIC", "html PUBLIC").replace("<beans ", "<html ").replace("</beans>", "</html>")).is_none());
+    assert!(xml_actions::update_schema("<project><!DOCTYPE beans></project>").is_none());
+}
+
+#[test]
+fn intentions_keep_multibyte_text_and_crlf() {
+    let crlf = |s: &str| s.replace('\n', "\r\n");
+    let text = crlf(&beans_xml("<!-- \u{1F600} -->\n<bean id=\"a\" class=\"x.Y\">\n  <property name=\"n\" value=\"caf\u{e9} \u{1F600}\"/>\n  <property name=\"dao\">\n    <bean class=\"com.acme.UserDao\">\n      <property name=\"k\" value=\"\u{e9}\"/>\n    </bean>\n  </property>\n</bean>"));
+    let fixed = apply_edits(&text, &xml_actions::use_p_namespace(&text, caret_in(&text, "<property name=\"n\"")).unwrap());
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "bean").unwrap().value("p:n"), Some("caf\u{e9} \u{1F600}"));
+    assert!(!fixed.contains("\r\n\r\n") && !fixed.replace("\r\n", "").contains('\n'), "{fixed:?}");
+
+    let fixed = apply_edits(&text, &xml_actions::introduce_bean(&text, caret_in(&text, "<bean class"), BTreeSet::new).unwrap());
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "property" && e.value("name") == Some("dao")).unwrap().value("ref"), Some("userDao"));
+    assert_eq!(els.iter().find(|e| e.value("id") == Some("userDao")).unwrap().parent, Some(0));
+    assert!(fixed.contains("\r\n<bean id=\"userDao\" class=\"com.acme.UserDao\">\r\n  <property name=\"k\" value=\"\u{e9}\"/>\r\n</bean>\r\n"), "{fixed:?}");
+    assert!(!fixed.replace("\r\n", "").contains('\n'));
+
+    let dtd = crlf(&DTD.replace("x.Y", "caf\u{e9}\u{1F600}"));
+    let fixed = apply_edits(&dtd, &xml_actions::update_schema(&dtd).unwrap());
+    assert!(fixed.contains("<beans xmlns=\"http://www.springframework.org/schema/beans\"\r\n       xmlns:xsi"), "{fixed:?}");
+    assert!(!fixed.replace("\r\n", "").contains('\n'));
+    assert_eq!(xml::elements(&fixed)[1].value("class"), Some("caf\u{e9}\u{1F600}"));
+}
+
+#[test]
+fn xml_intentions_are_offered_as_code_actions() {
+    let _host = MockHost::install();
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\" value=\"5\"/><property name=\"d\"><bean class=\"c.D\"/></property></bean>");
+    let document = doc(XML_PATH, &text);
+    let mut navigator = Navigator::default();
+    let at = |needle: &str| {
+        let p = position(&text, caret_in(&text, needle));
+        Range::new(p, p)
+    };
+    let mut titles = |range| navigator.code_actions(&document, range).into_iter().map(|a| a.title).collect::<Vec<_>>();
+    assert_eq!(titles(at("<property name=\"n\"")), ["Use p-namespace"]);
+    assert_eq!(titles(at("<bean class")), ["Introduce bean"]);
+    let dtd = doc(XML_PATH, DTD);
+    let first = Range::new(Position::new(0, 0), Position::new(0, 0));
+    assert_eq!(navigator.code_actions(&dtd, first).iter().map(|a| a.title.as_str()).collect::<Vec<_>>(), ["Update XML schema"]);
+}
+
+#[test]
+fn style_fix_handles_unusual_parent_tags() {
+    let fix = |body: &str| {
+        let text = beans_xml(body);
+        let els = xml::elements(&text);
+        let property = els.iter().find(|e| e.local() == "property").unwrap();
+        apply_edits(&text, &[xml_checks::attribute_style_edit(&text, property, &els).unwrap()])
+    };
+    let fixed = fix("<bean class=\"x.Y\"><property name=\"a&gt;b\" title=\"x>y\"><value>v</value></property></bean>");
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "property").unwrap().value("value"), Some("v"));
+    assert_eq!(els.iter().find(|e| e.name == "property").unwrap().value("title"), Some("x>y"));
+    assert!(els.iter().all(|e| e.name != "value"));
+
+    let fixed = fix("<b:bean xmlns:b=\"http://www.springframework.org/schema/beans\"><b:property name=\"n\"><b:ref bean=\"o\"/></b:property></b:bean>");
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "b:property").unwrap().value("ref"), Some("o"));
+    assert!(els.iter().all(|e| e.name != "b:ref"));
+
+    let fixed = fix("<bean class=\"x.Y\"><property name='n'><value>v</value></property></bean>");
+    let els = xml::elements(&fixed);
+    let property = els.iter().find(|e| e.name == "property").unwrap();
+    assert_eq!((property.value("name"), property.value("value")), (Some("n"), Some("v")));
+    assert!(els.iter().all(|e| e.name != "value"));
+
+    let text = "<beans xmlns=\"http://www.springframework.org/schema/beans\"><bean><property name=\"n\"";
+    let els = xml::elements(text);
+    assert!(xml_checks::attribute_style_edit(text, &els[2], &els).is_none());
+}
+
+#[test]
+fn autowired_static_field_is_reported() {
+    let text = "@Service\nclass A {\n    @Autowired\n    private static Repo repo;\n}\n";
+    assert_eq!(found(text), [pair("static-injection", "repo")]);
+    let constant = "@Service\nclass A {\n    @Value(\"${a}\")\n    static final String NAME = null;\n}\n";
+    assert_eq!(found(constant), [pair("static-injection", "NAME")]);
+}
+
+#[test]
+fn value_spel_on_static_field_reports_the_spel_code_only() {
+    let text = "@Service\nclass A {\n    @Value(\"#{systemProperties['x']}\")\n    static String x;\n}\n";
+    assert_eq!(found(text), [pair("static-spel-injection", "x")]);
+}
+
+#[test]
+fn inject_on_static_method_is_reported() {
+    let text = "import jakarta.inject.Inject;\n\n@Service\nclass A {\n    @Inject\n    static void setRepo(Repo r) {}\n}\n";
+    assert_eq!(found(text), [pair("static-injection", "setRepo")]);
+}
+
+#[test]
+fn two_required_autowired_constructors_are_reported() {
+    let text = "@Service\nclass A {\n    @Autowired\n    A(X x) {}\n    @Autowired(required = true)\n    A(Y y) {}\n}\n";
+    assert_eq!(found(text), [pair("autowired-constructors", "A")]);
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    assert_eq!(host.diagnostics()[&document.path][0].range.start.line, 5);
+}
+
+#[test]
+fn required_next_to_optional_constructor_is_reported() {
+    let text = "@Service\nclass A {\n    @Autowired\n    A(X x) {}\n    @Autowired(required = false)\n    A(Y y) {}\n}\n";
+    assert_eq!(found(text), [pair("autowired-constructors", "A")]);
+}
+
+#[test]
+fn optional_autowired_constructors_are_quiet() {
+    let text = "@Service\nclass A {\n    @Autowired(required = false)\n    A(X x) {}\n    @Autowired(required = false)\n    A(Y y) {}\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn injection_checks_are_quiet_for_library_or_dynamic_name() {
+    let foreign = "import com.acme.Autowired;\n\nclass A {\n    @Autowired\n    static Repo repo;\n    @Autowired\n    A(X x) {}\n    @Autowired\n    A(Y y) {}\n}\n";
+    assert!(found(foreign).is_empty());
+    let dynamic = "class A {\n    @Autowired(required = FLAG)\n    A(X x) {}\n    @Autowired\n    A(Y y) {}\n}\n";
+    assert!(found(dynamic).is_empty());
+    let lombok = "@RequiredArgsConstructor\n@Service\nclass A {\n    private final Repo repo;\n}\n";
+    assert!(found(lombok).is_empty());
+    let record = "record A(@Autowired static int x) {\n    @Autowired static Repo repo;\n}\n";
+    assert!(found(record).is_empty());
+    let instance = "@Service\nclass A {\n    @Autowired\n    private Repo repo;\n    @Autowired\n    void set(Repo r) {}\n    @Value(\"#{x}\")\n    String y;\n}\n";
+    assert!(found(instance).is_empty());
+}
+
+#[test]
+fn switched_off_injection_group_is_quiet() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkInjectionAnnotations", "false");
+    let text = "@Service\nclass A {\n    @Autowired\n    static Repo repo;\n}\n";
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", text).is_empty());
+}
+
+#[test]
+fn injection_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\nclass A {\n    @Qualifier(\"é\") @Autowired static Repo repo;\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let diagnostics = &host.diagnostics()[&document.path];
+    let diagnostic = diagnostics.iter().find(|d| d.code.as_deref() == Some("static-injection")).unwrap();
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 43));
+}
+
+#[test]
+fn profile_expression_problem_cases() {
+    for bad in ["", "  ", "a & b | c", "a | b & c", "!", "(a & b", "a & b)", "!!", "()"] {
+        assert!(annotation_checks::profile_expression_problem(bad).is_some(), "{bad:?} should report");
+    }
+    for good in ["a | b", "!dev", "(a & b) | c", "a", " a & b ", "!(a | b)", "a & (b | c)", "((a))", "a&b&c", "!a & !b", "a &", "a |", "a && b", "a !b", "(a)(b)"] {
+        assert_eq!(annotation_checks::profile_expression_problem(good), None, "{good:?} should be quiet");
+    }
+}
+
+#[test]
+fn empty_profile_is_reported() {
+    let text = "@Profile(\"\")\n@Service\nclass A {\n    @Bean\n    @Profile(\" \")\n    B b() { return null; }\n}\n";
+    assert_eq!(found(text), [pair("profile-expression", ""), pair("profile-expression", " ")]);
+}
+
+#[test]
+fn mixed_operators_are_reported() {
+    let text = "@Service\nclass A {\n    @Profile({\"x\", \"a & b | c\", \"!\"})\n    void m() {}\n}\n";
+    assert_eq!(found(text), [pair("profile-expression", "a & b | c"), pair("profile-expression", "!")]);
+    let valid = "@Profile({\"a\", \"!b\", \"(a & b) | c\"})\n@Service\nclass A {}\n";
+    assert!(found(valid).is_empty());
+}
+
+#[test]
+fn profile_checks_are_quiet_for_library_or_dynamic_name() {
+    let constant = "@Profile(NAMES)\n@Service\nclass A {}\n";
+    assert!(found(constant).is_empty());
+    let concatenated = "@Profile(\"a &\" + X)\n@Service\nclass A {}\n";
+    assert!(found(concatenated).is_empty());
+    let placeholder = "@Profile(\"${p} & !\")\n@Service\nclass A {}\n";
+    assert!(found(placeholder).is_empty());
+    let foreign = "import com.acme.Profile;\n\n@Profile(\"\")\n@Service\nclass A {}\n";
+    assert!(found(foreign).is_empty());
+}
+
+#[test]
+fn profile_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\nclass A {\n    @Named(\"é\") @Profile(\"a & b | c\") void m() {}\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let diagnostic = host.diagnostics()[&document.path].iter().find(|d| d.code.as_deref() == Some("profile-expression")).unwrap().clone();
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 26));
+}
+
+#[test]
+fn async_returning_string_is_reported() {
+    let text = "@Service\nclass A {\n    @Async\n    public String a() { return null; }\n    @Async\n    int b() { return 0; }\n    @Async\n    public List<String> c() { return null; }\n}\n";
+    assert_eq!(found(text), [pair("async-return-type", "String"), pair("async-return-type", "int"), pair("async-return-type", "List")]);
+}
+
+#[test]
+fn async_returning_future_types_is_quiet() {
+    let text = "@Service\nclass A {\n    @Async\n    void a() {}\n    @Async\n    Future<String> b() { return null; }\n    @Async\n    CompletableFuture<String> c() { return null; }\n    @Async\n    ListenableFuture<String> d() { return null; }\n    @Async\n    CompletionStage<String> e() { return null; }\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn async_check_is_quiet_for_library_or_dynamic_name() {
+    let project = "@Service\nclass A {\n    @Async\n    Result a() { return null; }\n}\n";
+    assert!(found(project).is_empty());
+    let foreign = "import com.acme.Async;\n\n@Service\nclass A {\n    @Async\n    String a() { return null; }\n}\n";
+    assert!(found(foreign).is_empty());
+    let plain = "@Service\nclass A {\n    String a() { return null; }\n}\n";
+    assert!(found(plain).is_empty());
+}
+
+#[test]
+fn switched_off_profile_and_async_groups_are_quiet() {
+    let text = "@Profile(\"\")\n@Service\nclass A {\n    @Async\n    String a() { return null; }\n}\n";
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkProfiles", "false");
+    assert_eq!(findings(&host, &mut Navigator::default(), "Subject.java", text), [pair("async-return-type", "String")]);
+    host.set_setting("springBeans.checkAsync", "false");
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", text).is_empty());
+}
+
+#[test]
+fn async_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\nclass A {\n    @Named(\"é\") @Async String a() { return null; }\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let diagnostic = host.diagnostics()[&document.path].iter().find(|d| d.code.as_deref() == Some("async-return-type")).unwrap().clone();
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 23));
+}
+
+#[test]
+fn cacheable_without_cache_name_is_reported() {
+    let text = "@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n    @CachePut(key = \"#id\")\n    String b() { return null; }\n    @CacheEvict(allEntries = true)\n    void c() {}\n    @Cacheable(\"x\")\n    String d() { return null; }\n}\n";
+    assert_eq!(
+        found(text),
+        [
+            pair("cache-names-missing", "@Cacheable"),
+            pair("cache-names-missing", "@CachePut(key = \"#id\")"),
+            pair("cache-names-missing", "@CacheEvict(allEntries = true)"),
+        ]
+    );
+}
+
+#[test]
+fn cache_config_on_class_supplies_the_name() {
+    let text = "@CacheConfig(cacheNames = \"x\")\n@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn cache_annotation_on_interface_method_is_reported() {
+    let text = "@Cacheable(\"t\")\ninterface A {\n    @Cacheable(\"x\")\n    String a();\n}\n";
+    assert_eq!(found(text), [pair("cache-annotation-on-interface", "@Cacheable(\"t\")"), pair("cache-annotation-on-interface", "@Cacheable(\"x\")")]);
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let d = &host.diagnostics()[&document.path][0];
+    assert_eq!(d.severity, Severity::Hint);
+    assert!(d.message.contains("AspectJ") && d.message.contains("concrete class"), "{}", d.message);
+}
+
+#[test]
+fn cacheable_and_cache_put_together_are_reported() {
+    let text = "@Service\nclass A {\n    @Cacheable(\"x\") @CachePut(\"x\")\n    String a() { return null; }\n}\n";
+    assert_eq!(found(text), [pair("cacheable-and-cache-put", "@CachePut(\"x\")")]);
+}
+
+#[test]
+fn cache_checks_are_quiet_for_library_or_dynamic_name() {
+    let constant = "@Service\nclass A {\n    @Cacheable(NAME)\n    String a() { return null; }\n    @Cacheable(cacheNames = PREFIX + \"x\")\n    String b() { return null; }\n}\n";
+    assert!(found(constant).is_empty());
+    let foreign = "import com.acme.Cacheable;\n\n@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n\ninterface B {\n    @Cacheable\n    String a();\n}\n";
+    assert!(found(foreign).is_empty());
+    let caching = "@Service\nclass A {\n    @Caching(cacheable = @Cacheable(\"x\"), put = @CachePut(\"x\"))\n    String a() { return null; }\n}\n";
+    assert!(found(caching).is_empty());
+    let dynamic_config = "@CacheConfig(cacheNames = NAMES)\n@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    assert!(found(dynamic_config).is_empty());
+    let spring = "import org.springframework.cache.annotation.Cacheable;\n\n@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    assert_eq!(found(spring), [pair("cache-names-missing", "@Cacheable")]);
+}
+
+#[test]
+fn switched_off_cache_group_is_quiet() {
+    let text = "@Service\nclass A {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    let host = MockHost::install();
+    assert_eq!(findings(&host, &mut Navigator::default(), "Subject.java", text).len(), 1);
+    host.set_setting("springBeans.checkCache", "false");
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", text).is_empty());
+}
+
+#[test]
+fn cache_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\nclass A {\n    @Named(\"é\") @Cacheable String a() { return null; }\n}\n";
+    let host = MockHost::install();
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let diagnostic = host.diagnostics()[&document.path].iter().find(|d| d.code.as_deref() == Some("cache-names-missing")).unwrap().clone();
+    assert_eq!((diagnostic.range.start.line, diagnostic.range.start.character), (2, 16));
+}
+
+const KT_TX: &str = "@Service\nclass Billing {\n    @Transactional\n    fun charge() {}\n}\n";
+const KTS_BUILD: &str = "plugins {\n    kotlin(\"jvm\") version \"1.9.24\"\n    id(\"org.springframework.boot\") version \"3.3.0\"\n}\n";
+const KT_POM: &str = "<project><plugin>kotlin-maven-plugin</plugin></project>";
+const KT_PATH: &str = "/project/src/main/kotlin/Billing.kt";
+
+fn kt_host(build: Option<(&str, &str)>) -> MockHost {
+    let host = MockHost::install();
+    if let Some((name, text)) = build {
+        host.add_file(name, text);
+    }
+    host
+}
+
+fn kt_findings(host: &MockHost, text: &str) -> Vec<(String, String)> {
+    let document = doc(KT_PATH, text);
+    Navigator::default().line_markers(&document);
+    host.diagnostics()
+        .get(&document.path)
+        .into_iter()
+        .flatten()
+        .filter(|d| d.code.as_deref() == Some("kotlin-spring-plugin"))
+        .map(|d| {
+            let (from, to) = (offset(text, d.range.start).unwrap(), offset(text, d.range.end).unwrap());
+            (d.code.clone().unwrap(), text[from..to].to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn final_transactional_kotlin_class_without_plugin_is_reported() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    assert_eq!(kt_findings(&host, KT_TX), [pair("kotlin-spring-plugin", "Billing")]);
+    let on_class = "@Transactional\nclass Billing\n";
+    assert_eq!(kt_findings(&host, on_class), [pair("kotlin-spring-plugin", "Billing")]);
+}
+
+#[test]
+fn configuration_class_without_plugin_is_reported() {
+    let host = kt_host(Some(("pom.xml", KT_POM)));
+    assert_eq!(kt_findings(&host, "@Configuration\nclass Config\n"), [pair("kotlin-spring-plugin", "Config")]);
+    let explicit = "@Configuration(proxyBeanMethods = true)\nclass Config\n";
+    assert_eq!(kt_findings(&host, explicit).len(), 1);
+}
+
+#[test]
+fn plugin_in_build_file_silences_the_check() {
+    for build in [
+        "plugins { kotlin(\"plugin.spring\") version \"1.9.24\" }",
+        "plugins { id 'org.jetbrains.kotlin.plugin.spring' version '1.9.24' }",
+        "apply plugin: 'kotlin-spring'",
+        "<compilerPlugins>\n  <plugin>spring</plugin>\n</compilerPlugins>",
+        "compilerPlugins { \"spring\" }",
+    ] {
+        let host = kt_host(Some(("build.gradle.kts", &format!("kotlin(\"jvm\")\n{build}"))));
+        assert!(kt_findings(&host, KT_TX).is_empty(), "{build}");
+    }
+    let host = kt_host(Some(("build.gradle.kts", "kotlin(\"jvm\")\ncompilerPlugins { \"jpa\" }")));
+    assert_eq!(kt_findings(&host, KT_TX).len(), 1);
+}
+
+#[test]
+fn open_or_abstract_class_is_quiet() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    for decl in [
+        "open class",
+        "abstract class",
+        "sealed class",
+        "data class",
+        "enum class",
+        "annotation class",
+        "interface",
+        "object",
+    ] {
+        let text = format!("@Transactional\n{decl} Billing\n");
+        assert!(kt_findings(&host, &text).is_empty(), "{decl}");
+    }
+    let inner = "class Outer {\n    @Transactional\n    inner class Billing\n}\n";
+    assert!(kt_findings(&host, inner).is_empty());
+}
+
+#[test]
+fn kotlin_spring_plugin_is_quiet_for_library_or_dynamic_name() {
+    assert!(kt_findings(&kt_host(None), KT_TX).is_empty());
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let foreign = "import com.acme.Transactional\n\nclass Billing {\n    @Transactional\n    fun charge() {}\n}\n";
+    assert!(kt_findings(&host, foreign).is_empty());
+    assert!(kt_findings(&host, "class Billing {\n    @Cacheable\n    fun a() {}\n}\n").len() == 1);
+    assert!(kt_findings(&host, "@Configuration(proxyBeanMethods = false)\nclass Config\n").is_empty());
+    assert!(kt_findings(&host, "@Configuration(proxyBeanMethods = FLAG)\nclass Config\n").is_empty());
+    assert!(kt_findings(&host, "class Plain {\n    fun a() {}\n}\n").is_empty());
+    let allopen = kt_host(Some(("build.gradle", "plugins { id 'org.jetbrains.kotlin.plugin.allopen' }")));
+    assert!(kt_findings(&allopen, KT_TX).is_empty());
+}
+
+fn edited(text: &str, edit: &TextEdit) -> String {
+    let (from, to) = (offset(text, edit.range.start).unwrap(), offset(text, edit.range.end).unwrap());
+    format!("{}{}{}", &text[..from], edit.text, &text[to..])
+}
+
+#[test]
+fn gradle_kts_fix_inserts_plugin_line() {
+    let edit = kotlin_build::gradle_fix("/project/build.gradle.kts", KTS_BUILD).unwrap();
+    assert_eq!(
+        edited(KTS_BUILD, &edit),
+        "plugins {\n    kotlin(\"jvm\") version \"1.9.24\"\n    id(\"org.springframework.boot\") version \"3.3.0\"\n    kotlin(\"plugin.spring\") version \"1.9.24\"\n}\n"
+    );
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let document = doc(KT_PATH, KT_TX);
+    let actions = Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8)));
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].edits[0].0, "/project/build.gradle.kts");
+    assert_eq!(edited(KTS_BUILD, &actions[0].edits[0].1[0]), edited(KTS_BUILD, &edit));
+    assert!(Navigator::default().code_actions(&document, Range::new(Position::new(3, 5), Position::new(3, 5))).is_empty());
+    drop(host);
+}
+
+#[test]
+fn groovy_gradle_fix_inserts_plugin_line() {
+    let build = "plugins {\n  id 'org.jetbrains.kotlin.jvm' version '1.9.24'\n}\n";
+    let edit = kotlin_build::gradle_fix("/project/build.gradle", build).unwrap();
+    assert_eq!(
+        edited(build, &edit),
+        "plugins {\n  id 'org.jetbrains.kotlin.jvm' version '1.9.24'\n  id 'org.jetbrains.kotlin.plugin.spring' version '1.9.24'\n}\n"
+    );
+    let crlf = build.replace('\n', "\r\n");
+    let edit = kotlin_build::gradle_fix("/project/build.gradle", &crlf).unwrap();
+    assert!(edited(&crlf, &edit).contains("'1.9.24'\r\n  id 'org.jetbrains.kotlin.plugin.spring' version '1.9.24'\r\n}"));
+}
+
+#[test]
+fn maven_build_offers_no_fix() {
+    let host = kt_host(Some(("pom.xml", KT_POM)));
+    let document = doc(KT_PATH, KT_TX);
+    assert!(Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8))).is_empty());
+    assert_eq!(kt_findings(&host, KT_TX).len(), 1);
+    assert!(kotlin_build::gradle_fix("/project/pom.xml", "<project/>").is_none());
+    assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", "dependencies {}\n").is_none());
+    assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", "plugins {\n    java\n}\n").is_none());
+    assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", "plugins {\n    kotlin(\"jvm\") version kv\n}\n").is_none());
+    assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", "plugins { kotlin(\"jvm\") version \"1.9\" }\n").is_none());
+}
+
+#[test]
+fn fix_never_edits_outside_the_project() {
+    // the mock refuses `..` files, so this guards the `..` segment check in build_module
+    let _host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    for path in ["/project/../outside/src/Billing.kt", "/projectile/src/Billing.kt", "/etc/Billing.kt"] {
+        let document = doc(path, KT_TX);
+        assert!(kotlin_build::fix_for(path).is_none(), "{path}");
+        assert!(Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8))).is_empty(), "{path}");
+    }
+    assert!(kotlin_build::fix_for(KT_PATH).is_some());
+}
+
+#[test]
+fn switched_off_kotlin_plugin_group_is_quiet() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    assert_eq!(kt_findings(&host, KT_TX).len(), 1);
+    host.set_setting("springBeans.checkKotlinSpringPlugin", "false");
+    assert!(kt_findings(&host, KT_TX).is_empty());
+    let document = doc(KT_PATH, KT_TX);
+    assert!(Navigator::default().code_actions(&document, Range::new(Position::new(1, 8), Position::new(1, 8))).is_empty());
+}
+
+#[test]
+fn fixed_kotlin_file_publishes_empty_list() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let mut navigator = Navigator::default();
+    navigator.line_markers(&doc(KT_PATH, KT_TX));
+    assert!(host.diagnostics()[KT_PATH].iter().any(|d| d.code.as_deref() == Some("kotlin-spring-plugin")));
+    navigator.line_markers(&doc(KT_PATH, "open class Billing\n"));
+    assert!(host.diagnostics().get(KT_PATH).is_none_or(|list| list.is_empty()));
+}
+
+#[test]
+fn kotlin_plugin_ranges_use_utf16_columns_with_multibyte_text() {
+    let text = "@Service\n@Named(\"é😀\") class Billing {\n    @Transactional fun a() {}\n}\n";
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let document = doc(KT_PATH, text);
+    Navigator::default().line_markers(&document);
+    let d = host.diagnostics()[KT_PATH].iter().find(|d| d.code.as_deref() == Some("kotlin-spring-plugin")).unwrap().clone();
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (1, 20, 27));
+}
+
+#[test]
+fn kotlin_plugin_crlf_files_report_correct_lines() {
+    let host = kt_host(Some(("build.gradle.kts", KTS_BUILD)));
+    let text = KT_TX.replace('\n', "\r\n");
+    let document = doc(KT_PATH, &text);
+    Navigator::default().line_markers(&document);
+    let d = host.diagnostics()[KT_PATH].iter().find(|d| d.code.as_deref() == Some("kotlin-spring-plugin")).unwrap().clone();
+    assert_eq!((d.range.start.line, d.range.start.character), (1, 6));
+}
+
+#[test]
+fn kotlin_spring_plugin_is_quiet_without_a_literal_kotlin_plugin() {
+    for build in [
+        "plugins {\n    alias(libs.plugins.kotlin.spring)\n    kotlin(\"jvm\") version \"1.9.24\"\n}\n",
+        "plugins {\n    id(\"my.kotlin-conventions\")\n}\n",
+        "plugins {\n    kotlin(\"jvm\") version \"1.9.24\" apply false\n}\n",
+        "subprojects { }\n",
+    ] {
+        let host = kt_host(Some(("build.gradle.kts", build)));
+        assert!(kt_findings(&host, KT_TX).is_empty(), "{build}");
+        assert!(kotlin_build::gradle_fix("/project/build.gradle.kts", build).is_none_or(|_| build.contains("alias")));
+    }
+    let root_applies = kt_host(Some(("build.gradle.kts", "plugins {\n    kotlin(\"plugin.spring\") version \"1.9.24\" apply false\n}\n")));
+    assert!(kt_findings(&root_applies, KT_TX).is_empty());
+    let host = kt_host(Some(("pom.xml", KT_POM)));
+    assert_eq!(kt_findings(&host, KT_TX).len(), 1);
+}
+
+#[test]
+fn own_names_of_one_bean_are_not_duplicates() {
+    assert!(aop_found("<bean id=\"a\" name=\"a\" class=\"x.Y\"/>").is_empty());
+    assert!(aop_found("<bean name=\"b,b\" class=\"x.Y\"/>").is_empty());
+    let found = aop_found("<bean id=\"a\" name=\"a\" class=\"x.Y\"/>\n<bean id=\"a\" class=\"x.Y\"/>");
+    assert_eq!(found, [pair("duplicate-bean-name", "a")]);
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Dispatcher.java", "@Service(\"dispatcher\")\nclass Dispatcher {}\n");
+    let found = xml_findings(&host, &beans_xml("<bean id=\"dispatcher\" name=\"dispatcher\" class=\"x.Y\"/>"));
+    assert_eq!(found, [pair("duplicate-bean-name", "dispatcher")]);
+}
+
+#[test]
+fn names_split_on_any_whitespace() {
+    assert!(aop_found("<bean name=\"p,\n q\" class=\"x.Y\"/>\n<bean name=\"r,\n\ts\" class=\"x.Y\"/>").is_empty());
+    assert_eq!(aop_found("<bean name=\"p,\n Q\" class=\"x.Y\"/>"), [pair("bean-name-convention", "Q")]);
+    let model = parse("/project/beans.xml", &beans_xml("<bean name=\"p,\n q;\tr\" class=\"x.Y\"/>")).unwrap();
+    assert_eq!((model.beans[0].name.as_str(), model.beans[0].aliases.clone()), ("p", vec!["q".to_owned(), "r".to_owned()]));
+    let text = beans_xml("<bean name=\"x,\n\tuserDao\" class=\"a.B\"/><bean id=\"a\" class=\"x.Y\"><constructor-arg><bean class=\"com.acme.UserDao\"/></constructor-arg></bean>");
+    let fixed = apply_edits(&text, &xml_actions::introduce_bean(&text, caret_in(&text, "<bean class"), BTreeSet::new).unwrap());
+    assert!(xml::elements(&fixed).iter().any(|e| e.value("id") == Some("userDao2")), "{fixed}");
+}
+
+#[test]
+fn placeholder_profile_keeps_xml_and_java_names_quiet() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Dispatcher.java", "@Service(\"dispatcher\")\nclass Dispatcher {}\n");
+    for profile in ["${env}", "#{env}", "dev, ${env}"] {
+        let body = format!("<beans profile=\"{profile}\"><bean id=\"dispatcher\" class=\"x.Y\"/></beans>");
+        assert!(xml_findings(&host, &beans_xml(&body)).is_empty(), "{profile}");
+    }
+    let host = MockHost::install();
+    host.add_file("src/main/resources/beans.xml", &beans_xml("<beans profile=\"${env}\"><bean id=\"dispatcher\" class=\"x.Y\"/></beans>"));
+    assert!(findings(&host, &mut Navigator::default(), "Dispatcher.java", "@Service(\"dispatcher\")\nclass Dispatcher {}\n").is_empty());
+}
+
+#[test]
+fn cache_name_from_a_supertype_is_quiet() {
+    let extends = "@Service\nclass A extends Base {\n    @Cacheable\n    String a() { return null; }\n}\n";
+    assert!(found(extends).is_empty());
+    let implements = "@Service\nclass A implements Api {\n    @CacheEvict(allEntries = true)\n    void a() {}\n}\n";
+    assert!(found(implements).is_empty());
+}
+
+#[test]
+fn cacheable_on_spring_data_repository_is_quiet() {
+    for parent in ["Repository<User, Long>", "CrudRepository<User, Long>", "JpaRepository<User, Long>"] {
+        let text = format!("interface Users extends {parent} {{\n    @Cacheable(\"users\")\n    User findByName(String name);\n}}\n");
+        assert!(found(&text).is_empty(), "{parent}");
+    }
+}
+
+#[test]
+fn introduce_bean_avoids_names_taken_elsewhere_in_the_project() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/UserDao.java", "@Repository\nclass UserDao {}\n");
+    host.add_file("src/main/resources/other.xml", &beans_xml("<bean id=\"userDao2\" class=\"a.B\"/>"));
+    let text = beans_xml(INNER);
+    let document = doc(XML_PATH, &text);
+    let p = position(&text, caret_in(&text, "<bean class"));
+    let actions = Navigator::default().code_actions(&document, Range::new(p, p));
+    let introduce = actions.iter().find(|a| a.title == "Introduce bean").unwrap();
+    let fixed = apply_edits(&text, &introduce.edits[0].1);
+    assert!(xml::elements(&fixed).iter().any(|e| e.value("id") == Some("userDao3")), "{fixed}");
+    let taken = || BTreeSet::from(["userDao".to_owned()]);
+    let fixed = apply_edits(&text, &xml_actions::introduce_bean(&text, caret_in(&text, "<bean class"), taken).unwrap());
+    assert!(xml::elements(&fixed).iter().any(|e| e.value("id") == Some("userDao2")), "{fixed}");
+}
+
+#[test]
+fn weaving_in_a_parent_build_or_aop_xml_keeps_designators_quiet() {
+    let module = "app/src/main/java/com/acme/Tracing.java";
+    let host = MockHost::install();
+    host.add_file("pom.xml", "<project><build><plugin>aspectj-maven-plugin</plugin></build></project>");
+    host.add_file("app/pom.xml", "<project/>");
+    host.add_file(module, WEAVING_ASPECT);
+    let document = doc(&format!("/project/{module}"), WEAVING_ASPECT);
+    Navigator::default().line_markers(&document);
+    assert!(host.diagnostics().get(&document.path).is_none_or(Vec::is_empty));
+
+    let host = MockHost::install();
+    host.add_file("pom.xml", "<project/>");
+    host.add_file("app/pom.xml", "<project/>");
+    Navigator::default().line_markers(&document);
+    assert_eq!(host.diagnostics()[&document.path].len(), 1, "no weaving anywhere still reports");
+    host.add_file("app/src/main/resources/META-INF/aop.xml", "<aspectj/>");
+    Navigator::default().line_markers(&document);
+    assert!(host.diagnostics().get(&document.path).is_none_or(Vec::is_empty));
+}
+
+#[test]
+fn resource_on_static_member_says_spring_fails() {
+    let host = MockHost::install();
+    let text = "import jakarta.annotation.Resource;\n\n@Service\nclass A {\n    @Resource\n    static Repo repo;\n    @Autowired\n    static Repo other;\n}\n";
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let messages: Vec<String> = host.diagnostics()[&document.path].iter().filter(|d| d.code.as_deref() == Some("static-injection")).map(|d| d.message.clone()).collect();
+    assert_eq!(messages.len(), 2);
+    assert!(messages[0].contains("@Resource") && messages[0].contains("fails") && !messages[0].contains("ignored"), "{}", messages[0]);
+    assert!(messages[1].contains("@Autowired") && messages[1].contains("ignored"), "{}", messages[1]);
+}
+
+#[test]
+fn saved_kotlin_file_publishes_field_injection() {
+    let host = MockHost::install();
+    let path = "/project/src/main/kotlin/com/acme/kt/Reports.kt";
+    host.add_file("src/main/kotlin/com/acme/kt/Reports.kt", KOTLIN);
+    Navigator::default().handle_events(&[Event::FileSaved(path.into())], &host.invocation());
+    assert!(host.diagnostics()[path].iter().any(|d| d.code.as_deref() == Some("field-injection")));
 }

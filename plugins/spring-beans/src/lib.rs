@@ -4,10 +4,16 @@
 //! Text-based: types match by simple name through the project's own type
 //! hierarchy; beans from libraries and auto-configuration aren't seen.
 
+mod annotation_checks;
+mod aop;
 mod checks;
+mod injection_checks;
 mod kotlin;
+mod kotlin_build;
 mod model;
 mod sites;
+mod xml_actions;
+mod xml_checks;
 
 pub use model::{Bean, FileModel, Injection, parse};
 
@@ -338,9 +344,16 @@ impl Navigator {
         f(&world, model)
     }
 
-    /// Publishes the problems of a Java or Kotlin source; a fixed file gets an empty list.
+    /// Publishes the problems of a Java, Kotlin or Spring XML source; a fixed file gets an empty list.
     fn diagnose(&mut self, path: &str, language: &str, text: &str) {
         if language == "xml" {
+            let mut problems = Vec::new();
+            let beans_file = xml_checks::is_beans_file(&spring_text::xml::elements(text));
+            if let Some(index) = beans_file.then(|| self.indexes.for_document(path, text, PROVIDER_BUDGET)).flatten() {
+                let findings = xml_checks::check_xml(path, text, &World::new(index), checks::Groups::from_settings());
+                problems.extend(findings.iter().map(|f| f.diagnostic(text)));
+            }
+            let _ = host::publish_diagnostics(path, &problems);
             return;
         }
         let mut problems = field_injection_problems(&model::parse(path, text).unwrap_or_default());
@@ -350,6 +363,10 @@ impl Navigator {
                 let findings = checks::check_java(path, &file, text, &World::new(index), checks::Groups::from_settings());
                 problems.extend(findings.iter().map(|f| f.diagnostic(text)));
             }
+        }
+        if language == "kotlin" && checks::Groups::from_settings().kotlin_plugin {
+            let findings = kotlin_build::missing_spring_plugin(path, &spring_text::kotlin::parse(text));
+            problems.extend(findings.iter().map(|f| f.diagnostic(text)));
         }
         let _ = host::publish_diagnostics(path, &problems);
     }
@@ -532,6 +549,13 @@ impl Providers for Navigator {
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
+        if doc.language == "xml" {
+            let project_names = || self.with_doc(doc, |world, _| world.beans().flat_map(|(_, b)| checks::names_of(b)).map(str::to_owned).collect());
+            return xml_code_actions(doc, selection, project_names);
+        }
+        if doc.language == "kotlin" {
+            return kotlin_code_actions(doc, selection);
+        }
         if doc.language != "java" {
             return Vec::new();
         }
@@ -544,6 +568,58 @@ impl Providers for Navigator {
             data: None,
         }]
     }
+}
+
+fn kotlin_code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
+    let Some(caret) = offset(&doc.text, selection.start) else { return Vec::new() };
+    if !checks::Groups::from_settings().kotlin_plugin {
+        return Vec::new();
+    }
+    let file = spring_text::kotlin::parse(&doc.text);
+    let on_candidate = kotlin_build::candidates(&file).iter().any(|ty| (ty.at..=ty.at + ty.name.len()).contains(&caret));
+    if !on_candidate {
+        return Vec::new();
+    }
+    let findings = kotlin_build::missing_spring_plugin(&doc.path, &file);
+    if !findings.iter().any(|f| (f.start..=f.end).contains(&caret)) {
+        return Vec::new();
+    }
+    let Some((build_path, edit)) = kotlin_build::fix_for(&doc.path) else { return Vec::new() };
+    vec![CodeAction {
+        title: "Add the kotlin-spring Gradle plugin".into(),
+        kind: Some("quickfix".into()),
+        preferred: true,
+        edits: vec![(build_path, vec![edit])],
+        data: None,
+    }]
+}
+
+fn xml_code_actions(doc: &Document, selection: Range, project_names: impl FnOnce() -> BTreeSet<String>) -> Vec<CodeAction> {
+    let Some(caret) = offset(&doc.text, selection.start) else { return Vec::new() };
+    let text = &doc.text;
+    let mut actions = Vec::new();
+    let mut offer = |title: &str, kind: &str, preferred: bool, edits: Vec<TextEdit>| {
+        actions.push(CodeAction {
+            title: title.into(),
+            kind: Some(kind.into()),
+            preferred,
+            edits: vec![(doc.path.clone(), edits)],
+            data: None,
+        });
+    };
+    if let Some((title, edit)) = xml_checks::style_fix(text, selection.start) {
+        offer(title, "quickfix", true, vec![edit]);
+    }
+    if let Some(edits) = xml_actions::use_p_namespace(text, caret) {
+        offer("Use p-namespace", "refactor", false, edits);
+    }
+    if let Some(edits) = xml_actions::introduce_bean(text, caret, project_names) {
+        offer("Introduce bean", "refactor", false, edits);
+    }
+    if let Some(edits) = xml_actions::update_schema(text) {
+        offer("Update XML schema", "refactor", false, edits);
+    }
+    actions
 }
 
 fn location_key(path: &str, range: Range) -> String {
@@ -693,7 +769,7 @@ impl Plugin for Navigator {
                 Event::FileSaved(path) | Event::FileOpened(path) => Some(path.as_str()),
                 _ => None,
             })
-            .filter(|path| path.ends_with(".java"))
+            .filter(|path| [".java", ".kt", ".xml"].iter().any(|ext| path.ends_with(ext)))
             .collect();
         for path in paths {
             let Some(project) = host::projects().unwrap_or_default().into_iter().find(|p| {
@@ -702,7 +778,12 @@ impl Plugin for Navigator {
                 continue;
             };
             let Ok(text) = project.read_file(path) else { continue };
-            self.diagnose(path, "java", &text);
+            let language = match path.rsplit('.').next() {
+                Some("kt") => "kotlin",
+                Some("xml") => "xml",
+                _ => "java",
+            };
+            self.diagnose(path, language, &text);
         }
     }
 

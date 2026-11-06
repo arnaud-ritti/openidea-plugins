@@ -38,6 +38,7 @@ const EARLY_EVENTS: [&str; 4] = [
     "ApplicationPreparedEvent",
 ];
 const REDUNDANT_ANNOTATIONS: [&str; 2] = ["EnableAutoConfiguration", "ComponentScan"];
+const TRANSACTION_CALLBACKS: [&str; 2] = ["BeforeTransaction", "AfterTransaction"];
 const AUTOWIRE_MODE_KEY: &str = "constructor.autowire.mode";
 
 /// Which groups of checks run.
@@ -48,6 +49,7 @@ pub struct Groups {
     pub configuration_properties: bool,
     pub early_events: bool,
     pub application_setup: bool,
+    pub test_lifecycle: bool,
 }
 
 impl Groups {
@@ -59,6 +61,7 @@ impl Groups {
             configuration_properties: on("checkConfigurationProperties"),
             early_events: on("checkEarlyEvents"),
             application_setup: on("checkApplicationSetup"),
+            test_lifecycle: on("checkTestLifecycle"),
         }
     }
 }
@@ -80,6 +83,9 @@ pub fn check_java(file: &JavaFile, autowire_mode_set: Option<bool>, groups: Grou
         }
         if groups.early_events {
             early_event_listeners(file, ty, &mut out);
+        }
+        if groups.test_lifecycle {
+            test_lifecycle(file, ty, &mut out);
         }
     }
     for ty in &file.types {
@@ -271,6 +277,47 @@ fn application_setup(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     }
 }
 
+/// `@DirtiesContext(methodMode)` belongs on methods, `classMode` and `hierarchyMode` on classes; `@BeforeTransaction` and `@AfterTransaction` methods are documented to return `void`.
+fn test_lifecycle(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
+    if ty.kind == "interface" {
+        return;
+    }
+    if file.from_spring("DirtiesContext") {
+        if let Some(a) = ty.annotation("DirtiesContext") {
+            if let Some(arg) = a.arg("methodMode") {
+                out.push(
+                    Finding::new(arg.at, arg.end, "dirties-context-mode", "`methodMode` applies to @DirtiesContext on a method; on a class use `classMode`.")
+                        .with_severity(Severity::Warning),
+                );
+            }
+        }
+    }
+    for m in ty.methods() {
+        if file.from_spring("DirtiesContext") {
+            if let Some(a) = m.annotation("DirtiesContext") {
+                for name in ["classMode", "hierarchyMode"] {
+                    let Some(arg) = a.arg(name) else { continue };
+                    out.push(
+                        Finding::new(arg.at, arg.end, "dirties-context-mode", format!("`{name}` applies to @DirtiesContext on a class; on a method use `methodMode`."))
+                            .with_severity(Severity::Warning),
+                    );
+                }
+            }
+        }
+        let Some(name) = TRANSACTION_CALLBACKS.iter().find(|n| m.annotation(n).is_some() && file.from_spring(n)) else {
+            continue;
+        };
+        let returns_value = m.ty.as_ref().is_some_and(|t| t.name != "void" || t.array);
+        if !returns_value {
+            continue;
+        }
+        out.push(
+            Finding::new(m.at, m.at + m.name.len(), "transaction-callback-signature", format!("An @{name} method is documented to return `void`."))
+                .with_severity(Severity::Warning),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +329,7 @@ mod tests {
         configuration_properties: true,
         early_events: true,
         application_setup: true,
+        test_lifecycle: true,
     };
 
     fn run(text: &str, mode_set: Option<bool>) -> Vec<(&'static str, String)> {
@@ -511,5 +559,71 @@ mod tests {
         let text = APP.replace('\n', "\r\n");
         let lines: Vec<_> = check_java(&parse(&text), None, ALL).iter().map(|f| f.diagnostic(&text).range.start.line).collect();
         assert_eq!(lines, [6, 7]);
+    }
+
+    const LIFECYCLE: &str = "import org.springframework.test.annotation.DirtiesContext;\nimport org.springframework.test.context.transaction.BeforeTransaction;\nimport org.springframework.test.context.transaction.AfterTransaction;\nclass T {\n    @BeforeTransaction\n    void before() {}\n    @AfterTransaction\n    void after() {}\n    @DirtiesContext(methodMode = MethodMode.AFTER_METHOD)\n    void m() {}\n}\n@DirtiesContext(classMode = ClassMode.AFTER_CLASS)\nclass U {}\n";
+
+    fn lifecycle(from: &str, to: &str) -> Vec<(&'static str, String)> {
+        run(&LIFECYCLE.replace(from, to), None)
+    }
+
+    #[test]
+    fn dirties_context_method_mode_on_class_is_reported() {
+        let found = lifecycle("classMode = ClassMode.AFTER_CLASS", "methodMode = MethodMode.AFTER_METHOD");
+        assert_eq!(found, [("dirties-context-mode", "MethodMode.AFTER_METHOD".to_owned())]);
+    }
+
+    #[test]
+    fn dirties_context_class_mode_on_method_is_reported() {
+        let found = lifecycle("methodMode = MethodMode.AFTER_METHOD", "classMode = ClassMode.AFTER_CLASS, hierarchyMode = HierarchyMode.EXHAUSTIVE");
+        assert_eq!(
+            found,
+            [
+                ("dirties-context-mode", "ClassMode.AFTER_CLASS".to_owned()),
+                ("dirties-context-mode", "HierarchyMode.EXHAUSTIVE".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn before_transaction_with_parameters_or_static_is_quiet() {
+        assert!(lifecycle("before()", "before(String s)").is_empty());
+        assert!(lifecycle("void before", "static void before").is_empty());
+    }
+
+    #[test]
+    fn after_transaction_returning_a_value_is_reported() {
+        assert_eq!(lifecycle("void after() {}", "int after() { return 1; }"), [("transaction-callback-signature", "after".to_owned())]);
+        let found = check_java(&parse(&LIFECYCLE.replace("void after", "String after")), None, ALL);
+        assert_eq!(found[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn test_lifecycle_is_quiet_for_library_or_dynamic_name() {
+        assert!(run(LIFECYCLE, None).is_empty());
+        let foreign = LIFECYCLE.replace("org.springframework.test.annotation.DirtiesContext", "org.acme.DirtiesContext");
+        assert!(run(&foreign.replace("methodMode = MethodMode.AFTER_METHOD", "classMode = X"), None).is_empty());
+        let foreign = LIFECYCLE.replace("org.springframework.test.context.transaction.", "org.acme.");
+        assert!(run(&foreign.replace("void before()", "int before()"), None).is_empty());
+        let interface = "import org.springframework.test.context.transaction.BeforeTransaction;\ninterface I {\n    @BeforeTransaction\n    default int before(int a) { return a; }\n}\n";
+        assert!(run(interface, None).is_empty());
+    }
+
+    #[test]
+    fn switched_off_group_is_quiet() {
+        let text = LIFECYCLE.replace("void before()", "int before()");
+        let off = Groups { test_lifecycle: false, ..ALL };
+        assert!(check_java(&parse(&text), None, off).is_empty());
+    }
+
+    #[test]
+    fn lifecycle_ranges_use_utf16_columns_with_multibyte_text() {
+        let text = "import org.springframework.test.context.transaction.BeforeTransaction;\nclass T {\n    String s = \"é😀\"; @BeforeTransaction int before() {}\n}\n";
+        let found = check_java(&parse(text), None, ALL);
+        let d = found[0].diagnostic(text);
+        let line = "    String s = \"é😀\"; @BeforeTransaction int ";
+        let col = line.encode_utf16().count() as u32;
+        assert_eq!((d.range.start.line, d.range.start.character), (2, col));
+        assert_eq!(d.range.end.character, col + 6);
     }
 }
