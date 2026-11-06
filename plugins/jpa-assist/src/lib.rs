@@ -27,7 +27,7 @@ use openidea_plugin::{
     Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Location, Position, Project, Range, register_plugin,
 };
 
-use checks::{Finding, inspect_entity, inspect_repository};
+use checks::{Finding, inspect_attribute_types, inspect_callbacks, inspect_entity, inspect_repository, missing_id};
 use generate::{Dialect, Known, ddl, dto, entity_from_ddl, equals_and_hash_code, inherited, table_name, to_string_method};
 use model::{Class, Edit, Kind, Relation, has_word, language_of, mask, parse_class};
 use queries::{ItemKind, Prop, complete, parse_repository};
@@ -37,6 +37,10 @@ const REPOSITORY_BUDGET: Duration = Duration::from_millis(30);
 
 /// Source files listed per pattern.
 const MAX_SOURCES: u32 = 50_000;
+
+fn setting(name: &str) -> bool {
+    host::setting_bool(&format!("jpaAssist.{name}")).unwrap_or(true)
+}
 
 fn project_of(path: &str) -> Option<Project> {
     host::projects()
@@ -244,13 +248,62 @@ impl JpaAssist {
         )
     }
 
+    /// Whether `class` and every superclass above it are project classes and none declares an id.
+    fn lacks_id(&mut self, project: &Project, class: &Class) -> bool {
+        let mut current = class.clone();
+
+        for _ in 0..16 {
+            if current.has_id {
+                return false;
+            }
+
+            let Some(parent) = current.superclass.clone() else { return true };
+            self.load(project, &parent, &current.path, true);
+            let Some(next) = self.class(&parent) else { return false };
+            current = next.clone();
+        }
+
+        false
+    }
+
+    fn entity_rule_findings(&mut self, project: &Project, path: &str, text: &str, kotlin: bool) -> Vec<Finding> {
+        let mut findings = Vec::new();
+
+        if setting("checkEntityId")
+            && let Some(class) = parse_class(text, path)
+            && class.kind == Kind::Entity
+            && self.lacks_id(project, &class)
+        {
+            findings.extend(missing_id(text));
+        }
+
+        if setting("checkAttributeTypes") {
+            findings.extend(inspect_attribute_types(text, kotlin, &|n| self.class(n).is_some()));
+        }
+
+        if setting("checkListenerSignatures") {
+            findings.extend(inspect_callbacks(text, kotlin));
+        }
+
+        findings
+    }
+
     fn findings(&mut self, project: &Project, path: &str, text: &str, kotlin: bool) -> Vec<Finding> {
         if let Some(class) = parse_class(text, path) {
             self.remember(class);
             if self.scanned {
                 host::refresh_view("structure");
             }
-            return inspect_entity(text, kotlin);
+            let mut findings = inspect_entity(text, kotlin);
+            findings.extend(self.entity_rule_findings(project, path, text, kotlin));
+            return findings;
+        }
+
+        if setting("checkListenerSignatures") {
+            let callbacks = inspect_callbacks(text, kotlin);
+            if !callbacks.is_empty() {
+                return callbacks;
+            }
         }
 
         let Some(repo) = parse_repository(text, kotlin) else { return Vec::new() };
@@ -592,6 +645,50 @@ public interface OrderRepository extends JpaRepository<Order, Integer> {
             diagnostics["/project/src/shop/data/OrderRepository.java"].iter().map(|d| d.message.as_str()).collect();
         assert_eq!(repository, ["The id of Order is Long, not Integer.", "Order has no property 'colour' (at 'Colour')."]);
         assert!(!diagnostics.contains_key("/project/src/notes.txt"));
+    }
+
+    fn problems(host: &MockHost, path: &str, text: &str) -> Vec<String> {
+        host.add_file(path, text);
+        let mut plugin = JpaAssist::default();
+        plugin.handle_events(&[Event::FileOpened(format!("/project/{path}"))], &host.invocation());
+        host.diagnostics().get(&format!("/project/{path}")).map_or(Vec::new(), |d| {
+            d.iter().filter_map(|d| d.code.clone()).collect()
+        })
+    }
+
+    #[test]
+    fn mapped_superclass_id_is_inherited() {
+        let host = host();
+        host.add_file("src/shop/Base.java", "package shop;\n@MappedSuperclass\nclass Base {\n  @Id Long id;\n}\n");
+        host.add_file("src/shop/Bare.java", "package shop;\n@MappedSuperclass\nclass Bare {\n  String x;\n}\n");
+
+        let child = |name: &str, parent: &str| format!("package shop;\n@Entity\nclass {name} extends {parent} {{}}\n");
+        assert!(problems(&host, "src/shop/A.java", &child("A", "Base")).is_empty());
+        assert_eq!(problems(&host, "src/shop/B.java", &child("B", "Bare")), ["entity-missing-id"]);
+        assert!(problems(&host, "src/shop/C.java", &child("C", "AbstractPersistable")).is_empty(), "library superclass");
+        assert_eq!(problems(&host, "src/shop/D.java", "@Entity\nclass D {}\n"), ["entity-missing-id"]);
+        assert!(problems(&host, "src/shop/D.java", "@Entity\nclass D { @Id Long id; }\n").is_empty(), "fixed file");
+    }
+
+    #[test]
+    fn rule_settings_turn_each_group_off() {
+        let host = host();
+        host.set_setting("jpaAssist.checkEntityId", "false");
+        host.set_setting("jpaAssist.checkAttributeTypes", "false");
+        host.set_setting("jpaAssist.checkListenerSignatures", "false");
+        let text = "@Entity\nclass E {\n  @Version String v;\n  @PrePersist void p(Object o) {}\n}\n";
+        assert!(problems(&host, "src/shop/E.java", text).is_empty());
+    }
+
+    #[test]
+    fn reports_attribute_types_and_listener_signatures() {
+        let host = host();
+        let text = "@Entity\nclass E {\n  @Id Long id;\n  @Version String v;\n  @PrePersist void p(Object o) {}\n}\n";
+        assert_eq!(problems(&host, "src/shop/E.java", text), ["attribute-type", "entity-listener-signature"]);
+        let listener = "import jakarta.persistence.*;\nclass L {\n  @PrePersist void p() {}\n}\n";
+        assert_eq!(problems(&host, "src/shop/L.java", listener), ["entity-listener-signature"]);
+        let fixed = "import jakarta.persistence.*;\nclass L {\n  @PrePersist void p(Object o) {}\n}\n";
+        assert!(problems(&host, "src/shop/L.java", fixed).is_empty());
     }
 
     #[test]
