@@ -153,6 +153,9 @@ impl Launcher {
                 return Err(format!("The {label} `{value}` may only contain letters, digits, `.`, `_` and `-` for the Spring Boot CLI."));
             }
         }
+        if self.get("artifactId").chars().all(|c| c == '.') {
+            return Err("The artifact may not consist of dots only for the Spring Boot CLI.".into());
+        }
         let package = self.get("packageName");
         if package.starts_with('-') || !package.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) {
             return Err(format!("The package name `{package}` may only contain letters, digits, `.` and `_` for the Spring Boot CLI."));
@@ -440,16 +443,46 @@ mod tests {
 
     #[test]
     fn spring_init_refuses_leading_dash_values() {
+        for (key, value, named) in [
+            ("artifactId", "--help", "artifact `--help`"),
+            ("artifactId", "-x", "artifact `-x`"),
+            ("groupId", "-g", "group `-g`"),
+            ("dependencies", "web,-web", "dependencies `web,-web`"),
+            ("packageName", "-p", "package name `-p`"),
+        ] {
+            let host = MockHost::install().with_capabilities(&["storage", "process:spring"]);
+            let mut l = Launcher::default();
+            field(&mut l, &host, key, value);
+            click(&mut l, &host, "cli");
+            assert!(host.terminals().is_empty(), "{key}={value}");
+            let notifications = host.notifications();
+            assert_eq!(notifications.len(), 1, "{key}={value}");
+            assert!(notifications[0].body.contains(named), "{}", notifications[0].body);
+        }
+    }
+
+    #[test]
+    fn spring_init_refuses_dot_only_artifacts() {
+        for value in [".", ".."] {
+            let host = MockHost::install().with_capabilities(&["storage", "process:spring"]);
+            let mut l = Launcher::default();
+            field(&mut l, &host, "artifactId", value);
+            click(&mut l, &host, "cli");
+            assert!(host.terminals().is_empty(), "{value}");
+            assert_eq!(host.notifications().len(), 1, "{value}");
+        }
+    }
+
+    #[test]
+    fn spring_init_accepts_inner_dashes() {
         let host = MockHost::install().with_capabilities(&["storage", "process:spring"]);
         let mut l = Launcher::default();
-        for (key, value) in [("artifactId", "--help"), ("artifactId", "-x"), ("groupId", "-g"), ("dependencies", "web,-web")] {
-            let mut l2 = Launcher::default();
-            field(&mut l2, &host, key, value);
-            click(&mut l2, &host, "cli");
-        }
-        assert!(host.terminals().is_empty());
-        assert_eq!(host.notifications().len(), 4);
-        field(&mut l, &host, "artifactId", "--help");
-        assert!(l.cli_args().is_err());
+        field(&mut l, &host, "artifactId", "my-app");
+        field(&mut l, &host, "groupId", "a-b");
+        field(&mut l, &host, "bootVersion", "1.0-SNAPSHOT");
+        field(&mut l, &host, "dependencies", "spring-web,data-jpa");
+        click(&mut l, &host, "cli");
+        assert_eq!(host.terminals().len(), 1);
+        assert!(host.notifications().is_empty());
     }
 }
