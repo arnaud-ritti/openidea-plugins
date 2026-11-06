@@ -100,7 +100,7 @@ pub fn grid(path: &str, text: &str, others: &[(String, String)]) -> Grid {
     let columns = std::iter::once("Key".to_owned())
         .chain(files.iter().enumerate().map(|(i, (file, _))| {
             let locale = locale_name(suffix(file));
-            if i == 0 { format!("{locale} (this file)") } else { format!("{locale} (read-only)") }
+            if i == 0 { format!("{locale} (this file)") } else { locale.to_string() }
         }))
         .collect();
 
@@ -317,12 +317,41 @@ impl Properties {
         let filter = if self.bundle_incomplete_only { "Show All Keys" } else { "Show Incomplete Only" };
         let mut status = format!("{total} keys · {} locales · {} missing translations", grid.files.len(), grid.missing);
         if grid.files.len() > 1 {
-            status.push_str(" · Editing another locale's cell opens its file");
+            status.push_str(" · Editing another locale's cell writes its file");
         }
         Ok(View::new(Body::Table(table))
             .button(Button::new("reload", "Reload Locales").icon("refresh"))
             .button(Button::new("incomplete", filter).icon("filter"))
             .status(&status))
+    }
+
+    fn write_locale(&mut self, grid: &Grid, event: &ViewEvent, row: u32, column: u32) -> Result<(), Error> {
+        if !host::setting_bool("bundle.writeOtherLocales").unwrap_or(true) {
+            return self.open_locale(grid, row, column);
+        }
+        let ViewEvent::Cell { value, .. } = event else { return Ok(()) };
+        let other = grid.files.get(column as usize - 1).ok_or("No such column.")?.clone();
+        let project = project_for(&other)?;
+        let text = project.read_file(&other)?;
+        let edit_event = ViewEvent::Cell { row, column: 1, value: value.clone() };
+        let mut edits = bundle_edits(&text, grid, &edit_event, &Settings::load())?;
+        edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+        let mut updated = text;
+        for (span, replacement) in edits {
+            updated.replace_range(span, &replacement);
+        }
+
+        let written = host::run_process("tee", &[other.clone()], Some(&updated))
+            .and_then(|out| if out.status == Some(0) { Ok(()) } else { Err(Error::Invalid(out.stderr)) });
+        match written {
+            Ok(()) => {
+                self.bundle = None;
+                host::refresh_view(BUNDLE);
+                Ok(())
+            }
+            Err(Error::Denied(_)) => self.open_locale(grid, row, column),
+            Err(e) => Err(e),
+        }
     }
 
     fn open_locale(&self, grid: &Grid, row: u32, column: u32) -> Result<(), Error> {
@@ -356,7 +385,7 @@ impl Properties {
 
         if let ViewEvent::Cell { row, column, .. } = &event {
             if *column >= 2 {
-                return self.open_locale(&grid, *row, *column);
+                return self.write_locale(&grid, &event, *row, *column);
             }
         }
 
@@ -492,11 +521,11 @@ mod tests {
 
         let view = plugin.render(BUNDLE, None, &host.invocation()).unwrap();
         let Body::Table(table) = view.body else { panic!("a table") };
-        assert_eq!(table.columns, ["Key", "default (this file)", "fr (read-only)"]);
+        assert_eq!(table.columns, ["Key", "default (this file)", "fr"]);
         assert_eq!(table.rows[2], ["extra", "", "En plus"]);
         assert_eq!(
             view.status.as_deref(),
-            Some("3 keys · 2 locales · 2 missing translations · Editing another locale's cell opens its file")
+            Some("3 keys · 2 locales · 2 missing translations · Editing another locale's cell writes its file")
         );
 
         let cell = |row, column, value: &str| ViewEvent::Cell { row, column, value: value.into() };
@@ -506,7 +535,7 @@ mod tests {
         assert_eq!(host.editor_text(), "greeting=Hello\nbye=Goodbye\nextra=Extra\n");
 
         plugin.handle(BUNDLE, cell(2, 2, "x"), &host.invocation()).unwrap();
-        assert_eq!(host.opened_locations(), [("/project/messages_fr.properties".to_owned(), 1, 0)]);
+        assert_eq!(host.opened_locations(), [("/project/messages_fr.properties".to_owned(), 1, 0)], "tee is not granted here");
 
         plugin.handle(BUNDLE, ViewEvent::InsertRow(1), &host.invocation()).unwrap();
         plugin.handle(BUNDLE, ViewEvent::DeleteRows(vec![0, 3]), &host.invocation()).unwrap();
@@ -547,5 +576,42 @@ mod tests {
             host.notifications()[0].body,
             "Removed from this file only. To delete it everywhere, use Remove property from all locales."
         );
+    }
+
+    fn tee_host() -> (MockHost, std::rc::Rc<std::cell::RefCell<String>>) {
+        let host = MockHost::install().with_capabilities(&["project.read", "editor.read", "editor.write", "process:tee"]);
+        let written = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let sink = written.clone();
+        host.on_process("tee", move |_, stdin| {
+            *sink.borrow_mut() = stdin.unwrap_or_default().to_owned();
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+        });
+        host.add_file("/project/messages_fr.properties", "hello=Bonjour\n");
+        host.open_editor("/project/messages.properties", "properties", "hello=Hello\nbye=Bye\n", &[]);
+        (host, written)
+    }
+
+    #[test]
+    fn editing_another_locale_cell_writes_that_file_with_tee() {
+        let (host, written) = tee_host();
+        let mut plugin = Properties::default();
+        let cell = |row, value: &str| ViewEvent::Cell { row, column: 2, value: value.into() };
+
+        plugin.handle(BUNDLE, cell(1, "Au revoir"), &host.invocation()).unwrap();
+        assert_eq!(*written.borrow(), "hello=Bonjour\nbye=Au revoir\n");
+        assert_eq!(host.process_runs()[0].args, ["/project/messages_fr.properties"]);
+        assert!(host.opened_locations().is_empty());
+
+        plugin.handle(BUNDLE, cell(0, "Salut"), &host.invocation()).unwrap();
+        assert_eq!(*written.borrow(), "hello=Salut\n");
+    }
+
+    #[test]
+    fn the_setting_keeps_other_locales_read_only() {
+        let (host, written) = tee_host();
+        host.set_setting("bundle.writeOtherLocales", "false");
+        Properties::default().handle(BUNDLE, ViewEvent::Cell { row: 1, column: 2, value: "x".into() }, &host.invocation()).unwrap();
+        assert!(written.borrow().is_empty());
+        assert_eq!(host.opened_locations().len(), 1);
     }
 }

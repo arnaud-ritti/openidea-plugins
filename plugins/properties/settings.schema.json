@@ -1,5 +1,11 @@
 {
   "properties": {
+    "bundle.writeOtherLocales": {
+      "type": "boolean",
+      "title": "Resource Bundle editor: write other locales",
+      "description": "Editing another locale's cell rewrites its file with tee (needs the optional tee permission; without it the file is opened). An unsaved editor buffer of that file is overwritten.",
+      "default": true
+    },
     "codeStyle.keyValueDelimiter": {
       "type": "string",
       "title": "Code style: key/value delimiter",

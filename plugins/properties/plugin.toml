@@ -4,7 +4,7 @@ version = "0.1.0" # x-release-please-version
 description = "Inspections and editing tools for .properties files. Reports duplicate keys, broken \\u escapes, trailing spaces, delimiters that don't match the code style, translations missing from other locales and unused keys, with quick fixes. Also removes a key from every locale, sorts and reformats files, groups keys by prefix in a structure view, edits a resource bundle as a table (Open With › Resource Bundle), goes to declaration in the parent locale or from Java/Kotlin strings, completes keys in i18n calls and simplelogger.properties, and copies a property's key or value. Ported from JetBrains' Properties plugin (com.intellij.properties) by JetBrains s.r.o., Apache-2.0."
 authors = ["Arnaud Ritti", "JetBrains s.r.o. (original Properties plugin)"]
 license = "Apache-2.0"
-change-notes = "Unreleased: live unused keys as hints (setting, off by default), Go to Declaration lists every locale of a bundle, the Resource Bundle editor opens another locale's file when its cell is edited and can show incomplete keys only. 0.1.0: first release, with inspections and quick fixes, unused keys, reformat and sort, the structure view, the resource bundle editor, and navigation and completion from Java/Kotlin. Ported from com.intellij.properties 263.7307.108 (source: intellij-community tag idea/263.7307.112, ff0ce573f67655be431312bebb00fecda756960b)."
+change-notes = "Unreleased: the Resource Bundle editor writes the cells of other locales to their files (optional tee permission, setting bundle.writeOtherLocales; without the permission the file opens). live unused keys as hints (setting, off by default), Go to Declaration lists every locale of a bundle, the Resource Bundle editor opens another locale's file when its cell is edited and can show incomplete keys only. 0.1.0: first release, with inspections and quick fixes, unused keys, reformat and sort, the structure view, the resource bundle editor, and navigation and completion from Java/Kotlin. Ported from com.intellij.properties 263.7307.108 (source: intellij-community tag idea/263.7307.112, ff0ce573f67655be431312bebb00fecda756960b)."
 categories = ["languages", "linters"]
 icon = "icon.svg"
 engines.openidea = "^1.2"
@@ -13,7 +13,7 @@ activation = ["on-event:file-opened", "on-event:file-saved"]
 
 [capabilities]
 required = ["project.read", "editor.read", "editor.write", "events"]
-optional = ["clipboard"]
+optional = ["clipboard", "process:tee"]
 
 [[contributes.providers]]
 kinds = ["code-actions", "definition", "completion"]

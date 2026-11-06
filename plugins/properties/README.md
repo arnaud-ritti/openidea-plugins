@@ -23,8 +23,9 @@ from JetBrains' [Properties plugin](https://plugins.jetbrains.com/plugin/11594-p
   sorted. Double-click a key to go to it.
 - Open With › Resource Bundle: a table of keys × locales. Edit keys and this
   file's values, and insert or delete rows. Editing another locale's cell
-  opens that file at the key (a plugin can't write to a file that isn't the
-  focused editor). Show Incomplete Only keeps the keys some locale lacks.
+  rewrites that file with `tee` (optional permission, setting
+  `bundle.writeOtherLocales`; without the permission the file is opened at the
+  key). An unsaved buffer of that file is overwritten. Show Incomplete Only keeps the keys some locale lacks.
 - Go to Declaration on a key: the same key in the parent locale
   (`messages_fr_CA` → `messages_fr` → `messages`) and in every other locale
   of the bundle that declares it; on a Java/Kotlin string:
