@@ -9,6 +9,7 @@ mod checks;
 mod kotlin;
 mod model;
 mod sites;
+mod xml_actions;
 mod xml_checks;
 
 pub use model::{Bean, FileModel, Injection, parse};
@@ -541,14 +542,7 @@ impl Providers for Navigator {
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         if doc.language == "xml" {
-            let Some((title, edit)) = xml_checks::style_fix(&doc.text, selection.start) else { return Vec::new() };
-            return vec![CodeAction {
-                title: title.into(),
-                kind: Some("quickfix".into()),
-                preferred: true,
-                edits: vec![(doc.path.clone(), vec![edit])],
-                data: None,
-            }];
+            return xml_code_actions(doc, selection);
         }
         if doc.language != "java" {
             return Vec::new();
@@ -562,6 +556,34 @@ impl Providers for Navigator {
             data: None,
         }]
     }
+}
+
+fn xml_code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
+    let Some(caret) = offset(&doc.text, selection.start) else { return Vec::new() };
+    let text = &doc.text;
+    let mut actions = Vec::new();
+    let mut offer = |title: &str, kind: &str, preferred: bool, edits: Vec<TextEdit>| {
+        actions.push(CodeAction {
+            title: title.into(),
+            kind: Some(kind.into()),
+            preferred,
+            edits: vec![(doc.path.clone(), edits)],
+            data: None,
+        });
+    };
+    if let Some((title, edit)) = xml_checks::style_fix(text, selection.start) {
+        offer(title, "quickfix", true, vec![edit]);
+    }
+    if let Some(edits) = xml_actions::use_p_namespace(text, caret) {
+        offer("Use p-namespace", "refactor", false, edits);
+    }
+    if let Some(edits) = xml_actions::introduce_bean(text, caret) {
+        offer("Introduce bean", "refactor", false, edits);
+    }
+    if let Some(edits) = xml_actions::update_schema(text) {
+        offer("Update XML schema", "refactor", false, edits);
+    }
+    actions
 }
 
 fn location_key(path: &str, range: Range) -> String {

@@ -1,6 +1,7 @@
 use super::*;
 use openidea_plugin::Event;
 use openidea_plugin::mock::MockHost;
+use spring_text::xml;
 
 const SERVICE: &str = r#"package com.acme;
 
@@ -1341,4 +1342,207 @@ fn code_action_applies_the_edit_to_the_open_file() {
     navigator.line_markers(&document);
     let hint = host.diagnostics()[XML_PATH][0].range;
     assert_eq!(navigator.code_actions(&document, hint)[0].title, "Use the ref attribute");
+}
+
+fn apply_edits(text: &str, edits: &[TextEdit]) -> String {
+    let mut fixed = text.to_owned();
+    for e in edits {
+        let (s, t) = (offset(&fixed, e.range.start).unwrap(), offset(&fixed, e.range.end).unwrap());
+        fixed.replace_range(s..t, &e.text);
+    }
+    fixed
+}
+
+fn caret_in(text: &str, needle: &str) -> usize {
+    text.find(needle).unwrap() + 2
+}
+
+const P_NS: &str = "http://www.springframework.org/schema/p";
+
+#[test]
+fn p_namespace_moves_value_and_adds_declaration() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\">\n  <property name=\"n\" value=\"5\"/>\n  <property name=\"m\" value=\"6\"/>\n</bean>");
+    let edits = xml_actions::use_p_namespace(&text, caret_in(&text, "<property name=\"n\"")).unwrap();
+    let fixed = apply_edits(&text, &edits);
+    assert!(fixed.contains("class=\"x.Y\" p:n=\"5\">\n  <property name=\"m\" value=\"6\"/>\n</bean>"), "{fixed}");
+    let els = xml::elements(&fixed);
+    assert_eq!(els[0].value("xmlns:p"), Some(P_NS));
+    assert_eq!(els.iter().find(|e| e.name == "bean").unwrap().value("p:n"), Some("5"));
+    assert_eq!(els.iter().filter(|e| e.name == "property").count(), 1);
+    assert_eq!(xml::elements(&fixed).len(), 3);
+}
+
+#[test]
+fn p_namespace_reuses_bound_prefix() {
+    let text = format!("<beans xmlns=\"http://www.springframework.org/schema/beans\" xmlns:q='{P_NS}'>\n<bean id='a' class='x.Y'><property name='n' value='say \"hi\"'/></bean>\n</beans>");
+    let edits = xml_actions::use_p_namespace(&text, caret_in(&text, "<property")).unwrap();
+    let fixed = apply_edits(&text, &edits);
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "bean").unwrap().value("q:n"), Some("say \"hi\""));
+    assert!(els[0].attrs.iter().all(|a| a.name != "xmlns:p"));
+    assert!(els.iter().all(|e| e.name != "property"));
+}
+
+#[test]
+fn p_namespace_for_ref_uses_ref_suffix() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\" ref=\"b\"/></bean>");
+    let edits = xml_actions::use_p_namespace(&text, caret_in(&text, "<property")).unwrap();
+    let els = xml::elements(&apply_edits(&text, &edits));
+    assert_eq!(els.iter().find(|e| e.name == "bean").unwrap().value("p:n-ref"), Some("b"));
+}
+
+#[test]
+fn p_namespace_is_quiet_for_library_or_dynamic_name() {
+    let quiet = |text: &str| assert!(xml_actions::use_p_namespace(text, caret_in(text, "<property")).is_none(), "{text}");
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"my.n\" value=\"5\"/></bean>"));
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"my-n\" value=\"5\"/></bean>"));
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"${n}\" value=\"5\"/></bean>"));
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\" value=\"5\" ref=\"b\"/></bean>"));
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\"><value>5</value></property></bean>"));
+    quiet(&format!("<beans xmlns=\"http://www.springframework.org/schema/beans\" xmlns:p=\"{P_NS}\"><bean id=\"a\" class=\"x.Y\" p:n=\"1\"><property name=\"n\" value=\"5\"/></bean></beans>"));
+    quiet("<beans xmlns=\"http://www.springframework.org/schema/beans\" xmlns:p=\"urn:other\"><bean id=\"a\" class=\"x.Y\"><property name=\"n\" value=\"5\"/></bean></beans>");
+    quiet("<beans xmlns=\"http://www.springframework.org/schema/beans\"><x:bean xmlns:x=\"urn:o\"><property name=\"n\" value=\"5\"/></x:bean></beans>");
+    quiet("<project><bean><property name=\"n\" value=\"5\"/></bean></project>");
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\" value=\"5\"/></bean>");
+    assert!(xml_actions::use_p_namespace(&text, 0).is_none());
+}
+
+const INNER: &str = "<bean id=\"a\" class=\"x.Y\">\n  <property name=\"dao\">\n    <bean class=\"com.acme.UserDao\">\n      <property name=\"k\" value=\"1\"/>\n    </bean>\n  </property>\n</bean>";
+
+#[test]
+fn introduce_bean_moves_inner_bean_and_references_it() {
+    let text = beans_xml(INNER);
+    let edits = xml_actions::introduce_bean(&text, caret_in(&text, "<bean class")).unwrap();
+    let fixed = apply_edits(&text, &edits);
+    let els = xml::elements(&fixed);
+    let names: Vec<_> = els.iter().map(|e| (e.name.as_str(), e.parent)).collect();
+    assert_eq!(names, [("beans", None), ("bean", Some(0)), ("property", Some(1)), ("bean", Some(0)), ("property", Some(3))]);
+    assert_eq!(els[2].value("ref"), Some("userDao"));
+    assert_eq!(els[3].value("id"), Some("userDao"));
+    assert_eq!(els[3].value("class"), Some("com.acme.UserDao"));
+    assert!(fixed.contains("</bean>\n<bean id=\"userDao\" class=\"com.acme.UserDao\">\n  <property name=\"k\" value=\"1\"/>\n</bean>\n</beans>"), "{fixed}");
+
+    let list = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"l\"><list><bean class=\"p.Q$R\"/></list></property></bean>");
+    let fixed = apply_edits(&list, &xml_actions::introduce_bean(&list, caret_in(&list, "<bean class")).unwrap());
+    let els = xml::elements(&fixed);
+    let reference = els.iter().find(|e| e.name == "ref").unwrap();
+    assert_eq!(reference.value("bean"), Some("r"));
+    assert_eq!(els[reference.parent.unwrap()].name, "list");
+    assert_eq!(els.iter().find(|e| e.value("id") == Some("r")).unwrap().parent, Some(0));
+}
+
+#[test]
+fn introduce_bean_picks_an_unused_id() {
+    let text = beans_xml("<bean id=\"userDao\" class=\"a.B\"/><bean name=\"x, userDao2\" class=\"a.C\"/>\n<alias name=\"userDao\" alias=\"userDao3\"/>\n<bean id=\"a\" class=\"x.Y\"><constructor-arg><bean class=\"com.acme.UserDao\"/></constructor-arg></bean>");
+    let fixed = apply_edits(&text, &xml_actions::introduce_bean(&text, caret_in(&text, "<bean class")).unwrap());
+    let els = xml::elements(&fixed);
+    assert!(els.iter().any(|e| e.name == "bean" && e.value("id") == Some("userDao4")), "{fixed}");
+    let arg = els.iter().find(|e| e.name == "constructor-arg").unwrap();
+    assert_eq!(arg.value("ref"), Some("userDao4"));
+}
+
+#[test]
+fn introduce_bean_is_quiet_when_bean_has_id() {
+    let quiet = |text: &str| assert!(xml_actions::introduce_bean(text, text.rfind("<bean").unwrap() + 2).is_none(), "{text}");
+    quiet(&beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"d\"><bean class=\"c.D\" id=\"d\"/></property></bean>"));
+    let top = beans_xml("<bean class=\"c.D\"/>");
+    assert!(xml_actions::introduce_bean(&top, caret_in(&top, "<bean class")).is_none());
+    quiet(&beans_xml("<bean id=\"a\"><property name=\"d\"><bean class=\"${c}\"/></property></bean>"));
+    quiet(&beans_xml("<bean id=\"a\"><property name=\"d\"><bean parent=\"p\"/></property></bean>"));
+    quiet(&beans_xml("<bean id=\"a\"><property name=\"d\"><bean class=\"c.D\">"));
+}
+
+const DTD: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE beans PUBLIC \"-//SPRING//DTD BEAN 2.0//EN\" \"https://www.springframework.org/dtd/spring-beans-2.0.dtd\">\n<beans default-lazy-init=\"true\">\n  <bean id=\"a\" class=\"x.Y\"/>\n</beans>\n";
+
+#[test]
+fn update_schema_replaces_doctype() {
+    let fixed = apply_edits(DTD, &xml_actions::update_schema(DTD).unwrap());
+    assert!(!fixed.contains("DOCTYPE"), "{fixed}");
+    assert!(fixed.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<beans xmlns="), "{fixed}");
+    let els = xml::elements(&fixed);
+    assert_eq!(xml::namespace(&els, 0), Some("http://www.springframework.org/schema/beans"));
+    assert_eq!(els[0].value("xsi:schemaLocation"), Some("http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd"));
+    assert_eq!(els[0].value("xmlns:xsi"), Some("http://www.w3.org/2001/XMLSchema-instance"));
+    assert_eq!(els[0].value("default-lazy-init"), Some("true"));
+    assert_eq!(els.len(), 2);
+    assert_eq!(xml::namespace(&els, 1), Some("http://www.springframework.org/schema/beans"));
+}
+
+#[test]
+fn update_schema_is_quiet_for_schema_files() {
+    assert!(xml_actions::update_schema(&beans_xml("<bean id=\"a\" class=\"x.Y\"/>")).is_none());
+    let both = DTD.replace("<beans ", "<beans xmlns=\"http://www.springframework.org/schema/beans\" ");
+    assert!(xml_actions::update_schema(&both).is_none());
+    assert!(xml_actions::update_schema(&DTD.replace("beans PUBLIC", "html PUBLIC").replace("<beans ", "<html ").replace("</beans>", "</html>")).is_none());
+    assert!(xml_actions::update_schema("<project><!DOCTYPE beans></project>").is_none());
+}
+
+#[test]
+fn intentions_keep_multibyte_text_and_crlf() {
+    let crlf = |s: &str| s.replace('\n', "\r\n");
+    let text = crlf(&beans_xml("<!-- \u{1F600} -->\n<bean id=\"a\" class=\"x.Y\">\n  <property name=\"n\" value=\"caf\u{e9} \u{1F600}\"/>\n  <property name=\"dao\">\n    <bean class=\"com.acme.UserDao\">\n      <property name=\"k\" value=\"\u{e9}\"/>\n    </bean>\n  </property>\n</bean>"));
+    let fixed = apply_edits(&text, &xml_actions::use_p_namespace(&text, caret_in(&text, "<property name=\"n\"")).unwrap());
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "bean").unwrap().value("p:n"), Some("caf\u{e9} \u{1F600}"));
+    assert!(!fixed.contains("\r\n\r\n") && !fixed.replace("\r\n", "").contains('\n'), "{fixed:?}");
+
+    let fixed = apply_edits(&text, &xml_actions::introduce_bean(&text, caret_in(&text, "<bean class")).unwrap());
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "property" && e.value("name") == Some("dao")).unwrap().value("ref"), Some("userDao"));
+    assert_eq!(els.iter().find(|e| e.value("id") == Some("userDao")).unwrap().parent, Some(0));
+    assert!(fixed.contains("\r\n<bean id=\"userDao\" class=\"com.acme.UserDao\">\r\n  <property name=\"k\" value=\"\u{e9}\"/>\r\n</bean>\r\n"), "{fixed:?}");
+    assert!(!fixed.replace("\r\n", "").contains('\n'));
+
+    let dtd = crlf(&DTD.replace("x.Y", "caf\u{e9}\u{1F600}"));
+    let fixed = apply_edits(&dtd, &xml_actions::update_schema(&dtd).unwrap());
+    assert!(fixed.contains("<beans xmlns=\"http://www.springframework.org/schema/beans\"\r\n       xmlns:xsi"), "{fixed:?}");
+    assert!(!fixed.replace("\r\n", "").contains('\n'));
+    assert_eq!(xml::elements(&fixed)[1].value("class"), Some("caf\u{e9}\u{1F600}"));
+}
+
+#[test]
+fn xml_intentions_are_offered_as_code_actions() {
+    let text = beans_xml("<bean id=\"a\" class=\"x.Y\"><property name=\"n\" value=\"5\"/><property name=\"d\"><bean class=\"c.D\"/></property></bean>");
+    let document = doc(XML_PATH, &text);
+    let mut navigator = Navigator::default();
+    let at = |needle: &str| {
+        let p = position(&text, caret_in(&text, needle));
+        Range::new(p, p)
+    };
+    let mut titles = |range| navigator.code_actions(&document, range).into_iter().map(|a| a.title).collect::<Vec<_>>();
+    assert_eq!(titles(at("<property name=\"n\"")), ["Use p-namespace"]);
+    assert_eq!(titles(at("<bean class")), ["Introduce bean"]);
+    let dtd = doc(XML_PATH, DTD);
+    let first = Range::new(Position::new(0, 0), Position::new(0, 0));
+    assert_eq!(navigator.code_actions(&dtd, first).iter().map(|a| a.title.as_str()).collect::<Vec<_>>(), ["Update XML schema"]);
+}
+
+#[test]
+fn style_fix_handles_unusual_parent_tags() {
+    let fix = |body: &str| {
+        let text = beans_xml(body);
+        let els = xml::elements(&text);
+        let property = els.iter().find(|e| e.local() == "property").unwrap();
+        apply_edits(&text, &[xml_checks::attribute_style_edit(&text, property, &els).unwrap()])
+    };
+    let fixed = fix("<bean class=\"x.Y\"><property name=\"a&gt;b\" title=\"x>y\"><value>v</value></property></bean>");
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "property").unwrap().value("value"), Some("v"));
+    assert_eq!(els.iter().find(|e| e.name == "property").unwrap().value("title"), Some("x>y"));
+    assert!(els.iter().all(|e| e.name != "value"));
+
+    let fixed = fix("<b:bean xmlns:b=\"http://www.springframework.org/schema/beans\"><b:property name=\"n\"><b:ref bean=\"o\"/></b:property></b:bean>");
+    let els = xml::elements(&fixed);
+    assert_eq!(els.iter().find(|e| e.name == "b:property").unwrap().value("ref"), Some("o"));
+    assert!(els.iter().all(|e| e.name != "b:ref"));
+
+    let fixed = fix("<bean class=\"x.Y\"><property name='n'><value>v</value></property></bean>");
+    let els = xml::elements(&fixed);
+    let property = els.iter().find(|e| e.name == "property").unwrap();
+    assert_eq!((property.value("name"), property.value("value")), (Some("n"), Some("v")));
+    assert!(els.iter().all(|e| e.name != "value"));
+
+    let text = "<beans xmlns=\"http://www.springframework.org/schema/beans\"><bean><property name=\"n\"";
+    let els = xml::elements(text);
+    assert!(xml_checks::attribute_style_edit(text, &els[2], &els).is_none());
 }

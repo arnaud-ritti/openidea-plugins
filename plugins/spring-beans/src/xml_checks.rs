@@ -11,7 +11,7 @@ use spring_text::finding::Finding;
 use spring_text::range;
 use spring_text::xml;
 
-const BEANS_NS: &str = "http://www.springframework.org/schema/beans";
+pub const BEANS_NS: &str = "http://www.springframework.org/schema/beans";
 const AOP_NS: &str = "http://www.springframework.org/schema/aop";
 pub const KNOWN_SCOPES: [&str; 7] = ["singleton", "prototype", "request", "session", "application", "websocket", "bundle"];
 const ADVICE: [&str; 5] = ["before", "after", "after-returning", "after-throwing", "around"];
@@ -35,15 +35,15 @@ pub fn check_xml(path: &str, text: &str, _world: &World, groups: Groups) -> Vec<
     out
 }
 
-fn is_beans_file(els: &[xml::Element]) -> bool {
+pub(crate) fn is_beans_file(els: &[xml::Element]) -> bool {
     xml::root(els) == Some("beans")
 }
 
-fn in_namespace(els: &[xml::Element], i: usize, ns: &str) -> bool {
+pub(crate) fn in_namespace(els: &[xml::Element], i: usize, ns: &str) -> bool {
     xml::namespace(els, i) == Some(ns)
 }
 
-fn dynamic(value: &str) -> bool {
+pub(crate) fn dynamic(value: &str) -> bool {
     value.contains("${") || value.contains("#{")
 }
 
@@ -235,6 +235,9 @@ fn style_attribute(text: &str, els: &[xml::Element], child: usize, parent: &xml:
 
 /// The edit turning the single `<value>` or `<ref>` child of `property` into an attribute.
 pub fn attribute_style_edit(text: &str, property: &xml::Element, els: &[xml::Element]) -> Option<TextEdit> {
+    if text.as_bytes().get(property.tag_end.checked_sub(1)?) != Some(&b'>') {
+        return None;
+    }
     let parent = els.iter().position(|e| e.start == property.start)?;
     let (_, child) = style_candidates(text, els).into_iter().find(|(p, _)| *p == parent)?;
     let replacement = style_attribute(text, els, child, property)?;
