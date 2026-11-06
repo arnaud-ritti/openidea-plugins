@@ -687,7 +687,7 @@ fn every_template_is_registered_and_parses() {
         .filter(|rest| rest.starts_with("templates/"))
         .filter_map(|rest| rest.strip_suffix('"'))
         .collect();
-    assert_eq!(paths.len(), 16, "{paths:?}");
+    assert_eq!(paths.len(), 27, "{paths:?}");
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for path in paths {
         let body = std::fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("missing {path}"));
@@ -2018,4 +2018,290 @@ fn creates_the_missing_view_under_the_cursor() {
     host.open_editor("/project/app/Http/Controllers/A.php", "php", text, &[(1, 17, 1, 17)]);
     plugin.run_command("create-missing", &host.invocation(), None).unwrap();
     assert_eq!(host.terminals().len(), 1);
+}
+
+#[test]
+fn find_unused_views_opens_the_chosen_one() {
+    let host = MockHost::install();
+    host.add_file("resources/views/orphan.blade.php", "<p>x</p>\n");
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&["orphan"]));
+    plugin.run_command("unused-views", &host.invocation(), None).unwrap();
+    let opened = host.opened_locations();
+    assert_eq!(opened.len(), 1);
+    assert!(opened[0].0.ends_with("resources/views/orphan.blade.php"));
+}
+
+#[test]
+fn find_unused_views_says_so_when_all_are_used() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    plugin.run_command("unused-views", &host.invocation(), None).unwrap();
+    assert!(host.opened_locations().is_empty());
+    assert!(host.notifications().iter().any(|n| n.body.contains("Every view is used")));
+}
+
+#[test]
+fn model_phpdoc_removal_is_offered_inside_the_block() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n\n/**\n * @property int $id\n * @mixin \\Eloquent\n */\nclass Post extends Model\n{\n}\n";
+    let titles = rewrite_titles(&mut plugin, "/project/app/Models/Post.php", "php", text, "@property");
+    assert!(titles.iter().any(|t| t.starts_with("Remove IDE helper PHPDoc")), "{titles:?}");
+    let plain = "<?php\nclass Post extends Model\n{\n}\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/Models/Post.php", "php", plain, "class").is_empty());
+}
+
+#[test]
+fn livewire_view_calling_a_missing_method_is_reported() {
+    let host = MockHost::install();
+    host.add_file("app/Livewire/Tally.php", "<?php\nnamespace App\\Livewire;\nclass Tally extends Component\n{\n    public function increment() {}\n}\n");
+    host.add_file("resources/views/livewire/tally.blade.php", "<button wire:click=\"increment\">+</button>\n<button wire:click=\"decrement\">-</button>\n");
+    let mut plugin = activated(&host);
+    let path = "/project/resources/views/livewire/tally.blade.php";
+    let text = host_text(&host, path);
+    let project = host.invocation().project().unwrap();
+    plugin.check(&project, path);
+    let found = host.diagnostics();
+    let codes: Vec<_> = found[path].iter().map(|d| (d.code.clone().unwrap(), d.range.start.line)).collect();
+    assert_eq!(codes, [("laravel.unknown-livewire-method".to_owned(), 1)]);
+    assert!(text.contains("decrement"));
+}
+
+#[test]
+fn livewire_view_of_a_component_with_a_trait_stays_silent() {
+    let host = MockHost::install();
+    host.add_file("app/Livewire/Tally.php", "<?php\nclass Tally extends Component\n{\n    use Helpers;\n}\n");
+    host.add_file("resources/views/livewire/tally.blade.php", "<button wire:click=\"anything\">+</button>\n");
+    let mut plugin = activated(&host);
+    let path = "/project/resources/views/livewire/tally.blade.php";
+    let project = host.invocation().project().unwrap();
+    plugin.check(&project, path);
+    assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
+}
+
+#[test]
+fn routes_naming_missing_controllers_and_methods_are_reported() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    host.add_file(
+        "routes/extra.php",
+        "<?php\nuse App\\Http\\Controllers\\PostController;\nuse App\\Http\\Controllers\\GhostController;\nuse Vendor\\Pkg\\RemoteController;\nRoute::get('/a', [PostController::class, 'index']);\nRoute::get('/b', [PostController::class, 'nope']);\nRoute::get('/c', [GhostController::class, 'index']);\nRoute::get('/d', [RemoteController::class, 'index']);\nRoute::resource('posts', PostController::class);\n",
+    );
+    let path = "/project/routes/extra.php";
+    let project = host.invocation().project().unwrap();
+    plugin.index_project(&project);
+    plugin.check(&project, path);
+    let found: Vec<_> = host.diagnostics()[path].iter().map(|d| (d.code.clone().unwrap(), d.range.start.line)).collect();
+    assert_eq!(
+        found,
+        [
+            ("laravel.unknown-route-method".to_owned(), 5),
+            ("laravel.unknown-route-controller".to_owned(), 6),
+            ("laravel.unknown-route-method".to_owned(), 8),
+            ("laravel.unknown-route-method".to_owned(), 8),
+            ("laravel.unknown-route-method".to_owned(), 8),
+            ("laravel.unknown-route-method".to_owned(), 8),
+            ("laravel.unknown-route-method".to_owned(), 8),
+        ]
+    );
+}
+
+#[test]
+fn route_files_with_controller_groups_and_invokables_stay_silent() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    host.add_file("routes/grouped.php", "<?php\nRoute::controller(PostController::class)->group(function () {\n    Route::get('/x', 'missing');\n});\n");
+    host.add_file("routes/invoke.php", "<?php\nuse App\\Http\\Controllers\\PostController;\nRoute::get('/x', PostController::class);\n");
+    let project = host.invocation().project().unwrap();
+    plugin.index_project(&project);
+    for path in ["/project/routes/grouped.php", "/project/routes/invoke.php"] {
+        plugin.check(&project, path);
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()), "{path}");
+    }
+}
+
+#[test]
+fn indexer_links_a_model_to_the_factory_the_project_has() {
+    use openidea_plugin::indexing::{Document as IndexDocument, DocumentIndexer};
+    let host = MockHost::install();
+    host.add_file("database/factories/PostFactory.php", "<?php\nclass PostFactory extends Factory {}\n");
+    let mut plugin = activated(&host);
+    let text = host_text(&host, "/project/app/Models/Post.php");
+    let edges = plugin.index(&IndexDocument { path: "/project/app/Models/Post.php".into(), text, symbols: Vec::new() });
+    let markers: Vec<&str> = edges.markers.iter().map(|m| m.key.as_str()).collect();
+    assert!(markers.contains(&"factory#Post"), "{markers:?}");
+    assert!(markers.contains(&"policy#Post") && !markers.contains(&"observer#Post"), "{markers:?}");
+}
+
+fn selection_actions(plugin: &mut Main, path: &str, language: &str, text: &str, selected: &str) -> Vec<CodeAction> {
+    let start = text.find(selected).unwrap();
+    let range = Range::new(text::position(text, start), text::position(text, start + selected.len()));
+    plugin.code_actions(&doc(path, language, text), range)
+}
+
+#[test]
+fn selected_blade_text_is_extracted_to_the_main_locale_lang_file() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<h1>Hello there</h1>\n";
+    let actions = selection_actions(&mut plugin, "/project/resources/views/x.blade.php", "blade", text, "Hello there");
+    let action = actions.iter().find(|a| a.title.starts_with("Extract to translation key")).unwrap();
+    assert!(action.title.contains("messages.hello_there"));
+    assert_eq!(action.edits[0].1[0].text, "{{ __('messages.hello_there') }}");
+    assert_eq!(action.edits[1].0, "/project/lang/en/messages.php");
+    assert_eq!(action.edits[1].1[0].text, "    'hello_there' => 'Hello there',\n");
+
+    let in_tag = "<a title=\"Hello there\">x</a>\n";
+    let none = selection_actions(&mut plugin, "/project/resources/views/x.blade.php", "blade", in_tag, "Hello there");
+    assert!(none.iter().all(|a| !a.title.starts_with("Extract")));
+}
+
+#[test]
+fn selected_php_string_is_extracted_only_inside_its_quotes() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nreturn 'Saved it';\n";
+    let actions = selection_actions(&mut plugin, "/project/app/A.php", "php", text, "Saved it");
+    assert_eq!(actions.iter().find(|a| a.title.starts_with("Extract")).unwrap().edits[0].1[0].text, "__('messages.saved_it')");
+    let partial = selection_actions(&mut plugin, "/project/app/A.php", "php", text, "Saved");
+    assert!(partial.iter().all(|a| !a.title.starts_with("Extract")));
+}
+
+#[test]
+fn form_request_gets_rules_for_the_model_columns() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nclass StorePostRequest extends FormRequest\n{\n    public function rules(): array\n    {\n        return [\n            'title' => ['required'],\n        ];\n    }\n}\n";
+    let at = text.find("return").unwrap();
+    let position = text::position(text, at);
+    let actions = plugin.code_actions(&doc("/project/app/Http/Requests/StorePostRequest.php", "php", text), Range::new(position, position));
+    let action = actions.iter().find(|a| a.title.starts_with("Add validation rules")).unwrap();
+    let inserted = &action.edits[0].1[0].text;
+    assert!(inserted.contains("'body' => ['required', 'string']"), "{inserted}");
+    assert!(!inserted.contains("'title'") && !inserted.contains("created_at"), "{inserted}");
+}
+
+#[test]
+fn model_fillable_gets_the_missing_columns() {
+    let host = MockHost::install();
+    host.add_file("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $fillable = [\n        'title',\n    ];\n}\n");
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+    laravel_project_without_post(&host);
+    plugin.index_all();
+    let path = "/project/app/Models/Post.php";
+    let text = host_text(&host, path);
+    let position = text::position(&text, text.find("$fillable").unwrap());
+    let actions = plugin.code_actions(&doc(path, "php", &text), Range::new(position, position));
+    let action = actions.iter().find(|a| a.title == "Add the missing columns to $fillable").unwrap();
+    assert_eq!(action.edits[0].1[0].text, "\n        'body',");
+}
+
+fn laravel_project_without_post(host: &MockHost) {
+    host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0"}}"#);
+    host.add_file(
+        "database/migrations/2024_01_01_create_posts_table.php",
+        "<?php\nreturn new class extends Migration {\n    public function up(): void\n    {\n        Schema::create('posts', function (Blueprint $table) {\n            $table->id();\n            $table->string('title');\n            $table->text('body');\n            $table->timestamps();\n        });\n    }\n};\n",
+    );
+}
+
+#[test]
+fn component_attributes_and_slots_complete_from_props_and_the_view() {
+    let host = MockHost::install();
+    host.add_file("resources/views/components/banner.blade.php", "@props(['tone' => 'info', 'dismissible'])\n<div>{{ $slot }}{{ $footer }}</div>\n");
+    let mut plugin = activated(&host);
+    let path = "/project/resources/views/x.blade.php";
+
+    let (text, at) = cursor("<x-banner ton|");
+    assert_eq!(labels(plugin.completion(&doc(path, "blade", &text), at, None)), ["tone", "dismissible"]);
+
+    let (text, at) = cursor("<x-banner>\n<x-slot:fo|");
+    assert_eq!(labels(plugin.completion(&doc(path, "blade", &text), at, None)), ["footer"]);
+
+    let (text, at) = cursor("<x-alert |");
+    assert!(labels(plugin.completion(&doc(path, "blade", &text), at, None)).is_empty());
+}
+
+#[test]
+fn livewire_tag_attributes_complete_from_public_properties() {
+    let host = MockHost::install();
+    host.add_file("app/Livewire/Tally.php", "<?php\nclass Tally extends Component\n{\n    public int $count = 0;\n}\n");
+    let mut plugin = activated(&host);
+    let (text, at) = cursor("<livewire:tally |");
+    assert_eq!(labels(plugin.completion(&doc("/project/resources/views/x.blade.php", "blade", &text), at, None)), ["count"]);
+}
+
+#[test]
+fn columns_complete_through_relations_and_scopes() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    host.add_file("app/Models/Thread.php", "<?php\nclass Thread extends Model\n{\n    public function replies(): HasMany\n    {\n        return $this->hasMany(Reply::class);\n    }\n\n    public function scopeActive($query) {}\n}\n");
+    host.add_file("app/Models/Reply.php", "<?php\nclass Reply extends Model {}\n");
+    host.add_file(
+        "database/migrations/2024_02_01_create_replies_table.php",
+        "<?php\nreturn new class extends Migration {\n    public function up(): void\n    {\n        Schema::create('replies', function (Blueprint $table) {\n            $table->id();\n            $table->string('author');\n        });\n    }\n};\n",
+    );
+    plugin.index_all();
+    let path = "/project/app/Http/Controllers/A.php";
+
+    for marked in [
+        "<?php\nThread::find(1)->replies()->where('au|');",
+        "<?php\nThread::active()->replies()->orderBy('au|');",
+        "<?php\nThread::query()->with('x')->replies()->latest()->where('au|');",
+    ] {
+        let (text, at) = cursor(marked);
+        assert_eq!(labels(plugin.completion(&doc(path, "php", &text), at, None)), ["author", "id"], "{marked}");
+    }
+
+    let (text, at) = cursor("<?php\nThread::find(1)->unknown()->where('au|');");
+    assert!(labels(plugin.completion(&doc(path, "php", &text), at, None)).is_empty());
+
+    let (text, at) = cursor("<?php\nPost::where('ti|');");
+    assert!(labels(plugin.completion(&doc(path, "php", &text), at, None)).contains(&"title".to_owned()));
+
+    let (text, at) = cursor("<?php\nclass Thread extends Model\n{\n    function a() { return $this->replies()->where('au|'); }\n}\n");
+    assert_eq!(labels(plugin.completion(&doc("/project/app/Models/Thread.php", "php", &text), at, None)), ["author", "id"]);
+}
+
+#[test]
+fn container_names_complete_and_navigate() {
+    let host = MockHost::install();
+    host.add_file("app/Services/Billing.php", "<?php\nnamespace App\\Services;\n\nclass Billing\n{\n}\n");
+    host.add_file("app/Providers/AppServiceProvider.php", "<?php\nnamespace App\\Providers;\n\nclass AppServiceProvider\n{\n    public function register()\n    {\n        $this->app->singleton('billing.gateway', fn () => 1);\n    }\n}\n");
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/A.php";
+
+    let (text, at) = cursor("<?php\napp('ca|');");
+    let names = labels(plugin.completion(&doc(path, "php", &text), at, None));
+    for expected in ["cache", "billing.gateway", "App\\Services\\Billing"] {
+        assert!(names.contains(&expected.to_owned()), "{expected} in {names:?}");
+    }
+
+    let (text, at) = cursor("<?php\nApp::make('App\\\\Services\\\\Bill|ing');");
+    let found = plugin.definition(&doc(path, "php", &text), at);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].path.ends_with("app/Services/Billing.php"));
+
+    let (text, at) = cursor("@inject('b', 'App\\Services\\Bil|ling')");
+    assert_eq!(plugin.definition(&doc("/project/resources/views/x.blade.php", "blade", &text), at).len(), 1);
+}
+
+#[test]
+fn config_app_providers_complete_project_providers() {
+    let host = MockHost::install();
+    host.add_file("app/Providers/BillingServiceProvider.php", "<?php\nnamespace App\\Providers;\n\nclass BillingServiceProvider\n{\n}\n");
+    let mut plugin = activated(&host);
+    let path = "/project/config/app.php";
+
+    let (text, at) = cursor("<?php\nreturn [\n    'name' => 'x',\n    'providers' => [\n        App\\Providers\\Bil|\n    ],\n];\n");
+    let items = plugin.completion(&doc(path, "php", &text), at, None);
+    let item = items.iter().find(|i| i.label == "App\\Providers\\BillingServiceProvider").unwrap();
+    assert_eq!(item.insert_text, "App\\Providers\\BillingServiceProvider::class");
+
+    let (text, at) = cursor("<?php\nreturn [\n    'name' => 'Bil|',\n    'providers' => [\n    ],\n];\n");
+    assert!(plugin.completion(&doc(path, "php", &text), at, None).iter().all(|i| i.label != "App\\Providers\\BillingServiceProvider"));
+
+    let (text, at) = cursor("<?php\nreturn [\n    'providers' => [\n        App\\Providers\\Billing|ServiceProvider::class,\n    ],\n];\n");
+    assert_eq!(plugin.definition(&doc(path, "php", &text), at).len(), 1);
 }

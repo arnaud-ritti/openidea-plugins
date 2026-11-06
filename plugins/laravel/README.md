@@ -136,11 +136,97 @@ un-namespaced components: any `*/blade-*` package (icon packs such as
 check quiet. None of the five checks reports while the index is partial (the
 3 s reading budget ran out).
 
+## Components, containers and columns
+
+- Attribute completion inside `<x-name ` and `<livewire:name `: `@props([...])`
+  of an anonymous component, the constructor parameters of a class component,
+  or the public properties and `mount()` parameters of a Livewire class
+  (kebab-case, `:` prefix kept). `<x-slot:` completes the variables the
+  enclosing component's view prints.
+- `app('…')`, `resolve('…')`, `App::make/get/bound('…')` and the class of
+  `@inject('x', '…')` complete and open: the framework's aliases, literal
+  `bind/singleton/scoped/instance/alias('x'` calls in `app/`, and the classes
+  of `app/` (PSR-4 by namespace line). In `config/app.php` (`'providers'`) and
+  `bootstrap/providers.php` the classes of `app/Providers` complete as
+  `Name::class`, and a class name opens its file. Names registered by vendor
+  packages or built at run time are unknown.
+- Column completion follows relations and scopes: `Post::find(1)->comments()->where('`,
+  `Post::active()->comments()->orderBy('` and `$this->comments()->where('` in
+  a model complete the columns of `Comment`. A relation is a model method whose
+  body calls `$this->hasMany(Comment::class)` (or `hasOne`, `belongsTo`,
+  `belongsToMany`, `morphMany`, `morphOne`, `morphToMany`, `hasManyThrough`,
+  `hasOneThrough`); a scope is `scopeActive` or a `#[Scope]` method. A call that is
+  neither stays silent.
+
+## Livewire, routes and unused views
+
+- Problem `laravel.unknown-livewire-method` (setting `reportUnknownLivewireMethods`):
+  `wire:click`, `wire:submit`, `wire:keydown` and the other event attributes
+  naming a method that the component class of a `livewire/` view does not
+  declare. Quiet for classes with a trait, a parent other than `Component`,
+  `__call`, `#[Computed]`, `#[On]` or Volt, and for expressions (`$set`,
+  `form.save`, `a = 1`).
+- Problems `laravel.unknown-route-controller` and `laravel.unknown-route-method`
+  (setting `reportUnknownRouteControllers`): a controller imported from the
+  controllers namespace that has no file, and a method (also of `Route::resource`)
+  the controller doesn't declare. Quiet for invokables, vendor controllers,
+  controllers with traits, `__call` or another parent than `Controller`,
+  and files that use `Route::controller(...)` groups.
+- _Laravel: Find Unused Views_ lists the views no code names (`view()`,
+  `@include`, `@extends`, `Route::view`, mail and `markdown()` calls) and opens
+  the one you pick. Components, `errors.*`, `livewire.*`, `vendor.*`,
+  `mail.*`/`emails.*` and package views are never listed; the entries are marked
+  _maybe used_ when the project builds view names at run time (`view($name)`), and
+  names with a literal prefix (`'reports.' . $type`) count as used.
+- Document indexer: gutter links between a model and its factory, policy, observer,
+  seeder and migrations (a marker exists only when the counterpart is at its
+  conventional path), between an event and the listeners whose `handle()` takes it,
+  and `Model::factory()` goes to the factory. Routes, views and controllers keep
+  the provider's markers above. Unverified in the IDE.
+
+## Class and string intentions
+
+- `scopeActive()` in a model becomes `#[Scope] protected function active()` with
+  the import (not offered when the scope is called by name).
+- On a typed parameter of a method: "Move $x to a constructor property" adds a
+  `private` promoted property (creating the constructor) and rewrites `$x` to
+  `$this->x`; not offered when the variable is reassigned, captured by `compact`
+  or when the class extends something other than `Controller`.
+- On a core facade call (`Cache::`, `Log::`, `Mail::`, ...): "Inject ... instead of
+  the facade" replaces every use of that facade in the class with an injected
+  property of the documented underlying class, and removes the facade import
+  (not offered when a use is in a static method or is not a call).
+- A selected plain string in Blade or a quoted PHP string: "Extract to translation
+  key" replaces it with `{{ __('messages.key') }}` / `__('messages.key')` and adds the
+  entry to the existing main-locale lang file (`messages` first). Nothing is created.
+- In a form request's `rules()` (`StorePostRequest` maps to `Post`): "Add validation
+  rules for the columns of Post" appends the columns of the migrations that the
+  array lacks (`'title' => ['required', 'string', 'max:255']`); in a model, "Add the
+  missing columns to $fillable". Both need a multi-line or empty array.
+- Removing the `@property`/`@method`/`@mixin` lines that IDE helper writes above a model
+  class: "Remove IDE helper PHPDoc from model" at the class or its docblock.
+
+## Generators
+
+Commands under the _Laravel_ category ask for names and options in dialogs,
+then run `php artisan` in a terminal (optional `process:php` capability):
+_Run Artisan Command..._ (any `artisan` command, listed from `artisan list` with
+a fallback list), _Generate with artisan make..._ (30 `make:*` generators with
+their flags, for example `--resource`, `--api`, `--requests`, `--inline`; the
+Livewire one only when Livewire is installed), _New Eloquent Model..._ (with
+`-m -f -s -c --policy --all`), _Generate for Model..._ (policy, observer,
+factory, resource or controller with `--model`) and _Create Missing View,
+Component or Controller_ (editor context menu, from the name under the caret).
+Names are validated before they reach the command line. The plugin API cannot
+create files itself, which is why the generators go through artisan.
+
 ## New file templates
 
 New › Laravel Controller, Resource Controller, Job, Event, Listener, Mailable,
 Middleware, Form Request, Policy, Observer, Enum, Seeder, Factory, Migration
-(anonymous class), Pest Feature Test and Pest Unit Test, written from Laravel's
+(anonymous class), Pest Feature Test and Pest Unit Test, Action, Cast, Global
+Scope, Notification, Validation Rule, Trait, JSON Resource, Service Provider,
+View Composer, Exception and Livewire Component, written from Laravel's
 documentation and default stubs. The host gives a template only the file name
 and the caret position, so each uses the default namespace of its type
 (`App\Http\Controllers`, `App\Jobs`, ...) and has no prompts for a model or
@@ -171,15 +257,14 @@ Comments and strings are tracked with a simple scan (no regex literals, no Vue t
 These rely on PhpStorm's PHP PSI and type inference, which the OpenIDEA plugin
 API has no equivalent for (see `LIMITATIONS.md`):
 
-- the service container (`app('…')`, `App::make`, facade resolution, `@inject`
-  classes), custom Blade directives registered outside `app/`, and component
-  slots and attributes;
-- Eloquent relations and attributes added by accessors, and `where('column')`
-  on a query whose model is lost (`$user->posts()->where(...)`); dropped and
-  renamed columns aren't tracked; config `providers` class completion;
-- the _Extract partial view_ refactoring;
-- artisan `make:*` commands, which need a name and the plugin API has no
-  input dialog.
+- container bindings made outside `app/` or with a non-literal name, facade
+  resolution, and custom Blade directives registered outside `app/`;
+- attributes added by accessors, and `where('column')` on a query whose model
+  is lost (`$user->posts()->where(...)`, a variable of unknown type); dropped
+  and renamed columns aren't tracked;
+- the _Extract partial view_ refactoring.
+
+The artisan `make:*` generators are ported as commands (see _Generators_ below).
 
 View namespaces and extra view roots come from `ide-blade.json` at the project
 root or `.idea/ide-blade.json` (both are read when present):

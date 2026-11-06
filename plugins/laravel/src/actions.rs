@@ -5,6 +5,7 @@ use std::ops::Range;
 use crate::php::{self, is_identifier};
 use crate::refs::{self, Kind};
 
+#[derive(Clone)]
 pub struct Rewrite {
     pub title: String,
     pub kind: &'static str,
@@ -48,6 +49,7 @@ pub fn rewrites(path: &str, language: &str, text: &str, at: usize, controllers_n
     if language == "php" {
         found.extend(rule_object(language, text, at));
         found.extend(root_facade(text, at));
+        found.extend(crate::class_actions::rewrites(text, at));
     }
 
     if let Some(open) = refs::rule_list_at(language, text, at) {

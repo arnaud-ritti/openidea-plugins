@@ -11,7 +11,7 @@ documentation. Blade files need the aritti.blade plugin for highlighting."""
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "Daniel Espendiller (original Laravel Plugin)"]
 homepage = "https://github.com/Haehnchen/idea-php-laravel-plugin"
 license = "MIT"
-change-notes = """Unreleased: Laravel: Run Artisan Command..., Generate with artisan make..., New Eloquent Model..., Generate for Model... and Create Missing View, Component or Controller ask for names and options, then run php artisan make:* in a terminal. 0.1.0: first release. Ported from the Laravel Plugin (de.espend.idea.laravel) 0.15.4, \
+change-notes = """Unreleased: Laravel: Livewire method, route controller and method problems, Find Unused Views, model/factory/policy/observer/event gutter links from a document indexer, component attribute and slot completion, relation-aware column completion, container name completion (app(), @inject, config providers), scope/constructor/facade/translation/rules intentions and 11 more file templates. Laravel: Run Artisan Command..., Generate with artisan make..., New Eloquent Model..., Generate for Model... and Create Missing View, Component or Controller ask for names and options, then run php artisan make:* in a terminal. 0.1.0: first release. Ported from the Laravel Plugin (de.espend.idea.laravel) 0.15.4, \
 source revision 3a07f4a5f67dc0aacbcd6fdb11a8b5c9814803b0 (tag 0.15.4): routes, controllers, views, config, translations, \
 assets and the Blade layout markers. Env keys, middleware, route groups, JSON translations, components, Vite entries, \
 validation rules, abilities, columns, problems, the tool window and artisan commands follow Laravel's documentation. This port works from a text index of the project, so the features that \
@@ -106,6 +106,11 @@ id = "create-missing"
 title = "Laravel: Create Missing View, Component or Controller"
 category = "Laravel"
 
+[[contributes.commands]]
+id = "unused-views"
+title = "Laravel: Find Unused Views"
+category = "Laravel"
+
 [[contributes.menus]]
 menu = "editor.context"
 command = "create-missing"
@@ -146,6 +151,9 @@ languages = ["php", "blade"]
 [[contributes.providers]]
 kinds = ["completion", "definition"]
 languages = ["javascript", "typescript", "vue", "javascriptreact", "typescriptreact"]
+
+[[contributes.documentIndexers]]
+extensions = ["php"]
 
 [[contributes.views]]
 id = "laravel"
@@ -253,3 +261,68 @@ name = "Pest Unit Test"
 extension = "php"
 path = "templates/UnitTest.php"
 
+[[contributes.fileTemplates]]
+id = "laravel-action"
+name = "Laravel Action"
+extension = "php"
+path = "templates/Action.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-cast"
+name = "Laravel Cast"
+extension = "php"
+path = "templates/Cast.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-scope"
+name = "Laravel Global Scope"
+extension = "php"
+path = "templates/Scope.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-notification"
+name = "Laravel Notification"
+extension = "php"
+path = "templates/Notification.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-rule"
+name = "Laravel Validation Rule"
+extension = "php"
+path = "templates/Rule.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-trait"
+name = "Laravel Trait"
+extension = "php"
+path = "templates/Trait.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-json-resource"
+name = "Laravel JSON Resource"
+extension = "php"
+path = "templates/JsonResource.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-service-provider"
+name = "Laravel Service Provider"
+extension = "php"
+path = "templates/ServiceProvider.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-view-composer"
+name = "Laravel View Composer"
+extension = "php"
+path = "templates/ViewComposer.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-exception"
+name = "Laravel Exception"
+extension = "php"
+path = "templates/Exception.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-livewire-component"
+name = "Laravel Livewire Component"
+extension = "php"
+path = "templates/LivewireComponent.php"
