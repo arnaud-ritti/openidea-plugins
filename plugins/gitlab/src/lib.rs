@@ -11,7 +11,6 @@ mod attributes;
 mod branch;
 mod ci;
 mod ci_data;
-mod forms;
 mod prompts;
 mod repo;
 mod review;
@@ -33,8 +32,6 @@ use openidea_plugin::{
 const LIST: &str = "merge-requests";
 const DETAILS: &str = "merge-request";
 const PROJECTS: &str = "gitlab-projects";
-const NEW_SNIPPET: &str = "new-snippet";
-const SHARE: &str = "share-project-form";
 
 const FILTER_KEY: &str = "filter";
 /// Typed filters (author, reviewer, label, text) as a query-string fragment added to the quick filter's.
@@ -411,10 +408,6 @@ pub struct GitLab {
     projects: Option<Vec<ProjectInfo>>,
     /// The `CONFIRMED` button clicked once, waiting for its second click.
     confirm: Option<String>,
-    new_snippet: forms::SnippetForm,
-    share: forms::ShareForm,
-    /// The namespaces the share form offers, loaded when it is first drawn.
-    namespaces: Option<Vec<api::Namespace>>,
     /// The reaction picked in the details form, checked against `safe::EMOJIS` when used.
     emoji: Option<String>,
     /// The commit whose diff the changes view shows instead of the merge request's; see [`GitLab::active_commit`].
@@ -1173,10 +1166,6 @@ fn commits_enabled() -> bool {
     host::setting_bool("commitsView").unwrap_or(true)
 }
 
-fn forms_enabled() -> bool {
-    host::setting_bool("forms").unwrap_or(true)
-}
-
 fn first_listed<'a>(first: &str, branches: impl Iterator<Item = &'a str>) -> Vec<String> {
     let rest = branches.filter(|b| *b != first).map(str::to_owned);
 
@@ -1302,27 +1291,19 @@ fn create_snippet(ctx: &Invocation) -> Result<Option<String>, Error> {
         [(path, _)] => path.rsplit('/').next().unwrap_or(path).to_owned(),
         _ => format!("{} files", files.len()),
     };
-    let title = match host::input("Snippet title", Some(&default_title)) {
-        Ok(Some(typed)) if !typed.trim().is_empty() => typed.trim().to_owned(),
-        Ok(Some(_)) | Err(_) => default_title,
-        Ok(None) => return Ok(None),
+    let paths: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
+    let Some(answers) = prompts::ask_new_snippet(&default_title, &paths)? else {
+        return Ok(None);
     };
-    post_snippet(&api::SnippetDraft { title, description: String::new(), visibility: "private".into(), files, project: None })?;
+
+    files.extend(extra_snippet_files(&answers.extra_paths, ctx)?);
+    post_snippet(&api::SnippetDraft { title: answers.title, description: String::new(), visibility: answers.visibility, files, project: None })?;
 
     Ok(None)
 }
 
-/// Unverified that the host sets `ctx.editor()` while a view button is clicked; without it the form says so.
-fn focused_snippet(ctx: &Invocation) -> Result<(String, String), Error> {
-    if ctx.editor().is_none() {
-        return Err("Focus a file first.".into());
-    }
-
-    snippet_content(ctx)
-}
-
-fn more_snippet_files(form: &forms::SnippetForm, ctx: &Invocation) -> Result<Vec<(String, String)>, Error> {
-    let paths = form.extra_paths()?;
+fn extra_snippet_files(paths: &[String], ctx: &Invocation) -> Result<Vec<(String, String)>, Error> {
+    let paths = paths.iter().map(|p| safe::repo_file_path(p)).collect::<Result<Vec<_>, _>>()?;
     if paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -1338,41 +1319,6 @@ fn more_snippet_files(form: &forms::SnippetForm, ctx: &Invocation) -> Result<Vec
             Ok((path.to_owned(), content))
         })
         .collect()
-}
-
-/// Posts and returns `None`, or returns why it waits or refused. A public snippet posts only on a confirm
-/// of the same file and content its warning named, so a focus change between the clicks publishes nothing.
-fn snippet_click(form: &mut forms::SnippetForm, confirming: Option<(String, String)>, ctx: &Invocation) -> Result<Option<String>, Error> {
-    let mut files = vec![focused_snippet(ctx)?];
-    files.extend(more_snippet_files(form, ctx)?);
-    let focused = (
-        files.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>().join(", "),
-        files.iter().map(|(_, content)| content.as_str()).collect::<Vec<_>>().join("\0"),
-    );
-    if form.visibility == "public" {
-        match confirming {
-            None => {
-                let warning = format!("Publish {} publicly? Anyone can see a public snippet, signed in or not. Click Confirm public.", focused.0);
-                form.confirm_public = Some(focused);
-                return Ok(Some(warning));
-            }
-            Some(shown) if shown != focused => {
-                return Ok(Some("The focused file or selection changed since the warning. Nothing was published; click Create Snippet again.".into()));
-            }
-            Some(_) => {}
-        }
-    }
-
-    post_snippet(&form.draft(files, &snippet_scopes(ctx))?)?;
-
-    Ok(None)
-}
-
-/// `Personal`, and `Project <group/name>` when the repository has a gitlab.com remote.
-fn snippet_scopes(ctx: &Invocation) -> Vec<String> {
-    let project = gitlab_project(ctx).ok().map(|repo| format!("Project {}", repo.path));
-
-    std::iter::once(forms::PERSONAL.to_owned()).chain(project).collect()
 }
 
 impl Plugin for GitLab {
@@ -1536,95 +1482,6 @@ impl GitLab {
         }
 
         Ok(None)
-    }
-
-    fn handle_new_snippet(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
-        let form = &mut self.new_snippet;
-        let pending = form.confirm_public.take();
-        match event {
-            ViewEvent::Field(key, value) => {
-                let was_pending = pending.is_some();
-                form.confirm_public = pending;
-                if key != "scope" || snippet_scopes(ctx).contains(&value) {
-                    form.field(&key, &value);
-                }
-                if form.confirm_public.is_some() || !was_pending {
-                    return Ok(());
-                }
-                form.status = None;
-            }
-            ViewEvent::Button(id) if id == "create" || (id == "confirm-public" && pending.is_some()) => {
-                let confirming = pending.filter(|_| id == "confirm-public");
-                match snippet_click(form, confirming, ctx) {
-                    Ok(None) => self.new_snippet = forms::SnippetForm::default(),
-                    Ok(Some(text)) => form.status = Some(text),
-                    Err(e) => form.status = Some(e.to_string()),
-                }
-            }
-            _ => {
-                form.confirm_public = pending;
-                return Ok(());
-            }
-        }
-
-        host::refresh_view(NEW_SNIPPET);
-
-        Ok(())
-    }
-
-    fn render_share(&mut self) -> Result<View, Error> {
-        if self.namespaces.is_none() {
-            let _task = host::begin_task("Loading GitLab namespaces", false);
-            self.namespaces = Some(api::namespaces()?);
-        }
-
-        Ok(self.share.render(self.namespaces.as_deref().unwrap_or_default()))
-    }
-
-    fn handle_share(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
-        let namespaces = self.namespaces.as_deref().unwrap_or_default();
-        let form = &mut self.share;
-        match event {
-            ViewEvent::Field(key, value) => {
-                let was_pending = form.confirm_commit.is_some();
-                if key != "namespace" || forms::namespace_choices(namespaces).contains(&value) {
-                    form.field(&key, &value);
-                }
-                if !was_pending || form.confirm_commit.is_some() {
-                    return Ok(());
-                }
-                form.status = None;
-            }
-            ViewEvent::Button(id) if id == "refresh" => {
-                self.namespaces = None;
-                form.status = None;
-                form.confirm_commit = None;
-            }
-            ViewEvent::Button(id) if id == "share" || (id == "confirm-commit" && form.confirm_commit.is_some()) => {
-                let shown = form.confirm_commit.take().filter(|_| id == "confirm-commit");
-                let shared = form.namespace_id(namespaces).and_then(|namespace| repo::share_with(ctx, form, namespace, shown.as_deref()));
-                match shared {
-                    Ok(None) => *form = forms::ShareForm::default(),
-                    Ok(Some(files)) => {
-                        let count = match files.len() {
-                            1 => "1 file".to_owned(),
-                            n => format!("{n} files"),
-                        };
-                        form.status = Some(match shown {
-                            Some(_) => format!("The files changed since the list was shown; nothing was committed. Check the {count} below and confirm again."),
-                            None => format!("Commit {count} as \"Initial commit\"? Check the list below, then click Confirm commit."),
-                        });
-                        form.confirm_commit = Some(files);
-                    }
-                    Err(e) => form.status = Some(e.to_string()),
-                }
-            }
-            _ => return Ok(()),
-        }
-
-        host::refresh_view(SHARE);
-
-        Ok(())
     }
 
     /// The picked commit while it belongs to the selected merge request and the view is on.
@@ -2026,10 +1883,6 @@ impl Views for GitLab {
             LIST => self.render_list(ctx),
             DETAILS => self.render_section(ctx),
             PROJECTS => self.render_projects(ctx),
-            NEW_SNIPPET if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
-            NEW_SNIPPET => Ok(self.new_snippet.render(&snippet_scopes(ctx))),
-            SHARE if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
-            SHARE => self.render_share(),
             _ => return Err(Error::NotFound(format!("view {view}"))),
         };
 
@@ -2048,8 +1901,6 @@ impl Views for GitLab {
             LIST => self.handle_list(event, ctx),
             DETAILS => self.handle_section(event, ctx),
             PROJECTS => self.handle_projects(event, ctx),
-            NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
-            SHARE if forms_enabled() => self.handle_share(event, ctx),
             _ => Ok(()),
         }
     }

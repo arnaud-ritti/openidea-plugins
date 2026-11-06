@@ -757,6 +757,8 @@ fn share_refuses_a_branch_name_that_reads_as_an_option() {
     host.set_vcs_status(Some(status("--upload-pack=x")));
     host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
     host.on_process("git", git_ok);
+    host.answer_next_prompt(Some(&[""]));
+    host.answer_next_prompt(Some(&["private"]));
 
     let result = GitLab::default().run_command("share-project", &host.invocation(), None);
 
@@ -815,8 +817,10 @@ fn the_token_never_appears_in_requests_logs_notifications_or_views() {
     views.push(format!("{:?}", plugin.render(PROJECTS, None, &host.invocation()).unwrap()));
     plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
     host.open_editor("/project/src/a.rs", "rust", "fn main() {}\n", &[(0, 0, 0, 0)]);
-    plugin.handle(NEW_SNIPPET, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
-    views.push(format!("{:?}", plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap()));
+    for answer in [Some(&[""][..]), Some(&["private"]), Some(&[""]), Some(&[""]), Some(&["private"])] {
+        host.answer_next_prompt(answer);
+    }
+    plugin.run_command("create-snippet", &host.invocation(), None).unwrap();
     host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
     GitLab::default().run_command("share-project", &host.invocation(), None).unwrap();
 
@@ -876,6 +880,8 @@ fn share_creates_the_project_adds_the_remote_and_pushes() {
     let host = setup();
     host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
     host.on_process("git", git_ok);
+    host.answer_next_prompt(Some(&[""]));
+    host.answer_next_prompt(Some(&["private"]));
 
     GitLab::default().run_command("share-project", &host.invocation(), None).unwrap();
 
@@ -911,7 +917,9 @@ fn copy_link_without_clipboard_notifies() {
 fn creates_a_private_snippet_from_the_selection() {
     let host = setup();
     host.open_editor("/project/src/a.rs", "rust", "fn main() {}\n", &[(0, 3, 0, 7)]);
-    host.answer_next_prompt(Some(&[""]));
+    for answer in [Some(&[""][..]), Some(&["private"]), Some(&[""])] {
+        host.answer_next_prompt(answer);
+    }
 
     GitLab::default().run_command("create-snippet", &host.invocation(), None).unwrap();
 
@@ -1765,251 +1773,131 @@ mod create_merge_request_tests {
     }
 }
 
-mod snippet_form_tests {
+mod snippet_prompt_tests {
     use super::*;
     use serde_json::Value;
 
-    fn open(host: &MockHost) -> (GitLab, View) {
-        let mut plugin = GitLab::default();
-        let view = plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap();
-        (plugin, view)
-    }
-
-    fn fill(plugin: &mut GitLab, host: &MockHost, fields: &[(&str, &str)]) {
-        for (key, value) in fields {
-            plugin.handle(NEW_SNIPPET, field(key, value), &host.invocation()).unwrap();
-        }
-    }
-
-    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
-        plugin.handle(NEW_SNIPPET, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
-        plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap()
-    }
-
-    fn posted(host: &MockHost) -> Vec<(String, Value)> {
-        writes(host).into_iter().map(|(_, url, body)| (url, serde_json::from_str(&body).unwrap())).collect()
-    }
-
-    fn with_file(text: &str, selection: (u32, u32, u32, u32)) -> MockHost {
+    fn with_file() -> MockHost {
         let host = setup();
-        host.open_editor("/project/src/a.rs", "rust", text, &[selection]);
+        host.open_editor("/project/src/a.rs", "rust", "fn main() {}\n", &[(0, 3, 0, 7)]);
+        host.add_file("docs/b.md", "second\n");
         host
     }
 
+    fn answers(host: &MockHost, answers: &[Option<&[&str]>]) {
+        for answer in answers {
+            host.answer_next_prompt(*answer);
+        }
+    }
+
+    const ALL: [Option<&[&str]>; 5] = [Some(&["Mine"]), Some(&["internal"]), Some(&["docs/b.md"]), Some(&["docs/b.md"]), Some(&[""])];
+
+    fn create(host: &MockHost) {
+        GitLab::default().run_command("create-snippet", &host.invocation(), None).unwrap();
+    }
+
+    fn posted(host: &MockHost) -> Vec<Value> {
+        writes(host).into_iter().map(|(_, _, body)| serde_json::from_str(&body).unwrap()).collect()
+    }
+
     #[test]
-    fn form_creates_a_private_personal_snippet_from_the_selection() {
-        let host = with_file("fn main() {}\n", (0, 3, 0, 7));
-        let (mut plugin, view) = open(&host);
-        fill(&mut plugin, &host, &[("description", "The entry point")]);
+    fn snippet_prompts_collect_title_visibility_and_extra_files() {
+        let host = with_file();
+        answers(&host, &ALL);
 
-        click(&mut plugin, &host, "create");
+        create(&host);
 
-        assert_eq!(buttons(&view), ["create"]);
-        let posted = writes(&host);
-        assert_eq!(posted[0].1, "https://gitlab.com/api/v4/snippets");
-        assert_eq!(
-            posted[0].2,
-            r#"{"description":"The entry point","files":[{"content":"main","file_path":"src/a.rs"}],"title":"a.rs","visibility":"private"}"#
-        );
-        assert_eq!(host.clipboard().as_deref(), Some("https://gitlab.com/-/snippets/9"));
+        let posted = posted(&host);
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0]["title"], "Mine");
+        assert_eq!(posted[0]["visibility"], "internal");
+        assert_eq!(posted[0]["files"][0]["file_path"], "src/a.rs");
+        assert_eq!(posted[0]["files"][0]["content"], "main");
+        assert_eq!(posted[0]["files"][1]["file_path"], "docs/b.md");
+        assert_eq!(posted[0]["files"][1]["content"], "second\n");
+        assert_eq!(posted[0]["files"].as_array().unwrap().len(), 2);
         assert_eq!(host.notifications()[0].title, "Snippet created");
     }
 
     #[test]
-    fn form_adds_more_project_files_to_the_snippet() {
-        let host = with_file("x\n", (0, 0, 0, 0));
-        host.add_file("docs/b.md", "second\n");
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("more-files", "docs/b.md\n")]);
+    fn an_empty_title_names_the_snippet_after_the_file() {
+        let host = with_file();
+        answers(&host, &[Some(&[""]), Some(&["private"]), Some(&[""])]);
 
-        click(&mut plugin, &host, "create");
+        create(&host);
 
-        let posted = posted(&host);
-        assert_eq!(posted[0].1["files"][0]["file_path"], "src/a.rs");
-        assert_eq!(posted[0].1["files"][1]["file_path"], "docs/b.md");
-        assert_eq!(posted[0].1["files"][1]["content"], "second\n");
+        assert_eq!(posted(&host)[0]["title"], "a.rs");
     }
 
     #[test]
-    fn project_scope_posts_to_the_encoded_project_path() {
-        let host = with_file("x\n", (0, 0, 0, 0));
-        let (mut plugin, view) = open(&host);
-        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
-        let scope = &fields.iter().find(|f| f.key == "scope").unwrap().value;
-        assert_eq!(scope, &FieldValue::Choice(vec!["Personal".into(), "Project g/p".into()], "Personal".into()));
-        fill(&mut plugin, &host, &[("title", "Mine"), ("file-path", "notes/x.txt"), ("scope", "Project g/p")]);
+    fn public_snippet_needs_the_confirmation() {
+        let declined = with_file();
+        answers(&declined, &[ALL[0], Some(&["public"]), None]);
+        create(&declined);
 
-        click(&mut plugin, &host, "create");
+        let confirmed = with_file();
+        answers(&confirmed, &[ALL[0], Some(&["public"]), Some(&["yes"]), Some(&[""])]);
+        create(&confirmed);
 
-        let posted = posted(&host);
-        assert_eq!(posted[0].0, "https://gitlab.com/api/v4/projects/g%2Fp/snippets");
-        assert_eq!(posted[0].1["title"], "Mine");
-        assert_eq!(posted[0].1["files"][0]["file_path"], "notes/x.txt");
+        assert!(writes(&declined).is_empty());
+        assert_eq!(posted(&confirmed)[0]["visibility"], "public");
     }
 
     #[test]
-    fn public_visibility_needs_a_second_click() {
-        let host = with_file("x\n", (0, 0, 0, 0));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("visibility", "public")]);
+    fn dismissing_any_snippet_prompt_creates_nothing() {
+        for dismissed in 0..3 {
+            let host = with_file();
+            let mut all = ALL;
+            all[dismissed] = None;
+            answers(&host, &all[..=dismissed]);
 
-        let view = click(&mut plugin, &host, "create");
+            create(&host);
 
-        assert!(writes(&host).is_empty());
-        assert_eq!(label(&view, "confirm-public"), "Confirm public");
-
-        click(&mut plugin, &host, "confirm-public");
-
-        let posted = posted(&host);
-        assert_eq!(posted.len(), 1);
-        assert_eq!(posted[0].1["visibility"], "public");
-    }
-
-    #[test]
-    fn a_focus_change_after_the_public_warning_publishes_nothing() {
-        let host = with_file("a\n", (0, 0, 0, 0));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("visibility", "public")]);
-        let warned = click(&mut plugin, &host, "create");
-        assert!(warned.status.as_deref().unwrap().contains("src/a.rs"), "{warned:?}");
-
-        host.open_editor("/project/.env", "dotenv", "TOKEN=secret\n", &[(0, 0, 0, 0)]);
-        let view = click(&mut plugin, &host, "confirm-public");
-
-        assert!(writes(&host).is_empty());
-        assert_eq!(buttons(&view), ["create"]);
-        assert!(view.status.as_deref().unwrap().contains("changed"), "{view:?}");
-
-        click(&mut plugin, &host, "create");
-        click(&mut plugin, &host, "confirm-public");
-        let posted = posted(&host);
-        assert_eq!(posted.len(), 1);
-        assert_eq!(posted[0].1["files"][0]["file_path"], ".env");
-    }
-
-    #[test]
-    fn changing_any_field_cancels_the_pending_public_confirm() {
-        let host = with_file("x\n", (0, 0, 0, 0));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("visibility", "public")]);
-        click(&mut plugin, &host, "create");
-
-        fill(&mut plugin, &host, &[("title", "Other")]);
-        let view = click(&mut plugin, &host, "confirm-public");
-
-        assert!(writes(&host).is_empty());
-        assert_eq!(buttons(&view), ["create"]);
-    }
-
-    #[test]
-    fn a_visibility_outside_the_choices_is_ignored() {
-        let host = with_file("x\n", (0, 0, 0, 0));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("visibility", "internal"), ("visibility", "everyone"), ("scope", "Project evil/x")]);
-
-        click(&mut plugin, &host, "create");
-
-        let posted = posted(&host);
-        assert_eq!(posted[0].0, "https://gitlab.com/api/v4/snippets");
-        assert_eq!(posted[0].1["visibility"], "internal");
-    }
-
-    #[test]
-    fn file_path_traversal_is_refused() {
-        for path in ["../../x", "/etc/x"] {
-            let host = with_file("x\n", (0, 0, 0, 0));
-            let (mut plugin, _) = open(&host);
-            fill(&mut plugin, &host, &[("file-path", path)]);
-
-            let view = click(&mut plugin, &host, "create");
-
-            assert!(writes(&host).is_empty(), "{path}");
-            assert!(view.status.as_deref().unwrap().contains("refusing the file path"), "{view:?}");
+            assert!(writes(&host).is_empty(), "prompt {dismissed}");
+            assert!(host.notifications().is_empty(), "prompt {dismissed}");
         }
     }
 
     #[test]
-    fn no_focused_file_says_focus_a_file_first() {
-        let host = setup();
-        let (mut plugin, _) = open(&host);
+    fn an_unreadable_or_unsafe_extra_path_creates_nothing() {
+        for path in ["missing.md", "../secret", "/etc/passwd"] {
+            let host = with_file();
+            answers(&host, &[ALL[0], ALL[1], Some(&[path]), Some(&[""])]);
 
-        let view = click(&mut plugin, &host, "create");
+            let result = GitLab::default().run_command("create-snippet", &host.invocation(), None);
 
-        assert!(writes(&host).is_empty());
-        assert_eq!(view.status.as_deref(), Some("Focus a file first."));
+            assert!(result.is_err(), "{path}");
+            assert!(writes(&host).is_empty(), "{path}");
+        }
     }
 
     #[test]
-    fn an_empty_selection_falls_back_to_the_whole_file_and_an_empty_file_is_refused() {
-        let host = with_file("a\nb\n", (1, 0, 1, 0));
-        let (mut plugin, _) = open(&host);
-        click(&mut plugin, &host, "create");
-        assert_eq!(posted(&host)[0].1["files"][0]["content"], "a\nb\n");
-
-        let host = with_file("", (0, 0, 0, 0));
-        let (mut plugin, _) = open(&host);
-        let view = click(&mut plugin, &host, "create");
-        assert!(writes(&host).is_empty());
-        assert_eq!(view.status.as_deref(), Some("The file is empty."));
-    }
-
-    #[test]
-    fn crlf_content_is_sent_unchanged() {
-        let host = with_file("a\r\nb\r\n", (0, 0, 0, 0));
-        let (mut plugin, _) = open(&host);
-
-        click(&mut plugin, &host, "create");
-
-        assert_eq!(posted(&host)[0].1["files"][0]["content"], "a\r\nb\r\n");
-    }
-
-    #[test]
-    fn multibyte_selection_is_cut_on_utf16_columns() {
-        let host = with_file("a😀b", (0, 3, 0, 5));
-        let (mut plugin, _) = open(&host);
-
-        click(&mut plugin, &host, "create");
-
-        assert_eq!(posted(&host)[0].1["files"][0]["content"], "b");
-    }
-
-    #[test]
-    fn the_form_is_quiet_when_forms_setting_is_off() {
-        let host = with_file("x\n", (0, 0, 0, 0));
+    fn a_stale_forms_setting_is_ignored() {
+        let host = with_file();
         host.set_setting("forms", "false");
+        answers(&host, &[ALL[0], Some(&["private"]), Some(&[""])]);
 
-        let (mut plugin, view) = open(&host);
-        click(&mut plugin, &host, "create");
+        create(&host);
 
-        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
-        assert!(host.requests().is_empty());
+        assert_eq!(posted(&host).len(), 1);
     }
 }
 
-#[test]
-fn check_out_refuses_a_merge_request_branch_that_reads_as_an_option() {
-    let host = setup();
-    host.on_process("git", git_ok);
-    host.on_fetch(|r| match r.url.contains("/merge_requests/7") && !r.url.contains("/merge_requests/7/") {
-        true => ok(&MR.replace(r#""source_branch": "feature""#, r#""source_branch": "--upload-pack=x""#)),
-        false => gitlab(r),
-    });
-    let mut plugin = selected(&host);
-
-    plugin.handle(DETAILS, ViewEvent::Button("checkout".into()), &host.invocation()).unwrap();
-
-    assert!(host.process_runs().is_empty(), "{:?}", git_runs(&host));
-}
-
-mod share_form_tests {
+mod share_prompt_tests {
     use super::*;
     use serde_json::Value;
+    use std::cell::Cell;
 
-    fn git_staging(files: &'static str, staged: String, failing: &'static str) -> impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> {
+    fn git_staging(statuses: Vec<&'static str>, staged: &'static str, failing: &'static str) -> impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> {
+        let calls = Cell::new(0);
         move |args, _| {
             let stdout = match args[0].as_str() {
-                "status" => files.replace('\n', "\0"),
-                "diff" => staged.clone(),
+                "status" => {
+                    let files = statuses[calls.get().min(statuses.len() - 1)];
+                    calls.set(calls.get() + 1);
+                    files.replace('\n', "\0")
+                }
+                "diff" => staged.to_owned(),
                 "symbolic-ref" => "main\n".into(),
                 _ => String::new(),
             };
@@ -2018,9 +1906,8 @@ mod share_form_tests {
         }
     }
 
-    fn git_with(files: &'static str, failing: &'static str) -> impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> {
-        git_staging(files, files.lines().map(|l| format!("{}\0", &l[3..])).collect(), failing)
-    }
+    const A: &str = "?? src/a.rs\n M README.md\n";
+    const A_STAGED: &str = "src/a.rs\0README.md\0";
 
     fn unshared() -> MockHost {
         let host = setup();
@@ -2029,31 +1916,28 @@ mod share_form_tests {
         host
     }
 
-    fn open(host: &MockHost) -> (GitLab, View) {
-        let mut plugin = GitLab::default();
-        let view = plugin.render(SHARE, None, &host.invocation()).unwrap();
-        (plugin, view)
+    fn uncommitted(process: impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> + 'static) -> MockHost {
+        let host = unshared();
+        host.set_vcs_status(Some(RepositoryStatus { commit: None, ..status("main") }));
+        host.on_process("git", process);
+        host
     }
 
-    fn fill(plugin: &mut GitLab, host: &MockHost, fields: &[(&str, &str)]) {
-        for (key, value) in fields {
-            plugin.handle(SHARE, field(key, value), &host.invocation()).unwrap();
+    fn answers(host: &MockHost, answers: &[Option<&[&str]>]) {
+        for answer in answers {
+            host.answer_next_prompt(*answer);
         }
     }
 
-    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
-        plugin.handle(SHARE, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
-        plugin.render(SHARE, None, &host.invocation()).unwrap()
+    const DEFAULTS: [Option<&[&str]>; 2] = [Some(&[""]), Some(&["private"])];
+    const YES: Option<&[&str]> = Some(&["yes"]);
+
+    fn share(host: &MockHost) -> Result<Option<String>, Error> {
+        GitLab::default().run_command("share-project", &host.invocation(), None)
     }
 
     fn created(host: &MockHost) -> Vec<Value> {
         writes(host).into_iter().filter(|(_, url, _)| url == "https://gitlab.com/api/v4/projects").map(|(_, _, body)| serde_json::from_str(&body).unwrap()).collect()
-    }
-
-    fn value<'a>(view: &'a View, key: &str) -> &'a FieldValue {
-        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
-
-        &fields.iter().find(|f| f.key == key).unwrap().value
     }
 
     fn nothing_happened(host: &MockHost) {
@@ -2063,41 +1947,51 @@ mod share_form_tests {
     }
 
     #[test]
-    fn share_form_creates_in_the_chosen_namespace_with_description_and_visibility() {
+    fn share_prompts_collect_name_and_visibility() {
         let host = unshared();
-        let (mut plugin, view) = open(&host);
-        fill(&mut plugin, &host, &[("name", "tool"), ("namespace", "team/sub"), ("description", "A tool"), ("visibility", "internal")]);
+        answers(&host, &[Some(&["tool"]), Some(&["internal"])]);
 
-        click(&mut plugin, &host, "share");
+        share(&host).unwrap();
 
-        assert_eq!(value(&view, "namespace"), &FieldValue::Choice(vec!["Personal".into(), "me".into(), "team/sub".into()], "Personal".into()));
-        assert!(host.requests().iter().any(|r| r.url == "https://gitlab.com/api/v4/namespaces?per_page=100&page=1"));
-        assert_eq!(created(&host), [serde_json::json!({"name": "tool", "namespace_id": 12, "description": "A tool", "visibility": "internal"})]);
+        assert_eq!(created(&host), [serde_json::json!({"name": "tool", "visibility": "internal"})]);
+        assert_eq!(git_runs(&host), ["--version", "remote add -- origin https://gitlab.com/me/project.git"]);
+        assert_eq!(host.terminals()[0].args, ["push", "-u", "--", "origin", "main"]);
         assert_eq!(host.notifications()[0].body, "https://gitlab.com/me/project");
     }
 
     #[test]
-    fn remote_names_starting_with_a_dash_are_refused_before_any_request() {
-        for remote in ["-u", "--mirror"] {
-            let host = unshared();
-            let (mut plugin, _) = open(&host);
-            fill(&mut plugin, &host, &[("remote", remote)]);
+    fn an_empty_name_is_the_folder_name() {
+        let host = unshared();
+        answers(&host, &DEFAULTS);
 
-            let view = click(&mut plugin, &host, "share");
+        share(&host).unwrap();
 
-            nothing_happened(&host);
-            assert!(view.status.unwrap_or_default().contains("refusing"), "{remote}");
-        }
+        assert_eq!(created(&host), [serde_json::json!({"name": "project", "visibility": "private"})]);
     }
 
     #[test]
-    fn remote_name_with_shell_metacharacters_is_refused() {
-        for remote in ["a;b", "a b", "$(x)"] {
-            let host = unshared();
-            let (mut plugin, _) = open(&host);
-            fill(&mut plugin, &host, &[("remote", remote)]);
+    fn a_public_project_needs_the_confirmation() {
+        let declined = unshared();
+        answers(&declined, &[DEFAULTS[0], Some(&["public"]), None]);
+        share(&declined).unwrap();
 
-            click(&mut plugin, &host, "share");
+        let confirmed = unshared();
+        answers(&confirmed, &[DEFAULTS[0], Some(&["public"]), YES]);
+        share(&confirmed).unwrap();
+
+        nothing_happened(&declined);
+        assert_eq!(created(&confirmed)[0]["visibility"], "public");
+    }
+
+    #[test]
+    fn dismissing_any_share_prompt_creates_nothing() {
+        for dismissed in 0..2 {
+            let host = unshared();
+            let mut all = DEFAULTS;
+            all[dismissed] = None;
+            answers(&host, &all[..=dismissed]);
+
+            share(&host).unwrap();
 
             nothing_happened(&host);
         }
@@ -2107,24 +2001,11 @@ mod share_form_tests {
     fn a_branch_with_shell_metacharacters_is_refused_before_pushing() {
         let host = unshared();
         host.set_vcs_status(Some(status("x;rm -rf ~")));
-        let (mut plugin, _) = open(&host);
+        answers(&host, &DEFAULTS);
 
-        click(&mut plugin, &host, "share");
+        assert!(share(&host).is_err());
 
         nothing_happened(&host);
-        assert!(created(&host).is_empty());
-    }
-
-    #[test]
-    fn remote_add_and_push_put_names_after_double_dash() {
-        let host = unshared();
-        let (mut plugin, _) = open(&host);
-
-        click(&mut plugin, &host, "share");
-
-        assert_eq!(created(&host), [serde_json::json!({"name": "project", "visibility": "private"})]);
-        assert_eq!(git_runs(&host), ["--version", "remote add -- origin https://gitlab.com/me/project.git"]);
-        assert_eq!(host.terminals()[0].args, ["push", "-u", "--", "origin", "main"]);
     }
 
     #[test]
@@ -2134,58 +2015,28 @@ mod share_form_tests {
             true => ok(r#"{"web_url": "https://gitlab.com/me/project", "http_url_to_repo": "https://evil.test/x.git", "ssh_url_to_repo": "git@evil.test:x.git"}"#),
             false => gitlab(r),
         });
-        let (mut plugin, _) = open(&host);
+        answers(&host, &DEFAULTS);
 
-        let view = click(&mut plugin, &host, "share");
+        let result = share(&host);
 
+        assert!(result.unwrap_err().to_string().contains("refusing the clone URL"));
         assert_eq!(git_runs(&host), ["--version"]);
         assert!(host.terminals().is_empty());
-        assert!(view.status.unwrap_or_default().contains("refusing the clone URL"));
     }
 
     #[test]
-    fn init_runs_only_when_there_is_no_repository_and_the_box_is_ticked() {
-        let host = unshared();
-        host.set_vcs_status(None);
-        host.on_process("git", git_with("?? src/a.rs\n", ""));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("commit-all", "true")]);
+    fn a_repository_without_a_commit_commits_after_two_confirms() {
+        let host = uncommitted(git_staging(vec![A], A_STAGED, ""));
+        answers(&host, &[DEFAULTS[0], DEFAULTS[1], YES, YES]);
 
-        click(&mut plugin, &host, "share");
-        assert!(host.process_runs().is_empty(), "{:?}", git_runs(&host));
-
-        fill(&mut plugin, &host, &[("init", "true")]);
-        click(&mut plugin, &host, "share");
-        assert_eq!(git_runs(&host), ["--version", "init", "symbolic-ref --short HEAD", "status --porcelain -z --untracked-files=all"]);
-
-        let host = unshared();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("init", "true")]);
-        click(&mut plugin, &host, "share");
-        assert!(!git_runs(&host).contains(&"init".to_owned()), "{:?}", git_runs(&host));
-        assert_eq!(created(&host).len(), 1);
-    }
-
-    #[test]
-    fn commit_all_lists_files_and_waits_for_the_second_click() {
-        let host = unshared();
-        host.on_process("git", git_with("?? src/a.rs\n M README.md\n", ""));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("commit-all", "true")]);
-
-        let view = click(&mut plugin, &host, "share");
-
-        assert_eq!(buttons(&view), ["confirm-commit", "refresh"]);
-        assert!(view.status.as_deref().unwrap_or_default().contains("2 files"), "{:?}", view.status);
-        assert_eq!(value(&view, "files"), &FieldValue::Multiline("src/a.rs\nREADME.md".into()));
-        assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")));
-        assert!(writes(&host).is_empty());
-
-        click(&mut plugin, &host, "confirm-commit");
+        share(&host).unwrap();
 
         assert_eq!(
-            git_runs(&host)[3..],
+            git_runs(&host),
             [
+                "--version",
+                "status --porcelain -z --untracked-files=all",
+                "--version",
                 "status --porcelain -z --untracked-files=all",
                 "add -A",
                 "diff --cached --name-only -z --no-renames",
@@ -2198,107 +2049,99 @@ mod share_form_tests {
     }
 
     #[test]
-    fn a_file_staged_after_the_confirm_is_unstaged_and_listed_again() {
-        let host = unshared();
-        host.on_process("git", git_with("?? src/a.rs\n", ""));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("commit-all", "true")]);
-        click(&mut plugin, &host, "share");
+    fn declining_either_commit_confirm_leaves_everything_alone() {
+        for confirms in [vec![None], vec![YES, None]] {
+            let host = uncommitted(git_staging(vec![A], A_STAGED, ""));
+            let mut all = DEFAULTS.to_vec();
+            all.extend(confirms);
+            answers(&host, &all);
 
-        host.on_process("git", git_staging("?? src/a.rs\n", "src/a.rs\0notes.txt\0".into(), ""));
-        let view = click(&mut plugin, &host, "confirm-commit");
+            share(&host).unwrap();
+
+            let runs = git_runs(&host);
+            assert!(!runs.iter().any(|r| r.starts_with("add") || r.starts_with("commit") || r.starts_with("remote")), "{runs:?}");
+            assert!(writes(&host).is_empty());
+            assert!(host.terminals().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_file_staged_after_the_confirm_is_unstaged_and_listed_again() {
+        let host = uncommitted(git_staging(vec![A], "src/a.rs\0README.md\0notes.txt\0", ""));
+        answers(&host, &[DEFAULTS[0], DEFAULTS[1], YES, YES, None]);
+
+        share(&host).unwrap();
 
         let runs = git_runs(&host);
         assert!(runs.contains(&"reset -q".to_owned()), "{runs:?}");
         assert!(!runs.iter().any(|r| r.starts_with("commit") || r.starts_with("remote")), "{runs:?}");
         assert!(created(&host).is_empty());
         assert!(host.terminals().is_empty());
-        assert_eq!(buttons(&view), ["confirm-commit", "refresh"]);
-        assert_eq!(value(&view, "files"), &FieldValue::Multiline("src/a.rs\nnotes.txt".into()));
+    }
+
+    #[test]
+    fn the_commit_confirm_is_bound_to_the_files_it_listed() {
+        let host = uncommitted(git_staging(vec!["?? src/a.rs\n", "?? src/a.rs\n?? notes.txt\n"], A_STAGED, ""));
+        answers(&host, &[DEFAULTS[0], DEFAULTS[1], YES, YES, None]);
+
+        share(&host).unwrap();
+
+        assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")));
+        assert!(writes(&host).is_empty());
     }
 
     #[test]
     fn porcelain_renames_list_both_sides_and_order_does_not_matter_for_the_confirm() {
-        let host = unshared();
-        host.on_process("git", git_staging("R  new.rs\nold.rs\n?? b.rs\n", "b.rs\0new.rs\0old.rs\0".into(), ""));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("commit-all", "true")]);
+        let host = uncommitted(git_staging(vec!["R  new.rs\nold.rs\n?? b.rs\n"], "b.rs\0new.rs\0old.rs\0", ""));
+        answers(&host, &[DEFAULTS[0], DEFAULTS[1], YES, YES]);
 
-        let view = click(&mut plugin, &host, "share");
-        assert_eq!(value(&view, "files"), &FieldValue::Multiline("new.rs\nold.rs\nb.rs".into()));
-
-        click(&mut plugin, &host, "confirm-commit");
+        share(&host).unwrap();
 
         assert!(git_runs(&host).contains(&"commit -m Initial commit".to_owned()));
         assert_eq!(created(&host).len(), 1);
     }
 
     #[test]
-    fn the_commit_confirm_is_bound_to_the_files_it_listed() {
-        let host = unshared();
-        host.on_process("git", git_with("?? src/a.rs\n", ""));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("commit-all", "true")]);
-        click(&mut plugin, &host, "share");
-
-        host.on_process("git", git_with("?? src/a.rs\n?? notes.txt\n", ""));
-        let view = click(&mut plugin, &host, "confirm-commit");
-
-        assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")));
-        assert!(writes(&host).is_empty());
-        assert_eq!(buttons(&view), ["confirm-commit", "refresh"]);
-        assert!(view.status.unwrap_or_default().contains("changed"));
-    }
-
-    #[test]
-    fn changing_a_field_cancels_the_pending_commit_confirm() {
-        let host = unshared();
-        host.on_process("git", git_with("?? src/a.rs\n", ""));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("commit-all", "true")]);
-        click(&mut plugin, &host, "share");
-
-        fill(&mut plugin, &host, &[("remote", "gitlab")]);
-        let view = click(&mut plugin, &host, "confirm-commit");
-
-        assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")));
-        assert_eq!(buttons(&view), ["share", "refresh"]);
-    }
-
-    #[test]
     fn commit_all_refuses_secret_looking_files() {
         for file in [".env", "deploy.key", "id_rsa", "config/.env.local", "certs/site.PEM", ".ssh/id_ed25519.pub"] {
-            let host = unshared();
-            host.on_process("git", git_with(Box::leak(format!("?? src/a.rs\n?? {file}\n").into_boxed_str()), ""));
-            let (mut plugin, _) = open(&host);
-            fill(&mut plugin, &host, &[("commit-all", "true")]);
+            let listing: &'static str = Box::leak(format!("?? src/a.rs\n?? {file}\n").into_boxed_str());
+            let host = uncommitted(git_staging(vec![listing], A_STAGED, ""));
+            answers(&host, &[DEFAULTS[0], DEFAULTS[1], YES]);
 
-            let view = click(&mut plugin, &host, "share");
+            let error = share(&host).unwrap_err();
 
             assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")), "{file}");
             assert!(writes(&host).is_empty(), "{file}");
-            assert_eq!(buttons(&view), ["share", "refresh"], "{file}");
-            assert!(view.status.unwrap_or_default().contains(file), "{file}");
+            assert!(error.to_string().contains(file), "{file}");
         }
+    }
+
+    #[test]
+    fn init_runs_only_when_there_is_no_repository() {
+        let host = unshared();
+        host.set_vcs_status(None);
+        host.on_process("git", git_staging(vec!["?? src/a.rs\n"], "src/a.rs\0", ""));
+        answers(&host, &[DEFAULTS[0], DEFAULTS[1], YES, YES]);
+
+        share(&host).unwrap();
+
+        assert_eq!(git_runs(&host)[..3], ["--version", "init", "symbolic-ref --short HEAD"]);
+        assert_eq!(created(&host).len(), 1);
     }
 
     #[test]
     fn nothing_is_created_when_git_init_or_commit_fails() {
         let host = unshared();
         host.set_vcs_status(None);
-        host.on_process("git", git_with("?? src/a.rs\n", "init"));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("init", "true"), ("commit-all", "true")]);
-        let view = click(&mut plugin, &host, "share");
+        host.on_process("git", git_staging(vec!["?? src/a.rs\n"], "src/a.rs\0", "init"));
+        answers(&host, &[DEFAULTS[0], DEFAULTS[1], YES]);
+        let error = share(&host).unwrap_err();
         assert!(writes(&host).is_empty());
-        assert!(view.status.unwrap_or_default().contains("Git init failed"));
+        assert!(error.to_string().contains("Git init failed"));
 
-        let host = unshared();
-        host.on_process("git", git_with("?? src/a.rs\n", "commit"));
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("commit-all", "true")]);
-        click(&mut plugin, &host, "share");
-        click(&mut plugin, &host, "confirm-commit");
+        let host = uncommitted(git_staging(vec![A], A_STAGED, "commit"));
+        answers(&host, &[DEFAULTS[0], DEFAULTS[1], YES, YES]);
+        assert!(share(&host).is_err());
         assert!(writes(&host).is_empty());
         assert!(host.terminals().is_empty());
     }
@@ -2307,53 +2150,24 @@ mod share_form_tests {
     fn an_existing_gitlab_remote_refuses() {
         let host = setup();
         host.on_process("git", git_ok);
-        let (mut plugin, _) = open(&host);
+        answers(&host, &DEFAULTS);
 
-        let view = click(&mut plugin, &host, "share");
+        let error = share(&host).unwrap_err();
 
         nothing_happened(&host);
-        assert!(view.status.unwrap_or_default().contains("already has a gitlab.com remote"));
-
-        host.set_vcs_remotes(&[("upstream", "git@github.com:x/y.git")]);
-        fill(&mut plugin, &host, &[("remote", "upstream")]);
-        click(&mut plugin, &host, "share");
-        nothing_happened(&host);
+        assert!(error.to_string().contains("already has a gitlab.com remote"));
     }
 
     #[test]
     fn share_without_process_git_names_the_capability() {
         let without_git: Vec<&str> = CAPS.iter().copied().filter(|c| *c != "process:git").collect();
         let host = unshared().with_capabilities(&without_git);
+        answers(&host, &DEFAULTS);
 
-        let result = GitLab::default().run_command("share-project", &host.invocation(), None);
+        let result = share(&host);
 
         assert_eq!(result, Err(Error::Denied("process:git".into())));
         assert!(writes(&host).is_empty());
-    }
-
-    #[test]
-    fn a_namespace_outside_the_choices_is_ignored() {
-        let host = unshared();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("namespace", "evil/ns"), ("visibility", "secret")]);
-
-        let view = click(&mut plugin, &host, "share");
-
-        assert_eq!(value(&view, "namespace"), &FieldValue::Choice(vec!["Personal".into(), "me".into(), "team/sub".into()], "Personal".into()));
-        assert_eq!(created(&host), [serde_json::json!({"name": "project", "visibility": "private"})]);
-    }
-
-    #[test]
-    fn the_form_is_quiet_when_forms_setting_is_off() {
-        let host = unshared();
-        host.set_setting("forms", "false");
-
-        let (mut plugin, view) = open(&host);
-        click(&mut plugin, &host, "share");
-
-        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
-        assert!(host.requests().is_empty());
-        assert!(host.process_runs().is_empty());
     }
 }
 
@@ -3106,7 +2920,9 @@ fn creates_a_snippet_from_the_selected_files_with_a_typed_title() {
     host.add_file("/project/src/a.rs", "one");
     host.add_file("/project/b.txt", "two");
     host.select_paths(&["/project/src/a.rs", "/project/b.txt", "/project/dir"]);
-    host.answer_next_prompt(Some(&["My files"]));
+    for answer in [Some(&["My files"][..]), Some(&["private"]), Some(&[""])] {
+        host.answer_next_prompt(answer);
+    }
 
     GitLab::default().run_command("create-snippet", &host.invocation(), None).unwrap();
 

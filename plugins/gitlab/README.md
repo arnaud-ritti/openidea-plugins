@@ -83,27 +83,26 @@ Optional permissions:
 
 ## Forms and detail views
 
-Five views open from the IDE's tool window list, not from commands. The
-`forms` setting turns the first three off, `commitsView` and `pipelineView`
-the last two, and `noteActions` the comment actions.
+Create Snippet and Share Project are prompt sequences, not windows. The
+`commitsView` and `pipelineView` settings turn the commit and pipeline views
+off, and `noteActions` the comment actions.
 
 - **Create Merge Request**: title, description, target branch (up to 1000
   branches), one assignee, reviewers by username, labels as text, and the Draft,
   Squash and Delete source branch checkboxes. No pickers here and no milestone;
   GitLab: Edit Merge Request picks labels, people and milestone from lists.
-- **Create Snippet**: title, description, visibility and personal or project.
-  It uses the focused file, or its selection. A public snippet needs a second
-  click, which posts only the file and content the warning named. *More files*
-  takes project paths, one per line, added next to the focused file.
+- **Create Snippet** (command): asks for the title, the visibility (a public
+  snippet needs a confirm) and more project files, one path per prompt until
+  an empty answer. It uses the focused file or its selection, or the files
+  selected in the Project view. Dismissing any prompt creates nothing.
 - **Merge Request Files**: the changed files as a tree or a list (Tree/List
   button). Double-click a file to toggle Viewed, or use Mark All Viewed and
   Clear Viewed; it works without page scripts and shares the marks of the
   Changes view.
-- **Share Project on GitLab**: namespace, remote name, visibility, description,
-  an optional `git init` (runs on the first click) and an optional initial
-  commit. The commit waits for a second click bound to the listed files, and
-  files that look secret (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`)
-  are refused. There is no file-selection tree.
+- **Share Project** (command): asks for the name and the visibility. A
+  repository without a commit is initialised and committed after a confirm
+  that lists the files; files that look secret (`.env*`, `*.pem`, `*.key`,
+  `id_rsa*`, `id_ed25519*`) are refused.
 - **Merge Request Commits**: the commits of the selected merge request. A
   double click shows that commit's diff, read-only, in the Changes view; commit
   mode has no comments and no viewed marks.
@@ -152,9 +151,9 @@ applying. It only edits the open file; nothing is posted to GitLab.
 |---|---|---|
 | GitLab: Open on GitLab | opens the file at the current commit on gitlab.com, with the selected lines (`#L3-L5`) | editor, editor tab and Project view context (first selected file or folder, linked at the current commit) |
 | GitLab: Copy Link | copies the same link | none |
-| GitLab: Create Snippet | creates a private snippet from the selection, or the whole file, named after the file; the URL is copied and shown | editor and editor tab context |
+| GitLab: Create Snippet | asks for title, visibility and more files, then creates the snippet from the selection, or the whole file; the URL is copied and shown | editor and editor tab context |
 | GitLab: Create Merge Request | opens gitlab.com's new merge request page for the current branch | Tools |
-| GitLab: Share Project | creates a private project in your namespace named after the folder, adds it as `origin` (or `gitlab` if `origin` exists) and runs `git push -u` in a terminal; needs a commit, a checked-out branch and no gitlab.com remote yet | none |
+| GitLab: Share Project | asks for name and visibility, creates the project in your namespace, adds it as `origin` (or `gitlab` if `origin` exists) and runs `git push -u` in a terminal; needs a commit, a checked-out branch and no gitlab.com remote yet | none |
 | GitLab: Show Current Branch's Merge Request | selects the current branch's merge request (the status bar item runs it) | none |
 | GitLab: Open Merge Request in Worktree | fetches the selected merge request (else the current branch's) and runs `git worktree add --detach` in a sibling folder `<repository>-<branch>`; git refuses a folder that already holds files; the path is shown in a notification and no editor is opened | none |
 | GitLab: Update Merge Request Branch | asks GitLab to rebase the selected merge request (else the current branch's) onto its target (`PUT .../rebase`, the same call as the Rebase button, which only appears when GitLab reports `need_rebase`) and reports a conflict | none |
@@ -172,7 +171,6 @@ Settings › Plugins › GitLab:
 | Key | Default | Effect |
 |---|---|---|
 | `editorReview` | `true` | show the current branch's unresolved threads in the editor |
-| `forms` | `true` | the Create Merge Request, Create Snippet and Share Project views |
 | `noteActions` | `true` | edit, delete and react on your own comments |
 | `commitsView` | `true` | the merge request's commits and each commit's changes |
 | `pipelineView` | `true` | the merge request's pipelines and jobs, with retry and cancel |

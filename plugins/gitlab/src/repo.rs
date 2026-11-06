@@ -7,7 +7,7 @@ use openidea_plugin::{Error, Invocation, NotificationLevel};
 
 use crate::api::{self, ProjectInfo};
 use crate::branch::git_ok;
-use crate::forms::ShareForm;
+use crate::prompts::{self, ShareRequest};
 use crate::{GitLab, PROJECTS, first_line, safe};
 
 fn use_ssh() -> bool {
@@ -91,9 +91,42 @@ impl GitLab {
     }
 }
 
-/// The command: a private project in the user's namespace named after the folder, no init, no commit.
+/// The command: asks for name and visibility. A repository without a commit is initialised and committed
+/// only after a confirm that lists the files, and the project is created only after that commit succeeded.
 pub fn share(ctx: &Invocation) -> Result<Option<String>, Error> {
-    share_with(ctx, &ShareForm::default(), None, None).map(|_| None)
+    let project = ctx.project().ok_or("No project is open.")?;
+    let status = project.vcs_status()?;
+    let root = match &status {
+        Some(s) => s.root.clone(),
+        None => project.root()?,
+    };
+    let folder = root.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("project");
+
+    let Some(mut request) = prompts::ask_share(&project_name(folder))? else {
+        return Ok(None);
+    };
+
+    let has_commit = status.as_ref().is_some_and(|s| s.commit.is_some());
+    if !has_commit {
+        if !host::confirm("Share Project", "The project has no commit yet. Create the repository if needed and commit all its files first?")? {
+            return Ok(None);
+        }
+
+        request.init = status.is_none();
+        request.commit_all = true;
+    }
+
+    let mut confirmed: Option<Vec<String>> = None;
+    while let Some(files) = share_with(ctx, &request, confirmed.as_deref())? {
+        let list = files.join("\n");
+        if !host::confirm("Share Project", &format!("Commit these {} files as \"Initial commit\"?\n{list}", files.len()))? {
+            return Ok(None);
+        }
+
+        confirmed = Some(files);
+    }
+
+    Ok(None)
 }
 
 /// `.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, matched on the file name, any case.
@@ -131,22 +164,22 @@ fn same_files(a: &[String], b: &[String]) -> bool {
     sorted(a) == sorted(b)
 }
 
-/// Shares the project as the form says. Every field is checked before the first `git` run and the local
+/// Shares the project as the request says. Every field is checked before the first `git` run and the local
 /// steps (`git init`, the commit) succeed before the project is created. With commit-all it returns the files
 /// `git status` lists, and commits only when called again with exactly those files as `confirmed`.
-pub fn share_with(ctx: &Invocation, form: &ShareForm, namespace_id: Option<u64>, confirmed: Option<&[String]>) -> Result<Option<Vec<String>>, Error> {
+pub fn share_with(ctx: &Invocation, request: &ShareRequest, confirmed: Option<&[String]>) -> Result<Option<Vec<String>>, Error> {
     let project = ctx.project().ok_or("No project is open.")?;
-    if !api::VISIBILITIES.contains(&form.visibility.as_str()) {
+    if !api::VISIBILITIES.contains(&request.visibility.as_str()) {
         return Err("Choose a visibility.".into());
     }
 
     let status = project.vcs_status()?;
-    if status.is_none() && !form.init {
+    if status.is_none() && !request.init {
         return Err("Create a git repository and commit your files first.".into());
     }
 
     let has_commit = status.as_ref().is_some_and(|s| s.commit.is_some());
-    if !has_commit && !form.commit_all {
+    if !has_commit && !request.commit_all {
         return Err("There is nothing to push yet. Commit your files first.".into());
     }
 
@@ -163,26 +196,12 @@ pub fn share_with(ctx: &Invocation, form: &ShareForm, namespace_id: Option<u64>,
         return Err("The repository already has a gitlab.com remote.".into());
     }
 
-    let remote = match form.remote.trim() {
-        "" => ["origin", "gitlab"]
-            .into_iter()
-            .find(|name| remotes.iter().all(|(existing, _)| existing != name))
-            .ok_or("The remotes origin and gitlab both exist already. Name another remote.")?,
-        typed => safe::remote_name(typed)?,
-    };
-    if remotes.iter().any(|(existing, _)| existing == remote) {
-        return Err(format!("The remote {remote} exists already. Name another one.").into());
-    }
+    let remote = ["origin", "gitlab"]
+        .into_iter()
+        .find(|name| remotes.iter().all(|(existing, _)| existing != name))
+        .ok_or("The remotes origin and gitlab both exist already. Remove one first.")?;
 
-    let root = match &status {
-        Some(s) => s.root.clone(),
-        None => project.root()?,
-    };
-    let folder = root.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("project");
-    let name = match form.name.trim() {
-        "" => project_name(folder),
-        typed => typed.to_owned(),
-    };
+    let name = request.name.trim();
 
     git_ok(&project, &["--version"])?;
     if status.is_none() {
@@ -194,7 +213,7 @@ pub fn share_with(ctx: &Invocation, form: &ShareForm, namespace_id: Option<u64>,
         None => safe::ref_name(git_ok(&project, &["symbolic-ref", "--short", "HEAD"])?.trim())?.to_owned(),
     };
 
-    if form.commit_all {
+    if request.commit_all {
         let files = porcelain_paths(&git_ok(&project, &["status", "--porcelain", "-z", "--untracked-files=all"])?);
         let secret: Vec<&str> = files.iter().map(String::as_str).filter(|f| looks_secret(f)).collect();
         if !secret.is_empty() {
@@ -225,7 +244,7 @@ pub fn share_with(ctx: &Invocation, form: &ShareForm, namespace_id: Option<u64>,
 
     let created = {
         let _task = host::begin_task("Creating GitLab project", false);
-        api::create_project(&name, namespace_id, form.description.trim(), &form.visibility)?
+        api::create_project(name, &request.visibility)?
     };
 
     let url = safe::clone_url(match use_ssh() {

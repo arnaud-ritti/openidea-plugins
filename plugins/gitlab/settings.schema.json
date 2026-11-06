@@ -25,11 +25,6 @@
       "title": "Report $VARIABLE inside single quotes in script lines",
       "default": true
     },
-    "forms": {
-      "type": "boolean",
-      "title": "Show the GitLab form views (Create Merge Request, Create Snippet, Share Project)",
-      "default": true
-    },
     "noteActions": {
       "type": "boolean",
       "title": "Edit and delete your own comments and react with emoji in the merge request details",

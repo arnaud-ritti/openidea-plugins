@@ -65,3 +65,74 @@ pub fn ask_new_merge_request(defaults: &MrDefaults) -> Result<Option<NewMergeReq
 
     Ok(Some(NewMergeRequest { source, target, title, description, draft }))
 }
+
+pub struct NewSnippet {
+    pub title: String,
+    pub visibility: String,
+    pub extra_paths: Vec<String>,
+}
+
+pub struct ShareRequest {
+    pub name: String,
+    pub visibility: String,
+    pub init: bool,
+    pub commit_all: bool,
+}
+
+fn pick_visibility() -> Result<Option<String>, Error> {
+    let items: Vec<PickItem> = api::VISIBILITIES.iter().map(|v| PickItem::new(v, v)).collect();
+
+    host::pick("Visibility", &items)
+}
+
+/// An empty title means `default_title`; `paths` are the files already in the snippet and are not asked twice.
+pub fn ask_new_snippet(default_title: &str, paths: &[String]) -> Result<Option<NewSnippet>, Error> {
+    let Some(typed) = host::input("Snippet title", Some(default_title))? else {
+        return Ok(None);
+    };
+    let title = match typed.trim() {
+        "" => default_title.to_owned(),
+        typed => typed.to_owned(),
+    };
+    let Some(visibility) = pick_visibility()? else {
+        return Ok(None);
+    };
+    if visibility == "public" && !host::confirm("Create Snippet", "Publish publicly? Anyone can see a public snippet, signed in or not.")? {
+        return Ok(None);
+    }
+
+    let mut extra_paths: Vec<String> = Vec::new();
+    loop {
+        let Some(path) = host::input("Add another project file (path from the project root; empty to finish)", None)? else {
+            return Ok(None);
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            break;
+        }
+        if !extra_paths.iter().any(|p| p == path) && !paths.iter().any(|p| p == path) {
+            extra_paths.push(path.to_owned());
+        }
+    }
+
+    Ok(Some(NewSnippet { title, visibility, extra_paths }))
+}
+
+/// An empty name means `default_name`.
+pub fn ask_share(default_name: &str) -> Result<Option<ShareRequest>, Error> {
+    let Some(typed) = host::input("Project name", Some(default_name))? else {
+        return Ok(None);
+    };
+    let name = match typed.trim() {
+        "" => default_name.to_owned(),
+        typed => typed.to_owned(),
+    };
+    let Some(visibility) = pick_visibility()? else {
+        return Ok(None);
+    };
+    if visibility == "public" && !host::confirm("Share Project", "Make the project public? Anyone can see it, signed in or not.")? {
+        return Ok(None);
+    }
+
+    Ok(Some(ShareRequest { name, visibility, init: false, commit_all: false }))
+}

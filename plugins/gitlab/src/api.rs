@@ -504,30 +504,12 @@ pub fn member_projects() -> Result<Vec<ProjectInfo>, Error> {
     paged("/projects?membership=true&simple=true&order_by=last_activity_at", 100)
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct Namespace {
-    pub id: u64,
-    pub full_path: String,
-}
-
-/// The user's namespace and the groups they can create projects in.
-pub fn namespaces() -> Result<Vec<Namespace>, Error> {
-    paged("/namespaces", 100)
-}
-
-/// `namespace_id: None` is the user's own namespace; an empty description is left out.
-pub fn create_project(name: &str, namespace_id: Option<u64>, description: &str, visibility: &str) -> Result<ProjectInfo, Error> {
+pub fn create_project(name: &str, visibility: &str) -> Result<ProjectInfo, Error> {
     if !VISIBILITIES.contains(&visibility) {
         return Err(format!("Unknown visibility {visibility:?}.").into());
     }
 
-    let mut body = json!({ "name": name, "visibility": visibility });
-    if let Some(id) = namespace_id {
-        body["namespace_id"] = json!(id);
-    }
-    if !description.is_empty() {
-        body["description"] = json!(description);
-    }
+    let body = json!({ "name": name, "visibility": visibility });
 
     parse(rest("POST", "/projects", Some(body))?)
 }
