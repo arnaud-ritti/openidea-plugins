@@ -4,6 +4,7 @@
 //! Text-based: types match by simple name through the project's own type
 //! hierarchy; beans from libraries and auto-configuration aren't seen.
 
+mod checks;
 mod kotlin;
 mod model;
 mod sites;
@@ -14,7 +15,7 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
+    Context, Diagnostic, Error, Event, EventKind, Invocation, Location, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
 };
 use sites::{Hit, Site, Word};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
@@ -138,8 +139,8 @@ fn describe(b: &Bean) -> String {
     s
 }
 
-fn publish_field_injections(path: &str, model: &FileModel) {
-    let problems: Vec<Diagnostic> = model
+fn field_injection_problems(model: &FileModel) -> Vec<Diagnostic> {
+    model
         .injections
         .iter()
         .filter_map(|inj| inj.field_annotation)
@@ -151,8 +152,7 @@ fn publish_field_injections(path: &str, model: &FileModel) {
                 "Field injection: prefer a constructor parameter, which lets the field be final and the class easier to test.",
             )
         })
-        .collect();
-    let _ = host::publish_diagnostics(path, &problems);
+        .collect()
 }
 
 fn hits(doc: &Document) -> Vec<Hit> {
@@ -327,6 +327,22 @@ impl Navigator {
         f(&world, model)
     }
 
+    /// Publishes the problems of a Java or Kotlin source; a fixed file gets an empty list.
+    fn diagnose(&mut self, path: &str, language: &str, text: &str) {
+        if language == "xml" {
+            return;
+        }
+        let mut problems = field_injection_problems(&model::parse(path, text).unwrap_or_default());
+        if language == "java" {
+            let file = java::parse(text);
+            if let Some(index) = self.indexes.for_document(path, text, PROVIDER_BUDGET) {
+                let findings = checks::check_java(path, &file, text, &World::new(index), checks::Groups::from_settings());
+                problems.extend(findings.iter().map(|f| f.diagnostic(text)));
+            }
+        }
+        let _ = host::publish_diagnostics(path, &problems);
+    }
+
     fn bean_items(world: &World, replace: Range) -> Vec<CompletionItem> {
         let mut seen = BTreeSet::new();
         world
@@ -344,9 +360,7 @@ impl Navigator {
 
 impl Providers for Navigator {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        if doc.language != "xml" {
-            publish_field_injections(&doc.path, &model::parse(&doc.path, &doc.text).unwrap_or_default());
-        }
+        self.diagnose(&doc.path, &doc.language, &doc.text);
         self.with_doc(doc, |world, model| {
             let mut markers = Vec::new();
             for inj in &model.injections {
@@ -656,6 +670,33 @@ impl Views for Navigator {
 }
 
 impl Plugin for Navigator {
+    fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
+        for kind in [EventKind::FileSaved, EventKind::FileOpened] {
+            host::subscribe(kind)?;
+        }
+        Ok(())
+    }
+
+    fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
+        let paths: BTreeSet<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::FileSaved(path) | Event::FileOpened(path) => Some(path.as_str()),
+                _ => None,
+            })
+            .filter(|path| path.ends_with(".java"))
+            .collect();
+        for path in paths {
+            let Some(project) = host::projects().unwrap_or_default().into_iter().find(|p| {
+                p.root().is_ok_and(|root| path.starts_with(&format!("{root}/")))
+            }) else {
+                continue;
+            };
+            let Ok(text) = project.read_file(path) else { continue };
+            self.diagnose(path, "java", &text);
+        }
+    }
+
     fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         Err(Error::NotFound(format!("command {id}")))
     }

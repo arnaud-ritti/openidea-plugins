@@ -1,4 +1,5 @@
 use super::*;
+use openidea_plugin::Event;
 use openidea_plugin::mock::MockHost;
 
 const SERVICE: &str = r#"package com.acme;
@@ -521,4 +522,251 @@ fn merge_after_a_trailing_line_comment() {
 fn parameter_name_clash_is_refused_by_the_clash_check() {
     let text = "package com.acme;\n\n@Service\nclass S {\n    @Autowired\n    private Foo foo;\n\n    S(Foo foo) {}\n}\n";
     assert_eq!(constructor_injection(text, 4), None);
+}
+
+fn findings(host: &MockHost, n: &mut Navigator, name: &str, text: &str) -> Vec<(String, String)> {
+    let document = java(name, text);
+    n.line_markers(&document);
+    host.diagnostics()
+        .get(&document.path)
+        .into_iter()
+        .flatten()
+        .filter(|d| d.code.as_deref() != Some("field-injection"))
+        .map(|d| {
+            let (from, to) = (offset(text, d.range.start).unwrap(), offset(text, d.range.end).unwrap());
+            (d.code.clone().unwrap(), text[from..to].to_owned())
+        })
+        .collect()
+}
+
+fn found(text: &str) -> Vec<(String, String)> {
+    let host = MockHost::install();
+    findings(&host, &mut Navigator::default(), "Subject.java", text)
+}
+
+fn pair(code: &str, text: &str) -> (String, String) {
+    (code.into(), text.into())
+}
+
+#[test]
+fn transactional_on_private_method_warns() {
+    let text = "@Service\nclass A {\n    @Transactional\n    private void save() {}\n}\n";
+    assert_eq!(found(text), [pair("non-proxyable-method", "save")]);
+}
+
+#[test]
+fn async_on_final_method_warns() {
+    let text = "@Service\nclass A {\n    @Async\n    public final void send() {}\n}\n";
+    assert_eq!(found(text), [pair("non-proxyable-method", "send")]);
+}
+
+#[test]
+fn cacheable_on_static_method_warns() {
+    let text = "@Component\nclass A {\n    @Cacheable(\"x\")\n    public static String load() { return \"\"; }\n}\n";
+    assert_eq!(found(text), [pair("non-proxyable-method", "load")]);
+}
+
+#[test]
+fn transactional_on_public_method_is_quiet() {
+    let text = "@Service\nclass A {\n    @Transactional\n    public void save() {}\n    @Transactional\n    void other() {}\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn non_proxyable_method_is_quiet_for_library_or_dynamic_name() {
+    let library = "import com.acme.Async;\n@Service\nclass A {\n    @Async\n    private void send() {}\n}\n";
+    assert!(found(library).is_empty());
+    let spring = "import org.springframework.scheduling.annotation.Async;\n@Service\nclass A {\n    @Async\n    private void send() {}\n}\n";
+    assert_eq!(found(spring), [pair("non-proxyable-method", "send")]);
+    let jakarta = "import jakarta.transaction.Transactional;\n@Service\nclass A {\n    @Transactional\n    private void send() {}\n}\n";
+    assert_eq!(found(jakarta), [pair("non-proxyable-method", "send")]);
+}
+
+#[test]
+fn scheduled_with_parameters_warns() {
+    let text = "@Component\nclass A {\n    @Scheduled(fixedRate = 1000)\n    void tick(String now) {}\n}\n";
+    assert_eq!(found(text), [pair("scheduled-signature", "tick")]);
+}
+
+#[test]
+fn scheduled_without_parameters_is_quiet() {
+    let text = "@Component\nclass A {\n    @Scheduled(fixedRate = 1000)\n    void tick() {}\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn scheduled_is_quiet_for_library_or_dynamic_name() {
+    let text = "import org.quartz.Scheduled;\n@Component\nclass A {\n    @Scheduled(fixedRate = 1000)\n    void tick(String now) {}\n}\n";
+    assert!(found(text).is_empty());
+}
+
+const DUPLICATE: &str = "@Service(\"dispatcher\")\nclass SmtpMailer {}\n";
+
+fn with_other(other: &str) -> (MockHost, Navigator) {
+    let host = setup();
+    host.add_file("src/main/java/com/acme/Other.java", other);
+    (host, Navigator::default())
+}
+
+#[test]
+fn duplicate_bean_names_across_files_warn_on_both() {
+    let (host, mut n) = with_other("@Component(\"dispatcher\")\nclass Other {}\n");
+    assert_eq!(findings(&host, &mut n, "Subject.java", DUPLICATE), [pair("duplicate-bean-name", "SmtpMailer")]);
+    let other = "@Component(\"dispatcher\")\nclass Other {}\n";
+    assert_eq!(findings(&host, &mut n, "Other.java", other), [pair("duplicate-bean-name", "Other")]);
+}
+
+#[test]
+fn same_name_in_different_profiles_is_quiet() {
+    let (host, mut n) = with_other("@Profile(\"prod\")\n@Component(\"dispatcher\")\nclass Other {}\n");
+    let dev = "@Profile(\"dev\")\n@Service(\"dispatcher\")\nclass SmtpMailer {}\n";
+    assert!(findings(&host, &mut n, "Subject.java", dev).is_empty());
+    assert_eq!(findings(&host, &mut n, "Subject.java", DUPLICATE).len(), 1, "an unprofiled bean overlaps every profile");
+}
+
+#[test]
+fn duplicate_bean_name_is_quiet_for_library_or_dynamic_name() {
+    let (host, mut n) = with_other("@Component(\"dispatcher\")\nclass Other {}\n");
+    let dynamic = "@Service(Names.DISPATCHER)\nclass Mailer {}\n";
+    assert!(findings(&host, &mut n, "Subject.java", dynamic).is_empty());
+    let conditional = "@Service(\"dispatcher\")\n@ConditionalOnMissingBean\nclass SmtpMailer {}\n";
+    assert!(findings(&host, &mut n, "Subject.java", conditional).is_empty());
+    let library = "@Service(\"mailSender\")\nclass Sender {}\n";
+    assert!(findings(&host, &mut n, "Subject.java", library).is_empty());
+}
+
+#[test]
+fn overloaded_bean_methods_are_not_duplicates() {
+    let text = "@Configuration(proxyBeanMethods = false)\nclass C {\n    @Bean Clock clock() { return null; }\n    @Bean Clock clock(Zone zone) { return null; }\n}\n";
+    assert!(found(text).is_empty());
+}
+
+#[test]
+fn configuration_with_final_bean_method_warns() {
+    let text = "@Configuration\nclass C {\n    @Bean\n    public final Clock clock() { return null; }\n}\n";
+    assert_eq!(found(text), [pair("configuration-proxy-method", "clock")]);
+    let private = "@Configuration(proxyBeanMethods = true)\nclass C {\n    @Bean\n    private Clock clock() { return null; }\n}\n";
+    assert_eq!(found(private), [pair("configuration-proxy-method", "clock")]);
+}
+
+#[test]
+fn proxy_bean_methods_false_is_quiet() {
+    let text = "@Configuration(proxyBeanMethods = false)\nclass C {\n    @Bean\n    public final Clock clock() { return null; }\n}\n";
+    assert!(found(text).is_empty());
+    let lite = "@Component\nclass C {\n    @Bean\n    public final Clock clock() { return null; }\n}\n";
+    assert!(found(lite).is_empty());
+}
+
+#[test]
+fn configuration_proxy_method_is_quiet_for_library_or_dynamic_name() {
+    let dynamic = "@Configuration(proxyBeanMethods = Settings.PROXY)\nclass C {\n    @Bean\n    public final Clock clock() { return null; }\n}\n";
+    assert!(found(dynamic).is_empty());
+    let library = "import com.acme.Configuration;\n@Configuration\nclass C {\n    @Bean\n    public final Clock clock() { return null; }\n}\n";
+    assert!(found(library).is_empty());
+    let static_bean = "@Configuration\nclass C {\n    @Bean\n    public static Clock clock() { return null; }\n}\n";
+    assert!(found(static_bean).is_empty());
+}
+
+#[test]
+fn capitalised_component_name_gets_a_hint() {
+    let text = "@Service(\"UserService\")\nclass UserServiceImpl {}\n";
+    assert_eq!(found(text), [pair("bean-name-convention", "UserService")]);
+    let method = "@Configuration(proxyBeanMethods = false)\nclass C {\n    @Bean(\"Clock\")\n    Clock clock() { return null; }\n}\n";
+    assert_eq!(found(method), [pair("bean-name-convention", "Clock")]);
+}
+
+#[test]
+fn bean_name_convention_is_quiet_for_library_or_dynamic_name() {
+    assert!(found("@Service(\"userService\")\nclass A {}\n").is_empty());
+    assert!(found("@Service(\"URLMapper\")\nclass A {}\n").is_empty(), "two capitals is Spring's own default");
+    assert!(found("@Service(Names.User)\nclass A {}\n").is_empty());
+    assert!(found("import com.acme.Service;\n@Service(\"User\")\nclass A {}\n").is_empty());
+}
+
+const SELF_CALL: &str = "@Service\nclass A {\n    @Transactional\n    public void save() {}\n    public void run() {\n        save();\n        this.save();\n    }\n}\n";
+
+fn self_invocation(host: &MockHost, text: &str) -> Vec<(String, String)> {
+    findings(host, &mut Navigator::default(), "Subject.java", text)
+}
+
+#[test]
+fn self_call_to_transactional_method_warns_only_for_unique_name() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkSelfInvocation", "true");
+    assert_eq!(
+        self_invocation(&host, SELF_CALL),
+        [pair("self-invocation", "save"), pair("self-invocation", "save")]
+    );
+    let overloaded = SELF_CALL.replace("    public void run", "    void save(int x) {}\n    public void run");
+    assert!(self_invocation(&host, &overloaded).is_empty());
+    let inherited = SELF_CALL.replace("class A", "class A extends Base");
+    assert!(self_invocation(&host, &inherited).is_empty());
+}
+
+#[test]
+fn call_through_injected_self_is_quiet() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkSelfInvocation", "true");
+    let text = SELF_CALL.replace("        save();\n        this.save();\n", "        self.save();\n        other.save();\n");
+    assert!(self_invocation(&host, &text).is_empty());
+    let same_annotation = SELF_CALL.replace("    public void run", "    @Transactional\n    public void run");
+    assert!(self_invocation(&host, &same_annotation).is_empty(), "a transactional caller already holds the transaction");
+}
+
+#[test]
+fn self_invocation_is_off_by_default() {
+    assert!(found(SELF_CALL).is_empty());
+}
+
+#[test]
+fn self_invocation_is_quiet_for_library_or_dynamic_name() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkSelfInvocation", "true");
+    let library = SELF_CALL.replace("@Service", "import com.acme.Transactional;\n@Service");
+    assert!(self_invocation(&host, &library).is_empty());
+    let local = "@Service\nclass A {\n    @Transactional\n    public void save() {}\n    public void run(Runnable save) {\n        helper.save();\n        String s = \"save()\";\n    }\n}\n";
+    assert!(self_invocation(&host, local).is_empty());
+}
+
+#[test]
+fn switched_off_groups_are_quiet() {
+    let host = MockHost::install();
+    host.set_setting("springBeans.checkProxyMethods", "false");
+    let text = "@Service\nclass A {\n    @Transactional\n    private void save() {}\n}\n";
+    assert!(findings(&host, &mut Navigator::default(), "Subject.java", text).is_empty());
+}
+
+#[test]
+fn fixed_file_publishes_empty_list() {
+    let host = MockHost::install();
+    let mut n = Navigator::default();
+    let broken = "@Service\nclass A {\n    @Transactional\n    private void save() {}\n}\n";
+    assert_eq!(findings(&host, &mut n, "Subject.java", broken).len(), 1);
+    let fixed = broken.replace("private ", "");
+    assert!(findings(&host, &mut n, "Subject.java", &fixed).is_empty());
+    let path = java("Subject.java", "").path;
+    assert!(host.diagnostics().get(&path).is_none_or(Vec::is_empty), "no stale problem is left");
+}
+
+#[test]
+fn saved_and_opened_files_are_checked() {
+    let host = MockHost::install();
+    host.add_file("src/main/java/com/acme/Subject.java", "@Service\nclass A {\n    @Transactional\n    private void save() {}\n}\n");
+    let mut n = Navigator::default();
+    let path = java("Subject.java", "").path;
+    n.handle_events(&[Event::FileOpened(path.clone())], &host.invocation());
+    assert_eq!(host.diagnostics()[&path].len(), 1);
+    host.add_file("src/main/java/com/acme/Subject.java", "@Service\nclass A {}\n");
+    n.handle_events(&[Event::FileSaved(path.clone())], &host.invocation());
+    assert!(host.diagnostics().get(&path).is_none_or(Vec::is_empty));
+}
+
+#[test]
+fn ranges_use_utf16_columns_with_multibyte_text() {
+    let host = MockHost::install();
+    let text = "@Service\nclass A {\n    @Transactional\n    private void caf\u{e9}\u{1F600}() {}\n}\n";
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let d = &host.diagnostics()[&document.path][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (3, 17, 23));
 }
