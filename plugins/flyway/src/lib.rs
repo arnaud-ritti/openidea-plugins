@@ -245,6 +245,11 @@ impl Providers for Flyway {
 
 impl Flyway {
     fn migration_file(&self, project: &Project, files: &[String], migration: &info::Migration, naming: &naming::Naming) -> Option<String> {
+        let description = migration.description.trim();
+        if description.starts_with("<<") && description.ends_with(">>") {
+            return None;
+        }
+
         let normalized = |text: &str| text.replace('_', " ").to_lowercase();
         let same_description = |description: &str| normalized(description) == normalized(&migration.description);
         let found = files
@@ -327,8 +332,8 @@ impl Views for Flyway {
             ViewEvent::Button(button) if button == "refresh" => host::refresh_view(view),
             ViewEvent::Activate(key) => {
                 if let Some(path) = self.targets.get(&key) {
-                    if host::open_location(path, 0, 0).is_err() {
-                        host::notify(NotificationLevel::Warning, TITLE, &format!("Could not open {path}."));
+                    if let Err(e) = host::open_location(path, 0, 0) {
+                        host::notify(NotificationLevel::Warning, TITLE, &format!("Could not open {path}: {e}"));
                     }
                 }
             }
@@ -676,5 +681,18 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].level, NotificationLevel::Warning);
         assert!(notes[0].body.starts_with("Could not open"), "{}", notes[0].body);
+    }
+
+    #[test]
+    fn synthetic_baseline_row_has_no_target_even_when_v1_exists() {
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "process:flyway"]);
+        host.add_file("src/main/resources/db/migration/V1__init.sql", "");
+        host.add_file("src/main/resources/db/migration/B1__base.sql", "");
+        run_info(&host, r#"{"migrations":[
+          {"category":"Baseline","version":"1","description":"<< Flyway Baseline >>","type":"BASELINE","state":"Baseline"}]}"#);
+        let mut flyway = Flyway::default();
+        let items = tree(&host, &mut flyway);
+        flyway.handle("migrations", ViewEvent::Activate(items[0].key.clone()), &host.invocation()).unwrap();
+        assert!(host.opened_locations().is_empty());
     }
 }
