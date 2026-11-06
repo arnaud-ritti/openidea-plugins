@@ -10,7 +10,7 @@ the free code of the public repository.
 | Names        | Indexed from                                                                                                       | Referenced in                                                                                                                                                  |
 | ------------ | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Routes       | `#[Route]` / `@Route` in `src/**/*Controller.php`, `config/routes*` YAML/XML, compiled `var/cache/dev/url_generating_routes.php` | PHP `generateUrl`, `redirectToRoute`, `->generate`; Twig `path()`, `url()`                                                                                     |
-| Templates    | `templates/**/*.twig` (`templates/bundles/XBundle/` as `@X/`)                                                       | PHP `render*`, `stream`, `htmlTemplate`, `textTemplate`, `#[Template]`; Twig `extends`, `include`, `embed`, `import`, `from`, `use`, `include()`, `source()` |
+| Templates    | `templates/**/*.twig` (`templates/bundles/XBundle/` as `@X/`; `twig: paths:` of `config/packages/twig.yaml` as `@namespace/`)                                                       | PHP `render*`, `stream`, `htmlTemplate`, `textTemplate`, `#[Template]`; Twig `extends`, `include`, `embed`, `import`, `from`, `use`, `include()`, `source()` |
 | Blocks       | the parent templates (`extends` chain)                                                                              | Twig `{% block name %}`, `block('name')`                                                                                                                       |
 | Variables    | keys of the array passed to `render()` by controllers                                                              | Twig expressions (completion only)                                                                                                                             |
 | Services     | `services:` in `config/**` YAML, `<service>` in XML, compiled `var/cache/dev/App_KernelDevDebugContainer.xml`      | PHP `$container->get/has`, `service()`, `ref()`; YAML `'@id'`, `'@?id'`; XML `type="service" id=`, `alias=`, `parent=`                                          |
@@ -74,5 +74,5 @@ which the OpenIDEA plugin API has no equivalent for:
   files.
 
 Matching is textual: a call is recognised by its method name, not its class,
-and templates are only looked up in `templates/` (Twig `paths:` namespaces are
-not read, so names starting with `@` are never reported missing).
+and templates are looked up in `templates/` and the `twig: paths:` directories of
+`config/packages/twig.yaml` (names starting with `@` are never reported missing).

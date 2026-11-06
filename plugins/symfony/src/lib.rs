@@ -970,4 +970,28 @@ mod tests {
         assert_eq!(plugin.run_command("reindex", &host.invocation(), None).unwrap(), None);
         assert_eq!(host.notifications()[0].body, "No Symfony project is open.");
     }
+
+    #[test]
+    fn twig_paths_namespace_resolves() {
+        let host = MockHost::install();
+        host.add_file(
+            "config/packages/twig.yaml",
+            "twig:\n    paths:\n        'templates/emails': 'emails'\n        '%kernel.project_dir%/templates/pdf': pdf\n        templates/plain:\n",
+        );
+        host.add_file("templates/emails/welcome.html.twig", "hi");
+        host.add_file("templates/pdf/invoice.html.twig", "pdf");
+        host.add_file("templates/plain/p.html.twig", "plain");
+        let mut plugin = activated(&host);
+
+        let twig = doc("/project/templates/a.html.twig", "twig", "{% include '@emails/welcome.html.twig' %}");
+        let found = plugin.definition(&twig, Position::new(0, 16));
+        assert_eq!(found[0].path, "/project/templates/emails/welcome.html.twig");
+
+        let typing = doc("/project/templates/a.html.twig", "twig", "{% include '@' %}");
+        let offered = labels(plugin.completion(&typing, Position::new(0, 13), None));
+        assert!(offered.contains(&"@emails/welcome.html.twig".to_owned()));
+        assert!(offered.contains(&"@pdf/invoice.html.twig".to_owned()));
+        assert!(offered.contains(&"p.html.twig".to_owned()));
+        assert!(offered.contains(&"base.html.twig".to_owned()));
+    }
 }
