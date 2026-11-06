@@ -34,10 +34,6 @@ pub fn remote_name(s: &str) -> Result<&str, Error> {
     accept("name", s, charset(s, 64, b"_.-") && !s.starts_with(['-', '.']))
 }
 
-pub fn username(s: &str) -> Result<&str, Error> {
-    accept("username", s, charset(s, 255, b"_.-") && !s.starts_with('-'))
-}
-
 pub fn hex_sha(s: &str) -> Result<&str, Error> {
     accept("commit", s, (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit()))
 }
@@ -91,13 +87,6 @@ mod tests {
         refused(remote_name, &["-x", ".x", "", "a/b", "a b", &"a".repeat(65)]);
 
         assert_eq!(remote_name("my_tool.rs-2").unwrap(), "my_tool.rs-2");
-    }
-
-    #[test]
-    fn username_refuses_url_metacharacters() {
-        refused(username, &["a&b", "a#b", "a/b", "a%2Fb", "a?b", "-a", ""]);
-
-        assert_eq!(username("ann.b_c-1").unwrap(), "ann.b_c-1");
     }
 
     #[test]

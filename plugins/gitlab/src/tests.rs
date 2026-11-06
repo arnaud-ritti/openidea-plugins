@@ -814,11 +814,6 @@ fn the_token_never_appears_in_requests_logs_notifications_or_views() {
     views.push(format!("{:?}", plugin.render(DETAILS, None, &host.invocation()).unwrap()));
     views.push(format!("{:?}", plugin.render(PROJECTS, None, &host.invocation()).unwrap()));
     plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
-    views.push(format!("{:?}", plugin.render(NEW_MR, None, &host.invocation()).unwrap()));
-    plugin.handle(NEW_MR, field("title", "Add parser"), &host.invocation()).unwrap();
-    plugin.handle(NEW_MR, field("assignee", "ann"), &host.invocation()).unwrap();
-    plugin.handle(NEW_MR, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
-    views.push(format!("{:?}", plugin.render(NEW_MR, None, &host.invocation()).unwrap()));
     host.open_editor("/project/src/a.rs", "rust", "fn main() {}\n", &[(0, 0, 0, 0)]);
     plugin.handle(NEW_SNIPPET, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
     views.push(format!("{:?}", plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap()));
@@ -927,20 +922,6 @@ fn creates_a_private_snippet_from_the_selection() {
     );
     assert_eq!(host.clipboard().as_deref(), Some("https://gitlab.com/-/snippets/9"));
     assert_eq!(host.notifications()[0].title, "Snippet created");
-}
-
-#[test]
-fn create_merge_request_opens_the_new_page_for_the_branch() {
-    let host = setup();
-    host.set_vcs_status(Some(status("feature")));
-    host.set_setting("forms", "false");
-
-    GitLab::default().run_command("create-merge-request", &host.invocation(), None).unwrap();
-
-    assert_eq!(
-        host.opened_urls(),
-        ["https://gitlab.com/g/p/-/merge_requests/new?merge_request%5Bsource_branch%5D=feature"]
-    );
 }
 
 #[test]
@@ -1643,31 +1624,36 @@ mod worktree_tests {
     }
 }
 
-mod merge_request_form_tests {
+mod create_merge_request_tests {
     use super::*;
     use serde_json::Value;
+
+    fn git_branches(args: &[String], _: Option<&str>) -> Result<ProcessOutput, Error> {
+        let stdout = match args[0].as_str() {
+            "branch" => "main\nfeature\n",
+            _ => "Add parser\n",
+        };
+
+        Ok(ProcessOutput { status: Some(0), stdout: stdout.into(), stderr: String::new() })
+    }
 
     fn on_feature() -> MockHost {
         let host = setup();
         host.set_vcs_status(Some(status("feature")));
+        host.on_process("git", git_branches);
         host
     }
 
-    fn open(host: &MockHost) -> (GitLab, View) {
-        let mut plugin = GitLab::default();
-        let view = plugin.render(NEW_MR, None, &host.invocation()).unwrap();
-        (plugin, view)
-    }
-
-    fn fill(plugin: &mut GitLab, host: &MockHost, fields: &[(&str, &str)]) {
-        for (key, value) in fields {
-            plugin.handle(NEW_MR, field(key, value), &host.invocation()).unwrap();
+    fn answers(host: &MockHost, answers: &[Option<&[&str]>]) {
+        for answer in answers {
+            host.answer_next_prompt(*answer);
         }
     }
 
-    fn create(plugin: &mut GitLab, host: &MockHost) -> View {
-        plugin.handle(NEW_MR, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
-        plugin.render(NEW_MR, None, &host.invocation()).unwrap()
+    const ALL: [Option<&[&str]>; 5] = [Some(&["feature"]), Some(&["develop"]), Some(&["Add parser"]), Some(&["Adds it"]), Some(&["yes"])];
+
+    fn create(host: &MockHost) {
+        GitLab::default().run_command("create-merge-request", &host.invocation(), None).unwrap();
     }
 
     fn created(host: &MockHost) -> Vec<Value> {
@@ -1678,197 +1664,104 @@ mod merge_request_form_tests {
             .collect()
     }
 
-    fn value<'a>(view: &'a View, key: &str) -> &'a FieldValue {
-        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
-        &fields.iter().find(|f| f.key == key).unwrap().value
-    }
-
     #[test]
-    fn form_lists_the_branches_and_defaults_the_target_to_the_project_default() {
+    fn create_merge_request_asks_branches_title_description_and_draft() {
         let host = on_feature();
+        answers(&host, &ALL);
 
-        let (_, view) = open(&host);
+        create(&host);
 
-        let branches = vec!["main".to_owned(), "develop".to_owned(), "feature".to_owned()];
-        assert_eq!(value(&view, "target-branch"), &FieldValue::Choice(branches, "main".into()));
-        assert_eq!(view.status.as_deref(), Some("feature → main"));
-        assert_eq!(buttons(&view), ["create", "refresh"]);
-        assert!(host.requests().iter().any(|r| r.url.contains("/repository/branches?per_page=100&page=1")));
+        let posts = created(&host);
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0]["source_branch"], "feature");
+        assert_eq!(posts[0]["target_branch"], "develop");
+        assert_eq!(posts[0]["title"], "Draft: Add parser");
+        assert_eq!(posts[0]["description"], "Adds it");
+        assert_eq!(host.notifications()[0].title, "Merge request created");
     }
 
     #[test]
-    fn create_posts_title_source_target_and_options() {
+    fn a_title_already_marked_draft_is_not_prefixed_twice_and_no_draft_keeps_it_plain() {
         let host = on_feature();
-        let (mut plugin, _) = open(&host);
-        fill(
-            &mut plugin,
-            &host,
-            &[
-                ("title", "Add parser"),
-                ("description", "Adds it"),
-                ("target-branch", "develop"),
-                ("source-branch", "evil"),
-                ("squash", "true"),
-                ("remove-source-branch", "true"),
-            ],
-        );
+        answers(&host, &[ALL[0], ALL[1], Some(&["Draft: wip"]), ALL[3], ALL[4]]);
+        create(&host);
+        let host2 = on_feature();
+        answers(&host2, &[ALL[0], ALL[1], ALL[2], ALL[3], None]);
+        create(&host2);
 
-        create(&mut plugin, &host);
-
-        let body = &created(&host)[0];
-        assert_eq!(body["source_branch"], "feature");
-        assert_eq!(body["target_branch"], "develop");
-        assert_eq!(body["title"], "Add parser");
-        assert_eq!(body["description"], "Adds it");
-        assert_eq!(body["squash"], true);
-        assert_eq!(body["remove_source_branch"], true);
-        assert_eq!(body["labels"], "");
-        assert_eq!(body["reviewer_ids"], serde_json::json!([]));
-        assert!(body.get("assignee_id").is_none());
+        assert_eq!(created(&host)[0]["title"], "Draft: wip");
+        assert_eq!(created(&host2)[0]["title"], "Add parser");
     }
 
     #[test]
-    fn draft_prefixes_the_title_with_draft() {
-        let host = on_feature();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("title", "Add parser"), ("draft", "true")]);
-
-        create(&mut plugin, &host);
-
-        assert_eq!(created(&host)[0]["title"], "Draft: Add parser");
-    }
-
-    #[test]
-    fn assignee_and_reviewers_are_resolved_by_username_lookup() {
-        let host = on_feature();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("title", "Add parser"), ("assignee", "ann"), ("reviewers", "ann, @bob")]);
-
-        create(&mut plugin, &host);
-
-        let body = &created(&host)[0];
-        assert_eq!(body["assignee_id"], 2);
-        assert_eq!(body["reviewer_ids"], serde_json::json!([2, 3]));
-        assert!(host.requests().iter().any(|r| r.url == "https://gitlab.com/api/v4/users?username=bob"));
-    }
-
-    #[test]
-    fn an_unknown_username_fails_and_creates_nothing() {
-        let host = on_feature();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("title", "Add parser"), ("reviewers", "ann ghost")]);
-
-        let view = create(&mut plugin, &host);
-
-        assert!(writes(&host).is_empty());
-        assert!(view.status.as_deref().unwrap().contains("ghost"), "{view:?}");
-    }
-
-    #[test]
-    fn usernames_with_url_metacharacters_are_refused_before_any_request() {
-        for (key, name) in [("assignee", "a&b#c/d"), ("assignee", "-x"), ("reviewers", "ann, a&b#c/d"), ("reviewers", "-x")] {
+    fn dismissing_any_prompt_creates_nothing() {
+        for dismissed in 0..4 {
             let host = on_feature();
-            let (mut plugin, _) = open(&host);
-            fill(&mut plugin, &host, &[("title", "Add parser"), (key, name)]);
+            let mut all = ALL;
+            all[dismissed] = None;
+            answers(&host, &all[..=dismissed]);
 
-            let view = create(&mut plugin, &host);
+            create(&host);
 
-            assert!(host.requests().iter().all(|r| !r.url.contains("/users")), "{name}");
-            assert!(writes(&host).is_empty(), "{name}");
-            assert!(view.status.as_deref().unwrap().contains("refusing the username"), "{view:?}");
+            assert!(writes(&host).is_empty(), "prompt {dismissed}");
+            assert!(host.notifications().is_empty(), "prompt {dismissed}");
         }
     }
 
     #[test]
-    fn a_target_branch_outside_the_listed_branches_is_ignored() {
+    fn the_branch_prompts_start_with_the_current_and_the_default_branch() {
         let host = on_feature();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("title", "Add parser"), ("target-branch", "develop"), ("target-branch", "main\"}, \"x"), ("target-branch", "--evil")]);
+        host.answer_next_prompt(Some(&["develop"]));
 
-        let view = plugin.render(NEW_MR, None, &host.invocation()).unwrap();
-        create(&mut plugin, &host);
+        let mut plugin = GitLab::default();
+        let repo = gitlab_project(&host.invocation()).unwrap();
+        let defaults = plugin.merge_request_defaults(&host.invocation(), &repo).unwrap();
 
-        let FieldValue::Choice(_, chosen) = value(&view, "target-branch") else { panic!("{view:?}") };
-        assert_eq!(chosen, "develop");
-        assert_eq!(created(&host)[0]["target_branch"], "develop");
+        assert_eq!(defaults.sources, ["feature", "main"]);
+        assert_eq!(defaults.targets, ["main", "develop", "feature"]);
+        assert_eq!(defaults.title, "Add parser");
     }
 
     #[test]
-    fn labels_are_trimmed_and_empty_ones_dropped() {
+    fn api_failure_notifies_and_offers_to_open_gitlab() {
         let host = on_feature();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("title", "Add parser"), ("labels", " bug , ,ui ,,")]);
+        host.on_fetch(|req| match req.method.as_str() {
+            "POST" => Ok(HttpResponse { status: 409, headers: vec![], body: b"{}".to_vec() }),
+            _ => gitlab(req),
+        });
+        answers(&host, &ALL);
+        host.answer_next_prompt(Some(&["yes"]));
 
-        create(&mut plugin, &host);
+        create(&host);
 
-        assert_eq!(created(&host)[0]["labels"], "bug,ui");
+        assert_eq!(host.notifications()[0].title, "Merge request not created");
+        assert_eq!(host.opened_urls(), ["https://gitlab.com/g/p/-/merge_requests/new?merge_request%5Bsource_branch%5D=feature"]);
     }
 
     #[test]
-    fn a_detached_head_refuses_and_says_so() {
-        let host = setup();
-        host.set_vcs_status(Some(RepositoryStatus { branch: None, ..status("main") }));
-        let (mut plugin, view) = open(&host);
-        fill(&mut plugin, &host, &[("title", "Add parser")]);
-
-        create(&mut plugin, &host);
-
-        assert_eq!(view.body, Body::Message(DETACHED.into()));
-        assert!(writes(&host).is_empty());
-    }
-
-    #[test]
-    fn an_empty_title_is_refused() {
+    fn declining_open_on_gitlab_after_a_failure_opens_nothing() {
         let host = on_feature();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("title", "   ")]);
+        host.on_fetch(|req| match req.method.as_str() {
+            "POST" => Ok(HttpResponse { status: 409, headers: vec![], body: b"{}".to_vec() }),
+            _ => gitlab(req),
+        });
+        answers(&host, &ALL);
+        host.answer_next_prompt(None);
 
-        let view = create(&mut plugin, &host);
+        create(&host);
 
-        assert!(writes(&host).is_empty());
-        assert_eq!(view.status.as_deref(), Some("Write a title first. · feature → main"));
+        assert!(host.opened_urls().is_empty());
     }
 
     #[test]
-    fn creating_reports_the_web_url_in_a_notification_and_refreshes_the_list() {
+    fn an_empty_title_creates_nothing() {
         let host = on_feature();
-        let (mut plugin, _) = open(&host);
-        fill(&mut plugin, &host, &[("title", "Add parser")]);
+        answers(&host, &[ALL[0], ALL[1], Some(&["  "]), ALL[3], ALL[4]]);
 
-        let view = create(&mut plugin, &host);
+        let result = GitLab::default().run_command("create-merge-request", &host.invocation(), None);
 
-        let notification = &host.notifications()[0];
-        assert_eq!(notification.title, "Merge request created");
-        assert!(notification.body.contains("https://gitlab.com/g/p/-/merge_requests/8"), "{notification:?}");
-        assert!(host.refreshed_views().iter().any(|v| v == LIST));
-        assert_eq!(value(&view, "title"), &FieldValue::Text(String::new()));
-
-        create(&mut plugin, &host);
-        assert_eq!(created(&host).len(), 1, "a second click on the emptied form creates nothing");
-    }
-
-    #[test]
-    fn the_form_is_quiet_when_forms_setting_is_off() {
-        let host = on_feature();
-        host.set_setting("forms", "false");
-
-        let (mut plugin, view) = open(&host);
-        fill(&mut plugin, &host, &[("title", "Add parser")]);
-        create(&mut plugin, &host);
-
-        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
-        assert!(host.requests().is_empty());
-    }
-
-    #[test]
-    fn without_a_token_the_form_asks_for_one() {
-        let host = MockHost::install().with_capabilities(CAPS);
-        host.set_vcs_status(Some(status("feature")));
-
-        let (_, view) = open(&host);
-
-        assert_eq!(view.body, Body::Message(NO_TOKEN.into()));
-        assert!(host.requests().is_empty());
+        assert!(result.is_err());
+        assert!(created(&host).is_empty());
     }
 }
 
@@ -3243,17 +3136,6 @@ fn the_status_item_reveals_the_merge_request_view() {
     plugin.run_command("show-branch-merge-request", &host.invocation(), None).unwrap();
 
     assert_eq!(host.revealed_views(), ["merge-request"]);
-}
-
-#[test]
-fn create_merge_request_reveals_the_form() {
-    let host = setup();
-    host.set_vcs_status(Some(status("feature")));
-
-    GitLab::default().run_command("create-merge-request", &host.invocation(), None).unwrap();
-
-    assert_eq!(host.revealed_views(), ["new-merge-request"]);
-    assert!(host.opened_urls().is_empty());
 }
 
 #[test]

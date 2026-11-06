@@ -499,12 +499,6 @@ pub fn create_snippet(draft: &SnippetDraft) -> Result<String, Error> {
     snippet["web_url"].as_str().map(str::to_owned).ok_or_else(|| "GitLab returned no snippet URL.".into())
 }
 
-pub fn user_id(username: &str) -> Result<u64, Error> {
-    let users: Vec<User> = parse(rest("GET", &format!("/users?username={}", encode(safe::username(username)?)), None)?)?;
-
-    users.first().map(|u| u.id).ok_or_else(|| format!("No GitLab user is named {username}.").into())
-}
-
 /// Projects the user is a member of, most recently active first.
 pub fn member_projects() -> Result<Vec<ProjectInfo>, Error> {
     paged("/projects?membership=true&simple=true&order_by=last_activity_at", 100)
