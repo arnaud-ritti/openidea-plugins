@@ -201,6 +201,55 @@ fn expression_problems(expr: &str) -> Vec<(usize, usize, &'static str, Severity,
     out
 }
 
+/// `text` with Kotlin comments and string literals blanked out (same byte offsets).
+fn kotlin_code_only(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = b.to_vec();
+    let blank = |out: &mut [u8], from: usize, to: usize| {
+        for byte in &mut out[from..to] {
+            if *byte != b'\n' && byte.is_ascii() {
+                *byte = b' ';
+            }
+        }
+    };
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        if b[i..].starts_with(b"//") {
+            i = text[i..].find('\n').map_or(b.len(), |n| i + n);
+        } else if b[i..].starts_with(b"/*") {
+            let mut depth = 0;
+            while i < b.len() {
+                if b[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if b[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        } else if b[i..].starts_with(b"\"\"\"") {
+            i = text[i + 3..].find("\"\"\"").map_or(b.len(), |n| i + 3 + n + 3);
+        } else if b[i] == b'"' {
+            i += 1;
+            while i < b.len() && b[i] != b'"' && b[i] != b'\n' {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(b.len());
+        } else {
+            i += 1;
+            continue;
+        }
+        blank(&mut out, start, i.min(b.len()));
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
 fn xml_problems(text: &str) -> Vec<Problem> {
     let mut out = Vec::new();
     if !text.contains(SECURITY_NAMESPACE) {
@@ -237,7 +286,8 @@ fn xml_problems(text: &str) -> Vec<Problem> {
             .filter(|(j, u)| u.parent == Some(i) && u.local() == "intercept-url" && xml::namespace(&elements, *j) == Some(SECURITY_NAMESPACE))
             .map(|(_, u)| u)
             .collect();
-        let mut seen: Vec<(&str, &str)> = Vec::new();
+        let mut seen: Vec<(&str, &str, &str)> = Vec::new();
+        let ant_patterns = e.attr("request-matcher").is_none_or(|a| a.value == "ant" || a.value == "mvc") && e.attr("request-matcher-ref").is_none();
         for (n, u) in urls.iter().enumerate() {
             if let Some(access) = u.attr("access").filter(|_| expressions) {
                 let exact = !access.value.contains('&');
@@ -247,13 +297,13 @@ fn xml_problems(text: &str) -> Vec<Problem> {
                 }
             }
             let Some(pattern) = u.attr("pattern") else { continue };
-            let key = (pattern.value.as_str(), u.value("method").unwrap_or(""));
+            let key = (pattern.value.as_str(), u.value("method").unwrap_or(""), u.value("servlet-path").unwrap_or(""));
             if seen.contains(&key) {
                 let message = format!("The pattern `{}` is already matched by an earlier <intercept-url>.", pattern.value);
                 out.push(diagnostic(pattern.value_at, pattern.value_end, Severity::Warning, "duplicate-pattern", message));
             }
             seen.push(key);
-            let catch_all = matches!(pattern.value.as_str(), "/**" | "**") && u.attr("method").is_none();
+            let catch_all = ant_patterns && matches!(pattern.value.as_str(), "/**" | "**") && u.attr("method").is_none() && u.attr("servlet-path").is_none();
             if catch_all && urls[n + 1..].iter().any(|later| later.value("pattern").is_some_and(|p| p != pattern.value)) {
                 let message = "This catch-all pattern comes before more specific ones, which can never match: move it last.".to_owned();
                 out.push(diagnostic(pattern.value_at, pattern.value_end, Severity::Warning, "unreachable-patterns", message));
@@ -353,10 +403,11 @@ fn problems(path: &str, text: &str) -> Vec<Problem> {
         }
     }
     if security && spring_text::is_kotlin(path) {
-        for (at, _) in text.match_indices("authorizeRequests") {
+        let code = kotlin_code_only(text);
+        for (at, _) in code.match_indices("authorizeRequests") {
             let after = at + "authorizeRequests".len();
-            let standalone = !text[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
-            if standalone && text[after..].trim_start().starts_with('{') {
+            let standalone = !code[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+            if standalone && code[after..].trim_start().starts_with('{') {
                 let message = "`authorizeRequests` is deprecated: use `authorizeHttpRequests`.".to_owned();
                 let mut diagnostic = problem(text, at, after, Severity::Warning, "authorize-requests", message);
                 diagnostic.deprecated = true;
@@ -689,5 +740,46 @@ class SecurityConfig : WebSecurityConfigurerAdapter() {
         ]);
         let p = openidea_plugin::text::position(text, text.find("antMatchers").unwrap());
         assert_eq!(tools.code_actions(&d, Range::new(p, p)).len(), 1);
+    }
+
+    #[test]
+    fn kotlin_authorize_requests_in_comments_and_strings_is_quiet() {
+        let host = MockHost::install();
+        let mut tools = SecurityTools::default();
+        let import = "import org.springframework.security.config.annotation.web.invoke\n";
+        let body = "// authorizeRequests { }\n/* a /* nested */ authorizeRequests { } */\nval s = \"authorizeRequests { } .antMatchers(\\\"/x\\\")\"\nval r = \"\"\"\nauthorizeRequests {\n\"\"\"\n// http.antMatchers(\"/a\")\nval ok = myauthorizeRequests { }\n";
+        let mut quiet = |name: &str, text: String| {
+            let d = Document { path: format!("/project/{name}.kt"), language: "kotlin".into(), version: 1, text };
+            tools.line_markers(&d);
+            host.diagnostics().get(&d.path).is_none_or(Vec::is_empty)
+        };
+        assert!(quiet("A", format!("{import}{body}")));
+        assert!(quiet("B", "val x = http.authorizeRequests { }.antMatchers(\"/a\")\n".into()));
+    }
+
+    fn xml_codes(xml: &str) -> Vec<String> {
+        let host = MockHost::install();
+        let d = Document { path: "/project/s.xml".into(), language: "xml".into(), version: 1, text: xml.into() };
+        SecurityTools::default().line_markers(&d);
+        host.diagnostics().get(&d.path).map(|v| v.iter().map(|x| x.code.clone().unwrap()).collect()).unwrap_or_default()
+    }
+
+    #[test]
+    fn xml_namespaces_and_legitimate_patterns() {
+        let ns = "http://www.springframework.org/schema/security";
+        let default_ns = format!("<beans xmlns=\"{ns}\"><http><intercept-url pattern=\"/a\" access=\"hasRoles('X')\"/></http></beans>");
+        assert_eq!(xml_codes(&default_ns), ["unknown-security-function"]);
+        let prefixed = format!("<beans xmlns:security=\"{ns}\"><security:http><security:intercept-url pattern=\"/a\" access=\"hasRoles('X')\"/></security:http></beans>");
+        assert_eq!(xml_codes(&prefixed), ["unknown-security-function"]);
+        let quiet = |inner: &str, http: &str| xml_codes(&format!("<beans xmlns=\"{ns}\"><http{http}>{inner}</http></beans>"));
+        let url = |extra: &str| format!("<intercept-url pattern=\"/a\" access=\"permitAll\"{extra}/>");
+        assert!(quiet(&format!("{}{}", url(" method=\"GET\""), url(" method=\"POST\"")), "").is_empty());
+        assert!(quiet(&format!("{}{}", url(" servlet-path=\"/x\""), url(" servlet-path=\"/y\"")), "").is_empty());
+        assert_eq!(quiet(&format!("{}{}", url(""), url(" servlet-path=\"/y\"")), ""), Vec::<String>::new());
+        let catch_all = |extra: &str| format!("<intercept-url pattern=\"/**\" access=\"permitAll\"{extra}/><intercept-url pattern=\"/b\" access=\"denyAll\"/>");
+        assert!(quiet(&catch_all(" method=\"GET\""), "").is_empty());
+        assert!(quiet(&catch_all(""), " request-matcher=\"regex\"").is_empty());
+        assert!(quiet(&catch_all(""), " request-matcher-ref=\"m\"").is_empty());
+        assert_eq!(quiet(&catch_all(""), ""), ["unreachable-patterns"]);
     }
 }
