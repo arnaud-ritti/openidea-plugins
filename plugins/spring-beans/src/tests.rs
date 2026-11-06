@@ -2736,6 +2736,24 @@ fn annotation_string_moves_to_a_placeholder_and_the_property_line_is_copied() {
 }
 
 #[test]
+fn property_line_is_written_through_tee_when_allowed() {
+    let host = MockHost::install().with_capabilities(&["project.read", "editor.read", "editor.write", "process:tee"]);
+    host.open_editor("/project/src/main/java/com/acme/Jobs.java", "java", SCHEDULED, &[(2, 24, 2, 24)]);
+    host.add_file("src/main/resources/application.properties", "a=1");
+    let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = written.clone();
+    host.on_process("tee", move |args, stdin| {
+        sink.borrow_mut().push((args.to_vec(), stdin.map(str::to_owned)));
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+    });
+    run(&host, "externalize-annotation-string", &[&["/project/src/main/resources/application.properties"], &["jobs.cron"]]).unwrap();
+    let calls = written.borrow();
+    assert_eq!(calls[0].0, ["/project/src/main/resources/application.properties"]);
+    assert_eq!(calls[0].1.as_deref(), Some("a=1\njobs.cron=0 0 * * * *\n"));
+    assert_eq!(host.clipboard(), None);
+}
+
+#[test]
 fn externalizing_is_refused_outside_annotation_strings_and_for_known_keys() {
     let host = externalize_host(SCHEDULED, 3, 6);
     assert!(run(&host, "externalize-annotation-string", &[]).is_err());

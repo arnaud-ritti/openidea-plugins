@@ -312,8 +312,23 @@ pub fn dump_configuration(nav: &mut Navigator, ctx: &Invocation) -> Result<Optio
     Ok(None)
 }
 
-/// Replaces the annotation string at the caret with `${key}`; the `key=value` line goes to the clipboard,
-/// because a plugin can only edit the open editor.
+fn append_property(project: &openidea_plugin::Project, file: &str, line: &str) -> Result<(), Error> {
+    let root = project.root()?;
+    let inside = file.starts_with(&format!("{}/", root.trim_end_matches('/'))) && !file.split('/').any(|part| part == "..");
+    if !inside || line.contains(['\n', '\r']) {
+        return Err("Not writable".into());
+    }
+    let existing = project.read_file(file)?;
+    let separator = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+    let out = host::run_process("tee", &[file.to_owned()], Some(&format!("{existing}{separator}{line}\n")))?;
+    if out.status != Some(0) {
+        return Err(out.stderr.into());
+    }
+    Ok(())
+}
+
+/// Replaces the annotation string at the caret with `${key}` and appends `key=value` to the chosen properties
+/// file through the optional `process:tee` capability; without it the line goes to the clipboard.
 pub fn externalize_string(ctx: &Invocation) -> Result<Option<String>, Error> {
     let editor = ctx.editor().ok_or("Open a Java class first.")?;
     if !editor.path().ends_with(".java") {
@@ -368,6 +383,12 @@ pub fn externalize_string(ctx: &Invocation) -> Result<Option<String>, Error> {
         Err(e) => return Err(e),
     }
     let line = format!("{key}={}", string.value);
+    if let Some(file) = &chosen {
+        if append_property(&project, file, &line).is_ok() {
+            host::notify(NotificationLevel::Info, TITLE, &format!("Added \"{line}\" to {}.", file_name(file)));
+            return Ok(None);
+        }
+    }
     let target = chosen.as_deref().map_or("your properties file".to_owned(), |f| file_name(f).to_owned());
     match host::copy_to_clipboard(&line) {
         Ok(()) => host::notify(NotificationLevel::Info, TITLE, &format!("Copied \"{line}\": paste it into {target}.")),
