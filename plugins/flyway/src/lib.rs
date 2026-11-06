@@ -6,6 +6,7 @@
 mod checks;
 mod complete;
 mod config;
+mod info;
 mod naming;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 use openidea_plugin::host;
 use openidea_plugin::providers::{CompletionItem, Document, Providers};
 use openidea_plugin::text::offset;
+use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project, register_plugin};
 use spring_text::config::is_config_file;
 use spring_text::index::project_of;
@@ -33,6 +35,8 @@ pub struct Flyway {
     scanned: BTreeSet<String>,
     /// When `clean` was asked for the first time.
     clean_asked: Option<Instant>,
+    /// Migration file by tree item key, from the last render of the migrations view.
+    targets: BTreeMap<String, String>,
 }
 
 fn root_relative<'a>(path: &'a str, root: &str) -> &'a str {
@@ -231,7 +235,96 @@ impl Providers for Flyway {
     }
 }
 
-register_plugin!(Flyway, providers);
+impl Flyway {
+    fn migration_file(&self, files: &[String], migration: &info::Migration, naming: &naming::Naming) -> Option<String> {
+        let normalized = |text: &str| text.replace('_', " ").to_lowercase();
+        let same_description = |description: &str| normalized(description) == normalized(&migration.description);
+        let found = files
+            .iter()
+            .filter_map(|path| {
+                let file_name = path.rsplit('/').next().unwrap_or(path);
+                let Name::Migration { kind, version, description } = parse(file_name, naming) else { return None };
+                if migration.repeatable {
+                    return (kind == Kind::Repeatable && same_description(&description)).then_some((path, true));
+                }
+                (kind == Kind::Versioned && version_key(&version) == version_key(&migration.version))
+                    .then(|| (path, same_description(&description)))
+            })
+            .min_by_key(|(_, matches)| !matches)
+            .map(|(path, _)| path);
+        found.cloned().or_else(|| migration.filepath.clone())
+    }
+
+    fn migrations_view(&mut self, project: &Project) -> View {
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let runner = host::setting_string("runner").filter(|runner| runner == "mvn").unwrap_or_else(|| "flyway".to_owned());
+        let maven = runner == "mvn";
+        let mut args = vec![if maven { "flyway:info".to_owned() } else { "info".to_owned() }];
+        args.push(if maven { "-Dflyway.outputType=json" } else { "-outputType=json" }.to_owned());
+        args.extend(host::setting_string("arguments").unwrap_or_default().split_whitespace().map(str::to_owned));
+
+        let _task = host::begin_task("Flyway info", false);
+        let output = match project.run_process(&runner, &args, None) {
+            Ok(output) => output,
+            Err(Error::Denied(_)) => {
+                return View::message(&format!("Allow running {runner} for Flyway Migrations in Settings › Plugins to list migrations.")).button(refresh);
+            }
+            Err(e) => return View::message(&format!("Could not run {runner}: {e}")).button(refresh),
+        };
+        if output.status != Some(0) {
+            let reason = output.stderr.trim();
+            let reason = if reason.is_empty() { output.stdout.trim() } else { reason };
+            let reason = reason.lines().last().unwrap_or_default();
+            let code = output.status.map_or("killed".to_owned(), |code| format!("exit {code}"));
+            return View::message(&format!("Flyway info failed ({code}): {reason}")).button(refresh);
+        }
+
+        let migrations = match info::parse(&output.stdout) {
+            Ok(migrations) => migrations,
+            Err(message) => return View::message(&message).button(refresh),
+        };
+        if migrations.is_empty() {
+            return View::message("Flyway reports no migrations.").button(refresh);
+        }
+
+        let config = load(project);
+        let files = migration_files(project, &config);
+        self.targets.clear();
+        let mut items = Vec::new();
+        for (index, migration) in migrations.iter().enumerate() {
+            let key = format!("m:{index}");
+            if let Some(path) = self.migration_file(&files, migration, &config.naming) {
+                self.targets.insert(key.clone(), path);
+            }
+            items.push(TreeItem::new(&key, &migration.label).detail(migration.state).icon(migration.icon));
+        }
+
+        let pending = migrations.iter().filter(|m| m.state == "Pending").count();
+        View::new(Body::Tree(items)).button(refresh).status(&format!("{} migrations, {pending} pending", migrations.len()))
+    }
+}
+
+impl Views for Flyway {
+    fn render(&mut self, _view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its Flyway migrations.")) };
+        Ok(self.migrations_view(&project))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, _ctx: &Invocation) -> Result<(), Error> {
+        match event {
+            ViewEvent::Button(button) if button == "refresh" => host::refresh_view(view),
+            ViewEvent::Activate(key) => {
+                if let Some(path) = self.targets.get(&key) {
+                    host::open_location(path, 0, 0)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+register_plugin!(Flyway, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -419,5 +512,80 @@ mod tests {
         let conf = |path: &str| Document { path: path.into(), language: "ini".into(), version: 1, text: "flyway.".into() };
         assert!(!flyway.completion(&conf("/project/flyway.conf"), Position::new(0, 7), None).is_empty());
         assert!(flyway.completion(&conf("/project/app.conf"), Position::new(0, 7), None).is_empty());
+    }
+
+    const INFO_JSON: &str = r#"{"schemaName":"public","schemaVersion":"2","flywayVersion":"10.17.0","migrations":[
+      {"category":"Versioned","version":"1","description":"init","type":"SQL","installedOn":"2024-01-01 10:00:00","state":"Success","filepath":"/project/src/main/resources/db/migration/V1__init.sql"},
+      {"category":"Versioned","version":"2","description":"add users","type":"SQL","state":"Failed"},
+      {"category":"Versioned","version":"3","description":"gone","type":"SQL","installedOn":"2024-01-02 10:00:00","state":"Missing (Success)"},
+      {"category":"Repeatable","description":"views","type":"SQL","state":"Pending"},
+      {"category":"Versioned","version":"4","description":"later","type":"SQL","state":"Pending"}
+    ]}"#;
+
+    fn info_host() -> MockHost {
+        let host = host();
+        host.add_file("src/main/resources/db/migration/V4__later.sql", "");
+        host.add_file("src/main/resources/db/migration/V2__add_users.sql", "");
+        host.add_file("src/main/resources/db/migration/R__views.sql", "");
+        host
+    }
+
+    fn tree(host: &MockHost, flyway: &mut Flyway) -> Vec<TreeItem> {
+        let Body::Tree(items) = flyway.render("migrations", None, &host.invocation()).unwrap().body else { panic!("tree expected") };
+        items
+    }
+
+    #[test]
+    fn info_json_parses_into_tree_items_pending_applied_failed() {
+        let host = info_host();
+        host.on_process("flyway", |args, _| {
+            assert_eq!(args, ["info", "-outputType=json"]);
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: INFO_JSON.into(), stderr: String::new() })
+        });
+        let mut flyway = Flyway::default();
+        let items = tree(&host, &mut flyway);
+
+        let rows: Vec<(&str, Option<&str>, Option<&str>)> =
+            items.iter().map(|i| (i.label.as_str(), i.detail.as_deref(), i.icon.as_deref())).collect();
+        assert_eq!(rows, [
+            ("V1 init", Some("Applied"), Some("success")),
+            ("V2 add users", Some("Failed"), Some("error")),
+            ("V3 gone", Some("Missing"), Some("warning")),
+            ("R views", Some("Pending"), Some("pending")),
+            ("V4 later", Some("Pending"), Some("pending")),
+        ]);
+
+        flyway.handle("migrations", ViewEvent::Activate(items[0].key.clone()), &host.invocation()).unwrap();
+        flyway.handle("migrations", ViewEvent::Activate(items[1].key.clone()), &host.invocation()).unwrap();
+        flyway.handle("migrations", ViewEvent::Activate(items[2].key.clone()), &host.invocation()).unwrap();
+        flyway.handle("migrations", ViewEvent::Activate(items[3].key.clone()), &host.invocation()).unwrap();
+        let opened: Vec<String> = host.opened_locations().into_iter().map(|l| l.0).collect();
+        assert_eq!(opened, [format!("{DIR}/V1__init.sql"), format!("{DIR}/V2__add_users.sql"), format!("{DIR}/R__views.sql")]);
+    }
+
+    fn message(host: &MockHost) -> String {
+        let Body::Message(text) = Flyway::default().render("migrations", None, &host.invocation()).unwrap().body else {
+            panic!("message expected")
+        };
+        text
+    }
+
+    #[test]
+    fn the_migrations_view_explains_why_it_is_empty() {
+        let host = host();
+        host.on_process("flyway", |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "{\"migrations\":[]}".into(), stderr: String::new() }));
+        assert_eq!(message(&host), "Flyway reports no migrations.");
+
+        host.on_process("flyway", |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "not json".into(), stderr: String::new() }));
+        assert!(message(&host).starts_with("Flyway info did not return JSON"));
+
+        host.on_process("flyway", |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(1), stdout: String::new(), stderr: "ERROR: no url\n".into() }));
+        assert_eq!(message(&host), "Flyway info failed (exit 1): ERROR: no url");
+
+        host.on_process("flyway", |_, _| Err(Error::NotFound("flyway".into())));
+        assert!(message(&host).contains("flyway"));
+
+        let denied = MockHost::install().with_capabilities(&["project.read", "events"]);
+        assert_eq!(message(&denied), "Allow running flyway for Flyway Migrations in Settings › Plugins to list migrations.");
     }
 }
