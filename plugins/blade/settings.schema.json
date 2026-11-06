@@ -1,0 +1,14 @@
+{
+  "properties": {
+    "checkDirectivePairs": {
+      "type": "boolean",
+      "title": "Report unpaired directives (@endif without @if, @if without @endif)",
+      "default": true
+    },
+    "checkParentheses": {
+      "type": "boolean",
+      "title": "Report unbalanced parentheses in directive arguments",
+      "default": true
+    }
+  }
+}
