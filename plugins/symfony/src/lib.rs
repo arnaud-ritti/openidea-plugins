@@ -9,6 +9,7 @@ mod checks;
 mod config_checks;
 mod doctrine;
 mod index;
+mod indexer;
 mod intentions;
 mod php_checks;
 mod php_text;
@@ -21,10 +22,10 @@ mod yaml_quotes;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, Providers};
 use openidea_plugin::views::{Body, Button, Table, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, Position, Range, Severity, TextEdit};
-use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, host, register_plugin, text};
+use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, PickItem, Position, Range, Severity, TextEdit};
+use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, host, text};
 
 pub use index::Index;
 use index::{Entry, Names, Sink};
@@ -599,6 +600,98 @@ impl Main {
         Ok(None)
     }
 
+    fn run_console_command(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let project = ctx.project().ok_or("No project is open.")?;
+        let args = ["bin/console".to_owned(), "list".to_owned(), "--raw".to_owned()];
+        let listed = project.run_process("php", &args, None).ok().filter(|o| o.status == Some(0));
+
+        let mut descriptions: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for line in listed.iter().flat_map(|o| o.stdout.lines()) {
+            let mut parts = line.trim().splitn(2, char::is_whitespace);
+            let Some(name) = parts.next().filter(|n| !n.is_empty()) else { continue };
+            descriptions.insert(name.to_owned(), parts.next().map(|d| d.trim().to_owned()));
+        }
+        if let Some(index) = self.view_index(ctx) {
+            for name in index.commands.keys() {
+                descriptions.entry(name.clone()).or_default();
+            }
+        }
+        if descriptions.is_empty() {
+            return Err("No console commands found. Allow process:php in Settings › Plugins or define a command in the project.".into());
+        }
+
+        let items: Vec<PickItem> = descriptions
+            .iter()
+            .map(|(name, description)| {
+                let item = PickItem::new(name, name);
+                match description {
+                    Some(description) => item.description(description),
+                    None => item,
+                }
+            })
+            .collect();
+        let Some(name) = host::pick("Run console command", &items)? else { return Ok(None) };
+        let Some(arguments) = host::input(&format!("Arguments for bin/console {name}"), None)? else { return Ok(None) };
+
+        let mut args = vec!["bin/console".to_owned(), name.clone()];
+        args.extend(arguments.split_whitespace().map(str::to_owned));
+        match host::open_terminal(&format!("console {name}"), "php", &args) {
+            Err(Error::Denied(_)) => Err("Allow the process:php capability in Settings › Plugins.".into()),
+            result => result.map(|()| None),
+        }
+    }
+
+    fn go_to(&self, ctx: &Invocation, what: &str, select: impl Fn(&Index) -> &Names) -> Result<Option<String>, Error> {
+        let index = self.view_index(ctx).ok_or("No Symfony project is indexed.")?;
+        let names = select(index);
+        if names.is_empty() {
+            return Err(format!("No {what}s are indexed.").into());
+        }
+
+        let items: Vec<PickItem> = names
+            .iter()
+            .map(|(name, entry)| {
+                let item = PickItem::new(name, name);
+                match &entry.detail {
+                    Some(detail) => item.description(detail),
+                    None => item,
+                }
+            })
+            .collect();
+        let Some(key) = host::pick(&format!("Go to {what}"), &items)? else { return Ok(None) };
+        let entry = names.get(&key).ok_or_else(|| format!("{key} is no longer indexed."))?;
+        if entry.path.is_empty() {
+            return Err(format!("{key} is defined by the framework, not by a project file.").into());
+        }
+
+        host::open_location(&entry.path, entry.at.line, entry.at.character)?;
+        Ok(None)
+    }
+
+    fn twig_extends(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let editor = ctx.editor().ok_or("Open a Twig template first.")?;
+        let path = editor.path();
+        if !path.ends_with(".twig") {
+            return Err("The open file is not a Twig template.".into());
+        }
+
+        let document = editor.document()?;
+        if refs::twig_parent(&document.text).is_some() {
+            return Err("This template already extends another.".into());
+        }
+
+        let index = self.index_for(&path).ok_or("The file is not in an indexed Symfony project.")?;
+        let own = index.template_of(&path);
+        let items: Vec<PickItem> =
+            index.templates.keys().filter(|name| Some(name.as_str()) != own).map(|name| PickItem::new(name, name)).collect();
+        let Some(parent) = host::pick("Extend template", &items)? else { return Ok(None) };
+
+        let start = Position::new(0, 0);
+        let edit = TextEdit { range: Range::new(start, start), text: format!("{{% extends '{parent}' %}}\n") };
+        editor.apply_edits(document.version, &[edit])?;
+        Ok(None)
+    }
+
     fn summary(&self) -> String {
         if self.indexes.is_empty() {
             return "No Symfony project is open.".into();
@@ -646,6 +739,12 @@ impl Plugin for Main {
             }
             "cache-warmup" => self.console(ctx, "cache:warmup"),
             "cache-clear" => self.console(ctx, "cache:clear"),
+            "run-console-command" => self.run_console_command(ctx),
+            "go-to-route" => self.go_to(ctx, "route", |i| &i.routes),
+            "go-to-service" => self.go_to(ctx, "service", |i| &i.services),
+            "go-to-command" => self.go_to(ctx, "console command", |i| &i.commands),
+            "go-to-template" => self.go_to(ctx, "template", |i| &i.templates),
+            "twig-extends" => self.twig_extends(ctx),
             _ => Err(Error::NotFound(format!("command {id}"))),
         }
     }
@@ -719,71 +818,6 @@ impl Providers for Main {
         let is_file = matches!(reference.kind, Kind::Template | Kind::Class | Kind::Asset);
         let width = if is_file { 0 } else { name.encode_utf16().count() as u32 };
         location(entry, width).into_iter().collect()
-    }
-
-    /// Controller ↔ template, block → parent block, class ↔ service
-    /// definition (the plugin's PHP, Twig, Service and YAML line markers).
-    fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
-        let mut markers = Vec::new();
-        let mut marker = |line: u32, icon: Option<&str>, tooltip: String, target: Option<Location>| {
-            markers.push(LineMarker { line, icon: icon.map(Into::into), tooltip, target });
-        };
-
-        match doc.language.as_str() {
-            "php" => {
-                for reference in refs::references("php", &doc.text).into_iter().filter(|r| r.kind == Kind::Template) {
-                    let name = &doc.text[reference.start..reference.end];
-                    if let Some(entry) = index.templates.get(name) {
-                        let line = text::position(&doc.text, reference.start).line;
-                        marker(line, None, format!("Template {name}"), location(entry, 0));
-                    }
-                }
-
-                if let Some((class, offset)) = index::php_class(&doc.text) {
-                    let service = index.services.iter().find(|(id, e)| **id == class || e.detail.as_deref() == Some(&class));
-                    if let Some((id, entry)) = service {
-                        let line = text::position(&doc.text, offset).line;
-                        marker(line, None, format!("Service {id}"), location(entry, id.encode_utf16().count() as u32));
-                    }
-                }
-            }
-            "twig" => {
-                if let Some(template) = index.template_of(&doc.path) {
-                    let renders: Vec<&index::Render> = index.renders.iter().filter(|r| r.template == template).collect();
-                    if let Some(first) = renders.first() {
-                        let callers: Vec<&str> = renders.iter().map(|r| r.caller.as_str()).collect();
-                        let target = Location { path: first.path.clone(), range: Range::new(first.at, first.at) };
-                        marker(0, None, format!("Rendered by {}", callers.join(", ")), Some(target));
-                    }
-                }
-
-                let parents = project_for(&doc.path).map(|p| parent_blocks(index, &p, &doc.text)).unwrap_or_default();
-                for (block, offset) in refs::twig_blocks(&doc.text) {
-                    let Some(entry) = parents.get(block) else { continue };
-                    let from = entry.detail.clone().unwrap_or_default();
-                    let line = text::position(&doc.text, offset).line;
-                    let target = location(entry, block.len() as u32);
-                    marker(line, Some("overriding"), format!("Overrides block \"{block}\" of {from}"), target);
-                }
-            }
-            "yaml" => {
-                let lines = |offset| text::position(&doc.text, offset).line;
-                for key in index::yaml_keys(&doc.text) {
-                    let class = match key.parents.as_slice() {
-                        [services] if services == "services" => &key.key,
-                        [services, _] if services == "services" && key.key == "class" => &key.value,
-                        _ => continue,
-                    };
-                    if let Some(entry) = index.classes.get(class.trim_matches(['\'', '"'])) {
-                        marker(lines(key.offset), None, format!("Class {class}"), location(entry, 0));
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        markers
     }
 
     /// Quick fixes (quote YAML scalars, apply check replacements, add a missing translation key) and refactorings (`intentions.rs`).
@@ -1047,7 +1081,17 @@ impl Views for Main {
     }
 }
 
-register_plugin!(Main, providers, views);
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn() -> Main = <Main as Default>::default;
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    struct Component;
+    openidea_plugin::__plugin_exports!(Main, Component, openidea_plugin::bindings);
+    openidea_plugin::__providers_exports!(Main, Component);
+    openidea_plugin::__views_exports!(Main, Component);
+    openidea_plugin::__indexing_exports!(Main, Component);
+    openidea_plugin::bindings::__export_plugin_world!(Component with_types_in openidea_plugin::bindings);
+};
 
 #[cfg(test)]
 mod tests {
@@ -1273,32 +1317,74 @@ mod tests {
         assert_eq!(host.diagnostics()["/project/templates/broken.html.twig"].len(), 1);
     }
 
-    #[test]
-    fn marks_controllers_templates_blocks_and_services() {
-        let host = MockHost::install();
+    fn console_host() -> (MockHost, Main) {
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
         let mut plugin = activated(&host);
-
-        let template = host_text(&host, "templates/blog/index.html.twig");
-        let markers = plugin.line_markers(&doc("/project/templates/blog/index.html.twig", "twig", &template));
-        let tooltips: Vec<_> = markers.iter().map(|m| (m.line, m.tooltip.as_str())).collect();
-        assert_eq!(tooltips, [(0, "Rendered by BlogController::index"), (1, "Overrides block \"body\" of base.html.twig")]);
-
-        let controller = host_text(&host, "src/Controller/BlogController.php");
-        let markers = plugin.line_markers(&doc("/project/src/Controller/BlogController.php", "php", &controller));
-        assert_eq!(markers[0].line, 7);
-        assert_eq!(markers[0].target.as_ref().unwrap().path, "/project/templates/blog/index.html.twig");
-
-        let mailer = host_text(&host, "src/Mailer.php");
-        let markers = plugin.line_markers(&doc("/project/src/Mailer.php", "php", &mailer));
-        assert_eq!(markers[0].tooltip, "Service app.mailer");
-
-        let services = host_text(&host, "config/services.yaml");
-        let markers = plugin.line_markers(&doc("/project/config/services.yaml", "yaml", &services));
-        assert_eq!(markers[0].target.as_ref().unwrap().path, "/project/src/Mailer.php");
+        host.add_file("src/Command/SyncCommand.php", "<?php\n#[AsCommand(name: 'app:sync')]\nclass SyncCommand {}\n");
+        plugin.index_all();
+        host.on_process("php", |args, _| {
+            assert_eq!(args, ["bin/console", "list", "--raw"]);
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "about  Display info\ncache:clear  Clear\n".into(), stderr: String::new() })
+        });
+        (host, plugin)
     }
 
-    fn host_text(host: &MockHost, path: &str) -> String {
-        host.invocation().project().unwrap().read_file(path).unwrap()
+    #[test]
+    fn runs_a_picked_console_command_in_a_terminal() {
+        let (host, mut plugin) = console_host();
+        host.answer_next_prompt(Some(&["app:sync"]));
+        host.answer_next_prompt(Some(&["--env=dev -v"]));
+        plugin.run_command("run-console-command", &host.invocation(), None).unwrap();
+        let terminal = &host.terminals()[0];
+        assert_eq!((terminal.title.as_str(), terminal.program.as_str()), ("console app:sync", "php"));
+        assert_eq!(terminal.args, ["bin/console", "app:sync", "--env=dev", "-v"]);
+    }
+
+    #[test]
+    fn dismissed_console_prompts_run_nothing() {
+        let (host, mut plugin) = console_host();
+        plugin.run_command("run-console-command", &host.invocation(), None).unwrap();
+        host.answer_next_prompt(Some(&["about"]));
+        plugin.run_command("run-console-command", &host.invocation(), None).unwrap();
+        assert!(host.terminals().is_empty());
+    }
+
+    #[test]
+    fn go_to_commands_open_the_picked_name() {
+        let (host, mut plugin) = console_host();
+        let ctx = host.invocation();
+        host.answer_next_prompt(Some(&["blog_index"]));
+        plugin.run_command("go-to-route", &ctx, None).unwrap();
+        host.answer_next_prompt(Some(&["app:sync"]));
+        plugin.run_command("go-to-command", &ctx, None).unwrap();
+        host.answer_next_prompt(None);
+        plugin.run_command("go-to-service", &ctx, None).unwrap();
+        let opened = host.opened_locations();
+        assert_eq!(opened.len(), 2);
+        assert_eq!(opened[0].0, "/project/src/Controller/BlogController.php");
+        assert_eq!(opened[1], ("/project/src/Command/SyncCommand.php".into(), 1, 19));
+    }
+
+    #[test]
+    fn extends_generator_inserts_the_picked_template() {
+        let (host, mut plugin) = console_host();
+        host.open_editor("/project/templates/page.html.twig", "twig", "{% block body %}{% endblock %}", &[(0, 0, 0, 0)]);
+        host.answer_next_prompt(Some(&["base.html.twig"]));
+        plugin.run_command("twig-extends", &host.invocation(), None).unwrap();
+        assert_eq!(host.editor_text(), "{% extends 'base.html.twig' %}\n{% block body %}{% endblock %}");
+
+        host.answer_next_prompt(None);
+        assert!(plugin.run_command("twig-extends", &host.invocation(), None).is_err());
+        assert_eq!(host.editor_version(), 2);
+    }
+
+    #[test]
+    fn dismissed_extends_generator_leaves_the_template_alone() {
+        let (host, mut plugin) = console_host();
+        host.open_editor("/project/templates/page.html.twig", "twig", "x", &[(0, 0, 0, 0)]);
+        host.answer_next_prompt(None);
+        plugin.run_command("twig-extends", &host.invocation(), None).unwrap();
+        assert_eq!(host.editor_text(), "x");
     }
 
     #[test]

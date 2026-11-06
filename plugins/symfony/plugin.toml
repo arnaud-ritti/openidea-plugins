@@ -4,7 +4,7 @@ version = "0.1.0" # x-release-please-version
 description = """Symfony support in PHP, Twig, YAML and XML files. Completion and go to definition for routes, \
 Twig templates and blocks, services, classes, translation keys (per domain), assets, Encore and AssetMapper entries, \
 and roles, plus completion of the variables controllers pass to a Twig template. Reports missing routes, templates, \
-services and translation keys, and routes defined twice in a file, with a quick fix that adds a missing key. Gutter markers link controllers, templates, \
+services and translation keys, and routes defined twice in a file, with a quick fix that adds a missing key. Gutter markers (several targets open a chooser) link controllers, templates, \
 parent blocks, classes and service definitions. A Symfony tool window lists routes, templates, services and \
 translations, two commands run cache:warmup and cache:clear, and a Profiler view lists the latest requests. \
 Partial port of the Symfony Plugin for IntelliJ by Daniel Espendiller and Adrien Brault (MIT). \
@@ -14,17 +14,20 @@ homepage = "https://github.com/Haehnchen/idea-php-symfony2-plugin"
 license = "MIT"
 change-notes = """0.1.0: first release. Ported from the Symfony Plugin (fr.adrienbrault.idea.symfony2plugin) 2026.2.314, \
 source revision b6c1034f6669784d7a58de7535515b7da93db87e. This port works from a text index of the project, so the \
-features that need PhpStorm's PSI are missing (container type inference, Doctrine, forms, most inspections)."""
+features that need PhpStorm's PSI are missing (container type inference, Doctrine, forms, most inspections). \
+Unreleased: project-wide Go to Declaration for service ids and route names (YAML and XML services, attribute, YAML and XML routes; @service, path() and generate() references) from the host's document index. \
+Also from the index: console command names, %parameters%, filters, functions and tests of the project's Twig extensions, UX Twig components and Stimulus controllers; gutter markers moved onto the index, so a template lists all its controllers, a block all its overriding templates and a route its path() uses. New commands: Run Console Command, Go to Route, Service, Console Command and Template, Extend Twig Template."""
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:php", "on-language:twig", "on-language:yaml", "on-language:xml", "on-view:symfony-profiler"]
 
 [capabilities]
 required = ["project.read"]
 # Cache: Warm Up / Clear run `php bin/console`; everything else works without it.
+# editor.*: Twig: Extend Template inserts the extends tag.
 # events: problems refresh on open and save; without it they are not published.
-optional = ["process:php", "events"]
+optional = ["process:php", "events", "editor.read", "editor.write"]
 
 [[contributes.commands]]
 id = "reindex"
@@ -46,9 +49,46 @@ id = "cache-clear"
 title = "Symfony: Clear Cache"
 category = "Symfony"
 
+[[contributes.commands]]
+id = "run-console-command"
+title = "Symfony: Run Console Command..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "go-to-route"
+title = "Symfony: Go to Route..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "go-to-service"
+title = "Symfony: Go to Service..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "go-to-command"
+title = "Symfony: Go to Console Command..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "go-to-template"
+title = "Symfony: Go to Template..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "twig-extends"
+title = "Symfony: Extend Twig Template..."
+category = "Symfony"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "twig-extends"
+
 [[contributes.providers]]
-kinds = ["completion", "definition", "line-markers", "code-actions"]
+kinds = ["completion", "definition", "code-actions"]
 languages = ["php", "twig", "yaml", "xml"]
+
+[[contributes.documentIndexers]]
+extensions = ["php", "yaml", "yml", "xml", "twig", "js", "ts"]
 
 [[contributes.views]]
 id = "symfony"
@@ -59,7 +99,7 @@ location = "right"
 [[contributes.views]]
 id = "symfony-profiler"
 title = "Symfony Profiler"
-icon = "file-php"
+icon = "icons/symfony.svg"
 location = "bottom"
 
 [contributes.settings]

@@ -51,6 +51,7 @@ pub struct Index {
     /// Webpack Encore and AssetMapper entry points.
     pub entries: Names,
     pub roles: Names,
+    pub commands: Names,
     /// Service tags used in `config/**`, at their first use.
     pub tags: Names,
     pub renders: Vec<Render>,
@@ -165,6 +166,7 @@ impl Index {
 
         let config = files(&["config/**/*.yaml", "config/**/*.yml", "config/**/*.xml"]);
         let controllers = files(&["src/**/*Controller.php", "src/Controller/**/*.php"]);
+        let commands = files(&["src/Command/**/*.php", "src/**/*Command.php"]);
         let translations =
             files(&["translations/**/*.yaml", "translations/**/*.yml", "translations/**/*.xlf", "translations/**/*.xliff"]);
 
@@ -205,6 +207,11 @@ impl Index {
             php_routes(path, &text, &mut index.routes);
             roles(path, &text, &mut index.roles);
             index.renders.extend(php_renders(path, &text));
+        }
+
+        for path in &commands {
+            let Some(text) = read(path, &mut index) else { continue };
+            php_commands(path, &text, &mut index.commands);
         }
 
         for path in &translations {
@@ -1003,6 +1010,107 @@ pub fn php_routes(path: &str, text: &str, names: &mut impl Sink) {
 
         let full = format!("{prefix}{name}");
         names.add(&full, None, path, lines.position(offset));
+    }
+}
+
+/// The name an attribute or `new X(` call is given: its first string, or `name:`.
+fn named_argument(text: &str, args_start: usize) -> Option<(&str, usize)> {
+    if text[args_start..].trim_start().starts_with(['\'', '"']) {
+        return quoted_at(text, args_start);
+    }
+
+    route_name_argument(text, args_start..closing_paren(text, args_start))
+}
+
+/// Console command names: `#[AsCommand('x')]`, `#[AsCommand(name: 'x')]`, `$defaultName = 'x'`.
+pub fn php_commands(path: &str, text: &str, names: &mut impl Sink) {
+    let lines = Lines::new(text);
+
+    for (at, matched) in text.match_indices("AsCommand(") {
+        if let Some((name, offset)) = named_argument(text, at + matched.len()) {
+            names.add(name, None, path, lines.position(offset));
+        }
+    }
+
+    for (at, matched) in text.match_indices("$defaultName") {
+        let after = at + matched.len();
+        let Some(equals) = text[after..].find('=').filter(|e| !text[after..after + e].contains(';')) else { continue };
+        if let Some((name, offset)) = quoted_at(text, after + equals + 1) {
+            names.add(name, None, path, lines.position(offset));
+        }
+    }
+}
+
+const TWIG_EXTENSION_CALLS: &[(&str, &str)] = &[
+    ("new TwigFilter(", "filter"),
+    ("AsTwigFilter(", "filter"),
+    ("new TwigFunction(", "function"),
+    ("AsTwigFunction(", "function"),
+    ("new TwigTest(", "test"),
+    ("AsTwigTest(", "test"),
+];
+
+/// Filters, functions and tests a project's Twig extensions define: (kind, name, position).
+pub fn php_twig_extensions(text: &str) -> Vec<(&'static str, String, Position)> {
+    let lines = Lines::new(text);
+    let mut found = Vec::new();
+
+    for (call, kind) in TWIG_EXTENSION_CALLS {
+        for (at, _) in text.match_indices(call) {
+            if let Some((name, offset)) = named_argument(text, at + call.len()) {
+                found.push((*kind, name.to_owned(), lines.position(offset)));
+            }
+        }
+    }
+
+    found
+}
+
+/// `#[AsTwigComponent]` classes: the `name` argument, else the class name.
+pub fn php_components(text: &str) -> Vec<(String, Position)> {
+    let lines = Lines::new(text);
+    let mut found = Vec::new();
+
+    for (at, matched) in text.match_indices("AsTwigComponent") {
+        let args_start = at + matched.len() + 1;
+        let has_arguments = text[at + matched.len()..].starts_with('(');
+        if let Some((name, offset)) = has_arguments.then(|| named_argument(text, args_start)).flatten() {
+            found.push((name.to_owned(), lines.position(offset)));
+            continue;
+        }
+
+        if let Some((class, offset)) = php_class(text) {
+            let short = class.rsplit('\\').next().unwrap_or(&class).to_owned();
+            found.push((short, lines.position(offset)));
+        }
+    }
+
+    found
+}
+
+/// `parameters:` keys of a YAML file.
+pub fn yaml_params(path: &str, text: &str, names: &mut impl Sink) {
+    let lines = Lines::new(text);
+
+    for key in yaml_keys(text) {
+        if key.parents != ["parameters"] {
+            continue;
+        }
+
+        let name = key.key.trim_matches(['\'', '"']);
+        let quote = usize::from(name.len() != key.key.len());
+        names.add(name, None, path, lines.position(key.offset + quote));
+    }
+}
+
+/// `<parameter key="…">` of an XML file.
+pub fn xml_params(path: &str, text: &str, names: &mut impl Sink) {
+    let lines = Lines::new(text);
+
+    for (tag, at) in xml_tags(text, "parameter") {
+        if let Some((key, offset)) = xml_attribute(tag, "key") {
+            names.add(key, None, path, lines.position(at + offset));
+        }
     }
 }
 
