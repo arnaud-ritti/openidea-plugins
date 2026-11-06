@@ -77,8 +77,19 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     route absent from the compiled routes (silent without them, for
     `_`-prefixed routes and dynamic names; replaces `missing-route` in Twig
     files); `twig-missing-asset`, `asset('x')` of a file absent from the public
-    directory, with the same exceptions as in PHP. Both run on `.twig` files
-    from their extension, so they work without the `aritti.twig` plugin.
+    directory, with the same exceptions as in PHP; `twig-route-compare`, a
+    literal compared with `app.current_route` or
+    `app.request.attributes.get('_route')` (`==`, `!=`, `is same as`, `in [...]`)
+    that is not a compiled route; `twig-missing-translation-domain`, the domain
+    of `'k'|trans(args, 'domain')` (or `domain:`) without translation files.
+    They run on `.twig` files from their extension, so they work without the
+    `aritti.twig` plugin. Comments and `{% verbatim %}` bodies are skipped.
+  - _Twig syntax_ (`twigSyntaxChecks`): `twig-for-condition` (warning), the `if`
+    condition of `{% for %}` (deprecated in Twig 2.10, removed in 3.0; use
+    `|filter`); `twig-component-block-syntax` (error), a `{% block %}` inside a
+    `<twig:Name>` element; `twig-component-self-import` (error), `_self` as
+    the source of `{% from %}` / `{% import %}` inside a component. An
+    unbalanced `<twig:...>` file is left alone.
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
   YAML files; on an unquoted `@` / `%` YAML value, quote it.
 - Gutter: controller `render()` → template; template → controllers rendering

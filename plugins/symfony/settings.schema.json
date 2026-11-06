@@ -22,12 +22,12 @@
     },
     "twigChecks": {
       "type": "boolean",
-      "title": "Report missing routes and assets in Twig templates",
+      "title": "Report missing routes, assets and translation domains and unknown route comparisons in Twig templates",
       "default": true
     },
     "twigSyntaxChecks": {
       "type": "boolean",
-      "title": "Report deprecated and mixed syntax in Twig templates",
+      "title": "Report deprecated for conditions and component syntax mistakes in Twig",
       "default": true
     },
     "yamlSyntaxChecks": {

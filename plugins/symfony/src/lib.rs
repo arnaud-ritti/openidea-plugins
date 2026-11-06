@@ -12,6 +12,7 @@ mod php_text;
 mod profiler;
 mod refs;
 mod twig;
+mod twig_checks;
 mod yaml_quotes;
 
 use std::borrow::Cow;
@@ -349,6 +350,14 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
 
     if groups.twig {
         findings.extend(checks::check_twig(&ctx, language, text));
+
+        if language == "twig" {
+            findings.extend(twig_checks::names(&ctx, text));
+        }
+    }
+
+    if groups.twig_syntax && language == "twig" {
+        findings.extend(twig_checks::syntax(text));
     }
 
     findings

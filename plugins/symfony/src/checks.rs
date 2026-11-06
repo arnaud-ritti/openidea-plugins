@@ -30,7 +30,7 @@ impl Finding {
         Finding { start: range.start, end: range.end, code, message, severity, replacement: None }
     }
 
-    fn warn(range: Range<usize>, code: &'static str, message: String) -> Finding {
+    pub(crate) fn warn(range: Range<usize>, code: &'static str, message: String) -> Finding {
         Finding::with_severity(range, code, message, Severity::Warning)
     }
 
@@ -86,7 +86,7 @@ fn is_service_file(path: &str) -> bool {
     path.contains("/config/") && !is_route_file(path) && !path.contains("/var/cache/")
 }
 
-fn offset_in(text: &str, part: &str) -> usize {
+pub(crate) fn offset_in(text: &str, part: &str) -> usize {
     part.as_ptr() as usize - text.as_ptr() as usize
 }
 
@@ -595,7 +595,7 @@ fn call_opens<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = usize>
 }
 
 /// Range of the contents of a quoted string argument.
-fn literal(text: &str, argument: &str) -> Option<Range<usize>> {
+pub(crate) fn literal(text: &str, argument: &str) -> Option<Range<usize>> {
     let argument = argument.trim();
     let quote = argument.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
     let inner = argument.strip_prefix(quote)?.strip_suffix(quote)?;
@@ -603,7 +603,7 @@ fn literal(text: &str, argument: &str) -> Option<Range<usize>> {
     Some(start..start + inner.len())
 }
 
-fn is_dynamic(name: &str) -> bool {
+pub(crate) fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '$', '~', '#'])
 }
 
@@ -661,6 +661,15 @@ fn asset_is_missing(ctx: &Context, name: &str) -> bool {
     !generated && directory_indexed && !ctx.index.assets.contains_key(file)
 }
 
+/// A literal domain that looks project-local (lowercase, `+intl-icu` allowed)
+/// yet has no translation files; never true before translations were indexed.
+pub(crate) fn translation_domain_is_unknown(ctx: &Context, domain: &str) -> bool {
+    let name = domain.strip_suffix("+intl-icu").unwrap_or(domain);
+    let project_local = !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'));
+
+    !ctx.index.translations.is_empty() && project_local && !BUILT_IN_DOMAINS.contains(&name) && !ctx.index.translations.contains_key(name)
+}
+
 fn missing_translation_domains(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
     if ctx.index.translations.is_empty() {
         return;
@@ -672,9 +681,7 @@ fn missing_translation_domains(ctx: &Context, text: &str, out: &mut Vec<Finding>
         let Some(range) = named.or_else(|| arguments.get(2).copied()).and_then(|argument| literal(text, argument)) else { continue };
 
         let domain = &text[range.clone()];
-        let name = domain.strip_suffix("+intl-icu").unwrap_or(domain);
-        let project_local = !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'));
-        if !project_local || BUILT_IN_DOMAINS.contains(&name) || ctx.index.translations.contains_key(name) {
+        if !translation_domain_is_unknown(ctx, domain) {
             continue;
         }
 
