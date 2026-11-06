@@ -219,11 +219,10 @@ fn merge_into(text: &str, constructor: &java::Member, params: &[(String, String)
         return None;
     }
     for (_, name) in params {
-        let assigned = body.match_indices(&format!("this.{name}")).any(|(i, m)| {
-            let rest = body[i + m.len()..].trim_start();
-            rest.starts_with('=') && !rest.starts_with("==")
-        });
-        if assigned || constructor.params.iter().any(|p| &p.name == name) {
+        if assigns(body, name) {
+            return None;
+        }
+        if constructor.params.iter().any(|p| &p.name == name) {
             return None;
         }
     }
@@ -240,10 +239,21 @@ fn merge_into(text: &str, constructor: &java::Member, params: &[(String, String)
     if close > from {
         return None;
     }
-    let line_start = text[..constructor.start].rfind('\n').map_or(0, |i| i + 1);
-    let indent: String = text[line_start..].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-    let list: Vec<String> = params.iter().map(|(t, n)| format!("{t} {n}")).collect();
-    let separator = if text[open + 1..close].trim().is_empty() { "" } else { ", " };
+    let indent = indent_of(text, constructor.start);
+    let new: Vec<String> = params.iter().map(|(t, n)| format!("{t} {n}")).collect();
+    let (param_at, param_text) = match constructor.params.last() {
+        None => (close, new.join(", ")),
+        Some(last) => {
+            let after_last = open + 1 + text[open + 1..close].trim_end().len();
+            let param_text = if text[open + 1..close].contains('\n') {
+                let pad = indent_of(text, last.at);
+                format!(",\n{pad}{}", new.join(&format!(",\n{pad}")))
+            } else {
+                format!(", {}", new.join(", "))
+            };
+            (after_last, param_text)
+        }
+    };
     let assignments: String = params.iter().map(|(_, n)| format!("\n{indent}    this.{n} = {n};")).collect();
     let inner = &body[1..body.len() - 1];
     let (at, end, replacement) = if inner.trim().is_empty() {
@@ -253,9 +263,27 @@ fn merge_into(text: &str, constructor: &java::Member, params: &[(String, String)
         (at, at, assignments)
     };
     Some(vec![
-        TextEdit { range: range(text, close, close), text: format!("{separator}{}", list.join(", ")) },
+        TextEdit { range: range(text, param_at, param_at), text: param_text },
         TextEdit { range: range(text, at, end), text: replacement },
     ])
+}
+
+fn indent_of(text: &str, at: usize) -> String {
+    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    text[line_start..].chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+}
+
+fn assigns(body: &str, name: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    body.match_indices(name).any(|(i, m)| {
+        let before = &body[..i];
+        let this_prefixed = before.ends_with("this.");
+        let bare = !before.ends_with('.') && !before.ends_with(word);
+        let rest = &body[i + m.len()..];
+        let boundary = !rest.starts_with(word);
+        let rest = rest.trim_start();
+        boundary && (this_prefixed || bare) && rest.starts_with('=') && !rest.starts_with("==")
+    })
 }
 
 fn braces_balanced(text: &str) -> bool {

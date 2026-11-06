@@ -477,3 +477,30 @@ fn use_constructor_injection_merges_into_existing_constructor() {
     assert_eq!(fix(&class("    S() {\n        this.foo = new Foo();\n    }\n")), None, "already assigned");
     assert_eq!(fix(&class("    S() {}\n    @Autowired void setBar(Bar bar) {}\n")), None, "autowired setter");
 }
+
+#[test]
+fn merge_into_multiline_parameter_list() {
+    let class = |ctor: &str| format!("package com.acme;\n\n@Service\nclass S {{\n    @Autowired\n    private Foo foo;\n\n{ctor}}}\n");
+    let fix = |text: &str| constructor_injection(text, 4).map(|e| apply(text, e));
+
+    let fixed = fix(&class("    S(\n        Bar bar\n    ) {\n        this.bar = bar;\n    }\n")).unwrap();
+    assert!(fixed.contains("    S(\n        Bar bar,\n        Foo foo\n    ) {\n        this.bar = bar;\n        this.foo = foo;\n    }\n"), "{fixed}");
+
+    let fixed = fix(&class("    S(Bar bar) {\n        super(bar);\n    }\n")).unwrap();
+    assert!(fixed.contains("    S(Bar bar, Foo foo) {\n        super(bar);\n        this.foo = foo;\n    }\n"), "{fixed}");
+
+    assert_eq!(fix(&class("    S(Foo foo) {\n        this.foo = foo;\n    }\n")), None, "parameter name clash");
+    assert_eq!(fix(&class("    S() {\n        foo = new Foo();\n    }\n")), None, "bare assignment");
+
+    let text = "package com.acme;\n\n@Service\nclass S {\n    @Autowired\n    private final Foo foo;\n\n    S() {}\n}\n";
+    let fixed = fix(text).unwrap();
+    assert!(fixed.contains("    private final Foo foo;\n") && !fixed.contains("final final"), "{fixed}");
+    assert!(fixed.contains("    S(Foo foo) {\n        this.foo = foo;\n    }\n"), "{fixed}");
+}
+
+#[test]
+fn kotlin_string_body_is_not_a_constructor_call() {
+    let text = "@Configuration\nclass C {\n    @Bean fun a() = \"Foo()\"\n}\n";
+    let model = parse("C.kt", text).unwrap();
+    assert_eq!(model.beans[1].ty, "");
+}
