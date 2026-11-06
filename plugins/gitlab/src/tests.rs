@@ -108,6 +108,20 @@ fn selected(host: &MockHost) -> GitLab {
     plugin
 }
 
+fn changes_view(plugin: &mut GitLab, host: &MockHost) -> Result<View, Error> {
+    storage::set(sections::SECTION_KEY, "changes").unwrap();
+    plugin.render(DETAILS, None, &host.invocation())
+}
+
+fn changes_message(plugin: &mut GitLab, host: &MockHost, event: ViewEvent) -> Result<(), Error> {
+    storage::set(sections::SECTION_KEY, "changes").unwrap();
+    plugin.handle(DETAILS, event, &host.invocation())
+}
+
+fn section_buttons(view: &View) -> Vec<(&str, &str)> {
+    view.toolbar.iter().filter(|b| b.id.starts_with("section:")).map(|b| (b.id.as_str(), b.label.as_str())).collect()
+}
+
 fn field(key: &str, value: &str) -> ViewEvent {
     ViewEvent::Field(key.into(), value.into())
 }
@@ -233,11 +247,9 @@ fn details_offer_the_review_flow() {
 
     let view = selected(&host).render(DETAILS, None, &host.invocation()).unwrap();
 
-    assert_eq!(
-        buttons(&view),
-        ["comment", "react", "approve", "merge", "review", "edit", "draft", "close", "checkout", "browser", "copy", "refresh"]
-    );
-    assert!(view.toolbar.iter().all(|b| b.icon.is_some()), "{view:?}");
+    let actions: Vec<&str> = buttons(&view).into_iter().filter(|b| !b.starts_with("section:")).collect();
+    assert_eq!(actions, ["comment", "react", "approve", "merge", "review", "edit", "draft", "close", "checkout", "browser", "copy", "refresh"]);
+    assert!(view.toolbar.iter().filter(|b| !b.id.starts_with("section:")).all(|b| b.icon.is_some()), "{view:?}");
     assert_eq!(
         view.status.as_deref(),
         Some("Open · feature → main · ann · Ready to merge · Pipeline passed · Approved by bob · 1 more required")
@@ -393,7 +405,7 @@ fn merge_sends_the_head_sha_and_options() {
     assert_eq!(posted[0].0, "PUT");
     assert!(posted[0].1.ends_with("/merge_requests/7/merge"));
     assert_eq!(posted[0].2, r#"{"sha":"abc123","should_remove_source_branch":true,"squash":true}"#);
-    assert!(host.refreshed_views().ends_with(&[DETAILS.into(), CHANGES.into(), LIST.into()]));
+    assert!(host.refreshed_views().ends_with(&[DETAILS.into(), LIST.into()]));
 }
 
 fn branch_on_merge_request_8() -> MockHost {
@@ -502,7 +514,7 @@ fn the_changes_view_shows_threads_on_their_lines() {
     let host = setup();
     let mut plugin = selected(&host);
 
-    let view = plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    let view = changes_view(&mut plugin, &host).unwrap();
 
     let Body::Html(html) = &view.body else { panic!("{view:?}") };
     let row = html.find("id=\"f0--4\"").expect("the added line 4");
@@ -515,9 +527,9 @@ fn the_changes_view_shows_threads_on_their_lines() {
 fn the_changes_page_reads_without_scripts() {
     let host = setup();
     let mut plugin = selected(&host);
-    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+    changes_message(&mut plugin, &host, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into())).unwrap();
 
-    let view = plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    let view = changes_view(&mut plugin, &host).unwrap();
 
     let Body::Html(html) = &view.body else { panic!("{view:?}") };
     assert!(html.contains("<p class=\"nojs\" role=\"note\">Commenting on lines doesn't work in this panel"));
@@ -530,12 +542,12 @@ fn the_changes_page_reads_without_scripts() {
 fn comments_on_diff_lines_carry_the_position() {
     let host = setup();
     let mut plugin = selected(&host);
-    plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    changes_view(&mut plugin, &host).unwrap();
 
     let message = r#"{"type":"comment","oldPath":"src/a.rs","newPath":"src/a.rs","old":4,"new":null,"body":"gone?","draft":false,"anchor":"f0-4-"}"#;
-    plugin.handle(CHANGES, ViewEvent::Message(message.into()), &host.invocation()).unwrap();
+    changes_message(&mut plugin, &host, ViewEvent::Message(message.into())).unwrap();
     let draft = r#"{"type":"comment","oldPath":"src/a.rs","newPath":"src/a.rs","old":3,"new":3,"body":"ctx","draft":true}"#;
-    plugin.handle(CHANGES, ViewEvent::Message(draft.into()), &host.invocation()).unwrap();
+    changes_message(&mut plugin, &host, ViewEvent::Message(draft.into())).unwrap();
 
     let posted = writes(&host);
     assert!(posted[0].1.ends_with("/merge_requests/7/discussions"));
@@ -556,17 +568,17 @@ fn a_failed_diff_comment_reports_to_the_page_without_redrawing_it() {
         false => gitlab(r),
     });
     let mut plugin = selected(&host);
-    plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    changes_view(&mut plugin, &host).unwrap();
     let refreshed = host.refreshed_views().len();
 
     let message = r#"{"type":"comment","oldPath":"src/a.rs","newPath":"src/a.rs","old":4,"new":null,"body":"gone?","draft":false,"anchor":"f0-4-"}"#;
-    plugin.handle(CHANGES, ViewEvent::Message(message.into()), &host.invocation()).unwrap();
+    changes_message(&mut plugin, &host, ViewEvent::Message(message.into())).unwrap();
 
     assert_eq!(host.refreshed_views().len(), refreshed);
     assert_eq!(plugin.status, None);
     assert_eq!(plugin.anchor, None);
     let (view, posted) = &host.view_messages()[0];
-    assert_eq!(view, CHANGES);
+    assert_eq!(view, DETAILS);
     assert!(posted.contains(r#""type":"error""#) && posted.contains("line_code is invalid"), "{posted}");
 }
 
@@ -574,10 +586,10 @@ fn a_failed_diff_comment_reports_to_the_page_without_redrawing_it() {
 fn viewed_files_are_remembered_for_the_head_commit() {
     let host = setup();
     let mut plugin = selected(&host);
-    plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    changes_view(&mut plugin, &host).unwrap();
 
-    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
-    let view = plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    changes_message(&mut plugin, &host, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into())).unwrap();
+    let view = changes_view(&mut plugin, &host).unwrap();
 
     assert_eq!(host.storage().get("viewed:g/p:7").map(String::as_str), Some(r#"{"src/a.rs":"abcdef1"}"#));
     let Body::Html(html) = &view.body else { panic!("{view:?}") };
@@ -768,7 +780,7 @@ fn the_token_never_appears_in_requests_logs_notifications_or_views() {
     views.push(format!("{:?}", plugin.render(LIST, None, &host.invocation()).unwrap()));
     plugin.handle(LIST, ViewEvent::Select("mr:7".into()), &host.invocation()).unwrap();
     views.push(format!("{:?}", plugin.render(DETAILS, None, &host.invocation()).unwrap()));
-    views.push(format!("{:?}", plugin.render(CHANGES, None, &host.invocation()).unwrap()));
+    views.push(format!("{:?}", changes_view(&mut plugin, &host).unwrap()));
     plugin.handle(DETAILS, field("comment", "LGTM"), &host.invocation()).unwrap();
     plugin.handle(DETAILS, ViewEvent::Button("comment".into()), &host.invocation()).unwrap();
     views.push(format!("{:?}", plugin.render(DETAILS, None, &host.invocation()).unwrap()));
@@ -948,7 +960,7 @@ fn file_changed_at_c1(args: &[String], _: Option<&str>) -> Result<ProcessOutput,
 }
 
 fn changes_html(plugin: &mut GitLab, host: &MockHost) -> String {
-    let view = plugin.render(CHANGES, None, &host.invocation()).unwrap();
+    let view = changes_view(plugin, &host).unwrap();
     let Body::Html(html) = view.body else { panic!("{view:?}") };
 
     html
@@ -966,7 +978,7 @@ fn viewed_compares_file_last_commit() {
     storage::set("viewed:g/p:7", r#"{"src/a.rs": "c0"}"#).unwrap();
     assert!(!changes_html(&mut plugin, &host).contains(" checked"), "viewed before the last change to a.rs");
 
-    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+    changes_message(&mut plugin, &host, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into())).unwrap();
     assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"c1"}"#);
 }
 
@@ -1011,7 +1023,7 @@ fn viewed_falls_back_to_the_head_without_local_history() {
     host.on_process("git", |_, _| Ok(ProcessOutput { status: Some(128), stdout: String::new(), stderr: "bad object".into() }));
     let mut plugin = selected(&host);
 
-    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+    changes_message(&mut plugin, &host, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into())).unwrap();
 
     assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
     assert!(changes_html(&mut plugin, &host).contains(" checked"));
@@ -1032,7 +1044,7 @@ fn non_hex_shas_are_not_passed_to_git() {
     });
     let mut plugin = selected(&host);
 
-    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+    changes_message(&mut plugin, &host, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into())).unwrap();
 
     assert_eq!(git_calls.get(), 0);
     assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
@@ -2762,7 +2774,7 @@ mod commit_tests {
         pick(&mut plugin, &host, SHA1);
 
         assert_eq!(plugin.commit.as_deref(), Some(SHA1));
-        assert!(host.refreshed_views().contains(&CHANGES.to_owned()));
+        assert!(host.refreshed_views().contains(&DETAILS.to_owned()));
         let html = changes_html(&mut plugin, &host);
         assert!(html.contains("src/b.rs") && !html.contains("src/a.rs"), "{html}");
         assert!(!html.contains("Why?") && !html.contains("data-reply"), "no comment threads in commit mode");
@@ -2770,7 +2782,7 @@ mod commit_tests {
         assert_eq!(commit_requests(&host), [format!("{REPO_URL}/commits/{SHA1}/diff?per_page=100&page=1")]);
 
         let comment = r#"{"type":"comment","oldPath":"src/b.rs","newPath":"src/b.rs","old":null,"new":2,"body":"x","draft":false}"#;
-        plugin.handle(CHANGES, ViewEvent::Message(comment.into()), &host.invocation()).unwrap();
+        changes_message(&mut plugin, &host, ViewEvent::Message(comment.into())).unwrap();
         assert!(writes(&host).is_empty(), "commit diffs are read-only");
     }
 
@@ -3428,4 +3440,78 @@ mod ci_aid_tests {
 
         assert!(codes(&host, "include: a.yml\nbuild:\n  extends: .a\n").is_empty());
     }
+}
+
+#[test]
+fn section_buttons_list_the_five_sections_with_the_active_one_marked() {
+    let host = setup();
+    let mut plugin = selected(&host);
+
+    let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+
+    let ids: Vec<&str> = section_buttons(&view).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(ids, ["section:overview", "section:changes", "section:commits", "section:files", "section:pipelines"]);
+    assert_eq!(section_buttons(&view)[0].1, "● Overview");
+    assert_eq!(section_buttons(&view)[1].1, "Changes");
+
+    let view = changes_view(&mut plugin, &host).unwrap();
+
+    assert_eq!(section_buttons(&view)[0].1, "Overview");
+    assert_eq!(section_buttons(&view)[1].1, "● Changes (1)");
+}
+
+#[test]
+fn clicking_a_section_button_switches_the_view_and_stores_it() {
+    let host = setup();
+    let mut plugin = selected(&host);
+
+    plugin.handle(DETAILS, ViewEvent::Button("section:changes".into()), &host.invocation()).unwrap();
+
+    assert_eq!(storage::get(sections::SECTION_KEY).unwrap().as_deref(), Some("changes"));
+    assert!(host.refreshed_views().contains(&DETAILS.to_owned()));
+    let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+    assert!(matches!(view.body, Body::Html(_)), "{view:?}");
+}
+
+#[test]
+fn unknown_stored_section_falls_back_to_overview() {
+    let host = setup();
+    let mut plugin = selected(&host);
+    storage::set(sections::SECTION_KEY, "gone").unwrap();
+
+    let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+
+    assert!(matches!(view.body, Body::Form(_)), "{view:?}");
+    assert_eq!(section_buttons(&view)[0].1, "● Overview");
+}
+
+#[test]
+fn no_selected_merge_request_shows_the_select_message_in_every_section() {
+    let host = setup();
+    let mut plugin = GitLab::default();
+
+    for section in Section::ALL {
+        storage::set(sections::SECTION_KEY, section.id()).unwrap();
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+
+        assert!(matches!(&view.body, Body::Message(m) if m.contains("Select a merge request")), "{}: {view:?}", section.id());
+        assert_eq!(section_buttons(&view).len(), 5);
+        for (id, _) in section_buttons(&view) {
+            plugin.handle(DETAILS, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn changes_section_still_routes_view_messages() {
+    let host = setup();
+    let mut plugin = selected(&host);
+    storage::set(sections::SECTION_KEY, "changes").unwrap();
+    plugin.render(DETAILS, None, &host.invocation()).unwrap();
+
+    plugin.handle(DETAILS, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+
+    let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+    let Body::Html(html) = &view.body else { panic!("{view:?}") };
+    assert!(html.contains("src/a.rs"));
 }

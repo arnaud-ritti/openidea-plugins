@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use crate::api::{self, Commit, DiffRefs, Discussion, DraftNote, FileDiff};
 use crate::branch::git_ok;
-use crate::{CHANGES, DETAILS, FILES, GitLab, LIST, first_line, gitlab_project, safe};
+use crate::sections::Section;
+use crate::{DETAILS, FILES, GitLab, LIST, first_line, gitlab_project, safe};
 
 #[derive(Debug, PartialEq)]
 pub struct Line {
@@ -528,7 +529,7 @@ impl GitLab {
         }
 
         host::refresh_view(FILES);
-        host::refresh_view(CHANGES);
+        self.refresh_section(Section::Changes);
 
         Ok(())
     }
@@ -606,7 +607,7 @@ impl GitLab {
         let message: Value = serde_json::from_str(message).map_err(|e| Error::Invalid(e.to_string()))?;
         if self.active_commit().is_some() && message["type"] != "open" {
             let error = serde_json::json!({ "type": "error", "message": "A commit's changes are read-only. Click All Changes to comment." });
-            return host::post_view_message(CHANGES, &error.to_string());
+            return host::post_view_message(DETAILS, &error.to_string());
         }
 
         let repo = gitlab_project(ctx)?;
@@ -660,7 +661,7 @@ impl GitLab {
 
         if let Err(e) = result {
             // Redrawing would reload the page and lose the open editor's text.
-            return host::post_view_message(CHANGES, &serde_json::json!({ "type": "error", "message": e.to_string() }).to_string());
+            return host::post_view_message(DETAILS, &serde_json::json!({ "type": "error", "message": e.to_string() }).to_string());
         }
 
         self.status = Some(match (draft, message["type"].as_str(), message["resolved"].as_bool()) {
@@ -682,7 +683,6 @@ impl GitLab {
         self.threads.remove(&iid);
         self.events.remove(&iid);
         host::refresh_view(DETAILS);
-        host::refresh_view(CHANGES);
         host::refresh_view(LIST);
     }
 }

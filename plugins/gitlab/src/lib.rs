@@ -15,11 +15,13 @@ mod forms;
 mod repo;
 mod review;
 mod safe;
+mod sections;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use api::{Approvals, Commit, Discussion, DraftNote, FileDiff, Job, MergeRequest, Note, Pipeline, ProjectInfo, TimelineEvent, User};
 use branch::BranchReview;
+use sections::{Badges, Section};
 use openidea_plugin::host::{self, storage};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
@@ -29,7 +31,6 @@ use openidea_plugin::{
 
 const LIST: &str = "merge-requests";
 const DETAILS: &str = "merge-request";
-const CHANGES: &str = "merge-request-changes";
 const PROJECTS: &str = "gitlab-projects";
 const NEW_MR: &str = "new-merge-request";
 const NEW_SNIPPET: &str = "new-snippet";
@@ -520,7 +521,7 @@ impl GitLab {
         self.pipeline_confirm = None;
         self.pipeline_status = None;
         self.pipeline_open.clear();
-        host::refresh_view(CHANGES);
+        self.refresh_section(Section::Changes);
         host::refresh_view(FILES);
         host::refresh_view(COMMITS);
         host::refresh_view(PIPELINES);
@@ -678,7 +679,6 @@ impl GitLab {
             ViewEvent::Button(id) if id == "refresh" => {
                 self.reset();
                 host::refresh_view(DETAILS);
-                host::refresh_view(CHANGES);
             }
             ViewEvent::Button(id) if id == "filter" => edit_filter(ctx)?,
             ViewEvent::Button(id) if id == "events" => {
@@ -770,6 +770,59 @@ impl GitLab {
         }
 
         host::open_url(&format!("{}#note_{}", mr.web_url, note.unwrap_or(first.id)))
+    }
+
+    fn set_section(&self, section: Section) -> Result<(), Error> {
+        storage::set(sections::SECTION_KEY, section.id())?;
+        host::refresh_view(DETAILS);
+
+        Ok(())
+    }
+
+    fn refresh_section(&self, section: Section) {
+        if Section::stored() == section {
+            host::refresh_view(DETAILS);
+        }
+    }
+
+    fn badges(&self) -> Badges {
+        let diff_count = self.diffs.as_ref().map(|(_, diffs)| diffs.len());
+
+        Badges {
+            changes: diff_count,
+            files: diff_count,
+            commits: self.commits.as_ref().map(|(_, commits)| commits.len()),
+            pipeline: self.details.as_ref().and_then(|d| d.mr.head_pipeline.as_ref()).map(|p| p.status.clone()),
+        }
+    }
+
+    fn render_section(&mut self, ctx: &Invocation) -> Result<View, Error> {
+        let section = Section::stored();
+        let view = match section {
+            Section::Overview => self.render_details(ctx),
+            Section::Changes => self.render_changes(ctx),
+            Section::Commits => self.render_commits(ctx),
+            Section::Files => self.render_files(ctx),
+            Section::Pipelines => self.render_pipelines(ctx),
+        }?;
+
+        Ok(sections::with_sections(view, section, &self.badges()))
+    }
+
+    fn handle_section(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if let ViewEvent::Button(id) = &event {
+            if let Some(section) = Section::from_button(id) {
+                return self.set_section(section);
+            }
+        }
+
+        match Section::stored() {
+            Section::Overview => self.handle_details(event, ctx),
+            Section::Changes => self.handle_changes(event, ctx),
+            Section::Commits => self.handle_commits(event),
+            Section::Files => self.handle_files(event, ctx),
+            Section::Pipelines => self.handle_pipelines(event, ctx),
+        }
     }
 
     fn render_details(&mut self, ctx: &Invocation) -> Result<View, Error> {
@@ -1049,7 +1102,7 @@ impl GitLab {
                 self.status = None;
                 match Self::selected() {
                     Some(iid) => self.reload_merge_request(iid),
-                    None => host::refresh_view(CHANGES),
+                    None => self.refresh_section(Section::Changes),
                 }
                 Ok(())
             }
@@ -1673,7 +1726,7 @@ impl GitLab {
 
         self.anchor = None;
         host::refresh_view(COMMITS);
-        host::refresh_view(CHANGES);
+        self.refresh_section(Section::Changes);
 
         Ok(())
     }
@@ -1994,8 +2047,7 @@ impl Views for GitLab {
 
         let rendered = match view {
             LIST => self.render_list(ctx),
-            DETAILS => self.render_details(ctx),
-            CHANGES => self.render_changes(ctx),
+            DETAILS => self.render_section(ctx),
             PROJECTS => self.render_projects(ctx),
             NEW_MR if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
             NEW_MR => self.render_new_merge_request(ctx),
@@ -2022,8 +2074,7 @@ impl Views for GitLab {
 
         match view {
             LIST => self.handle_list(event, ctx),
-            DETAILS => self.handle_details(event, ctx),
-            CHANGES => self.handle_changes(event, ctx),
+            DETAILS => self.handle_section(event, ctx),
             PROJECTS => self.handle_projects(event, ctx),
             NEW_MR if forms_enabled() => self.handle_new_merge_request(event, ctx),
             NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
