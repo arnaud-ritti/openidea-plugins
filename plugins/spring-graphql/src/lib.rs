@@ -9,11 +9,13 @@ use openidea_plugin::{
 };
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java::{self, Annotation, Member, Str, TypeDecl};
+use spring_text::kotlin;
 use spring_text::{contains, range};
 use std::collections::BTreeMap;
 
 const SCHEMA_GLOBS: &[&str] = &["**/*.graphqls", "**/*.graphql"];
-const JAVA_GLOBS: &[&str] = &["**/*.java"];
+const JAVA_GLOBS: &[&str] = &["**/*.java", "**/*.kt"];
+const DOCUMENT_DIR: &str = "/graphql-documents/";
 /// (annotation, operation, default root type).
 const ROOTS: [(&str, &str, &str); 3] = [
     ("QueryMapping", "query", "Query"),
@@ -57,6 +59,8 @@ pub struct Field {
     pub name: String,
     pub range: Range,
     pub args: Vec<String>,
+    /// The named type of the field, without list and non-null wrappers.
+    pub ty: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,7 +170,15 @@ fn fields(text: &str, toks: &[Tok]) -> Vec<Field> {
                     args = fields(text, &toks[k + 1..c]).into_iter().map(|f| f.name).collect();
                     k = c + 1;
                 }
-                out.push(Field { name: s.to_owned(), range: range(text, at, at + s.len()), args });
+                let mut j = k + 1;
+                while toks.get(j).is_some_and(|t| t.1 == "[") {
+                    j += 1;
+                }
+                let ty = match toks.get(k) {
+                    Some(t) if t.1 == ":" => toks.get(j).map(|t| t.1).filter(|t| is_name(t)).unwrap_or_default(),
+                    _ => "",
+                };
+                out.push(Field { name: s.to_owned(), range: range(text, at, at + s.len()), args, ty: ty.to_owned() });
             }
             _ => k += 1,
         }
@@ -269,7 +281,12 @@ fn field_attrs(a: &Annotation) -> &'static [&'static str] {
 
 /// The handler methods of a Java source's controllers.
 pub fn handlers(text: &str) -> Vec<Handler> {
-    let file = java::parse(text);
+    handlers_in(text, false)
+}
+
+/// The handler methods of a Java or Kotlin source's controllers.
+pub fn handlers_in(text: &str, kotlin: bool) -> Vec<Handler> {
+    let file = if kotlin { kotlin::parse(text) } else { java::parse(text) };
     let span = |at: usize, s: &str| range(text, at, at + s.len());
     let mut out = Vec::new();
     for c in file.types.iter().filter(|t| t.has(&["Controller", "RestController"])) {
@@ -317,11 +334,11 @@ fn schema_file(path: &str, text: &str) -> Option<Schema> {
     (!schema.types.is_empty() || !schema.roots.is_empty()).then_some(schema)
 }
 
-fn java_file(_path: &str, text: &str) -> Option<Vec<Handler>> {
+fn java_file(path: &str, text: &str) -> Option<Vec<Handler>> {
     if !text.contains("Mapping") {
         return None;
     }
-    let found = handlers(text);
+    let found = handlers_in(text, path.ends_with(".kt"));
     (!found.is_empty()).then_some(found)
 }
 
@@ -364,8 +381,8 @@ enum Slot {
     Field(Option<&'static str>, String),
 }
 
-fn annotation_slot(text: &str, at: usize) -> Option<(Slot, Str)> {
-    let file = java::parse(text);
+fn annotation_slot(text: &str, at: usize, kotlin: bool) -> Option<(Slot, Str)> {
+    let file = if kotlin { kotlin::parse(text) } else { java::parse(text) };
     for c in &file.types {
         for a in c.annotations.iter().filter(|a| a.name == "SchemaMapping") {
             if let Some(s) = a.strings(&["typeName"]).into_iter().find(|s| s.holds(at)) {
@@ -402,12 +419,174 @@ impl Default for GraphQlTools {
     }
 }
 
+fn is_code(doc: &Document) -> bool {
+    matches!(doc.language.as_str(), "java" | "kotlin")
+}
+
+/// A field selected in a client document, by byte offsets of the document text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocField {
+    /// `query`, `mutation` or `subscription`; `None` in a fragment.
+    pub op: Option<String>,
+    /// The type a fragment is `on`.
+    pub on: Option<String>,
+    /// The fields enclosing this one, outermost first.
+    pub path: Vec<String>,
+    pub name: String,
+    pub at: usize,
+    pub end: usize,
+}
+
+fn skip_directives(toks: &[Tok], mut k: usize) -> usize {
+    while toks.get(k).is_some_and(|t| t.1 == "@") {
+        k += 2;
+        if toks.get(k).is_some_and(|t| t.1 == "(") {
+            k = close(toks, k) + 1;
+        }
+    }
+    k
+}
+
+fn selection(toks: &[Tok], open: usize, scope: &DocField, out: &mut Vec<DocField>) {
+    let end = close(toks, open).min(toks.len());
+    let mut k = open + 1;
+    while k < end {
+        let (mut at, mut s) = toks[k];
+        if s == "." {
+            while toks.get(k).is_some_and(|t| t.1 == ".") {
+                k += 1;
+            }
+            k += if toks.get(k).is_some_and(|t| t.1 == "on") { 2 } else { 1 };
+            k = skip_directives(toks, k);
+            if toks.get(k).is_some_and(|t| t.1 == "{") {
+                k = close(toks, k);
+            }
+            k += 1;
+            continue;
+        }
+        if !is_name(s) {
+            k = if matches!(s, "(" | "[" | "{") { close(toks, k) + 1 } else { k + 1 };
+            continue;
+        }
+        if toks.get(k + 1).is_some_and(|t| t.1 == ":") && toks.get(k + 2).is_some_and(|t| is_name(t.1)) {
+            (at, s) = toks[k + 2];
+            k += 2;
+        }
+        k += 1;
+        if toks.get(k).is_some_and(|t| t.1 == "(") {
+            k = close(toks, k) + 1;
+        }
+        k = skip_directives(toks, k);
+        let field = DocField { path: scope.path.clone(), name: s.to_owned(), at, end: at + s.len(), ..scope.clone() };
+        out.push(field.clone());
+        if toks.get(k).is_some_and(|t| t.1 == "{") {
+            let mut inner = field;
+            inner.path.push(s.to_owned());
+            selection(toks, k, &inner, out);
+            k = close(toks, k) + 1;
+        }
+    }
+}
+
+/// The fields of the operations and fragments of a GraphQL executable document.
+pub fn document_fields(text: &str) -> Vec<DocField> {
+    let toks = tokens(text);
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < toks.len() {
+        let mut scope = DocField { op: None, on: None, path: Vec::new(), name: String::new(), at: 0, end: 0 };
+        match toks[k].1 {
+            "query" | "mutation" | "subscription" | "{" | "fragment" => {
+                if toks[k].1 == "fragment" {
+                    scope.on = toks.get(k + 3).map(|t| t.1.to_owned()).filter(|_| toks.get(k + 2).is_some_and(|t| t.1 == "on"));
+                    k += 4;
+                } else {
+                    scope.op = Some(if toks[k].1 == "{" { "query" } else { toks[k].1 }.to_owned());
+                    k += usize::from(toks[k].1 != "{");
+                    if toks.get(k).is_some_and(|t| is_name(t.1)) {
+                        k += 1;
+                    }
+                    if toks.get(k).is_some_and(|t| t.1 == "(") {
+                        k = close(&toks, k) + 1;
+                    }
+                }
+                k = skip_directives(&toks, k);
+                if toks.get(k).is_some_and(|t| t.1 == "{") {
+                    selection(&toks, k, &scope, &mut out);
+                    k = close(&toks, k);
+                }
+                k += 1;
+            }
+            _ => k += 1,
+        }
+    }
+    out
+}
+
+/// The client documents embedded in a Java or Kotlin source: `.document("…")` literals.
+fn inline_documents(text: &str, kotlin: bool) -> Vec<DocField> {
+    if !text.contains("document") {
+        return Vec::new();
+    }
+    let calls = if kotlin { kotlin::calls(text) } else { java::calls(text) };
+    let mut out = Vec::new();
+    for call in calls.iter().filter(|c| c.name == "document" && !c.is_new) {
+        let Some(s) = call.args.first().and_then(|a| a.string.as_ref()) else { continue };
+        let raw = &text[s.at..s.end];
+        if raw.contains('\\') {
+            continue;
+        }
+        for mut f in document_fields(raw) {
+            f.at += s.at;
+            f.end += s.at;
+            out.push(f);
+        }
+    }
+    out
+}
+
 impl GraphQlTools {
+    /// The schema fields (and the handlers of root fields) of the client document field at `at`.
+    fn client_document_definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        let Some(project) = project_of(&doc.path) else { return Vec::new() };
+        let Some(at) = offset(&doc.text, at) else { return Vec::new() };
+        let fields = if is_code(doc) {
+            inline_documents(&doc.text, doc.language == "kotlin")
+        } else {
+            document_fields(&doc.text)
+        };
+        let Some(hit) = fields.into_iter().find(|f| f.at <= at && at <= f.end) else { return Vec::new() };
+        let schemas = self.schemas.get(&project, PROVIDER_BUDGET / 2);
+        let mut ty = match (&hit.on, &hit.op) {
+            (Some(on), _) => on.clone(),
+            (None, Some(op)) => root_type(schemas, op),
+            (None, None) => return Vec::new(),
+        };
+        for name in &hit.path {
+            let Some((_, parent)) = schema_fields(schemas, &ty, name).into_iter().next() else { return Vec::new() };
+            ty = parent.ty;
+        }
+        let mut found: Vec<Location> = schema_fields(schemas, &ty, &hit.name)
+            .into_iter()
+            .map(|(path, f)| Location { path, range: f.range })
+            .collect();
+        if hit.path.is_empty() && hit.op.is_some() {
+            let java = self.java.get(&project, PROVIDER_BUDGET / 2);
+            found.extend(
+                java.iter()
+                    .flat_map(|(path, hs)| hs.iter().map(move |h| (path, h)))
+                    .filter(|(_, h)| h.field == hit.name && type_of(h, schemas) == ty)
+                    .map(|(path, h)| Location { path: path.to_owned(), range: h.method }),
+            );
+        }
+        found
+    }
+
     /// The open Java file's handlers with the schema fields they map to; publishes its problems.
     fn java_links(&mut self, doc: &Document) -> Vec<(Handler, String, Vec<(String, Field)>)> {
         let Some(project) = project_of(&doc.path) else { return Vec::new() };
         let schemas = self.schemas.get(&project, PROVIDER_BUDGET);
-        let links: Vec<_> = handlers(&doc.text)
+        let links: Vec<_> = handlers_in(&doc.text, doc.language == "kotlin")
             .into_iter()
             .map(|h| {
                 let ty = type_of(&h, schemas);
@@ -471,7 +650,7 @@ impl GraphQlTools {
 impl Providers for GraphQlTools {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(at) = offset(&doc.text, at) else { return Vec::new() };
-        let Some((slot, s)) = annotation_slot(&doc.text, at) else { return Vec::new() };
+        let Some((slot, s)) = annotation_slot(&doc.text, at, doc.language == "kotlin") else { return Vec::new() };
         let Some(project) = project_of(&doc.path) else { return Vec::new() };
         let schemas = self.schemas.get(&project, PROVIDER_BUDGET);
         let types = schemas.iter().flat_map(|(_, s)| &s.types);
@@ -499,7 +678,7 @@ impl Providers for GraphQlTools {
     }
 
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        if doc.language == "java" {
+        if is_code(doc) {
             return self
                 .java_links(doc)
                 .into_iter()
@@ -528,13 +707,18 @@ impl Providers for GraphQlTools {
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
-        if doc.language == "java" {
-            return self
+        if is_code(doc) {
+            let mut found: Vec<Location> = self
                 .java_links(doc)
                 .into_iter()
                 .filter(|(h, _, _)| contains(h.annotation, at) || contains(h.method, at) || contains(h.range, at))
                 .flat_map(|(_, _, found)| found.into_iter().map(|(path, f)| Location { path, range: f.range }))
                 .collect();
+            found.extend(self.client_document_definition(doc, at));
+            return found;
+        }
+        if doc.path.replace('\\', "/").contains(DOCUMENT_DIR) {
+            return self.client_document_definition(doc, at);
         }
         self.schema_links(doc)
             .into_iter()
@@ -790,5 +974,77 @@ class BookController {
         assert!(
             complete(&mut tools, &CONTROLLER.replace("@Argument String sort", "@Argument String so|rt")).is_empty()
         );
+    }
+
+    const DOCUMENT: &str = "query Find($id: ID!) { bookById(id: $id) { title author { name } } }\nmutation { addBook(input: {}) { id } }";
+
+    #[test]
+    fn client_document_field_links_to_schema() {
+        let _host = setup();
+        let mut tools = GraphQlTools::default();
+        let file = doc("src/main/resources/graphql-documents/find.graphql", "graphql", DOCUMENT);
+        let found = tools.definition(&file, at(DOCUMENT, "bookById"));
+        assert_eq!(found.len(), 2, "the schema field and its controller method");
+        assert_eq!(found[0].range.start, start(SCHEMA, "bookById"));
+        assert_eq!(found[1].range.start, start(CONTROLLER, "bookById("));
+        let nested = tools.definition(&file, at(DOCUMENT, "title"));
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].range.start, start(SCHEMA, "title("));
+        assert!(tools.definition(&file, at(DOCUMENT, "name")).is_empty(), "Author is not in the schema");
+        assert_eq!(tools.definition(&file, at(DOCUMENT, "addBook")).len(), 1);
+        assert!(tools.definition(&file, at(DOCUMENT, "query Find")).is_empty());
+
+        let code = "class C {\n    void f() {\n        client.document(\"query { books { title } }\").retrieve(\"books\");\n        client.document(\"\"\"\n            { bookById(id: 1) { title } }\n            \"\"\").execute();\n    }\n}\n";
+        let java = doc("src/main/java/com/acme/C.java", "java", code);
+        assert_eq!(tools.definition(&java, at(code, "books {")).len(), 2);
+        assert_eq!(tools.definition(&java, at(code, "title } }")).len(), 1);
+        assert_eq!(tools.definition(&java, at(code, "bookById")).len(), 2);
+    }
+
+    const KOTLIN: &str = r#"package com.acme
+
+@Controller
+@SchemaMapping(typeName = "Book")
+class BookController {
+    @QueryMapping
+    suspend fun bookById(@Argument id: String): Book? = null
+
+    @QueryMapping("books")
+    fun all(@Argument("filter") f: Filter, @Argument sort: String): List<Book> {
+        return emptyList()
+    }
+
+    @SchemaMapping
+    fun author(book: Book): Author = Author()
+
+    @BatchMapping
+    fun title(books: List<Book>): Map<Book, String> = emptyMap()
+}
+"#;
+
+    #[test]
+    fn kotlin_query_mapping_links_to_schema() {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/graphql/schema.graphqls", SCHEMA);
+        host.add_file("src/main/kotlin/com/acme/BookController.kt", KOTLIN);
+        let mut tools = GraphQlTools::default();
+        let kt = doc("src/main/kotlin/com/acme/BookController.kt", "kotlin", KOTLIN);
+        let tips: Vec<_> = tools.line_markers(&kt).into_iter().map(|m| m.tooltip).collect();
+        assert_eq!(
+            tips,
+            [
+                "GraphQL schema field Query.bookById",
+                "GraphQL schema field Query.books",
+                "GraphQL schema field Book.author",
+                "GraphQL schema field Book.title",
+            ]
+        );
+        assert_eq!(tools.definition(&kt, at(KOTLIN, "bookById")).len(), 1);
+        let back = tools.line_markers(&graphql());
+        let target = back.iter().find(|m| m.tooltip.contains("bookById")).unwrap();
+        assert_eq!(target.tooltip, "Handled by BookController.bookById()");
+        assert!(target.target.as_ref().unwrap().path.ends_with("BookController.kt"));
+        let problems = &host.diagnostics()["/project/src/main/kotlin/com/acme/BookController.kt"];
+        assert_eq!(problems.iter().filter_map(|d| d.code.as_deref()).collect::<Vec<_>>(), ["unknown-graphql-argument"]);
     }
 }

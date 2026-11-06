@@ -8,14 +8,14 @@ change-notes = "0.1.0 (first release): schema index, handler ↔ schema field na
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-language:graphql"]
+activation = ["on-language:java", "on-language:kotlin", "on-language:graphql"]
 
 [capabilities]
 required = ["project.read"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
-languages = ["java"]
+languages = ["java", "kotlin"]
 
 [[contributes.providers]]
 kinds = ["definition", "line-markers"]
