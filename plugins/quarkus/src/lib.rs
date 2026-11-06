@@ -70,7 +70,7 @@ impl QuarkusTools {
     fn java_problems(&mut self, doc: &Document) -> Vec<java_checks::Problem> {
         let unassigned = host::setting_bool("quarkus.checkUnassigned").unwrap_or(false);
         let annotations = host::setting_bool("quarkus.checkAnnotations").unwrap_or(true);
-        if !(unassigned || annotations) || !self.uses_quarkus(&doc.path) {
+        if !(unassigned || annotations || host::setting_bool("quarkus.checkHealthMetrics").unwrap_or(true)) || !self.uses_quarkus(&doc.path) {
             return Vec::new();
         }
         let rest_clients = self.sources.for_document(&doc.path, &doc.text, PROVIDER_BUDGET).filter(|index| index.complete()).map(|index| {
@@ -83,8 +83,16 @@ impl QuarkusTools {
         let (project, _) = self.project(doc);
         let configured = self.keys_elsewhere(doc);
         let lookup = Lookup(vec![&project, bundled()]);
-        let ctx = Context { lookup: &lookup, configured: configured.as_ref(), rest_clients: rest_clients.as_ref(), unassigned, annotations };
+        let health_metrics = host::setting_bool("quarkus.checkHealthMetrics").unwrap_or(true);
+        let ctx = Context { lookup: &lookup, configured: configured.as_ref(), rest_clients: rest_clients.as_ref(), unassigned, annotations, health_metrics };
         java_checks::check(&doc.text, &ctx)
+    }
+
+    fn unregistered_interface(&mut self, doc: &Document, name: &str) -> Option<(String, String)> {
+        let index = self.sources.for_document(&doc.path, &doc.text, PROVIDER_BUDGET)?;
+        let file = index.iter().find(|(_, info)| info.interfaces.iter().any(|(n, registered)| n == name && !registered))?.0.to_owned();
+        let content = project_of(&doc.path)?.read_file(&file).ok()?;
+        Some((file, content))
     }
 
     /// The `application.properties` nearest to `path`.
@@ -297,6 +305,19 @@ impl Providers for QuarkusTools {
                     Fix::DefaultValue { at, value } => {
                         let edit = TextEdit { range: range(&doc.text, at, at), text: format!(", defaultValue = \"{value}\"") };
                         ("Add defaultValue".to_owned(), vec![(doc.path.clone(), vec![edit])])
+                    }
+                    Fix::Edits { title, edits } => {
+                        let edits = edits.into_iter().map(|(a, b, text)| TextEdit { range: range(&doc.text, a, b), text }).collect();
+                        (title, vec![(doc.path.clone(), edits)])
+                    }
+                    Fix::RegisterRestClient { name } => {
+                        let Some((file, current)) = self.unregistered_interface(doc, &name) else { continue };
+                        let Some(start) = java::parse_interface_start(&current, &name) else { continue };
+                        let edits = java_checks::annotate_edits(&current, start, "RegisterRestClient", java_checks::REGISTER_REST_CLIENT)
+                            .into_iter()
+                            .map(|(a, b, text)| TextEdit { range: range(&current, a, b), text })
+                            .collect();
+                        (format!("Add @RegisterRestClient to {name}"), vec![(file, edits)])
                     }
                     Fix::AddKey { key } => {
                         let Some(file) = self.properties_file_for(doc) else { continue };
@@ -791,6 +812,37 @@ mod tests {
         tools.line_markers(&doc(JAVA, text));
         assert_eq!(codes(text, &host.diagnostics()[JAVA]), [("rest-client-not-registered", "api")]);
         host.set_setting("quarkus.checkAnnotations", "false");
+        tools.line_markers(&doc(JAVA, text));
+        assert!(host.diagnostics().get(JAVA).is_none_or(|d| d.is_empty()));
+    }
+
+    #[test]
+    fn registers_an_unregistered_rest_client_interface_from_the_injection_site() {
+        let host = quarkus_project();
+        let api = "package org.acme;\n\nimport jakarta.ws.rs.Path;\n\n@Path(\"/x\")\npublic interface Api { }\n";
+        host.add_file("src/main/java/org/acme/Api.java", api);
+        let text = "class G { @Inject @RestClient Api api; }";
+        let mut tools = QuarkusTools::default();
+        let selection = Range::new(Position::new(0, 30), Position::new(0, 30));
+        tools.code_actions(&doc(JAVA, text), selection);
+        let actions = tools.code_actions(&doc(JAVA, text), selection);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Add @RegisterRestClient to Api");
+        let (file, edits) = &actions[0].edits[0];
+        assert_eq!(file, "/project/src/main/java/org/acme/Api.java");
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().any(|e| e.text == "@RegisterRestClient\n" && e.range.start == Position::new(4, 0)));
+        assert!(edits.iter().any(|e| e.text.starts_with("import org.eclipse.microprofile.rest.client.inject.RegisterRestClient;")));
+    }
+
+    #[test]
+    fn health_and_metrics_checks_follow_their_setting() {
+        let host = quarkus_project();
+        let text = "@Liveness\nclass Ping { }\n";
+        let mut tools = QuarkusTools::default();
+        tools.line_markers(&doc(JAVA, text));
+        assert_eq!(host.diagnostics()[JAVA][0].code.as_deref(), Some("health-not-implemented"));
+        host.set_setting("quarkus.checkHealthMetrics", "false");
         tools.line_markers(&doc(JAVA, text));
         assert!(host.diagnostics().get(JAVA).is_none_or(|d| d.is_empty()));
     }

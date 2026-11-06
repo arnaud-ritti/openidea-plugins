@@ -373,3 +373,7 @@ mod tests {
         }
     }
 }
+
+pub fn parse_interface_start(text: &str, name: &str) -> Option<usize> {
+    java::parse(text).types.iter().find(|t| t.kind == "interface" && t.name == name).map(|t| t.start)
+}

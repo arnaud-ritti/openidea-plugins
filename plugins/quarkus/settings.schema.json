@@ -25,6 +25,11 @@
       "title": "Warn about @ConfigProperty keys without a default that no application file or .env sets",
       "default": false
     },
+    "quarkus.checkHealthMetrics": {
+      "type": "boolean",
+      "title": "Check health checks (@Liveness/@Readiness without HealthCheck and the reverse) and @Gauge beans",
+      "default": true
+    },
     "quarkus.checkAnnotations": {
       "type": "boolean",
       "title": "Check @RestClient injections against @RegisterRestClient and @Scheduled cron and every expressions",
