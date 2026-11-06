@@ -360,6 +360,39 @@ java.lang.IllegalStateException: boom
         assert!(kinds_on_line("Nov  6 12:00:00 host proc[1]: boom failed\n", 0).contains(&("boom failed".to_owned(), Highlight::Keyword)));
     }
 
+    const LARAVEL: &str = "\
+[2026-11-06 10:00:00] local.ERROR: Division by zero {\"exception\":\"[object]\"}
+[stacktrace]
+#0 /var/www/app/Http/Foo.php(12): fn()
+#1 {main}
+[2026-11-06 10:00:01] local.INFO: fine
+";
+
+    #[test]
+    fn laravel_lines_colour_as_error_with_their_stack_trace() {
+        assert!(kinds_on_line(LARAVEL, 0).contains(&("ERROR".to_owned(), Highlight::Keyword)));
+        assert_eq!(kinds_on_line(LARAVEL, 2).len(), 1);
+        assert_eq!(kinds_on_line(LARAVEL, 2)[0].1, Highlight::Keyword);
+        assert!(kinds_on_line(LARAVEL, 4).contains(&("INFO".to_owned(), Highlight::String)));
+        assert_eq!(folding(&Config::default(), LARAVEL), [Fold { start_line: 0, end_line: 3, kind: FoldKind::Region }]);
+    }
+
+    #[test]
+    fn monolog_and_serilog_lines_are_classified() {
+        let error = Some(Severity::Error);
+        let warning = Some(Severity::Warning);
+        assert_eq!(
+            classify("[2026-11-06T10:00:00.123456+00:00] app.ERROR: boom {\"ctx\":1} []"),
+            (error, Some("2026-11-06T10:00:00.123456+00:00".to_owned()))
+        );
+        assert_eq!(
+            classify("2026-11-06 10:00:00.123 +00:00 [ERR] boom"),
+            (error, Some("2026-11-06 10:00:00.123 +00:00".to_owned()))
+        );
+        assert_eq!(classify("2026-11-06 10:00:00.123 +00:00 [WRN] hm").0, warning);
+        assert_eq!(classify("2026-11-06 10:00:00.123 +00:00 [FTL] dead").0, error);
+    }
+
     #[test]
     fn existing_formats_keep_their_detection() {
         let config = Config::default();

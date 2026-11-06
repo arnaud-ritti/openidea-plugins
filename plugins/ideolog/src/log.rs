@@ -11,12 +11,25 @@ use std::ops::Range;
 const DETECTION_LINES: usize = 25;
 const MAX_PARSING_LENGTH: usize = 10_000;
 
+macro_rules! level {
+    () => {
+        "(?i:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|ERR|FATAL|CRIT(?:ICAL)?|SEVERE|ALERT|EMERG(?:ENCY)?)"
+    };
+}
+
 const SYSLOG_UUID: &str = "0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0005";
-const DOCKER: &str = r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?)\s+((?i:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|ERR|FATAL|CRIT(?:ICAL)?|SEVERE))\s+(.*)$";
+const DOCKER: &str = concat!(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?)\s+(", level!(), r")\s+(.*)$");
 const PYTHON_BASIC: &str = r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL):([^:\s]+):(.*)$";
-const PYTHON_DASH: &str = r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) - (\S+) - ((?i:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|ERR|FATAL|CRIT(?:ICAL)?|SEVERE)) - (.*)$";
+const PYTHON_DASH: &str = concat!(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) - (\S+) - (", level!(), r") - (.*)$");
 const NGINX: &str = r"^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) \[(\w+)] (\d+#\d+): (.*)$";
 const SYSLOG: &str = r"^([A-Z][a-z]{2}\s+\d{1,2}\s\d\d:\d\d:\d\d)\s(\S+)\s([^:\s]+(?:\[\d+])?):\s(.*)$";
+const MONOLOG: &str = concat!(
+    r"^\[(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?)]\s+([\w-]+)\.(",
+    level!(),
+    r"):\s*(.*)$"
+);
+const SERILOG: &str =
+    r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?\s[+-]\d\d:\d\d)\s\[(VRB|DBG|INF|WRN|ERR|FTL)]\s(.*)$";
 const ERROR_WORDS: &str = r"\b(error|fatal|fail(ed|ure)?|critical|panic)\b";
 const WARN_WORDS: &str = r"\bwarn(ing)?\b";
 
@@ -114,6 +127,8 @@ impl Default for Config {
             ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0002", PYTHON_BASIC, r"^[A-Z]+:", [-1, 0, 1]),
             ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0003", PYTHON_DASH, r"^\d{4}-\d\d-\d\d ", [0, 2, 1]),
             ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0004", NGINX, r"^\d{4}/\d\d/\d\d ", [0, 1, 2]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0006", MONOLOG, r"^\[\d{4}-", [0, 2, 1]),
+            ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0007", SERILOG, r"^\d{4}-\d\d-\d\d[ T]", [0, 1, -1]),
             ("0f1d6a52-4c3e-4b7a-9d21-5a0b7c1e0005", SYSLOG, r"^[A-Z][a-z]{2}\s+\d", [0, -1, 2]),
         ]
         .into_iter()
@@ -125,7 +140,7 @@ impl Default for Config {
         .collect();
 
         let rules = [
-            (r"^\s*(e(rr(or)?)?|severe|fatal|crit(ical)?|alert|emerg(ency)?)\s*$", Highlight::Keyword, None, None),
+            (r"^\s*(e(rr(or)?)?|severe|fatal|ftl|crit(ical)?|alert|emerg(ency)?)\s*$", Highlight::Keyword, None, None),
             (r"^\s*w(arn(ing)?|rn)?\s*$", Highlight::Tag, None, None),
             (r"^\s*i(nfo|nf)?\s*$", Highlight::String, None, None),
             (ERROR_WORDS, Highlight::Keyword, Some(SYSLOG_UUID), Some(3)),
@@ -179,6 +194,7 @@ impl Config {
     /// out and listed in `errors`.
     pub fn with_custom(xml: &str) -> Self {
         let mut config = Self::default();
+        let mut custom_formats = Vec::new();
         for (element, attrs) in elements(xml) {
             if attr(&attrs, "enabled") == Some("false") {
                 continue;
@@ -194,13 +210,15 @@ impl Config {
                     int("severityId"),
                     int("categoryId"),
                 )
-                .map(|format| config.formats.push(format)),
+                .map(|format| custom_formats.push(format)),
                 _ => custom_rule(&attrs).map(|rule| config.rules.extend(rule)),
             };
             if let Err(e) = result {
                 config.errors.push(e);
             }
         }
+        // Ahead of the built-ins: the first of equally good formats wins.
+        config.formats.splice(0..0, custom_formats);
         config
     }
 
@@ -344,7 +362,7 @@ impl<'a> Parsed<'a> {
         let column = format.map_or(Some(0), |f| f.severity_column);
         let level = self.value(column)?.to_ascii_uppercase();
         match level.trim_matches(|c: char| !c.is_ascii_alphabetic()) {
-            "E" | "ERR" | "ERROR" | "SEVERE" | "FATAL" | "CRIT" | "CRITICAL" | "ALERT" | "EMERG" | "EMERGENCY" => {
+            "E" | "ERR" | "ERROR" | "FTL" | "SEVERE" | "FATAL" | "CRIT" | "CRITICAL" | "ALERT" | "EMERG" | "EMERGENCY" => {
                 Some(Severity::Error)
             }
             "W" | "WRN" | "WARN" | "WARNING" => Some(Severity::Warning),

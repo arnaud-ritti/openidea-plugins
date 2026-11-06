@@ -5,7 +5,8 @@ OpenIDEA port of JetBrains' [Ideolog](https://github.com/JetBrains/ideolog) (MIT
 
 - Detects the log format from the first 25 lines: IntelliJ IDEA, TeamCity build log, Logcat,
   Loguru, pipe-separated, Docker/ISO timestamps, Python `logging`, nginx error log, syslog (level
-  from keywords), or your own; other logs are split on the first space, like Ideolog does.
+  from keywords), Laravel/Monolog (`[date] channel.LEVEL:`), Serilog text, or your own (yours win
+  ties); other logs are split on the first space, like Ideolog does.
 - Colours each event by level (error, warning, info), including its stack trace lines. The time
   column of a coloured event gets its own colour.
 - Folds multi-line events (stack traces).
