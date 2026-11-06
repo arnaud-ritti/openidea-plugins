@@ -115,10 +115,12 @@ impl Site {
 
     /// The string is the value of a key in the rules array itself, not in a nested list or the messages array.
     fn is_rule_value(&self) -> bool {
-        let rules_argument = if self.is_method(&["validateWithBag"]) || self.is_static(&["Validator"], &["make"]) || self.is_function(&["validator"]) {
-            1
-        } else {
-            0
+        let on_controller = self.callee.starts_with("$this->");
+        let rules_argument = match () {
+            _ if self.is_method(&["validateWithBag"]) => if on_controller { 2 } else { 1 },
+            _ if self.is_method(&["validate"]) && on_controller => 1,
+            _ if self.is_static(&["Validator"], &["make"]) || self.is_function(&["validator"]) => 1,
+            _ => 0,
         };
         self.depth == 1 && self.key.is_some() && self.arg == rules_argument
     }

@@ -633,3 +633,33 @@ fn rewrites_survive_multibyte_text_and_crlf() {
     let result = apply_rewrite(&mut plugin, "/project/resources/views/a.blade.php", "blade", blade, "$x");
     assert_eq!(result, "<p>é</p>\r\n<p>{!! $x !!}</p>\r\n");
 }
+
+#[test]
+fn controller_this_validate_rules_are_offered() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$this->validate($request, ['email' => 'required|email'], ['email.required' => 'a|b']);\n";
+    let result = apply_rewrite(&mut plugin, "/project/app/A.php", "php", text, "required|email");
+    assert!(result.contains("['email' => ['required', 'email']]"));
+}
+
+#[test]
+fn controller_this_validate_messages_are_left_alone() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n$this->validate($request, ['email' => 'required|email'], ['email.required' => 'a|b']);\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/A.php", "php", text, "a|b").is_empty());
+}
+
+#[test]
+fn bag_and_form_request_rules_are_offered() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let path = "/project/app/A.php";
+    let bag = "<?php\n$request->validateWithBag('post', ['t' => 'required|max:5']);\n$this->validateWithBag('post', $request, ['u' => 'required|max:6']);\n";
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", bag, "required|max:5").len(), 1);
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", bag, "required|max:6").len(), 1);
+
+    let form = "<?php\nclass R {\n    public function rules(): array\n    {\n        return ['n' => 'required|string'];\n    }\n}\n";
+    assert_eq!(rewrite_titles(&mut plugin, path, "php", form, "required|string").len(), 1);
+}
