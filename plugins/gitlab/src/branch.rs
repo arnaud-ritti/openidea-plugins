@@ -8,7 +8,8 @@ use openidea_plugin::providers::{CodeAction, Document, LineMarker};
 use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem, TextEdit};
 
 use crate::api::{self, Discussion, MergeRequest};
-use crate::{COMMITS, DETAILS, GitLab, first_line, relative_path, review, safe};
+use crate::sections::Section;
+use crate::{DETAILS, GitLab, first_line, relative_path, review, safe};
 
 pub const STATUS_ITEM: &str = "merge-request";
 const RECHECK_SECS: u64 = 300;
@@ -421,13 +422,13 @@ impl GitLab {
         self.commit = None;
         self.confirm = None;
         self.reload_merge_request(iid);
-        host::refresh_view(COMMITS);
+        self.set_section(Section::Overview)?;
 
         if host::reveal_view(DETAILS).is_ok() {
             return Ok(Some(format!("!{iid} is open in the Merge Request tool window.")));
         }
 
-        Ok(Some(format!("!{iid} is open in the Merge Request and Merge Request Changes tool windows.")))
+        Ok(Some(format!("!{iid} is open in the Merge Request tool window.")))
     }
 }
 

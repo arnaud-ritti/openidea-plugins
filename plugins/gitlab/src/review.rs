@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::api::{self, Commit, DiffRefs, Discussion, DraftNote, FileDiff};
 use crate::branch::git_ok;
 use crate::sections::Section;
-use crate::{DETAILS, FILES, GitLab, LIST, first_line, gitlab_project, safe};
+use crate::{DETAILS, GitLab, LIST, first_line, gitlab_project, safe};
 
 #[derive(Debug, PartialEq)]
 pub struct Line {
@@ -528,7 +528,7 @@ impl GitLab {
             _ => return Ok(()),
         }
 
-        host::refresh_view(FILES);
+        self.refresh_section(Section::Files);
         self.refresh_section(Section::Changes);
 
         Ok(())
@@ -634,7 +634,7 @@ impl GitLab {
                 });
                 set_viewed(&project, iid, &text("path"), sha)?;
 
-                return Ok(host::refresh_view(FILES));
+                return Ok(self.refresh_section(Section::Files));
             }
             _ => {}
         }

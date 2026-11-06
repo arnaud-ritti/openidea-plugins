@@ -101,6 +101,18 @@ fn setup() -> MockHost {
     host
 }
 
+fn render_in(plugin: &mut GitLab, section: Section, host: &MockHost) -> View {
+    storage::set(sections::SECTION_KEY, section.id()).unwrap();
+
+    plugin.render(DETAILS, None, &host.invocation()).unwrap()
+}
+
+fn handle_in(plugin: &mut GitLab, section: Section, event: ViewEvent, host: &MockHost) {
+    storage::set(sections::SECTION_KEY, section.id()).unwrap();
+
+    plugin.handle(DETAILS, event, &host.invocation()).unwrap();
+}
+
 fn selected(host: &MockHost) -> GitLab {
     let mut plugin = GitLab::default();
     plugin.handle(LIST, ViewEvent::Select("mr:7".into()), &host.invocation()).unwrap();
@@ -471,7 +483,7 @@ fn showing_the_branch_merge_request_resets_the_pipeline_view() {
 
     assert_eq!((plugin.pipeline_selection, plugin.pipeline_confirm, plugin.pipeline_status.as_deref()), (None, None, None));
     assert!(plugin.pipeline_open.is_empty());
-    assert!(host.refreshed_views()[before..].contains(&PIPELINES.to_owned()));
+    assert!(host.refreshed_views()[before..].contains(&DETAILS.to_owned()));
 }
 
 #[test]
@@ -1004,7 +1016,7 @@ fn files_view_toggles_viewed_without_page_scripts_and_switches_layout() {
     host.on_process("git", |_, _| Ok(ProcessOutput { status: Some(128), stdout: String::new(), stderr: "bad object".into() }));
     let mut plugin = selected(&host);
     let items = |plugin: &mut GitLab| {
-        let view = plugin.render(FILES, None, &host.invocation()).unwrap();
+        let view = render_in(plugin, Section::Files, &host);
         let Body::Tree(items) = view.body else { panic!("{view:?}") };
 
         items
@@ -1015,21 +1027,21 @@ fn files_view_toggles_viewed_without_page_scripts_and_switches_layout() {
     assert_eq!(tree[1].parent.as_deref(), Some("dir:src"));
     assert!(tree[1].icon.is_none());
 
-    plugin.handle(FILES, ViewEvent::Activate("file:src/a.rs".into()), &host.invocation()).unwrap();
+    handle_in(&mut plugin, Section::Files, ViewEvent::Activate("file:src/a.rs".into()), &host);
 
     assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
     assert_eq!(items(&mut plugin)[1].icon.as_deref(), Some("check"));
     assert!(changes_html(&mut plugin, &host).contains(" checked"));
 
-    plugin.handle(FILES, ViewEvent::Button("layout".into()), &host.invocation()).unwrap();
+    handle_in(&mut plugin, Section::Files, ViewEvent::Button("layout".into()), &host);
     let list = items(&mut plugin);
     assert_eq!((list.len(), list[0].label.as_str(), list[0].parent.as_deref()), (1, "src/a.rs", None));
 
-    plugin.handle(FILES, ViewEvent::Activate("file:nope".into()), &host.invocation()).unwrap();
-    plugin.handle(FILES, ViewEvent::Button("clear".into()), &host.invocation()).unwrap();
+    handle_in(&mut plugin, Section::Files, ViewEvent::Activate("file:nope".into()), &host);
+    handle_in(&mut plugin, Section::Files, ViewEvent::Button("clear".into()), &host);
     assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), "{}");
 
-    plugin.handle(FILES, ViewEvent::Button("mark-all".into()), &host.invocation()).unwrap();
+    handle_in(&mut plugin, Section::Files, ViewEvent::Button("mark-all".into()), &host);
     assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
 }
 
@@ -2755,12 +2767,12 @@ mod commit_tests {
 
     fn on_mr(host: &MockHost) -> GitLab {
         let mut plugin = selected(host);
-        plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        render_in(&mut plugin, Section::Commits, &host);
         plugin
     }
 
     fn pick(plugin: &mut GitLab, host: &MockHost, key: &str) {
-        plugin.handle(COMMITS, ViewEvent::Activate(key.into()), &host.invocation()).unwrap();
+        handle_in(plugin, Section::Commits, ViewEvent::Activate(key.into()), &host);
     }
 
     fn commit_requests(host: &MockHost) -> Vec<String> {
@@ -2772,7 +2784,7 @@ mod commit_tests {
         let host = host();
         let mut plugin = selected(&host);
 
-        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Commits, &host);
 
         let Body::Tree(items) = &view.body else { panic!("{view:?}") };
         let rows: Vec<(&str, &str)> = items.iter().map(|i| (i.key.as_str(), i.label.as_str())).collect();
@@ -2809,10 +2821,10 @@ mod commit_tests {
         let host = host();
         let mut plugin = on_mr(&host);
         pick(&mut plugin, &host, SHA1);
-        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Commits, &host);
         assert!(buttons(&view).contains(&"all-changes"), "{view:?}");
 
-        plugin.handle(COMMITS, ViewEvent::Button("all-changes".into()), &host.invocation()).unwrap();
+        handle_in(&mut plugin, Section::Commits, ViewEvent::Button("all-changes".into()), &host);
 
         assert_eq!(plugin.commit, None);
         let html = changes_html(&mut plugin, &host);
@@ -2828,7 +2840,7 @@ mod commit_tests {
         plugin.handle(LIST, ViewEvent::Select("mr:8".into()), &host.invocation()).unwrap();
 
         assert_eq!(plugin.commit, None);
-        assert!(host.refreshed_views().contains(&COMMITS.to_owned()));
+        assert!(host.refreshed_views().contains(&DETAILS.to_owned()));
     }
 
     #[test]
@@ -2843,7 +2855,7 @@ mod commit_tests {
 
         for key in ["abc/../x", "HEAD", "abcdef1?x"] {
             pick(&mut plugin, &host, key);
-            plugin.handle(COMMITS, ViewEvent::Select(key.into()), &host.invocation()).unwrap();
+            handle_in(&mut plugin, Section::Commits, ViewEvent::Select(key.into()), &host);
             assert_eq!(plugin.commit, None, "{key}");
             changes_html(&mut plugin, &host);
         }
@@ -2861,7 +2873,7 @@ mod commit_tests {
         });
         let mut plugin = selected(&host);
 
-        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Commits, &host);
 
         assert_eq!(view.body, Body::Message("!7 has no commits.".into()));
     }
@@ -2871,8 +2883,8 @@ mod commit_tests {
         let host = host();
         let mut plugin = GitLab::default();
 
-        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
-        plugin.handle(COMMITS, ViewEvent::Activate(SHA1.into()), &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Commits, &host);
+        handle_in(&mut plugin, Section::Commits, ViewEvent::Activate(SHA1.into()), &host);
 
         assert!(matches!(view.body, Body::Message(_)), "{view:?}");
         assert_eq!(plugin.commit, None);
@@ -2887,7 +2899,7 @@ mod commit_tests {
         host.set_setting("commitsView", "false");
         let before = host.requests().len();
 
-        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Commits, &host);
         pick(&mut plugin, &host, SHA2);
         let html = changes_html(&mut plugin, &host);
 
@@ -2906,7 +2918,7 @@ mod commit_tests {
 
         assert!(html.contains("<td class=\"code\">ü😀&lt;script&gt;</td>"), "{html}");
         assert!(html.contains("<td class=\"code\">ü😀x&lt;/td&gt;</td>"), "{html}");
-        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Commits, &host);
         assert!(view.status.as_deref().unwrap_or("").contains("aaaaaaa1"), "{view:?}");
     }
 
@@ -2962,17 +2974,17 @@ mod pipeline_tests {
 
     fn on_mr(host: &MockHost) -> GitLab {
         let mut plugin = selected(host);
-        plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        render_in(&mut plugin, Section::Pipelines, &host);
         plugin
     }
 
     fn pick(plugin: &mut GitLab, host: &MockHost, key: &str) {
-        plugin.handle(PIPELINES, ViewEvent::Select(key.into()), &host.invocation()).unwrap();
+        handle_in(plugin, Section::Pipelines, ViewEvent::Select(key.into()), &host);
     }
 
     fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
-        plugin.handle(PIPELINES, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
-        plugin.render(PIPELINES, None, &host.invocation()).unwrap()
+        handle_in(plugin, Section::Pipelines, ViewEvent::Button(id.into()), &host);
+        render_in(plugin, Section::Pipelines, &host)
     }
 
     fn rows(view: &View) -> Vec<(&str, Option<&str>, &str, Option<&str>)> {
@@ -2986,7 +2998,7 @@ mod pipeline_tests {
         let host = host();
         let mut plugin = selected(&host);
 
-        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Pipelines, &host);
 
         assert_eq!(
             rows(&view),
@@ -3006,11 +3018,11 @@ mod pipeline_tests {
         assert_eq!(items[5].detail.as_deref(), Some("Failed (allowed to fail)"));
         assert!(!host.requests().iter().any(|r| r.url.contains("/pipelines/40/jobs")), "a collapsed pipeline loads no jobs");
 
-        plugin.handle(PIPELINES, ViewEvent::Expand("p:40".into()), &host.invocation()).unwrap();
-        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        handle_in(&mut plugin, Section::Pipelines, ViewEvent::Expand("p:40".into()), &host);
+        let view = render_in(&mut plugin, Section::Pipelines, &host);
 
         assert!(rows(&view).contains(&("j:300", Some("s:40:test"), "unit", Some("error"))), "{view:?}");
-        assert!(host.refreshed_views().contains(&PIPELINES.to_owned()));
+        assert!(host.refreshed_views().contains(&DETAILS.to_owned()));
     }
 
     #[test]
@@ -3076,15 +3088,15 @@ mod pipeline_tests {
 
         for key in ["j:1/../2", "p:1?x", "j:-1", "s:1/../2:test"] {
             pick(&mut plugin, &host, key);
-            plugin.handle(PIPELINES, ViewEvent::Expand(key.into()), &host.invocation()).unwrap();
+            handle_in(&mut plugin, Section::Pipelines, ViewEvent::Expand(key.into()), &host);
             for button in ["retry", "cancel", "cancel", "browser"] {
-                plugin.handle(PIPELINES, ViewEvent::Button(button.into()), &host.invocation()).unwrap();
+                handle_in(&mut plugin, Section::Pipelines, ViewEvent::Button(button.into()), &host);
             }
         }
 
         assert_eq!(host.requests().len(), before);
         assert!(host.opened_urls().is_empty());
-        plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        render_in(&mut plugin, Section::Pipelines, &host);
         assert!(host.requests()[before..].iter().all(|r| !r.url.contains("..") && !r.url.contains("?x") && !r.url.contains("/-1")));
     }
 
@@ -3135,7 +3147,7 @@ mod pipeline_tests {
         });
         let mut plugin = selected(&host);
 
-        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Pipelines, &host);
 
         assert_eq!(view.body, Body::Message("!7 has no pipelines.".into()));
     }
@@ -3182,11 +3194,11 @@ mod pipeline_tests {
         host.set_setting("pipelineView", "false");
         let before = host.requests().len();
 
-        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        let view = render_in(&mut plugin, Section::Pipelines, &host);
         pick(&mut plugin, &host, "j:301");
-        plugin.handle(PIPELINES, ViewEvent::Expand("p:40".into()), &host.invocation()).unwrap();
+        handle_in(&mut plugin, Section::Pipelines, ViewEvent::Expand("p:40".into()), &host);
         for button in ["retry", "cancel", "cancel", "browser"] {
-            plugin.handle(PIPELINES, ViewEvent::Button(button.into()), &host.invocation()).unwrap();
+            handle_in(&mut plugin, Section::Pipelines, ViewEvent::Button(button.into()), &host);
         }
 
         assert!(matches!(view.body, Body::Message(_)), "{view:?}");
@@ -3532,4 +3544,29 @@ fn changes_section_still_routes_view_messages() {
     let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
     let Body::Html(html) = &view.body else { panic!("{view:?}") };
     assert!(html.contains("src/a.rs"));
+}
+
+#[test]
+fn badges_use_cached_data_and_make_no_api_call() {
+    let host = setup();
+    let mut plugin = selected(&host);
+    render_in(&mut plugin, Section::Overview, &host);
+    let before = host.requests().len();
+
+    let view = render_in(&mut plugin, Section::Overview, &host);
+
+    assert_eq!(host.requests().len(), before);
+    assert!(view.toolbar.iter().any(|b| b.id == "section:commits"));
+}
+
+#[test]
+fn files_section_toggles_viewed_and_refreshes_the_window() {
+    let host = setup();
+    let mut plugin = selected(&host);
+    render_in(&mut plugin, Section::Files, &host);
+    let before = host.refreshed_views().len();
+
+    handle_in(&mut plugin, Section::Files, ViewEvent::Button("clear".into()), &host);
+
+    assert!(host.refreshed_views()[before..].contains(&DETAILS.to_owned()));
 }

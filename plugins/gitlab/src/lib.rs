@@ -35,9 +35,6 @@ const PROJECTS: &str = "gitlab-projects";
 const NEW_MR: &str = "new-merge-request";
 const NEW_SNIPPET: &str = "new-snippet";
 const SHARE: &str = "share-project-form";
-const FILES: &str = "merge-request-files";
-const COMMITS: &str = "merge-request-commits";
-const PIPELINES: &str = "merge-request-pipeline";
 
 const FILTER_KEY: &str = "filter";
 /// Typed filters (author, reviewer, label, text) as a query-string fragment added to the quick filter's.
@@ -521,10 +518,7 @@ impl GitLab {
         self.pipeline_confirm = None;
         self.pipeline_status = None;
         self.pipeline_open.clear();
-        self.refresh_section(Section::Changes);
-        host::refresh_view(FILES);
-        host::refresh_view(COMMITS);
-        host::refresh_view(PIPELINES);
+        host::refresh_view(DETAILS);
 
         Ok(())
     }
@@ -1730,7 +1724,7 @@ impl GitLab {
         }
 
         self.anchor = None;
-        host::refresh_view(COMMITS);
+        self.refresh_section(Section::Commits);
         if show_changes {
             return self.set_section(Section::Changes);
         }
@@ -1909,7 +1903,7 @@ impl GitLab {
                 let cancellable = pipeline.as_ref().filter(|p| ACTIVE_PIPELINE.contains(&p.status.as_str())).map(|p| p.id);
                 if CONFIRMED.contains(&id.as_str()) && cancellable.is_some() && pending != cancellable {
                     self.pipeline_confirm = cancellable;
-                    host::refresh_view(PIPELINES);
+                    self.refresh_section(Section::Pipelines);
                     return Ok(());
                 }
 
@@ -1926,7 +1920,7 @@ impl GitLab {
             _ => {}
         }
 
-        host::refresh_view(PIPELINES);
+        self.refresh_section(Section::Pipelines);
 
         Ok(())
     }
@@ -2063,9 +2057,6 @@ impl Views for GitLab {
             NEW_SNIPPET => Ok(self.new_snippet.render(&snippet_scopes(ctx))),
             SHARE if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
             SHARE => self.render_share(),
-            FILES => self.render_files(ctx),
-            COMMITS => self.render_commits(ctx),
-            PIPELINES => self.render_pipelines(ctx),
             _ => return Err(Error::NotFound(format!("view {view}"))),
         };
 
@@ -2087,9 +2078,6 @@ impl Views for GitLab {
             NEW_MR if forms_enabled() => self.handle_new_merge_request(event, ctx),
             NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
             SHARE if forms_enabled() => self.handle_share(event, ctx),
-            FILES => self.handle_files(event, ctx),
-            COMMITS => self.handle_commits(event),
-            PIPELINES => self.handle_pipelines(event, ctx),
             _ => Ok(()),
         }
     }
