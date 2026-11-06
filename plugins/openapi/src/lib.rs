@@ -145,11 +145,19 @@ fn fetch(result: Result<String, Error>) -> Fetched {
     }
 }
 
+fn spec_candidate_hint(text: &str) -> Vec<Diagnostic> {
+    if host::setting_bool("checkSpecCandidates") == Some(false) {
+        return Vec::new();
+    }
+
+    checks::spec_candidate(text)
+}
+
 fn problems(path: &str) -> Result<Vec<Diagnostic>, Error> {
     let project = project_for(path)?;
     let text = project.read_file(path)?;
     let Some(spec) = spec::parse(&text) else {
-        return Ok(Vec::new());
+        return Ok(spec_candidate_hint(&text));
     };
 
     let read = |file: &str| fetch(project.read_file(&resolve_path(path, file)));
@@ -348,12 +356,15 @@ impl Providers for OpenApi {
     }
 }
 
+const MAX_ENDPOINT_FILE_BYTES: usize = 1 << 20;
+
 pub const ENDPOINTS: &str = "endpoints";
 
 // ponytail: re-scans the project on every render; cache per file version if large projects make it slow.
 fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
     let mut paths = project.find_files("**/*.yaml", 500)?;
     paths.extend(project.find_files("**/*.yml", 500)?);
+    paths.extend(project.find_files("**/*.json", 500)?);
 
     let mut items = Vec::new();
     let mut files = 0;
@@ -361,6 +372,10 @@ fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
         let Ok(text) = project.read_file(&path) else {
             continue;
         };
+        if text.len() > MAX_ENDPOINT_FILE_BYTES {
+            continue;
+        }
+
         let Some(spec) = spec::parse(&text) else {
             continue;
         };
@@ -841,5 +856,143 @@ mod tests {
         host.open_editor("/project/api.json", "json", "openapi: 3.0.0\n", &[(0, 0, 0, 0)]);
         assert!(OpenApi::default().run_command("copy-http-requests", &host.invocation(), None).is_err());
         assert!(host.clipboard().is_none());
+    }
+
+    const FRAGMENT: &str = "paths:\n  /pets:\n    get:\n      operationId: list\n";
+    const FRAGMENT_JSON: &str = "{\n  \"paths\": {\n    \"/pets\": { \"get\": {} }\n  }\n}\n";
+
+    fn published(host: &MockHost, path: &str, text: &str) -> Vec<Diagnostic> {
+        host.add_file(path, text);
+        OpenApi::default().handle_events(&[Event::FileSaved(path.into())], &host.invocation());
+        host.diagnostics().get(path).cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn yaml_with_paths_but_no_root_key_gets_a_hint() {
+        let host = MockHost::install();
+        let found = published(&host, "/project/frag.yaml", FRAGMENT);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code.as_deref(), Some("missing-openapi-root"));
+        assert_eq!(found[0].severity, openidea_plugin::Severity::Info);
+        assert_eq!((found[0].range.start.line, found[0].range.start.character), (0, 0));
+    }
+
+    #[test]
+    fn json_with_paths_but_no_root_key_gets_a_hint() {
+        let host = MockHost::install();
+        let found = published(&host, "/project/frag.json", FRAGMENT_JSON);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].code.as_deref(), Some("missing-openapi-root"));
+        assert_eq!(found[0].range.start.line, 1);
+    }
+
+    #[test]
+    fn hint_disappears_when_the_root_key_is_added() {
+        let host = MockHost::install();
+        assert_eq!(published(&host, "/project/frag.yaml", FRAGMENT).len(), 1);
+        assert!(published(&host, "/project/frag.yaml", &format!("openapi: 3.0.0\n{FRAGMENT}")).is_empty());
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = MockHost::install();
+        published(&host, "/project/frag.yaml", FRAGMENT);
+        host.add_file("/project/frag.yaml", &format!("swagger: '2.0'\n{FRAGMENT}"));
+        OpenApi::default().handle_events(&[Event::FileSaved("/project/frag.yaml".into())], &host.invocation());
+        assert!(host.diagnostics().get("/project/frag.yaml").is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn spec_candidate_is_quiet_for_library_or_dynamic_name() {
+        let host = MockHost::install();
+        let quiet = [
+            ("/project/a.yaml", "paths:\n  - src\n  - lib\n"),
+            ("/project/b.yaml", "paths:\n  src:\n    get: x\n"),
+            ("/project/c.yaml", "paths:\n  /x:\n    summary: no method\n"),
+            ("/project/d.yaml", "paths:\n  /x: {}\n"),
+            ("/project/package.json", "{\n  \"name\": \"x\",\n  \"paths\": [\"a\"],\n  \"compilerOptions\": { \"paths\": { \"/x\": { \"get\": 1 } } }\n}\n"),
+        ];
+        for (path, text) in quiet {
+            assert!(published(&host, path, text).is_empty(), "{path}");
+        }
+    }
+
+    #[test]
+    fn candidate_hint_ignores_unrelated_yaml() {
+        let host = MockHost::install();
+        let compose = "services:\n  web:\n    image: nginx\n    volumes:\n      - paths:/data\n";
+        let workflow = "name: ci\non:\n  push:\n    paths:\n      - 'src/**'\njobs:\n  t:\n    runs-on: ubuntu-latest\n";
+        assert!(published(&host, "/project/docker-compose.yaml", compose).is_empty());
+        assert!(published(&host, "/project/.github/ci.yml", workflow).is_empty());
+    }
+
+    #[test]
+    fn candidate_check_can_be_switched_off() {
+        let host = MockHost::install();
+        host.set_setting("checkSpecCandidates", "false");
+        assert!(published(&host, "/project/frag.yaml", FRAGMENT).is_empty());
+    }
+
+    #[test]
+    fn ranges_use_utf16_columns_with_multibyte_text() {
+        let host = MockHost::install();
+        let text = "\u{1F600}: 1\n\"paths\": {}\n";
+        assert!(published(&host, "/project/u.yaml", text).is_empty());
+
+        let json = "{ \"\u{1F600}\": 1, \"paths\": { \"/p\": { \"get\": {} } } }";
+        let found = published(&host, "/project/u.json", json);
+        assert_eq!(found[0].range.start.character, 12);
+    }
+
+    #[test]
+    fn crlf_files_report_correct_lines() {
+        let host = MockHost::install();
+        let text = "info: x\r\nnote: y\r\npaths:\r\n  /pets:\r\n    get: {}\r\n";
+        let found = published(&host, "/project/crlf.yaml", text);
+        assert_eq!(found[0].range.start.line, 2);
+        assert_eq!(found[0].range.start.character, 0);
+    }
+
+    #[test]
+    fn lists_endpoints_of_json_specs() {
+        let host = MockHost::install();
+        host.add_file("/project/a.yaml", PETSTORE);
+        host.add_file("/project/b/api.json", JSON_SPEC);
+        let view = OpenApi::default().render(ENDPOINTS, None, &host.invocation()).unwrap();
+        let Body::List(items) = view.body else { panic!("expected a list") };
+        let json_item = items.iter().find(|i| i.key.ends_with("/project/b/api.json")).unwrap();
+        assert_eq!(json_item.label, "GET /pets");
+        OpenApi::default().handle(ENDPOINTS, ViewEvent::Activate(json_item.key.clone()), &host.invocation()).unwrap();
+        assert_eq!(host.opened_locations()[0].0, "/project/b/api.json");
+        assert!(items.iter().any(|i| i.key.ends_with("/project/a.yaml")));
+    }
+
+    #[test]
+    fn endpoints_skip_non_spec_json_and_huge_files() {
+        let host = MockHost::install();
+        host.add_file("/project/package.json", "{\"name\": \"x\"}");
+        let huge = format!("{{\"openapi\": \"3.0.0\", \"paths\": {{\"/p\": {{\"get\": {{}}}}}}, \"pad\": \"{}\"}}", "x".repeat(2 << 20));
+        host.add_file("/project/huge.json", &huge);
+        let view = OpenApi::default().render(ENDPOINTS, None, &host.invocation()).unwrap();
+        assert!(matches!(view.body, Body::Message(_)));
+    }
+
+    #[test]
+    fn endpoints_view_counts_yaml_and_json_files() {
+        let host = MockHost::install();
+        host.add_file("/project/a.yaml", PETSTORE);
+        host.add_file("/project/b.json", JSON_SPEC);
+        let view = OpenApi::default().render(ENDPOINTS, None, &host.invocation()).unwrap();
+        assert_eq!(view.status.as_deref(), Some("5 endpoints in 2 files"));
+    }
+
+    #[test]
+    fn missing_file_is_treated_as_absent() {
+        let host = MockHost::install();
+        for error in [Error::NotFound("x".into()), Error::Invalid("/project/x.yaml: no such file".into())] {
+            assert!(matches!(fetch(Err(error)), Fetched::Missing));
+        }
+        assert!(problems("/project/never-added.yaml").is_err());
+        let _ = host;
     }
 }

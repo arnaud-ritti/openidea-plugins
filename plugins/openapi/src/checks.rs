@@ -37,6 +37,30 @@ pub fn check(text: &str, spec: &Spec, read: &dyn Fn(&str) -> Fetched) -> Vec<Dia
     found
 }
 
+/// A file that looks like a spec without its root key: a `paths` object of `/…` items holding HTTP methods.
+pub fn spec_candidate(text: &str) -> Vec<Diagnostic> {
+    if !text.contains("paths") {
+        return Vec::new();
+    }
+
+    let keys = scan(text);
+    if keys.iter().any(|k| k.key == "openapi" || k.key == "swagger") {
+        return Vec::new();
+    }
+
+    let Some(paths) = keys.iter().find(|k| k.key == "paths") else {
+        return Vec::new();
+    };
+
+    if operations(text, &keys).is_empty() {
+        return Vec::new();
+    }
+
+    let message = "This file has a `paths` object but no `openapi` or `swagger` key, so it is not treated as an API description".to_owned();
+
+    vec![problem(text, (paths.at, paths.end), Severity::Info, "missing-openapi-root", message)]
+}
+
 fn problem(text: &str, (at, end): (usize, usize), severity: Severity, code: &str, message: String) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(range(text, at, end), severity, message);
     diagnostic.code = Some(code.into());
