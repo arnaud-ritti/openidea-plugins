@@ -4,7 +4,7 @@ version = "0.1.0" # x-release-please-version
 description = "Spring Cloud in Java and Kotlin projects. Links OpenFeign client methods to the controller endpoints they call and back, links Spring Cloud Stream function beans to their bindings in application.yml/.properties (navigation, completion, and checks for bindings and function definitions that name no function), and completes and checks Spring Cloud Gateway route predicates and filters. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0 (first release): Feign client ↔ endpoint navigation, Stream function binding navigation, completion and checks, Gateway predicate and filter completion and checks."
+change-notes = "Unreleased: Feign Clients view, checks for legacy @StreamListener / @SendTo channels and return values, and a hint for @BootstrapConfiguration classes that component scanning can find. 0.1.0: 0.1.0 (first release): Feign client ↔ endpoint navigation, Stream function binding navigation, completion and checks, Gateway predicate and filter completion and checks."
 categories = ["frameworks"]
 icon = "icon.svg"
 engines.openidea = "^1.2"
@@ -12,6 +12,7 @@ wasm = "dist/plugin.wasm"
 activation = [
     "on-language:java",
     "on-language:kotlin",
+    "on-view:feign-clients",
     "on-file:**/application*.yml",
     "on-file:**/application*.yaml",
     "on-file:**/application*.properties",
@@ -34,3 +35,9 @@ languages = ["yaml", "properties"]
 [contributes.settings]
 schema = "settings.schema.json"
 title = "Spring Cloud"
+
+[[contributes.views]]
+id = "feign-clients"
+title = "Feign Clients"
+icon = "icons/spring.svg"
+location = "left"

@@ -26,12 +26,13 @@ pub const BUILD_GLOBS: &[&str] = &[
 pub struct Groups {
     pub stream_bindings: bool,
     pub bootstrap: bool,
+    pub legacy_stream: bool,
 }
 
 impl Groups {
     pub fn from_settings() -> Self {
         let on = |key: &str| host::setting_bool(&format!("springCloud.{key}")).unwrap_or(true);
-        Self { stream_bindings: on("checkStreamBindings"), bootstrap: on("checkBootstrap") }
+        Self { stream_bindings: on("checkStreamBindings"), bootstrap: on("checkBootstrap"), legacy_stream: on("checkLegacyStream") }
     }
 }
 
@@ -177,4 +178,64 @@ pub fn bootstrap_config_missing_dependency(path: &str, text: &str, builds: &Inde
         "bootstrap-config-missing-dependency",
         "Since Spring Boot 2.4 this bootstrap file is ignored unless spring-cloud-starter-bootstrap is a dependency or spring.cloud.bootstrap.enabled=true is set. Prefer spring.config.import in application.* instead.",
     )]
+}
+
+const BUILT_IN_CHANNELS: [&str; 2] = ["input", "output"];
+const BUILT_IN_BINDINGS: [&str; 3] = ["Sink", "Source", "Processor"];
+
+/// Problems of the legacy annotation model (`@StreamListener`, `@SendTo`, `@BootstrapConfiguration`), judged
+/// only against channels the project declares itself; a `@EnableBinding` of a library interface keeps the check quiet.
+pub fn legacy_stream(path: &str, text: &str, java: &Index<JavaFacts>) -> Vec<Finding> {
+    if !["StreamListener", "BootstrapConfiguration"].iter().any(|w| text.contains(w)) {
+        return Vec::new();
+    }
+    let file = spring_text::parse_source(path, text);
+    let mut out = Vec::new();
+    let channels_known = channels_visible(java);
+    for ty in &file.types {
+        if let Some(a) = ty.annotation("BootstrapConfiguration")
+            && ty.has(&["Configuration", "Component"])
+        {
+            out.push(
+                Finding::new(a.at, a.end, "bootstrap-configuration-scanned", "A `@BootstrapConfiguration` class that is also a `@Configuration` or `@Component` can be found by component scanning and loaded twice; register it only in spring.factories.")
+                    .with_severity(Severity::Hint),
+            );
+        }
+        for m in ty.methods() {
+            let Some(listener) = m.annotation("StreamListener") else { continue };
+            let send_to = m.annotation("SendTo");
+            let returns = m.ty.as_ref().is_some_and(|t| t.text != "void" && t.text != "Unit");
+            let output = send_to.is_some() || m.annotation("Output").is_some() || m.params.iter().any(|p| p.annotation("Output").is_some());
+            if returns && !output {
+                out.push(
+                    Finding::new(m.at, m.at + m.name.len(), "stream-listener-return", "This `@StreamListener` method returns a value but has no `@SendTo` or `@Output`, so the result goes nowhere.")
+                        .with_severity(Severity::Info),
+                );
+            }
+            if !returns && let Some(a) = send_to {
+                out.push(
+                    Finding::new(a.at, a.end, "send-to-without-return", "`@SendTo` has nothing to send: the method returns void.").with_severity(Severity::Info),
+                );
+            }
+            let Some(known) = channels_known.as_ref() else { continue };
+            for s in listener.strings(&["value", "target"]).into_iter().chain(send_to.map(|a| a.strings(&["value"])).unwrap_or_default()) {
+                if s.value.contains("${") || known.contains(&s.value) || BUILT_IN_CHANNELS.contains(&s.value.as_str()) {
+                    continue;
+                }
+                out.push(Finding::new(s.at, s.end, "stream-listener-channel", format!("No `@Input` or `@Output` channel `{}` is declared in the project.", s.value)));
+            }
+        }
+    }
+    out
+}
+
+/// The channels the project declares, once every file was read and each `@EnableBinding` type is a project interface or a built-in one.
+fn channels_visible(java: &Index<JavaFacts>) -> Option<Vec<String>> {
+    if !java.complete() {
+        return None;
+    }
+    let interfaces: Vec<&String> = java.iter().flat_map(|(_, f)| &f.channel_interfaces).collect();
+    let bindings: Vec<&String> = java.iter().flat_map(|(_, f)| &f.enable_bindings).collect();
+    let all_visible = bindings.iter().all(|b| interfaces.contains(b) || BUILT_IN_BINDINGS.contains(&b.as_str()));
+    (!bindings.is_empty() && all_visible).then(|| java.iter().flat_map(|(_, f)| f.channels.clone()).collect())
 }

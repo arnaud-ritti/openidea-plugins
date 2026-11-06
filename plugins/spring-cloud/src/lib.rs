@@ -7,10 +7,12 @@ mod checks;
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
+use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
 use spring_text::config::{self, Key};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET, project_of};
 use spring_text::java;
+use spring_text::tree::Expansion;
 use spring_text::{SOURCE_GLOBS, contains, parse_source, range, source_calls};
 
 const CONFIG_GLOBS: &[&str] = &[
@@ -22,7 +24,8 @@ const CONFIG_GLOBS: &[&str] = &[
     "**/bootstrap*.properties",
 ];
 /// Words a Java file needs to hold anything this plugin indexes.
-const JAVA_HINTS: [&str; 7] = ["FeignClient", "Controller", "Function", "Consumer", "Supplier", "send(", "Factory"];
+const JAVA_HINTS: [&str; 9] =
+    ["FeignClient", "Controller", "Function", "Consumer", "Supplier", "send(", "Factory", "@Input", "@Output"];
 const FUNCTIONAL: [&str; 3] = ["Function", "Consumer", "Supplier"];
 const BINDINGS: &str = "spring.cloud.stream.bindings.";
 const FUNCTION_BINDINGS: &str = "spring.cloud.stream.function.bindings.";
@@ -128,6 +131,11 @@ pub struct JavaFacts {
     pub sent: Vec<String>,
     /// Names of the project's own route predicate and gateway filter factories.
     pub factories: Vec<String>,
+    /// Legacy Stream channels declared by `@Input` / `@Output` methods, and the interfaces declaring them.
+    pub channels: Vec<String>,
+    pub channel_interfaces: Vec<String>,
+    /// Types named by `@EnableBinding(…)`.
+    pub enable_bindings: Vec<String>,
 }
 
 pub fn java_facts(text: &str) -> JavaFacts {
@@ -172,6 +180,23 @@ pub fn facts_in(path: &str, text: &str) -> JavaFacts {
                     out.servers.push(Endpoint { verb, path, range: span(m.at, &m.name), label });
                 }
             }
+        }
+        let channels: Vec<String> = c
+            .methods()
+            .filter_map(|m| {
+                let a = m.annotation("Input").or_else(|| m.annotation("Output"))?;
+                Some(a.strings(&["value"]).first().map_or_else(|| m.name.clone(), |s| s.value.clone()))
+            })
+            .collect();
+        if !channels.is_empty() {
+            out.channel_interfaces.push(c.name.clone());
+            out.channels.extend(channels);
+        }
+        if let Some(binding) = c.annotation("EnableBinding") {
+            out.enable_bindings.extend(binding.args.iter().flat_map(|a| a.text.split(".class").filter_map(|t| {
+                let name = t.rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_')).next()?;
+                (!name.is_empty()).then(|| name.to_owned())
+            })));
         }
         let factory = ["RoutePredicateFactory", "GatewayFilterFactory"].iter().find_map(|s| c.name.strip_suffix(s));
         let extends_factory = c.supers().any(|s| s.name.ends_with("PredicateFactory") || s.name.ends_with("FilterFactory"));
@@ -438,6 +463,7 @@ pub struct CloudTools {
     java: Indexes<JavaFacts>,
     config: Indexes<StreamConfig>,
     builds: Indexes<checks::Build>,
+    expansion: Expansion,
 }
 
 impl Default for CloudTools {
@@ -446,6 +472,7 @@ impl Default for CloudTools {
             java: Indexes::new(SOURCE_GLOBS, java_file),
             config: Indexes::new(CONFIG_GLOBS, config_file),
             builds: Indexes::new(checks::BUILD_GLOBS, checks::read_build),
+            expansion: Expansion::default(),
         }
     }
 }
@@ -487,6 +514,9 @@ impl CloudTools {
         if groups.stream_bindings {
             let unbound = checks::stream_channel_unbound(&doc.path, &doc.text, java, config);
             problems.extend(unbound.iter().map(|f| f.diagnostic(&doc.text)));
+        }
+        if groups.legacy_stream {
+            problems.extend(checks::legacy_stream(&doc.path, &doc.text, java).iter().map(|f| f.diagnostic(&doc.text)));
         }
         let _ = host::publish_diagnostics(&doc.path, &problems);
         let endpoints = |pick: fn(&JavaFacts) -> &Vec<Endpoint>, matches: &dyn Fn(&Endpoint) -> bool| {
@@ -667,7 +697,74 @@ impl Plugin for CloudTools {
     }
 }
 
-register_plugin!(CloudTools, providers);
+impl CloudTools {
+    fn feign_view(&mut self, view: &str, project: &openidea_plugin::Project, budget: std::time::Duration) -> View {
+        let index = self.java.get(project, budget);
+        let complete = index.complete();
+        if !complete {
+            host::refresh_view(view);
+        }
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let mut files: Vec<(&str, &Vec<Endpoint>)> =
+            index.iter().filter(|(_, f)| !f.clients.is_empty()).map(|(p, f)| (p, &f.clients)).collect();
+        files.sort_by_key(|(path, _)| *path);
+        if files.is_empty() {
+            let text = if complete { "No Feign clients found." } else { "Scanning…" };
+            return View::message(text).button(refresh);
+        }
+        let mut items = Vec::new();
+        let mut total = 0;
+        for (path, clients) in files {
+            let file_key = format!("f:{path}");
+            total += clients.len();
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            items.push(TreeItem::new(&file_key, name).detail(&clients.len().to_string()).icon("file"));
+            for c in clients {
+                let key = format!("c:{}:{}:{path}", c.range.start.line, c.range.start.character);
+                let label = format!("{} {}", c.verb, c.path);
+                items.push(TreeItem::new(&key, &label).parent(&file_key).detail(&c.label).icon("send"));
+            }
+        }
+        self.expansion.apply(&mut items);
+        View::new(Body::Tree(items)).button(refresh).status(&format!("{total} client methods"))
+    }
+}
+
+impl Views for CloudTools {
+    fn render(&mut self, view: &str, _viewport: Option<Viewport>, ctx: &Invocation) -> Result<View, Error> {
+        let Some(project) = ctx.project() else { return Ok(View::message("Open a project to see its Feign clients.")) };
+        Ok(self.feign_view(view, &project, spring_text::index::COMMAND_BUDGET))
+    }
+
+    fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if self.expansion.handle(&event) {
+            host::refresh_view(view);
+            return Ok(());
+        }
+        match event {
+            ViewEvent::Button(b) if b == "refresh" => {
+                if let Some(project) = ctx.project()
+                    && self.java.get(&project, std::time::Duration::ZERO).complete()
+                {
+                    self.java.reset();
+                }
+                host::refresh_view(view);
+            }
+            ViewEvent::Activate(key) => {
+                let mut parts = key.splitn(4, ':');
+                if let (Some("c"), Some(line), Some(column), Some(path)) = (parts.next(), parts.next(), parts.next(), parts.next())
+                    && let (Ok(line), Ok(column)) = (line.parse(), column.parse())
+                {
+                    host::open_location(path, line, column)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+register_plugin!(CloudTools, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -1121,5 +1218,60 @@ class StreamFunctions {
         let mut tools = CloudTools::default();
         tools.line_markers(&doc(BOOTSTRAP_PATH, "yaml", BOOTSTRAP));
         assert!(codes(&host, BOOTSTRAP_PATH).is_empty());
+    }
+
+    const CHANNELS: &str = "interface Channels {\n    @Input(\"orders\") SubscribableChannel orders();\n    @Output SubscribableChannel shipped();\n}\n@EnableBinding(Channels.class)\nclass App {}\n";
+    const LISTENERS: &str = "class L {\n    @StreamListener(\"orders\") void ok(String s) {}\n    @StreamListener(\"ordres\") void typo(String s) {}\n    @StreamListener(\"orders\") String lost(String s) { return s; }\n    @StreamListener(\"orders\") @SendTo(\"shipped\") String sends(String s) { return s; }\n    @StreamListener(\"orders\") @SendTo(\"shipped\") void empty(String s) {}\n    @StreamListener(\"input\") void builtIn(String s) {}\n}\n";
+    const LISTENERS_PATH: &str = "src/main/java/com/acme/L.java";
+
+    #[test]
+    fn legacy_stream_listeners_are_checked_against_declared_channels() {
+        let host = setup();
+        host.add_file("src/main/java/com/acme/Channels.java", CHANNELS);
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(LISTENERS_PATH, "java", LISTENERS));
+        let found = codes(&host, LISTENERS_PATH);
+        assert_eq!(found, [
+            ("stream-listener-channel".to_owned(), Severity::Warning),
+            ("stream-listener-return".to_owned(), Severity::Info),
+            ("send-to-without-return".to_owned(), Severity::Info),
+        ]);
+        let channel = host.diagnostics()[&format!("/project/{LISTENERS_PATH}")].iter().find(|d| d.code.as_deref() == Some("stream-listener-channel")).unwrap().clone();
+        assert_eq!(channel.range.start.line, 2);
+    }
+
+    #[test]
+    fn legacy_stream_is_quiet_for_library_binding_interfaces_and_other_settings() {
+        let host = setup();
+        host.add_file("src/main/java/com/acme/Channels.java", "@EnableBinding(com.lib.Foreign.class)\nclass App {}\n");
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(LISTENERS_PATH, "java", LISTENERS));
+        assert!(!codes(&host, LISTENERS_PATH).iter().any(|(c, _)| c == "stream-listener-channel"));
+        host.set_setting("springCloud.checkLegacyStream", "false");
+        tools.line_markers(&doc(LISTENERS_PATH, "java", LISTENERS));
+        assert!(codes(&host, LISTENERS_PATH).is_empty());
+    }
+
+    #[test]
+    fn bootstrap_configuration_that_is_scannable_gets_a_hint() {
+        let host = setup();
+        let path = "src/main/java/com/acme/Boot.java";
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(path, "java", "@BootstrapConfiguration\n@Configuration\nclass Boot {}\n"));
+        assert_eq!(codes(&host, path), [("bootstrap-configuration-scanned".to_owned(), Severity::Hint)]);
+        tools.line_markers(&doc(path, "java", "@BootstrapConfiguration\nclass Boot {}\n"));
+        assert!(codes(&host, path).is_empty());
+    }
+
+    #[test]
+    fn feign_view_lists_client_methods_by_file() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/Users.java", "@FeignClient(name = \"users\")\ninterface Users {\n    @GetMapping(\"/users/{id}\") User get(@PathVariable long id);\n}\n");
+        let mut tools = CloudTools::default();
+        let project = host.invocation().project().unwrap();
+        let view = tools.feign_view("feign-clients", &project, std::time::Duration::from_secs(3));
+        let Body::Tree(items) = view.body else { panic!("not a tree") };
+        let labels: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.detail.as_deref())).collect();
+        assert_eq!(labels, [("Users.java", Some("1")), ("GET /users/{id}", Some("Users.get()"))]);
     }
 }

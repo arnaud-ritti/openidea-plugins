@@ -9,6 +9,11 @@
       "type": "boolean",
       "title": "Warn when a bootstrap file is ignored because spring-cloud-starter-bootstrap is missing (Spring Boot 2.4+)",
       "default": true
+    },
+    "springCloud.checkLegacyStream": {
+      "type": "boolean",
+      "title": "Check legacy @StreamListener / @SendTo channels, return values and @BootstrapConfiguration classes",
+      "default": true
     }
   }
 }
