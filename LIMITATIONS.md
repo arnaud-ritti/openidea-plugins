@@ -479,6 +479,12 @@ inside the container, needs work in OpenIDEA itself: see _Upstream work_.
 - **Accepted:** for a file starting with a UTF-8 BOM, line-0 ranges are one UTF-16 column to the right if the editor document omits the BOM, so the squiggle on the first line is off by one. The manifest-activation test is a substring check on `plugin.toml`, not a TOML parse.
 - **Not verified in the IDE:** `on-event:` activation in the real host.
 
+### Added by the gap F pass (2026-11-06)
+
+- **Folder structure** (`folder-structure`, Information, setting `checkFolderStructure`): a `devcontainer.json` that is not at `.devcontainer/`, `.devcontainer/<folder>/` or `.devcontainer.json`. It looks at the opened file's path only; it does not check that anything references the file.
+- **Completion** (setting `completeProperties`): top-level property names not yet present, and value choices for known enum or boolean properties. Nested objects, arrays, feature ids and schema-driven values are not completed. The provider is declared for `json` and `jsonc`; the `jsonc` language id and whether the completion `Document.path` equals the path the file-opened event reports are not verified in the IDE.
+- Files over 256 KB publish nothing for either the checks or the completion.
+
 ## JPA Assist (`aritti.jpa-assist`)
 
 Clean-room plugin for JPA and Spring Data in Java and Kotlin: entity and
@@ -637,6 +643,15 @@ The plugin API is the same in both.
 
 - **jpa-assist:** `entity-missing-id` replaces `jpa-missing-id`: it follows project superclasses and warns only when the whole chain is project entities without an id; a library or unfound superclass is quiet and the search is capped by `MAX_SOURCES`. `attribute-type` covers `@Temporal`, `@Enumerated` and `@Version` on well-known types only; `@Lob` is not checked. `entity-listener-signature` treats a class with callbacks, a `persistence` import and no entity marker as a listener (heuristic, no `@EntityListeners` cross-reference), and a file with both an entity and a listener holds the listener to the zero-parameter rule. Settings `checkEntityId`, `checkAttributeTypes`, `checkListenerSignatures`.
 
+### Added by the gap F pass (2026-11-06)
+
+- **Kotlin checks** (setting `jpaAssist.checkKotlinEntities`): `jpa-val-attribute`, `jpa-immutable-collection` (a read-only collection on an association) and `jpa-data-class` (now quiet when `equals`, `hashCode` and `toString` are all overridden). Only the first class in a file is checked and there is no type resolution: collection types are judged by simple name, so a user-defined `List` is flagged, and `@Version val` still warns.
+- **Class signature** (`jpaAssist.checkClassSignature`): `jpa-entity-nested`, `jpa-entity-multiple-roles` and `jpa-entity-not-a-class`. The nested check applies to classes nested in a class only.
+- **Listeners** (`jpaAssist.checkListenerUsage`): `jpa-listener-without-callbacks` on an `@EntityListeners` reference. The listener is found by simple file name and only when there is one match; callbacks inherited or supplied by an interface are not followed, so those cases stay quiet.
+- **Callback actions:** seven "Add @X callback" source actions on the class line, skipped when a method of that name already exists (a call to it also counts). The import is added with the method, and CRLF files keep their line endings. The action on a `@MappedSuperclass` is not verified.
+- **`parse_class` accepts classes only:** an entity on an interface or enum drops out of the structure view and the generators. A later entity after a non-class marker in the same file is not parsed.
+- A preceding `Audit::class` in an annotation no longer counts as the class keyword.
+
 ## aritti.kube-explorer (clean-room, inspired by JetBrains Kubernetes 263.7307.101)
 
 Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plugin API change since
@@ -674,10 +689,19 @@ Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plug
 ### Added by the feasible-parity pass (2026-11-06)
 
 - **Manifest inspections** (six settings, `events` and `project.read` optional, activation `on-event:file-opened`/`file-saved`): `deprecated-api-version` (11 rows of removed groups with the release that removed them), `duplicate-env-name`, `missing-name`, `missing-selector`, `helm-whitespace-trim`, `chart-missing-key`. Intentions: List to separate documents and documents to List. Limits: block-style YAML only (flow-style `env`, `metadata` or `spec` keeps a check quiet); files containing `{{` get only the Helm group; the deprecation table lacks `autoscaling/v2beta1` and `v2beta2` and the `discovery`, `events`, `flowcontrol` and `storage` `v1beta1` rows; `missing-selector` is quiet for files in a directory with a `kustomization` file or a name containing `patch`, and only looks at the file's own directory; comments inside a List's items are kept but List-level metadata and header comments are dropped by the conversions; every `.yaml`, `.yml` and `.tpl` open or save costs a file read, capped at 1 MiB; changing a setting does not refresh published diagnostics until the next save.
-- **Templates:** 15 New-menu templates (`k8s-<kind>`) that pass the manifest checks.
+- **Templates:** 15 New-menu templates (`k8s-<kind>`; 16 after the gap F pass) that pass the manifest checks.
 - **Debug:** a button on a pod runs `kubectl debug -it <pod> --image=<debugImage> --target=<first container>` in a terminal (default image `busybox:stable`, setting `debugImage`). Only the first container is the target, the cluster must support ephemeral containers, and pod or image names with whitespace, control characters or a leading `-` are refused.
 - **Secrets (setting `allowRevealSecrets`, default off):** Show Secret and Create Secret are tree-toolbar buttons, not palette commands. With the setting off, Show Secret shows nothing and runs no `kubectl`, and the YAML of a Secret (edit and open) is refused too; Describe is left alone because it shows no values. With it on, YAML of a Secret is unstripped. Show runs `kubectl get secret -o json`, decodes in the plugin and keeps values in the Form body in plugin memory only; they clear on Back (there is no view-close event) and are hidden if the setting is turned off. Non-UTF-8 values show as base64. Create builds an Opaque manifest with base64 `data` and runs `kubectl create -f -` with the manifest on stdin (never `apply`, so an existing secret is not overwritten and no last-applied copy of the values is stored); an existing name gives a value-free message. **The Form API has no masked field, so typed values in Create are visible on screen.** Values never go to logs, notifications, storage, the clipboard, terminals or process arguments; failure text is redacted of the raw and base64 values, and that redaction misses JSON-escaped and partial forms. A Secret's YAML already opened as a temp file stays on disk when the setting is turned off.
 - **Not verified in the IDE:** the `$NAME$` and `$END$` placeholders in the templates; that Form field values persist as the plugin assumes; prefilled code-action edits (the intentions use whole-document edits).
+
+### Added by the gap F pass (2026-11-06)
+
+- **Deprecated APIs:** the table gained 13 entries (HPA `autoscaling/v2beta1` and `v2beta2`, and the `discovery`, `events`, `node`, `storage`, `certificates`, `coordination`, `scheduling`, `apiregistration`, `authentication` and `authorization` `v1beta1` groups), checked against the Kubernetes deprecation guide. It is still a fixed list.
+- **Chart.yaml schema** (`chart-unknown-key`, `chart-invalid-value`, setting `checkChartSchema`): top-level keys against the fixed Helm key list, and scalar values (`apiVersion`, `type`, `deprecated`, a `version` that does not start with a digit after an optional `v`; `yes` and `no` count as booleans). Files with Helm `{{ }}` actions are skipped. `requirements.yaml` (Helm 2) is not covered.
+- **Excessive trim** (`helm-excessive-trim`, setting `checkHelmExcessiveTrim`): text based, with no template parse, so a `}}` inside a string literal or a comment can end an action early and confuse it.
+- **Commands:** Update Helm Repositories (`helm repo update`, needs the optional `process:helm`; denied gives a notification) and How to Install kubectl (static text in a notification). The hint cannot install kubectl or read the shell's `PATH`; it only reports that the IDE could not start it. It appears as a tree button only while no context is stored, because kubectl is not asked once one is, and a missing kubectl on the real host may show a permission message instead (not verified). A 16th template, CertificateSigningRequest, joins the New menu.
+- **All namespaces:** the first entry of the Namespace list shows every namespaced kind as `namespace/name` rows; actions on a row run in that row's namespace. Create Secret, Apply Manifest, Apply Kustomization and Delete Manifest Resources are refused in this mode (pick a namespace first); dry run, Diff and Kustomize render still run against the kubeconfig's namespace. Cluster-scoped custom resources and custom resources whose names are not DNS names are listed, but every action on them is refused. Refresh already existed.
+- **Known limit that predates this pass:** the port-forward `ports` text can carry extra kubectl flags.
 
 ## aritti.tasks (port of com.intellij.tasks)
 
@@ -1044,6 +1068,11 @@ The `migrations` view (bottom, icon `database`) is a read-only tree of migration
 - **Failures:** a denied capability, a spawn error, a non-zero exit, bad JSON or an empty list show a message with a Refresh button. 
 - **Not verified:** whether JSON survives `mvn` output (Maven prefixes every line with `[INFO]`, which would break multi-line JSON, and it is unverified that the Maven plugin honours `outputType`), the exact JSON state spellings for the Missing and Out of order variants against a live Flyway, and the view in the IDE (mock host only). `serde_json` was added as a dependency of the plugin to parse the output.
 
+### Added by the gap F pass (2026-11-06)
+
+- **Run configurations:** `info`, `validate` and `migrate` are run detectors on `flyway.toml` and `flyway.conf`. They always run plain `flyway <goal>` and ignore the `runner` and `arguments` settings; URL, credentials and environment come from the config file. A config in `conf/` is not detected, and whether the host matches `files` at the project root only is not verified. `clean` and `repair` stay commands.
+- **`migrate` writes to the database** with one click (the entry is labelled so), unlike the Liquibase detectors, which only read.
+
 ## Liquibase Changelogs (aritti.liquibase, clean-room)
 
 Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
@@ -1118,6 +1147,14 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 ### Added by the feasible-parity pass (2026-11-06)
 
 - **Templates:** New-menu entries for OpenAPI 3.1 (YAML and JSON) and AsyncAPI 3.0 (YAML) with a `$NAME$` title only. The AsyncAPI file is not checked as OpenAPI (detection needs an `openapi` or `swagger` key). Not verified in the IDE: `$NAME$` expansion.
+
+### Added by the gap F pass (2026-11-06)
+
+- **`missing-openapi-root`** (Info on the `paths` key, setting `checkSpecCandidates`): a YAML or JSON file with a root `paths` object of `/...` items holding HTTP methods but no `openapi` or `swagger` key, such as a spec fragment. Files over 1 MiB are skipped by this hint; a file that parses as a spec is still checked at any size.
+- **JSON in the endpoints view:** JSON specs are listed next to YAML ones. A JSON file is read in full before the 1 MiB cap applies, because the host has no size query.
+- **Skeletons:** `openapi-path`, `openapi-operation` and `swagger2-root` are plain completion items (not live templates with abbreviations), offered anywhere in a spec file and not context aware, so `swagger2-root` also appears in an OpenAPI 3 file. Snippet tab stops are not verified in the IDE.
+- **Templates:** Swagger 2.0 (YAML) and Swagger 2.0 (JSON) join the New menu.
+- **Reload:** the preview has a Reload button. Cargo cannot run the page script, so it is not verified.
 
 ## aritti.dependency-audit (clean-room, inspired by JetBrains' package vulnerability checks)
 

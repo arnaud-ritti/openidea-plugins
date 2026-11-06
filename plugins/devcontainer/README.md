@@ -29,6 +29,15 @@ read as JSONC; files above 256 KB are skipped). Each group has a setting.
   everything under `customizations` stay quiet, since the property list may be incomplete.
 - `features-malformed` (Check features): `features` that is not an object, a feature id that is empty or
   contains whitespace, or a feature value that is not an options object, a version string or a boolean.
+- `folder-structure` (Check folder structure, information): a `devcontainer.json` that is not at
+  `.devcontainer/`, `.devcontainer/<folder>/` or `.devcontainer.json`. It looks at the file's path only.
+
+## Completion
+
+In a `devcontainer.json`, completion offers the top-level properties not yet present and the values of
+`shutdownAction`, `userEnvProbe`, `waitFor` and the boolean properties. Nested objects, arrays and feature
+ids are not completed. A setting switches it off. The provider is declared for the `json` and `jsonc`
+language ids; `jsonc` is not verified in a live IDE.
 
 Requires the devcontainer CLI (`npm i -g @devcontainers/cli`) and Docker. The IDE
 keeps running on the host: OpenIDEA's remote development connects over SSH or

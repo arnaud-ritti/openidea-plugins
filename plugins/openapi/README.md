@@ -41,6 +41,11 @@ Checked when a file is opened or saved.
 | `path-parameter` | error | ``Path parameter `<name>` is not declared for <METHOD> <path>`` |
 | `path-parameter` | warning | ``Path parameter `<name>` is not in the path <path>`` |
 
+A YAML or JSON file that has a root `paths` object of `/...` items with HTTP methods
+but no `openapi` or `swagger` key (a spec fragment) gets an info hint,
+`missing-openapi-root`, on `paths`. The setting `checkSpecCandidates` switches it
+off, and files over 1 MiB are skipped.
+
 A `$ref` into a file that exists but can't be read (a directory, too large, not
 UTF-8) is not flagged. JSON files are checked like YAML ones, except a JSON file whose root
 is an array. Path parameters are skipped when the parameter list can't be
@@ -57,7 +62,7 @@ YAML language server then validates the file.
 ## Endpoints view
 
 The OpenAPI Endpoints view (right side) lists `METHOD /path` for every OpenAPI
-YAML file of the current window's project, with the operationId and file name as
+YAML or JSON file (up to 1 MiB) of the current window's project, with the operationId and file name as
 detail. Activating an entry opens the operation. Refresh re-scans the project.
 
 ## Preview
@@ -65,7 +70,8 @@ detail. Activating an entry opens the operation. Refresh re-scans the project.
 Swagger UI 5.34.1 beside the text. It opens automatically for `openapi.*`,
 `swagger.*`, `*.openapi.*` and `*.swagger.*` with a `.yaml`, `.yml` or `.json`
 extension. For any other YAML or JSON file, use Open With and pick API Preview.
-The preview follows edits as you type.
+The preview follows edits as you type. A Reload button in the preview asks for the
+referenced files again (not verified in a live IDE).
 
 - Relative `$ref`s to other files: implemented, not yet verified in a live IDE
   (an `openidea-plugin link` check is pending). The plugin reads the files the
@@ -84,9 +90,17 @@ operation of the focused file, ready for a `.http` file. The base URL comes from
 defaults to `http://localhost`. Path parameters become `{{name}}` variables.
 Without the clipboard permission the plugin shows a warning instead.
 
+## Skeleton completion
+
+In an OpenAPI or Swagger file, completion offers three skeletons: `openapi-path`
+(a path item), `openapi-operation` (an operation with a response) and
+`swagger2-root` (a Swagger 2.0 root). They are plain completion items, offered
+anywhere in the file (`swagger2-root` also in an OpenAPI 3 file), and the tab
+stops are not verified in a live IDE.
+
 ## Templates
 
-New › OpenAPI 3.1 (YAML), OpenAPI 3.1 (JSON) and AsyncAPI 3.0 (YAML) create a minimal valid document:
+New › Swagger 2.0 (YAML) and Swagger 2.0 (JSON) create a minimal Swagger 2.0 document too. New › OpenAPI 3.1 (YAML), OpenAPI 3.1 (JSON) and AsyncAPI 3.0 (YAML) create a minimal valid document:
 `info` with title (`$NAME$`) and version, and for OpenAPI a `GET /health` with a 200 response; for AsyncAPI
 one channel, one operation and one message. AsyncAPI files are not OpenAPI documents, so the plugin's checks and
 preview leave them alone.
@@ -110,7 +124,7 @@ notice files are in `web/vendor/`; see `NOTICE.md`.
 - No rename, find usages, hover or structure view.
 - The endpoints view re-scans the project on each render.
 - The schema modeline is YAML only; JSON specs get no schema validation.
-- The endpoints view lists YAML files only.
+- The endpoints view reads a JSON file in full before the 1 MiB cap applies.
 - The preview isn't opened automatically for other file names, and loads only
   the files the open document references directly.
 

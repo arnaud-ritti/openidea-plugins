@@ -54,6 +54,12 @@ are ignored. The same files give the prefixes (`sqlMigrationPrefix`,
   within 30 seconds to start it. Flyway's own `cleanDisabled` setting still
   applies.
 
+Run configurations: when `flyway.toml` or `flyway.conf` is at the project root, the IDE offers
+**Flyway: info**, **Flyway: validate** and **Flyway: migrate (writes to the database)**. They always run
+plain `flyway <goal>` and ignore the `runner` and `arguments` settings; the URL, credentials and
+environment come from the config file. A config in `conf/` is not detected, and `migrate` changes the
+database with one click. Clean and Repair stay commands.
+
 The setting `runner` picks `flyway` (the CLI, goal `info`) or `mvn` (goal
 `flyway:info`); `arguments` are added after the goal, split on spaces
 (`-environment=dev`). Running a program needs the `process:flyway` or
