@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "springGraphql.checkUnmatchedMapping": {
+      "type": "boolean",
+      "title": "Warn when a mapping handler names a field the project's GraphQL schema does not declare",
+      "default": true
+    }
+  }
+}

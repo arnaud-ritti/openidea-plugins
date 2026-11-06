@@ -595,8 +595,12 @@ impl GraphQlTools {
             })
             .collect();
         let mut problems = Vec::new();
+        let check_mappings = host::setting_bool("springGraphql.checkUnmatchedMapping").unwrap_or(true);
         for (h, ty, found) in &links {
             if found.is_empty() {
+                if !check_mappings {
+                    continue;
+                }
                 let known_type = schemas.iter().any(|(_, s)| s.types.iter().any(|t| &t.name == ty));
                 if schemas.complete() && (known_type || h.op.is_some() && !schemas.files().is_empty()) {
                     let message = format!("The GraphQL schema declares no field `{}` on type `{ty}`.", h.field);
@@ -919,6 +923,48 @@ class BookController {
             ],
             "Author is not in the schema: no warning for Author.books"
         );
+    }
+
+    fn problems_of(host: &MockHost, text: &str) -> Vec<String> {
+        let mut tools = GraphQlTools::default();
+        tools.line_markers(&doc("src/main/java/com/acme/C.java", "java", text));
+        host.diagnostics()
+            .get("/project/src/main/java/com/acme/C.java")
+            .into_iter()
+            .flatten()
+            .filter(|d| d.code.as_deref() == Some("unknown-schema-field"))
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    const MAPPED: &str = "@Controller\nclass C {\n    @QueryMapping\n    public Book nope() { return null; }\n}\n";
+
+    #[test]
+    fn unknown_schema_field_warns() {
+        let host = setup();
+        let messages = problems_of(&host, MAPPED);
+        assert_eq!(messages, ["The GraphQL schema declares no field `nope` on type `Query`."]);
+    }
+
+    #[test]
+    fn unknown_schema_field_is_quiet_for_library_or_dynamic_name() {
+        let host = setup();
+        let extended = "@Controller\nclass C {\n    @QueryMapping\n    public List<Author> authors() { return null; }\n}\n";
+        assert!(problems_of(&host, extended).is_empty(), "extend type Query counts");
+        let library = "@Controller\nclass C {\n    @SchemaMapping(typeName = \"PageInfo\", field = \"x\")\n    public String x() { return null; }\n}\n";
+        assert!(problems_of(&host, library).is_empty(), "type from a library schema");
+        let empty = MockHost::install();
+        empty.add_file("src/main/java/com/acme/C.java", MAPPED);
+        assert!(problems_of(&empty, MAPPED).is_empty(), "no schema file");
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = setup();
+        assert_eq!(problems_of(&host, MAPPED).len(), 1);
+        let fixed = MAPPED.replace("nope", "stats");
+        assert!(problems_of(&host, &fixed).is_empty());
+        assert!(host.diagnostics().get("/project/src/main/java/com/acme/C.java").is_none_or(Vec::is_empty));
     }
 
     #[test]
