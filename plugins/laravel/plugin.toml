@@ -1,0 +1,86 @@
+id = "aritti.laravel"
+name = "Laravel"
+version = "0.1.0"
+description = """Laravel support in PHP and Blade files. Completion and go to definition for routes, views, config keys, \
+translations, env keys, middleware, assets, controllers and controller actions, Blade and Livewire components, Vite \
+entries, validation rules, gate abilities and Eloquent columns from migrations, and for the sections and stacks of the layouts a Blade view extends. Reports views, config keys and translation keys that don't exist, with a quick fix \
+that adds a missing translation key. Gutter markers link controllers, routes, views and layouts. A Laravel tool window \
+lists routes, views, config, translations, middleware and env keys, and commands run common artisan tasks. \
+Partial port of the Laravel Plugin for IntelliJ by Daniel Espendiller (MIT), plus features that follow Laravel's \
+documentation. Blade files need the aritti.blade plugin for highlighting."""
+authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "Daniel Espendiller (original Laravel Plugin)"]
+homepage = "https://github.com/Haehnchen/idea-php-laravel-plugin"
+license = "MIT"
+change-notes = """0.1.0: first release. Ported from the Laravel Plugin (de.espend.idea.laravel) 0.15.4, \
+source revision 3a07f4a5f67dc0aacbcd6fdb11a8b5c9814803b0 (tag 0.15.4): routes, controllers, views, config, translations, \
+assets and the Blade layout markers. Env keys, middleware, route groups, JSON translations, components, Vite entries, \
+validation rules, abilities, columns, problems, the tool window and artisan commands follow Laravel's documentation. This port works from a text index of the project, so the features that \
+need PhpStorm's PSI are missing (container types, Eloquent, facades)."""
+categories = ["frameworks"]
+engines.openidea = "^1.0"
+wasm = "dist/plugin.wasm"
+activation = ["on-language:php", "on-language:blade"]
+
+[capabilities]
+required = ["project.read", "events"]
+# Artisan commands run `php artisan`; everything else works without it.
+optional = ["process:php"]
+
+[[contributes.commands]]
+id = "reindex"
+title = "Laravel: Reindex Project"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "optimize-clear"
+title = "Laravel: Clear All Caches"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "cache-clear"
+title = "Laravel: Clear Application Cache"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "config-clear"
+title = "Laravel: Clear Config Cache"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "route-clear"
+title = "Laravel: Clear Route Cache"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "view-clear"
+title = "Laravel: Clear Compiled Views"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "migrate"
+title = "Laravel: Run Migrations"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "storage-link"
+title = "Laravel: Link Storage"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "route-list"
+title = "Laravel: Show Route List"
+category = "Laravel"
+
+[[contributes.providers]]
+kinds = ["completion", "definition", "line-markers", "code-actions"]
+languages = ["php", "blade"]
+
+[[contributes.views]]
+id = "laravel"
+title = "Laravel"
+icon = "file-php"
+location = "right"
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Laravel"

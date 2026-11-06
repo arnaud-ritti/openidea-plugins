@@ -1,0 +1,29 @@
+{
+  "properties": {
+    "diagnostics": {
+      "type": "boolean",
+      "title": "Report views, config keys and translation keys that don't exist",
+      "default": true
+    },
+    "reportMissingRoutes": {
+      "type": "boolean",
+      "title": "Also report route names that aren't defined in routes/ (packages add routes the plugin can't see)",
+      "default": false
+    },
+    "viewPaths": {
+      "type": "string",
+      "title": "Extra view directories (project-relative, comma-separated)",
+      "default": ""
+    },
+    "locale": {
+      "type": "string",
+      "title": "Main locale: its translations are the ones shown and navigated to",
+      "default": "en"
+    },
+    "publicDirectory": {
+      "type": "string",
+      "title": "Public directory that asset() paths start from (project-relative)",
+      "default": "public"
+    }
+  }
+}

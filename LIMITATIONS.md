@@ -205,6 +205,46 @@ These aren't API limits; they were left out for size:
 - Twig function and filter completion from a static list;
 - the rest of the text-only inspections (duplicate XML service keys, YAML quoting).
 
+## Laravel (`aritti.laravel`) and Blade (`aritti.blade`)
+
+Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus features that follow Laravel's documentation. Checked against the SDK, WIT and host source of v0.1.37 on 2026-11-06. The gaps in the Symfony section above apply here too (no PHP semantic model, no references, rename or hover, code actions can't create files, problems aren't re-checked while typing, one target per gutter marker); this section only adds what is specific to Laravel.
+
+### Blocks: type-aware Laravel features
+
+- **Blocks:**
+  - `app('x')` / `App::make('x')` container aliases and the classes `@inject` names (the original resolves them with PHP type providers);
+  - facade and Eloquent resolution: relations, accessor attributes, and `where('column')` on a query whose model is not named in the chain (`$user->posts()->where(…)`, a builder passed as an argument);
+  - `providers` class completion in `config/app.php` (needs a project class index);
+  - the _Extract partial view_ refactoring (no refactoring hooks).
+- **Why:** a provider gets the document text only. A call is recognised by its function or method name (`route(`, `->middleware(`), never by the class it is called on, so `$request->route('id')` is excluded by a rule on its receiver (`redirect()` only) and other lookalikes are left out rather than guessed.
+- **Would need:** the symbol queries described in the Symfony section (`classes`, `members_of(fqcn)`, `return_type(fqcn, method)`).
+
+### Blade needs its own language and has no PHP or HTML injection
+
+- **Blocks:** highlighting of the PHP inside `{{ }}`, `@if (…)` and `@php` by the IDE's PHP grammar, and HTML highlighting by its HTML grammar. `aritti.blade` lexes both itself, so it is an approximation: PHP keywords, strings, variables, numbers, calls and class names; HTML tags and attributes.
+- **Why:** `syntax-provider` returns flat tokens for a language the plugin owns, and a plugin language can't take the built-in `php` id or extension. See "No language injection or template data language" above.
+- **Not verified in the IDE:** that `*.blade.php` resolves to the `blade` language rather than `php`. The registry matches compound extensions longest first (`crates/ide-language/src/registry.rs:382`) and only drops a plugin extension that equals a built-in one (`blade.php` ≠ `php`), but this was read, not run. If the file stays `php`, `aritti.laravel` still reads it as Blade (it checks the `.blade.php` suffix) and everything but highlighting works.
+- **Would need:** language injection, as described in "No language injection or template data language" above.
+
+### Custom Blade directives are invisible, and components come from file names
+
+- **Blocks:** highlighting and completion of `Blade::directive('name', …)` directives; components registered with `Blade::component()` or by a package (`<x-package::alert>`); the slots and attributes a component accepts (`<x-slot:title>`, `:prop`).
+- **Why:** a directive or alias exists only in the PHP that registers it, which a plugin can't evaluate, and the plugin has no PHP class index to read a component's constructor.
+- **Workaround in the plugins:** only Laravel's and Livewire's own directives are known. Components are found by Laravel's naming convention (`resources/views/components`, `app/View/Components`, `app/Livewire`).
+
+### Route names that packages register can't be checked
+
+- **Blocks:** reporting `route('horizon.index')` as missing. Packages add routes in their service providers, which are PHP the plugin doesn't run, and `php artisan route:list` needs `process:php` and a working application.
+- **Workaround in the plugins:** missing routes are an opt-in setting (`reportMissingRoutes`, off by default). Config and translation keys are only reported below an array or file the project itself defines, and views with a `package::` namespace aren't checked.
+- **Would need:** reading `bootstrap/cache/routes-v7.php` (compiled by `route:cache`, serialised PHP), or a host function that runs an allowed command from a provider.
+
+### Not done, possible with the current API
+
+- Dropped and renamed columns (`dropColumn`, `renameColumn`) and columns added by a package's published migrations outside `database/migrations`; irregular plurals for a model without `$table` (`Person` is not `people`).
+- Custom validation rule classes (`app/Rules`) are objects, not strings, so only Laravel's own rule names are completed, and a rule's parameters (`exists:users,email`) are not.
+- Gate resource abilities (`Gate::resource('posts', …)` registers `posts.view` and friends) are not read.
+- Artisan `make:*` commands: there is no input dialog for the name.
+
 ## aritti.dotenv (port of ru.adelf.idea.dotenv)
 
 ### Not implemented
