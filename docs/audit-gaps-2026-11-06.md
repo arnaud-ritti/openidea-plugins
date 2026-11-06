@@ -57,6 +57,23 @@ Reading the totals:
 - Most F\* rows are inspections that depend on beans, classes or keys the plugin cannot see (library and auto-configured beans, vendor bundles), so they need a quiet-unless-sure design, and templates, intentions and providers whose behaviour in the IDE is unverified.
 - Where the gap is widest in volume: Spring core (56 rows, 64 original inspections against 10 of ours), Symfony (77 rows, mostly inspections), Kubernetes (56 rows, mostly actions and live templates), JPA (32 rows) and Laravel Idea (37 rows).
 
+## Done
+
+Status of the F rows after the gap F pass (branch `gap-f-spring-core`, [plan](superpowers/plans/2026-11-06-gap-f-spring-core.md), tests against the mock host only, nothing run in the IDE). Row numbers refer to [A1-spring-core.md](audit-gaps-2026-11-06/A1-spring-core.md).
+
+**Spring core -> `spring-beans` (+ `spring-boot`).** Rows 1, 2, 5, 6, 7, 13, 14, 15, 19, 23, 25, 26, 30, 32, 33 and 34 are built.
+- Row 1 (AOP structure) and row 5 (XML attributes, injected values, value/ref style hint with fix): as listed. Row 5 scopes are narrowed to case variants and one-edit typos of known scopes, because a custom scope can be registered anywhere.
+- Row 2 (pointcut designators): quiet when the module build, an ancestor build or `META-INF/aop.xml` signals AspectJ weaving.
+- Row 6 (XML names): same-file and XML-versus-Java clashes only; XML-versus-XML across files is quiet, since a later file may override. Row 7 (abstract beans): `ref`-style references only, not `parent`.
+- Rows 13, 14, 15 (static injection, SpEL on static members, several `@Autowired` constructors), 19 (`@Profile` expressions), 26 (`@Async` return type), 23 (cache checks; quiet for classes with a supertype, the interface case is a hint that skips Spring Data repositories).
+- Row 25 (`spring-boot`): `@DirtiesContext` mode and target; the transaction callback check reports only a non-void return, because the parameter and static rules have no documented basis.
+- Row 30 (`kotlin-spring` plugin): Gradle quick fix; Maven gets the diagnostic only.
+- Rows 32, 33, 34: p-namespace, introduce bean and update schema intentions.
+- Skipped, row 27 (`@EventListener` on a non-public method): Spring documents no visibility rule, so the check would guess.
+- Unverified in the IDE: file events for `.xml` and `.kt`, code actions on XML (multi-edit, `refactor` kind), the Gradle fix, diagnostic placement. Details in `PARITY.md` and `LIMITATIONS.md`.
+
+**Spring OSGi -> `spring-osgi`.** Row 1 (enumerated attribute values: `cardinality`, `greedy-proxying`, `ranking` and others; `osgi-attribute-value`, Error) is built. Row 7 (`bundle` scope) is built by accepting `bundle` in the `spring-beans` scope check. The value rendering in the IDE is unverified.
+
 ## Limits of this audit
 
 - **Behaviour is inferred, not observed.** The proprietary originals were read through descriptors, bundles and description pages only. A description says what a check reports, not its exact rules, messages or false-positive behaviour. Every new check built from this list must be specified from public documentation.

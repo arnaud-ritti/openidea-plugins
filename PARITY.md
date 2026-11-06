@@ -103,6 +103,21 @@ Of 44 verdict rows in the audit: 8 were already done by the pass above, 17 are b
 
 **Unverified in the IDE** (added by this pass; the earlier list above still applies): `$NAME$`/`$END$` placeholders in the Symfony, Kubernetes and OpenAPI templates; prefilled code-action edits applied without a resolve step (Laravel, Kubernetes intentions, the `simplify-order-by` fix); the language ids `vue`, `javascriptreact` and `typescriptreact` for the Laravel JS provider; `on-event:` activation in the real host (gitlab, kube-explorer, devcontainer, symfony); completion on `@`; the first file that activates `blade` is checked on its next open or save.
 
+## Gap F pass 2026-11-06: Spring core and Spring OSGi
+
+Branch `gap-f-spring-core` ([plan](docs/superpowers/plans/2026-11-06-gap-f-spring-core.md), rows in [docs/audit-gaps-2026-11-06.md](docs/audit-gaps-2026-11-06.md)). Unit tests against the mock host only; no rating changed, no `version` bumped.
+
+- **`spring-beans`, XML** (settings `springBeans.checkAop`, `springBeans.checkXml`): AOP structure (`aop-structure`), pointcut designators Spring AOP does not support (`unsupported-pointcut-designator`, XML and Java `@Aspect`), bean attribute and injected-value consistency (`xml-bean-attributes`, `xml-injection-value`), scope typos (`xml-scope`), `ref` to an abstract bean (`xml-abstract-reference`), bean-name convention and duplicate names, a value-or-ref style hint (`xml-value-style`) with quick fixes, and three XML intentions (p-namespace, introduce bean, update schema). The XML checks now run on saved or opened `.xml` files.
+- **`spring-beans`, code:** static or SpEL injection and several `@Autowired` constructors (`checkInjectionAnnotations`), `@Profile` expressions (`checkProfiles`), `@Async` return type (`checkAsync`), cache annotations (`checkCache`: `cache-names-missing`, `cacheable-and-cache-put`, and `cache-annotation-on-interface` as a hint), and for Kotlin projects a missing `kotlin-spring` compiler plugin (`checkKotlinSpringPlugin`) with a Gradle quick fix.
+- **`spring-boot`:** `@DirtiesContext` mode or target mismatch and `@BeforeTransaction`/`@AfterTransaction` callbacks with a non-void return (`checkTestLifecycle`).
+- **`spring-osgi`:** value checks for `cardinality`, `greedy-proxying`, `ranking` and the other enumerated attributes (`osgi-attribute-value`, Error). The original has no such check; the allowed values and messages come from the Spring DM reference and XSD. No setting turns it off.
+
+Rows narrowed by ruling: scope checks flag case variants and one-edit typos of known scopes only (custom scopes stay quiet); abstract-bean checks cover `ref`-style references, not `parent`; XML-versus-XML name clashes across files are quiet (same file and XML-versus-Java are reported, dynamic profiles never overlap); the transaction callback check reports only a non-void return; cache checks stay quiet for classes with a supertype and for Spring Data repositories; the pointcut designator check is quiet when the module build, an ancestor build or `META-INF/aop.xml` points to AspectJ weaving; the Maven side of the Kotlin plugin check has no fix. Audit row 27 (`@EventListener` method visibility) was skipped: Spring documents no such rule.
+
+**Unverified in the IDE:** that the host delivers events for `.xml` and `.kt` files; code actions on XML (multi-edit, `refactor` kind, an edit in a file other than the active one); the Gradle fix; diagnostic placement (annotation values, string literals, return types, the `ranking` and value ranges); `project.root()` with a trailing slash; introduce bean latency on a large index; real-host `read_file` of build files; load-time weaving configured only outside `src/main/resources`.
+
+**Known limits:** the p-namespace intention skips dotted or dashed names and non-self-closing properties, and there is no `c:` variant; introduce bean needs a `class`; `@Async` is checked on methods only; static members are found by the `static` modifier; meta-annotations are not followed; the Kotlin build check reads text lines, so a commented-out line can count; a stale Kotlin warning stays in other open `.kt` files until they are saved.
+
 ## Cross-cutting gaps (largest effect first)
 
 These explain most of the "Medium" and "Low" ratings. Each is an OpenIDEA API gap, not a plugin bug.
