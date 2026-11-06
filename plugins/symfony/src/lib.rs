@@ -97,6 +97,84 @@ fn domain_of(doc_language: &str, text: &str, reference: &Reference) -> String {
     refs::translation_domain(doc_language, text, reference).unwrap_or_else(|| DEFAULT_DOMAIN.into())
 }
 
+/// The tags of Symfony's "Built-in Symfony Service Tags" page.
+const CORE_TAGS: &[&str] = &[
+    "asset_mapper.compiler",
+    "assets.package",
+    "auto_alias",
+    "cache.pool",
+    "cache.pool.clearer",
+    "cache.taggable",
+    "chatter.transport_factory",
+    "config_cache.resource_checker",
+    "console.command",
+    "container.do_not_inline",
+    "container.env_var_loader",
+    "container.env_var_processor",
+    "container.excluded",
+    "container.hot_path",
+    "container.no_preload",
+    "container.preload",
+    "container.service_locator",
+    "container.service_subscriber",
+    "container.stack",
+    "controller.argument_value_resolver",
+    "controller.service_arguments",
+    "data_collector",
+    "doctrine.event_listener",
+    "doctrine.event_subscriber",
+    "doctrine.orm.entity_listener",
+    "doctrine.repository_service",
+    "form.type",
+    "form.type_extension",
+    "form.type_guesser",
+    "http_client.client",
+    "kernel.cache_clearer",
+    "kernel.cache_warmer",
+    "kernel.event_listener",
+    "kernel.event_subscriber",
+    "kernel.fragment_renderer",
+    "kernel.locale_aware",
+    "kernel.reset",
+    "mailer.transport_factory",
+    "messenger.message_handler",
+    "messenger.receiver",
+    "messenger.transport_factory",
+    "mime.mime_type_guesser",
+    "monolog.logger",
+    "monolog.processor",
+    "notifier.channel",
+    "property_info.access_extractor",
+    "property_info.constructor_extractor",
+    "property_info.initializable_extractor",
+    "property_info.list_extractor",
+    "property_info.type_extractor",
+    "proxy",
+    "routing.expression_language_provider",
+    "routing.loader",
+    "routing.route_loader",
+    "runtime.reset",
+    "scheduler.schedule_provider",
+    "security.authenticator.login_linker",
+    "security.expression_language_provider",
+    "security.remember_me_handler",
+    "security.voter",
+    "serializer.encoder",
+    "serializer.normalizer",
+    "texter.transport_factory",
+    "translation.dumper",
+    "translation.extractor",
+    "translation.extractor.visitor",
+    "translation.loader",
+    "twig.extension",
+    "twig.loader",
+    "twig.runtime",
+    "validator.auto_mapper",
+    "validator.constraint_validator",
+    "validator.initializer",
+    "workflow.definition",
+];
+
 /// Names a reference can name, for completion and navigation.
 fn candidates<'a>(index: &'a Index, path: &str, language: &str, text: &str, reference: &Reference) -> Cow<'a, Names> {
     match reference.kind {
@@ -107,6 +185,14 @@ fn candidates<'a>(index: &'a Index, path: &str, language: &str, text: &str, refe
         Kind::Asset => Cow::Borrowed(&index.assets),
         Kind::Entry => Cow::Borrowed(&index.entries),
         Kind::Role => Cow::Borrowed(&index.roles),
+        Kind::Tag => {
+            let mut all: Names = CORE_TAGS
+                .iter()
+                .map(|tag| ((*tag).to_owned(), Entry { detail: Some("Symfony core tag".into()), path: String::new(), at: Position::new(0, 0) }))
+                .collect();
+            all.extend(index.tags.iter().map(|(tag, entry)| (tag.clone(), entry.clone())));
+            Cow::Owned(all)
+        }
         Kind::Translation => {
             if let Some(names) = index.translations.get(&domain_of(language, text, reference)) {
                 return Cow::Borrowed(names);
@@ -133,6 +219,7 @@ fn completion_kind(kind: Kind) -> CompletionKind {
         Kind::Entry => CompletionKind::Module,
         Kind::Role => CompletionKind::Constant,
         Kind::Block => CompletionKind::Field,
+        Kind::Tag => CompletionKind::Keyword,
     }
 }
 
@@ -606,6 +693,9 @@ impl Providers for Main {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
         let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return Vec::new() };
+        if reference.kind == Kind::Tag {
+            return Vec::new();
+        }
 
         let name = &doc.text[reference.start..reference.end];
         let names = candidates(index, &doc.path, &doc.language, &doc.text, &reference);
@@ -1292,6 +1382,179 @@ mod tests {
         assert!(offered.contains(&"@pdf/invoice.html.twig".to_owned()));
         assert!(offered.contains(&"p.html.twig".to_owned()));
         assert!(offered.contains(&"base.html.twig".to_owned()));
+    }
+
+    fn complete_marked(plugin: &mut Main, path: &str, language: &str, marked: &str) -> Vec<String> {
+        let at = marked.find('|').unwrap();
+        let text = marked.replace('|', "");
+        let before = &marked[..at];
+        let line = before.matches('\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
+        labels(plugin.completion(&doc(path, language, &text), Position::new(line, column), None))
+    }
+
+    fn tagged_project(host: &MockHost) {
+        host.add_file(
+            "config/services/tags.yaml",
+            "services:\n    a:\n        tags:\n            - { name: app.flow_tag, priority: 1 }\n            - name: app.block_tag\n            - app.bare_tag\n    b:\n        tags: ['app.list_tag']\n",
+        );
+        host.add_file("config/services/tags.xml", "<services><service id=\"c\"><tag name=\"app.xml_tag\"/></service></services>");
+        host.add_file("src/legacy.yaml", "services:\n    z:\n        tags: [src.tag]\n");
+        host.add_file("translations/t.yaml", "services:\n    z:\n        tags: [translation.tag]\n");
+        host.add_file(
+            "config/services/commented.yaml",
+            "services:\n    a:\n        # tags: [commented.list]\n        tags:\n            # - { name: commented.item }\n            - app.real\n",
+        );
+        host.add_file("config/services/commented.xml", "<services><!-- <tag name=\"commented.xml\"/> --></services>");
+    }
+
+    const SERVICES_FILE: &str = "/project/config/services.yaml";
+
+    #[test]
+    fn completes_core_and_project_tags_in_yaml_service_tags() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        for marked in [
+            "services:\n    a:\n        tags:\n            - { name: | }\n",
+            "services:\n    a:\n        tags:\n            - name: |\n",
+            "services:\n    a:\n        tags: ['|']\n",
+            "services:\n    a:\n        tags: [{ name: '|' }]\n",
+            "services:\n    a:\n        tags:\n            - |\n",
+            "services:\n    a:\n        tags:\n            - priority: 3\n              name: app.fl|\n",
+        ] {
+            let offered = complete_marked(&mut plugin, SERVICES_FILE, "yaml", marked);
+            for expected in ["kernel.event_listener", "console.command", "twig.extension", "app.flow_tag", "app.block_tag", "app.bare_tag", "app.list_tag", "app.xml_tag", "app.real"] {
+                assert!(offered.contains(&expected.to_owned()), "{expected} in {marked:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn completes_tags_in_xml_tag_elements() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/config/services.xml", "xml", "<service id=\"a\"><tag name=\"|\"/></service>");
+        assert!(offered.contains(&"kernel.event_subscriber".to_owned()));
+        assert!(offered.contains(&"app.flow_tag".to_owned()));
+        assert!(offered.contains(&"app.xml_tag".to_owned()));
+    }
+
+    #[test]
+    fn tag_completion_is_quiet_outside_tags_and_in_other_files() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let quiet = |plugin: &mut Main, path: &str, language: &str, marked: &str| {
+            let offered = complete_marked(plugin, path, language, marked);
+            assert!(!offered.contains(&"kernel.event_listener".to_owned()), "{marked:?}");
+        };
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "parameters:\n    tags: ['|']\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "parameters:\n    tags:\n        - |\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        arguments:\n            - name: |\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        arguments: [{ name: '|' }]\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags:\n            - { priority: |, name: x }\n");
+        quiet(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags:\n            - { name: x }\n        calls:\n            - |\n");
+        quiet(&mut plugin, "/project/src/Controller/HomeController.php", "php", "<?php\n$x->tags('|');\n");
+        quiet(&mut plugin, "/project/templates/a.html.twig", "twig", "{{ include('|') }}");
+        quiet(&mut plugin, "/project/config/services.xml", "xml", "<service id=\"a\"><argument name=\"|\"/></service>");
+        quiet(&mut plugin, "/project/config/services.xml", "xml", "<service id=\"a\"><tags name=\"|\"/></service>");
+    }
+
+    #[test]
+    fn project_tags_come_from_config_files_only() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['|']\n");
+        assert!(offered.contains(&"app.list_tag".to_owned()));
+        assert!(!offered.contains(&"src.tag".to_owned()));
+        assert!(!offered.contains(&"translation.tag".to_owned()));
+    }
+
+    #[test]
+    fn tag_completion_ignores_commented_lines() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['|']\n");
+        assert!(offered.contains(&"app.real".to_owned()));
+        for hidden in ["commented.list", "commented.item", "commented.xml"] {
+            assert!(!offered.contains(&hidden.to_owned()), "{hidden}");
+        }
+
+        let commented = complete_marked(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags:\n            # - { name: |\n");
+        assert!(!commented.contains(&"kernel.event_listener".to_owned()));
+    }
+
+    #[test]
+    fn tag_names_have_no_definition_and_no_problem() {
+        let host = MockHost::install();
+        tagged_project(&host);
+        let mut plugin = activated(&host);
+
+        let yaml = doc(SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['app.list_tag', 'unknown.tag']\n");
+        assert!(plugin.definition(&yaml, Position::new(2, 20)).is_empty());
+        let index = plugin.index_for(SERVICES_FILE).unwrap();
+        assert!(problems(index, SERVICES_FILE, "yaml", &yaml.text).is_empty());
+    }
+
+    #[test]
+    fn twig_namespaces_setting_resolves_templates() {
+        let host = MockHost::install();
+        host.set_setting("twigNamespaces", r#""emails=templates/mail""#);
+        host.add_file("templates/mail/welcome.html.twig", "hi");
+        let mut plugin = activated(&host);
+
+        let twig = doc("/project/templates/a.html.twig", "twig", "{% include '@emails/welcome.html.twig' %}");
+        assert_eq!(plugin.definition(&twig, Position::new(0, 16))[0].path, "/project/templates/mail/welcome.html.twig");
+
+        let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% include '@|' %}");
+        assert!(offered.contains(&"@emails/welcome.html.twig".to_owned()));
+    }
+
+    #[test]
+    fn twig_namespaces_setting_merges_with_twig_yaml_paths() {
+        let host = MockHost::install();
+        host.set_setting("twigNamespaces", r#""emails=templates/mail""#);
+        host.add_file("config/packages/twig.yaml", "twig:\n    paths:\n        'templates/pdf': pdf\n");
+        host.add_file("templates/mail/welcome.html.twig", "hi");
+        host.add_file("templates/pdf/invoice.html.twig", "pdf");
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% include '@|' %}");
+        assert!(offered.contains(&"@emails/welcome.html.twig".to_owned()));
+        assert!(offered.contains(&"@pdf/invoice.html.twig".to_owned()));
+    }
+
+    #[test]
+    fn twig_namespaces_setting_ignores_malformed_pairs() {
+        let host = MockHost::install();
+        host.set_setting("twigNamespaces", r#""nodelimiter, a=, b=../mail, c=templates/ok""#);
+        host.add_file("mail/welcome.html.twig", "hi");
+        host.add_file("templates/ok/fine.html.twig", "ok");
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% include '|' %}");
+        assert!(offered.contains(&"@c/fine.html.twig".to_owned()));
+        assert!(!offered.iter().any(|name| name.contains("welcome") || name.starts_with("@a/") || name.starts_with("@b/")), "{offered:?}");
+    }
+
+    #[test]
+    fn missing_file_is_treated_as_absent() {
+        let host = MockHost::install();
+        host.set_setting("twigNamespaces", r#""gone=templates/gone""#);
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, SERVICES_FILE, "yaml", "services:\n    a:\n        tags: ['|']\n");
+        assert!(offered.contains(&"kernel.event_listener".to_owned()));
+        assert!(plugin.index_for(SERVICES_FILE).unwrap().tags.is_empty());
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub enum Kind {
     Entry,
     Role,
     Block,
+    Tag,
 }
 
 /// A name in the document and what kind of thing it names.
@@ -129,6 +130,10 @@ fn is_class_byte(b: u8) -> bool {
 
 /// What the name at byte offset `at` refers to, if anything.
 pub fn reference_at(language: &str, text: &str, at: usize) -> Option<Reference> {
+    if let Some((start, end)) = crate::index::tag_slot_at(language, text, at) {
+        return Some(Reference { kind: Kind::Tag, start, end });
+    }
+
     let Some((start, end, closed)) = literal_at(language, text, at) else {
         return match language {
             "yaml" => yaml_class_at(text, at),

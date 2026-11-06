@@ -64,6 +64,11 @@
       "type": "string",
       "title": "Extra compiled route files, like url_generating_routes.php (project-relative, comma-separated)",
       "default": ""
+    },
+    "twigNamespaces": {
+      "type": "string",
+      "title": "Extra Twig namespaces as name=directory pairs (project-relative, comma-separated; an empty name is the main namespace)",
+      "default": ""
     }
   }
 }

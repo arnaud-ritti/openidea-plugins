@@ -19,6 +19,7 @@ the free code of the public repository.
 | Assets       | files under `public/`                                                                                              | Twig `asset()`; PHP `->getUrl()`                                                                                                                               |
 | Entries      | `webpack.config.js` `addEntry`/`addStyleEntry`, `importmap.php`                                                    | Twig `encore_entry_link_tags()`, `encore_entry_script_tags()`, `importmap()`                                                                                    |
 | Roles        | `ROLE_*` in security config and controllers, plus built-in attributes (`IS_AUTHENTICATED_*`, `PUBLIC_ACCESS`, …)  | PHP `isGranted`, `denyAccessUnlessGranted`, `#[IsGranted]`; Twig `is_granted()`                                                                                |
+| Tags         | Symfony's built-in service tags plus the tags used in `config/**` YAML and XML service files                      | YAML `tags:` of a service (`- { name: x }`, `- name: x`, `['x']`, `- x`); XML `<tag name="">` (completion only)                                              |
 
 ## Twig names and structure
 
@@ -169,7 +170,9 @@ cannot be opened.
 A project counts as Symfony when it has `symfony.lock` or requires
 `symfony/framework-bundle` or `symfony/symfony` in `composer.json`. Twig files
 need the `aritti.twig` plugin (the IDE has no Twig language). Settings: the
-public directory and extra compiled container and route files.
+public directory, extra compiled container and route files, and extra Twig
+namespaces (`twigNamespaces`, comma-separated `name=directory` pairs, an empty
+name is the main namespace; added to `twig: paths:`).
 
 ## Not ported
 
