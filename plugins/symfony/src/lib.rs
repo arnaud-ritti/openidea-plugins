@@ -8,7 +8,7 @@
 mod checks;
 mod config_checks;
 mod index;
-#[allow(dead_code)] // used by the checks added after this foundation
+mod intentions;
 mod php_text;
 mod profiler;
 mod refs;
@@ -665,7 +665,7 @@ impl Providers for Main {
         markers
     }
 
-    /// Quick fixes: quote YAML scalars, apply check replacements, add a missing translation key.
+    /// Quick fixes (quote YAML scalars, apply check replacements, add a missing translation key) and refactorings (`intentions.rs`).
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let mut actions = Vec::new();
@@ -691,6 +691,22 @@ impl Providers for Main {
 
         let Some(offset) = text::offset(&doc.text, selection.start) else { return actions };
         let selection_end = text::offset(&doc.text, selection.end).unwrap_or(offset);
+
+        let intentions = match doc.language.as_str() {
+            "php" => intentions::php_actions(&doc.text, offset, index.framework_version),
+            "twig" => {
+                let blocks: Vec<String> = project_for(&doc.path).map(|project| parent_blocks(index, &project, &doc.text).into_keys().collect()).unwrap_or_default();
+                intentions::twig_actions(&doc.text, offset, &blocks)
+            }
+            _ => Vec::new(),
+        };
+        actions.extend(intentions.into_iter().map(|action| CodeAction {
+            title: action.title,
+            kind: Some(action.kind.into()),
+            preferred: false,
+            edits: vec![(doc.path.clone(), action.edits.into_iter().map(|(range, text)| TextEdit { range: range_of(&doc.text, range.start, range.end), text }).collect())],
+            data: None,
+        }));
 
         for finding in fixes(index, &doc.path, &doc.language, &doc.text) {
             let Some(replacement) = finding.replacement else { continue };
@@ -946,6 +962,27 @@ mod tests {
 
     fn labels(items: Vec<CompletionItem>) -> Vec<String> {
         items.into_iter().map(|item| item.label).collect()
+    }
+
+    #[test]
+    fn code_actions_combine_quote_fix_and_intentions() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+
+        let yaml = doc("/project/config/services.yaml", "yaml", "services:\n    app.mailer:\n        arguments: [@foo]\n        class: App\\Mailer\n        factory: @bar\n");
+        let titles: Vec<String> = plugin.code_actions(&yaml, Range::new(Position::new(4, 17), Position::new(4, 17))).into_iter().map(|action| action.title).collect();
+        assert!(titles.iter().any(|title| title.starts_with("Quote ")), "{titles:?}");
+
+        let php = doc("/project/src/Controller/PostController.php", "php", "<?php\nnamespace App\\Controller;\n\nclass PostController extends AbstractController\n{\n    public function show()\n    {\n    }\n}\n");
+        let actions = plugin.code_actions(&php, Range::new(Position::new(5, 22), Position::new(5, 22)));
+        let route = actions.iter().find(|action| action.title == "Add #[Route] attribute").expect("route action");
+        assert_eq!(route.kind.as_deref(), Some("refactor.rewrite"));
+        assert_eq!(route.edits[0].1.len(), 2);
+
+        let twig = doc("/project/templates/blog/new.html.twig", "twig", "{% extends 'base.html.twig' %}\n");
+        let actions = plugin.code_actions(&twig, Range::new(Position::new(0, 5), Position::new(0, 5)));
+        let titles: Vec<String> = actions.into_iter().map(|action| action.title).collect();
+        assert_eq!(titles, ["Override block \"body\"", "Override block \"title\""]);
     }
 
     #[test]

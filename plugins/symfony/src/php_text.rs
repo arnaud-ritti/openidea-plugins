@@ -49,7 +49,7 @@ pub struct AttributeUse {
 }
 
 /// Same length as `text`: comments and string contents become spaces, line breaks stay.
-fn mask(text: &str) -> String {
+pub(crate) fn mask(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = bytes.to_vec();
     let blank = |out: &mut Vec<u8>, range: Range<usize>| {
@@ -100,7 +100,7 @@ fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\' | b'$' | b'?' | b'|' | b'&') || byte >= 0x80
 }
 
-fn short_name(fqcn: &str) -> &str {
+pub(crate) fn short_name(fqcn: &str) -> &str {
     fqcn.rsplit('\\').next().unwrap_or(fqcn)
 }
 
@@ -126,7 +126,7 @@ struct Header {
     namespace: Option<(String, usize)>,
 }
 
-fn line_end(masked: &str, from: usize) -> usize {
+pub(crate) fn line_end(masked: &str, from: usize) -> usize {
     masked[from..].find('\n').map_or(masked.len(), |at| from + at + 1)
 }
 
@@ -204,11 +204,26 @@ pub fn insert_use(text: &str, fqcn: &str) -> Option<UseEdit> {
     } else if let Some((_, end)) = &header.namespace {
         (*end, format!("{eol}{line}"))
     } else {
-        let start = masked.find("<?php")?;
-        (line_end(&masked, start), line)
+        let start = line_end(&masked, masked.find("<?php")?);
+        match declare_end(&masked, start) {
+            Some(end) => (end, format!("{eol}{line}")),
+            None => (start, line),
+        }
     };
 
     Some(UseEdit { offset, text, short_name: short.to_owned() })
+}
+
+/// Offset after the line of a `declare(...);` statement that opens the file at `from`.
+fn declare_end(masked: &str, from: usize) -> Option<usize> {
+    let start = skip_whitespace(masked, from);
+    let word = read_word(masked, start);
+    if !masked[word.clone()].eq_ignore_ascii_case("declare") {
+        return None;
+    }
+
+    let semicolon = masked[word.end..].find(';')? + word.end;
+    Some(line_end(masked, semicolon))
 }
 
 fn resolve(name: &str, header: &Header) -> String {
@@ -234,7 +249,7 @@ fn resolve(name: &str, header: &Header) -> String {
     }
 }
 
-fn skip_whitespace(masked: &str, mut at: usize) -> usize {
+pub(crate) fn skip_whitespace(masked: &str, mut at: usize) -> usize {
     let bytes = masked.as_bytes();
     while at < bytes.len() && bytes[at].is_ascii_whitespace() {
         at += 1;
@@ -242,7 +257,7 @@ fn skip_whitespace(masked: &str, mut at: usize) -> usize {
     at
 }
 
-fn read_word(masked: &str, at: usize) -> Range<usize> {
+pub(crate) fn read_word(masked: &str, at: usize) -> Range<usize> {
     let bytes = masked.as_bytes();
     let mut end = at;
     while end < bytes.len() && is_word_byte(bytes[end]) {
@@ -252,13 +267,13 @@ fn read_word(masked: &str, at: usize) -> Range<usize> {
 }
 
 /// Index of the bracket closing the one at `open`, in masked text.
-fn matching_close(masked: &str, open: usize) -> Option<usize> {
+pub(crate) fn matching_close(masked: &str, open: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (at, byte) in masked.bytes().enumerate().skip(open) {
         match byte {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Some(at);
                 }
@@ -352,9 +367,20 @@ pub fn attributes(text: &str) -> Vec<AttributeUse> {
     let mut found = Vec::new();
     let mut pending: Vec<(String, Range<usize>, Range<usize>)> = Vec::new();
     let mut at = 0;
+    let mut parameter_depth = 0usize;
+    let mut counted = 0;
 
     while let Some(start) = masked[at..].find("#[").map(|found| at + found) {
         let Some(close) = matching_close(&masked, start + 1) else { break };
+
+        for byte in masked[counted..start].bytes() {
+            match byte {
+                b'(' => parameter_depth += 1,
+                b')' => parameter_depth = parameter_depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        counted = start;
 
         let mut item_start = start + 2;
         let mut depth = 0usize;
@@ -362,7 +388,7 @@ pub fn attributes(text: &str) -> Vec<AttributeUse> {
             let byte = masked.as_bytes()[position];
             match byte {
                 b'(' | b'[' | b'{' => depth += 1,
-                b')' | b']' | b'}' if position < close => depth -= 1,
+                b')' | b']' | b'}' if position < close => depth = depth.saturating_sub(1),
                 _ => {}
             }
 
@@ -380,7 +406,10 @@ pub fn attributes(text: &str) -> Vec<AttributeUse> {
             continue;
         }
 
-        let target = target_after(&masked, at);
+        let target = match target_after(&masked, at) {
+            Target::Property { .. } if parameter_depth > 0 => Target::Other,
+            target => target,
+        };
         for (name, range, arguments) in pending.drain(..) {
             let target = match &target {
                 Target::Class { name } => Target::Class { name: name.clone() },
@@ -510,5 +539,28 @@ mod tests {
         let found = attributes(text);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "D");
+    }
+
+    #[test]
+    fn insert_use_goes_after_a_leading_declare() {
+        let text = "<?php\ndeclare(strict_types=1);\n\nclass X {}\n";
+        let edit = insert_use(text, "Foo\\Bar").unwrap();
+        assert_eq!(&text[..edit.offset], "<?php\ndeclare(strict_types=1);\n");
+        assert_eq!(edit.text, "\nuse Foo\\Bar;\n");
+    }
+
+    #[test]
+    fn attributes_survive_unbalanced_brackets() {
+        for text in ["<?php\n#[A(]]\nclass C {}\n", "<?php\n#[A)]\nclass C {}\n", "<?php\n#[A(\n"] {
+            let _ = attributes(text);
+        }
+    }
+
+    #[test]
+    fn promoted_constructor_parameter_attribute_is_not_a_property() {
+        let text = "<?php\nclass C\n{\n    public function __construct(#[Autowire] private $x, #[Other] $y) {}\n}\n";
+        let found = attributes(text);
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|attribute| attribute.target == Target::Other));
     }
 }

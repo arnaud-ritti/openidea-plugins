@@ -543,7 +543,7 @@ pub fn check_services(ctx: &Context, path: &str, language: &str, text: &str) -> 
     out
 }
 
-const FORM_TYPES: &[(&str, &str)] = &[
+pub(crate) const FORM_TYPES: &[(&str, &str)] = &[
     ("text", "TextType"),
     ("textarea", "TextareaType"),
     ("email", "EmailType"),
@@ -584,7 +584,7 @@ const BUILT_IN_DOMAINS: &[&str] = &["messages", "validators", "security"];
 /// Positions of the `(` of every call that ends with `needle` (which ends in
 /// `(`). A needle that starts with a name is a function call: not a method,
 /// not part of a longer name.
-fn call_opens<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+pub(crate) fn call_opens<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
     let function = needle.as_bytes()[0].is_ascii_alphabetic();
 
     text.match_indices(needle).filter_map(move |(at, _)| {
@@ -607,16 +607,27 @@ pub(crate) fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '$', '~', '#'])
 }
 
-fn form_type_strings(text: &str, out: &mut Vec<Finding>) {
+/// Literal aliases in the second argument of `->add()` calls of a form type,
+/// with the alias and the class that replaced it.
+pub(crate) fn form_type_literals(text: &str) -> Vec<(Range<usize>, &'static str, &'static str)> {
     if !text.contains("FormBuilderInterface") && !text.contains("AbstractType") && !text.contains("$builder") {
-        return;
+        return Vec::new();
     }
 
+    let mut found = Vec::new();
     for open in call_opens(text, "->add(") {
         let arguments = refs::arguments(text, open);
         let Some(range) = arguments.get(1).and_then(|argument| literal(text, argument)) else { continue };
         let Some((alias, class)) = FORM_TYPES.iter().find(|(alias, _)| *alias == &text[range.clone()]) else { continue };
 
+        found.push((range, *alias, *class));
+    }
+
+    found
+}
+
+fn form_type_strings(text: &str, out: &mut Vec<Finding>) {
+    for (range, alias, class) in form_type_literals(text) {
         let message = format!("Form type \"{alias}\" was removed in Symfony 3; use {class}::class.");
         out.push(Finding::warn(range, "form-type-string", message));
     }

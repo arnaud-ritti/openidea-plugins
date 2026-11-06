@@ -106,6 +106,31 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
   it; `{% block %}` → the parent block it overrides; PHP class → its service
   definition; YAML service → its class file.
 
+### Code actions
+
+Refactorings in the code actions menu (⌥⏎), from `src/intentions.rs`. Each
+edits the open file only, and is not offered when a needed import would clash
+with another class of the same short name.
+
+- _Add #[Route] attribute_: caret in a public, non-static, non-magic method
+  without `#[Route]` of a class named `*Controller` or extending
+  `AbstractController` / `Controller`, when `composer.json` requires
+  `symfony/framework-bundle` 6.2 or newer. Path and name come from the class
+  and method names (`/blog/show-post`, `app_blog_show_post`); the caret is not
+  moved to the path.
+- _Add parameter: Request $request_ / _UserInterface $user_: in a public route
+  action (`#[Route]`, `@Route`, or `__invoke` of a class with a `#[Route]`).
+  In the `__invoke` of an `#[AsCommand]` class: `InputInterface`,
+  `OutputInterface`, `Cursor`, `SymfonyStyle`, `Application`. One action per
+  type (no chooser); a type already in the signature, by short or full name, is
+  not offered.
+- _Use TextType::class_: on the second argument of `->add('field', 'text')`
+  when it is a pre-3.0 form type alias; _Use class constants for all form types
+  in this file_ when the file has two or more.
+- _Override block "name"_: with the caret on `{% extends %}`, one action per
+  parent block the file does not define; appends a block calling `parent()`
+  at the end of the file.
+
 ## New file templates
 
 New menu entries for a PHP class with a fixed `App\…` namespace: Command,
