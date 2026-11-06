@@ -2774,6 +2774,7 @@ mod commit_tests {
         pick(&mut plugin, &host, SHA1);
 
         assert_eq!(plugin.commit.as_deref(), Some(SHA1));
+        assert_eq!(storage::get(sections::SECTION_KEY).unwrap().as_deref(), Some("changes"));
         assert!(host.refreshed_views().contains(&DETAILS.to_owned()));
         let html = changes_html(&mut plugin, &host);
         assert!(html.contains("src/b.rs") && !html.contains("src/a.rs"), "{html}");
@@ -2784,6 +2785,7 @@ mod commit_tests {
         let comment = r#"{"type":"comment","oldPath":"src/b.rs","newPath":"src/b.rs","old":null,"new":2,"body":"x","draft":false}"#;
         changes_message(&mut plugin, &host, ViewEvent::Message(comment.into())).unwrap();
         assert!(writes(&host).is_empty(), "commit diffs are read-only");
+        assert!(host.view_messages().iter().any(|(view, _)| view == DETAILS), "the error goes to the merge request view");
     }
 
     #[test]

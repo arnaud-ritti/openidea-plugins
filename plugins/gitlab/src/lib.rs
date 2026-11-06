@@ -1698,7 +1698,7 @@ impl GitLab {
         Ok(match self.active_commit() {
             Some(c) => view
                 .button(Button::new("all-changes", "All Changes").icon("arrow-left"))
-                .status(&format!("Showing {} {} in Merge Request Changes", c.short_id, first_line(&c.title))),
+                .status(&format!("Showing {} {} in the Changes section", c.short_id, first_line(&c.title))),
             None => view.status(&format!("!{iid} · double-click a commit to see its changes")),
         })
     }
@@ -1709,6 +1709,7 @@ impl GitLab {
             return Ok(());
         }
 
+        let mut show_changes = true;
         match event {
             ViewEvent::Activate(key) => {
                 let Ok(sha) = safe::hex_sha(&key) else { return Ok(()) };
@@ -1720,12 +1721,18 @@ impl GitLab {
                 self.commit = Some(sha.to_owned());
             }
             ViewEvent::Button(id) if id == "all-changes" => self.commit = None,
-            ViewEvent::Button(id) if id == "refresh" => self.commits = None,
+            ViewEvent::Button(id) if id == "refresh" => {
+                self.commits = None;
+                show_changes = false;
+            }
             _ => return Ok(()),
         }
 
         self.anchor = None;
         host::refresh_view(COMMITS);
+        if show_changes {
+            return self.set_section(Section::Changes);
+        }
         self.refresh_section(Section::Changes);
 
         Ok(())

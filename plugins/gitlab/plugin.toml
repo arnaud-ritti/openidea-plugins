@@ -25,7 +25,7 @@ icon = "icon.svg"
 engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [
-    "on-view:merge-requests", "on-view:merge-request", "on-view:merge-request-changes", "on-view:gitlab-projects", "on-view:new-merge-request", "on-view:new-snippet", "on-view:share-project-form", "on-view:merge-request-commits", "on-view:merge-request-files", "on-view:merge-request-pipeline",
+    "on-view:merge-requests", "on-view:merge-request", "on-view:gitlab-projects", "on-view:new-merge-request", "on-view:new-snippet", "on-view:share-project-form", "on-view:merge-request-commits", "on-view:merge-request-files", "on-view:merge-request-pipeline",
     "on-event:vcs-changed", "on-event:file-opened", "on-event:file-saved",
     "on-file:**/.gitlab-ci.yml", "on-file:**/*.gitlab-ci.yml",
 ]
