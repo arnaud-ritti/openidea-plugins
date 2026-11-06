@@ -52,6 +52,10 @@ Source: the user, after looking at the real IDE (OpenIDEA 0.1.38) with `ma-stati
 
 - Option B (fewer windows), Changes on the right, the five-window Spring grouping, and merging only the groups above.
 
+## Decided by the user on the builder's question
+
+- **Old plugin ids:** the published versions of the seven absorbed plugins (`aritti.spring-websocket`, `-messaging`, `-graphql`, `-webflow`, `-cloud`, `-batch`, `-modulith`) stay where they are (GitHub releases, tags, registry entries). They are no longer maintained: no tombstone release, no registry withdrawal, no further versions. Consequence to document, not to engineer around: a user who keeps an old plugin installed next to the new `aritti.spring-web` or `aritti.spring-integration` gets duplicate windows and duplicate completions until they uninstall it. The README and change-notes of the two survivors say to uninstall the old ids.
+
 ## My calls (marked as mine, to check)
 
 - **Multi-line text:** a prompt is one line. Create Merge Request asks for title and a one-line description, then offers "Open on GitLab" for longer text. A dedicated multi-line field would need a form window again.
