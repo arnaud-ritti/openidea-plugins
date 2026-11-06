@@ -44,6 +44,10 @@ are ignored. The same files give the prefixes (`sqlMigrationPrefix`,
 
 ## Commands
 
+- **Flyway: New Migration…** asks for a description and creates
+  `V<next>__<description>.sql` in the folder of the newest migration, then opens
+  it. It writes the file with the optional `tee` permission; without it, the
+  file name is copied instead.
 - **Flyway: Copy Next Migration Version** copies the next versioned prefix
   (`V3__`) to the clipboard, and the notification names the folder of the
   newest migration. Without the `clipboard` permission, the notification
