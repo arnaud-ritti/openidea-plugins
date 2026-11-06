@@ -56,8 +56,56 @@ const RULES: &[Rule] = &[
     Rule { refs: &["success-handler-ref"], ..Rule::new("logout") },
     Rule { required: &["ref|hash"], refs: &["ref"], ..Rule::new("password-encoder") },
     Rule { required: &["data-source-ref"], refs: &["data-source-ref"], ..Rule::new("jdbc-user-service") },
-    Rule { enums: &[("mode", &["proxy", "aspectj"])], ..Rule::new("global-method-security") },
+    Rule {
+        enums: &[
+            ("mode", &["proxy", "aspectj"]),
+            ("pre-post-annotations", ENABLED),
+            ("secured-annotations", ENABLED),
+            ("jsr250-annotations", ENABLED),
+            ("proxy-target-class", BOOLEAN),
+        ],
+        refs: &["access-decision-manager-ref", "authentication-manager-ref"],
+        ..Rule::new("global-method-security")
+    },
+    Rule {
+        enums: &[
+            ("mode", &["proxy", "aspectj"]),
+            ("pre-post-enabled", BOOLEAN),
+            ("secured-enabled", BOOLEAN),
+            ("jsr250-enabled", BOOLEAN),
+        ],
+        ..Rule::new("method-security")
+    },
+    Rule {
+        enums: &[
+            ("auto-config", BOOLEAN),
+            ("once-per-request", BOOLEAN),
+            ("disable-url-rewriting", BOOLEAN),
+            ("servlet-api-provision", BOOLEAN),
+            ("jaas-api-provision", BOOLEAN),
+        ],
+        refs: &["access-decision-manager-ref", "security-context-repository-ref", "request-cache-ref"],
+        ..Rule::new("http")
+    },
+    Rule { enums: &[("always-use-default-target", BOOLEAN)], ..Rule::new("form-login") },
+    Rule { enums: &[("invalidate-session", BOOLEAN)], ..Rule::new("logout") },
+    Rule { refs: &["data-source-ref", "token-repository-ref", "services-ref"], ..Rule::new("remember-me") },
+    Rule { enums: &[("disabled", BOOLEAN)], refs: &["token-repository-ref", "request-handler-ref"], ..Rule::new("csrf") },
+    Rule { enums: &[("disabled", BOOLEAN), ("defaults-disabled", BOOLEAN)], ..Rule::new("headers") },
+    Rule { refs: &["ref", "configuration-source-ref"], ..Rule::new("cors") },
+    Rule { enums: &[("enabled", BOOLEAN)], ..Rule::new("anonymous") },
+    Rule { required: &["ref"], refs: &["ref"], ..Rule::new("custom-filter") },
+    Rule { refs: &["session-authentication-strategy-ref"], ..Rule::new("session-management") },
+    Rule {
+        enums: &[("error-if-maximum-exceeded", BOOLEAN)],
+        refs: &["session-registry-ref"],
+        ..Rule::new("concurrency-control")
+    },
+    Rule { enums: &[("erase-credentials", BOOLEAN)], ..Rule::new("authentication-manager") },
 ];
+
+const BOOLEAN: &[&str] = &["true", "false"];
+const ENABLED: &[&str] = &["enabled", "disabled"];
 
 /// The bean names a source declares: stereotype classes, `@Bean` methods, repository interfaces and XML bean ids.
 pub fn bean_names(path: &str, text: &str) -> Option<Vec<String>> {
@@ -204,5 +252,25 @@ mod tests {
             ]
         );
         assert_eq!(xml_rules(xml, None).len(), 5);
+    }
+
+    #[test]
+    fn checks_the_wider_security_xml_tables() {
+        let xml = r#"<b:beans xmlns:b="http://www.springframework.org/schema/beans" xmlns="http://www.springframework.org/schema/security">
+<global-method-security pre-post-annotations="true" secured-annotations="enabled"/>
+<http auto-config="yes"><csrf disabled="maybe"/><custom-filter after="BASIC_AUTH_FILTER"/><cors ref="corsSource"/></http>
+<method-security pre-post-enabled="true"/></b:beans>"#;
+        let none = |_: &str| false;
+        let codes: Vec<_> = xml_rules(xml, Some(&none)).into_iter().map(|f| (f.code, xml[f.start..f.end].to_owned())).collect();
+        assert_eq!(
+            codes,
+            [
+                ("invalid-attribute-value", "true".into()),
+                ("invalid-attribute-value", "yes".into()),
+                ("invalid-attribute-value", "maybe".into()),
+                ("missing-attribute", "custom-filter".into()),
+                ("unresolved-reference", "corsSource".into()),
+            ]
+        );
     }
 }
