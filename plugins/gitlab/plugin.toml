@@ -1,6 +1,6 @@
 id = "aritti.gitlab"
 name = "GitLab"
-version = "0.2.0" # x-release-please-version
+version = "0.1.0" # x-release-please-version
 description = """\
 gitlab.com merge requests in the IDE. List them with the IntelliJ quick filters and follow their timeline. \
 Review the changes with comments on diff lines and pending reviews, then reply, resolve, approve, merge, rebase, \
