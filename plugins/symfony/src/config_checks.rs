@@ -2,7 +2,7 @@
 //! removed, and plain YAML scalars the parser refuses or reads differently.
 
 use crate::checks::{Finding, is_service_file};
-use crate::index::{self, xml_attribute, xml_tags};
+use crate::index::{self, xml_tags};
 use crate::{is_quoted_config, yaml_quotes};
 
 const FACTORY_SETTINGS: [(&str, &str); 3] = [("factory_class", "factory-class"), ("factory_method", "factory-method"), ("factory_service", "factory-service")];
@@ -28,11 +28,14 @@ pub fn deprecated_factory_settings(path: &str, language: &str, text: &str) -> Ve
     }
 
     if language == "xml" && text.contains("<container") {
+        let comments = xml_comments(text);
         for (tag, at) in xml_tags(text, "service") {
+            if comments.iter().any(|comment| comment.contains(&at)) {
+                continue;
+            }
             for (_, name) in FACTORY_SETTINGS {
-                if let Some((_, value_at)) = xml_attribute(tag, name) {
-                    let start = at + value_at - 2 - name.len();
-                    found.push(deprecated_factory(start..start + name.len(), name));
+                if let Some(start) = attribute_name(tag, name) {
+                    found.push(deprecated_factory(at + start..at + start + name.len(), name));
                 }
             }
         }
@@ -40,6 +43,29 @@ pub fn deprecated_factory_settings(path: &str, language: &str, text: &str) -> Ve
 
     found.sort_by_key(|finding| finding.start);
     found
+}
+
+fn xml_comments(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut comments = Vec::new();
+    let mut from = 0;
+
+    while let Some(open) = text[from..].find("<!--") {
+        let start = from + open;
+        let end = text[start..].find("-->").map_or(text.len(), |close| start + close + 3);
+        comments.push(start..end);
+        from = end;
+    }
+
+    comments
+}
+
+/// Offset of the attribute `name` in a start tag, allowing spaces around `=`.
+fn attribute_name(tag: &str, name: &str) -> Option<usize> {
+    tag.match_indices(name).map(|(at, _)| at).find(|&at| {
+        let before_ok = tag[..at].ends_with(|c: char| c.is_ascii_whitespace());
+        let after = tag[at + name.len()..].trim_start();
+        before_ok && after.strip_prefix('=').is_some_and(|rest| rest.trim_start().starts_with(['"', '\'']))
+    })
 }
 
 pub fn yaml_scalars(path: &str, language: &str, text: &str) -> Vec<Finding> {
@@ -119,6 +145,38 @@ mod tests {
     fn deprecated_factory_setting_is_quiet_in_route_files() {
         let text = "services:\n    app.a:\n        factory_method: create\n";
         assert!(run_in("/project/config/routes.yaml", "yaml", text, Groups::all_on()).is_empty());
+    }
+
+    #[test]
+    fn factory_setting_ranges_use_utf16_columns_with_multibyte_text() {
+        let found = yaml("services:\n    s:\n        factory_method: \"é😀\"\n        factory_class: X\n");
+        assert_eq!(found[1].range, TextRange::new(Position::new(3, 8), Position::new(3, 21)));
+
+        let xml = "<container><services><service id=\"é😀\" factory-method = \"m\"/></services></container>";
+        let found = run_in("/project/config/services.xml", "xml", xml, Groups::all_on());
+        assert_eq!(found[0].range, TextRange::new(Position::new(0, 39), Position::new(0, 53)));
+    }
+
+    #[test]
+    fn factory_setting_crlf_files_report_correct_lines() {
+        let found = yaml("services:\r\n    s:\r\n        factory_method: m\r\n");
+        assert_eq!(found[0].range, TextRange::new(Position::new(2, 8), Position::new(2, 22)));
+
+        let xml = "<container>\r\n<services>\r\n<service id=\"a\" factory-class=\"F\"/>\r\n</services></container>";
+        let found = run_in("/project/config/services.xml", "xml", xml, Groups::all_on());
+        assert_eq!(found[0].range, TextRange::new(Position::new(2, 16), Position::new(2, 29)));
+    }
+
+    #[test]
+    fn factory_setting_is_quiet_in_xml_comments() {
+        let xml = "<container><!-- <service id=\"a\" factory-class=\"F\"/> --><services/></container>";
+        assert!(run_in("/project/config/services.xml", "xml", xml, Groups::all_on()).is_empty());
+    }
+
+    #[test]
+    fn quotes_inside_plain_values_and_comments_are_quiet_for_backslash_check() {
+        assert!(yaml("msg: Use the \"App\\Entity\\User\" class\na: foo # see \"C:\\x\"\nb: [\"ok\"] # \"C:\\x\"\n").is_empty());
+        assert_eq!(codes(&yaml("b: [x, \"C:\\q\"]\n")), ["yaml-unescaped-backslash"]);
     }
 
     #[test]

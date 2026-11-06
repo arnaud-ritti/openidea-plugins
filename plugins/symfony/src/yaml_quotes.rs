@@ -80,10 +80,12 @@ pub fn backslashes(text: &str) -> Vec<Range<usize>> {
 
     for_each_value(text, |base, value, _| {
         let bytes = value.as_bytes();
+        let flow = value.starts_with(['[', '{']);
         let mut i = 0;
 
         while i < bytes.len() {
-            let opens = bytes[i] == b'"' && (i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b'[' | b'{' | b',' | b':'));
+            let after_flow_punctuation = || value[..i].trim_end().ends_with(['[', '{', ',', ':']);
+            let opens = bytes[i] == b'"' && (i == 0 || (flow && after_flow_punctuation()));
             if !opens {
                 i += 1;
                 continue;
