@@ -3,12 +3,12 @@
 //! has none), its unresolved threads on the lines of open files, and checking
 //! out a merge request's branch with `git`.
 
-use openidea_plugin::host::{self, storage};
+use openidea_plugin::host;
 use openidea_plugin::providers::{CodeAction, Document, LineMarker};
 use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem, TextEdit};
 
 use crate::api::{self, Discussion, MergeRequest};
-use crate::{COMMITS, GitLab, SELECTED_KEY, first_line, relative_path, review, safe};
+use crate::{COMMITS, GitLab, first_line, relative_path, review, safe};
 
 pub const STATUS_ITEM: &str = "merge-request";
 const RECHECK_SECS: u64 = 300;
@@ -415,8 +415,11 @@ impl GitLab {
         let mr = self.branch.as_ref().and_then(|b| b.mr.as_ref()).ok_or("The current branch has no open merge request.")?;
         let iid = mr.iid;
 
-        storage::set(SELECTED_KEY, &iid.to_string())?;
+        if Self::selected() != Some(iid) {
+            self.select_merge_request(iid)?;
+        }
         self.commit = None;
+        self.confirm = None;
         self.reload_merge_request(iid);
         host::refresh_view(COMMITS);
 

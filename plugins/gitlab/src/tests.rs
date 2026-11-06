@@ -391,6 +391,72 @@ fn merge_sends_the_head_sha_and_options() {
     assert!(host.refreshed_views().ends_with(&[DETAILS.into(), CHANGES.into(), LIST.into()]));
 }
 
+fn branch_on_merge_request_8() -> MockHost {
+    let host = setup();
+    host.set_vcs_status(Some(status("feature")));
+    host.on_fetch(|r| {
+        let mr8 = MR.replace(r#""iid": 7"#, r#""iid": 8"#);
+        if r.url.contains("source_branch=feature") {
+            return ok(&format!("[{mr8}]"));
+        }
+        if r.url.split('?').next().unwrap().ends_with("/merge_requests/8") {
+            return ok(&mr8);
+        }
+        let mut as_7 = r.clone();
+        as_7.url = r.url.replace("/merge_requests/8/", "/merge_requests/7/");
+        gitlab(&as_7)
+    });
+    host
+}
+
+#[test]
+fn a_merge_confirm_does_not_follow_a_switch_to_the_branch_merge_request() {
+    let host = branch_on_merge_request_8();
+    let mut plugin = selected(&host);
+    plugin.handle(DETAILS, ViewEvent::Button("merge".into()), &host.invocation()).unwrap();
+    plugin.handle_events(&[Event::VcsChanged("/project".into())], &host.invocation());
+
+    plugin.run_command("show-branch-merge-request", &host.invocation(), None).unwrap();
+    plugin.render(DETAILS, None, &host.invocation()).unwrap();
+    plugin.handle(DETAILS, ViewEvent::Button("merge".into()), &host.invocation()).unwrap();
+
+    assert!(writes(&host).is_empty(), "{:?}", writes(&host));
+    let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+    assert_eq!(label(&view, "merge"), "Confirm Merge !8 into main");
+}
+
+#[test]
+fn a_close_confirm_is_bound_to_its_merge_request() {
+    let host = branch_on_merge_request_8();
+    let mut plugin = selected(&host);
+    plugin.handle(DETAILS, ViewEvent::Button("close".into()), &host.invocation()).unwrap();
+    storage::set(SELECTED_KEY, "8").unwrap();
+    plugin.details = None;
+    plugin.render(DETAILS, None, &host.invocation()).unwrap();
+
+    plugin.handle(DETAILS, ViewEvent::Button("close".into()), &host.invocation()).unwrap();
+
+    assert!(writes(&host).is_empty(), "{:?}", writes(&host));
+}
+
+#[test]
+fn showing_the_branch_merge_request_resets_the_pipeline_view() {
+    let host = branch_on_merge_request_8();
+    let mut plugin = selected(&host);
+    plugin.pipeline_selection = Some(PipelineKey::Pipeline(41));
+    plugin.pipeline_confirm = Some(41);
+    plugin.pipeline_status = Some("Pipeline retried.".into());
+    plugin.pipeline_open.insert("p:41".into(), false);
+    plugin.handle_events(&[Event::VcsChanged("/project".into())], &host.invocation());
+    let before = host.refreshed_views().len();
+
+    plugin.run_command("show-branch-merge-request", &host.invocation(), None).unwrap();
+
+    assert_eq!((plugin.pipeline_selection, plugin.pipeline_confirm, plugin.pipeline_status.as_deref()), (None, None, None));
+    assert!(plugin.pipeline_open.is_empty());
+    assert!(host.refreshed_views()[before..].contains(&PIPELINES.to_owned()));
+}
+
 #[test]
 fn another_action_or_selection_cancels_a_pending_close() {
     let host = setup();
@@ -670,6 +736,21 @@ fn reply_and_resolve_encode_the_discussion_id() {
     let posted = writes(&host);
     assert_eq!(posted[0].1, "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7/discussions/abc123/notes");
     assert_eq!(posted[1].1, "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7/discussions/abc123?resolved=false");
+}
+
+#[test]
+fn a_draft_reply_to_a_hostile_discussion_id_sends_nothing() {
+    let host = setup();
+    let api = api::Project("g/p");
+
+    for id in ["abc/notes", "abc?x=1", "abc#x", "..", "%2F", ""] {
+        assert!(api.create_draft(7, "x", None, Some(id)).is_err(), "{id}");
+    }
+    assert!(host.requests().is_empty());
+
+    api.create_draft(7, "x", None, Some("abc123")).unwrap();
+
+    assert!(writes(&host)[0].2.contains(r#""in_reply_to_discussion_id":"abc123""#));
 }
 
 #[test]
@@ -1934,16 +2015,21 @@ mod share_form_tests {
     use super::*;
     use serde_json::Value;
 
-    fn git_with(files: &'static str, failing: &'static str) -> impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> {
+    fn git_staging(files: &'static str, staged: String, failing: &'static str) -> impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> {
         move |args, _| {
             let stdout = match args[0].as_str() {
-                "status" => files,
-                "symbolic-ref" => "main\n",
-                _ => "",
+                "status" => files.replace('\n', "\0"),
+                "diff" => staged.clone(),
+                "symbolic-ref" => "main\n".into(),
+                _ => String::new(),
             };
             let status = if args[0] == failing { 1 } else { 0 };
-            Ok(ProcessOutput { status: Some(status), stdout: stdout.into(), stderr: "boom".into() })
+            Ok(ProcessOutput { status: Some(status), stdout, stderr: "boom".into() })
         }
+    }
+
+    fn git_with(files: &'static str, failing: &'static str) -> impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> {
+        git_staging(files, files.lines().map(|l| format!("{}\0", &l[3..])).collect(), failing)
     }
 
     fn unshared() -> MockHost {
@@ -2080,7 +2166,7 @@ mod share_form_tests {
 
         fill(&mut plugin, &host, &[("init", "true")]);
         click(&mut plugin, &host, "share");
-        assert_eq!(git_runs(&host), ["--version", "init", "symbolic-ref --short HEAD", "status --porcelain --untracked-files=all"]);
+        assert_eq!(git_runs(&host), ["--version", "init", "symbolic-ref --short HEAD", "status --porcelain -z --untracked-files=all"]);
 
         let host = unshared();
         let (mut plugin, _) = open(&host);
@@ -2109,10 +2195,52 @@ mod share_form_tests {
 
         assert_eq!(
             git_runs(&host)[3..],
-            ["status --porcelain --untracked-files=all", "add -A", "commit -m Initial commit", "remote add -- origin https://gitlab.com/me/project.git"]
+            [
+                "status --porcelain -z --untracked-files=all",
+                "add -A",
+                "diff --cached --name-only -z --no-renames",
+                "commit -m Initial commit",
+                "remote add -- origin https://gitlab.com/me/project.git"
+            ]
         );
         assert_eq!(created(&host).len(), 1);
         assert_eq!(host.terminals().len(), 1);
+    }
+
+    #[test]
+    fn a_file_staged_after_the_confirm_is_unstaged_and_listed_again() {
+        let host = unshared();
+        host.on_process("git", git_with("?? src/a.rs\n", ""));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+        click(&mut plugin, &host, "share");
+
+        host.on_process("git", git_staging("?? src/a.rs\n", "src/a.rs\0notes.txt\0".into(), ""));
+        let view = click(&mut plugin, &host, "confirm-commit");
+
+        let runs = git_runs(&host);
+        assert!(runs.contains(&"reset -q".to_owned()), "{runs:?}");
+        assert!(!runs.iter().any(|r| r.starts_with("commit") || r.starts_with("remote")), "{runs:?}");
+        assert!(created(&host).is_empty());
+        assert!(host.terminals().is_empty());
+        assert_eq!(buttons(&view), ["confirm-commit", "refresh"]);
+        assert_eq!(value(&view, "files"), &FieldValue::Multiline("src/a.rs\nnotes.txt".into()));
+    }
+
+    #[test]
+    fn porcelain_renames_list_both_sides_and_order_does_not_matter_for_the_confirm() {
+        let host = unshared();
+        host.on_process("git", git_staging("R  new.rs\nold.rs\n?? b.rs\n", "b.rs\0new.rs\0old.rs\0".into(), ""));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+
+        let view = click(&mut plugin, &host, "share");
+        assert_eq!(value(&view, "files"), &FieldValue::Multiline("new.rs\nold.rs\nb.rs".into()));
+
+        click(&mut plugin, &host, "confirm-commit");
+
+        assert!(git_runs(&host).contains(&"commit -m Initial commit".to_owned()));
+        assert_eq!(created(&host).len(), 1);
     }
 
     #[test]
@@ -2385,6 +2513,32 @@ mod note_action_tests {
 
         assert_eq!(writes(&host), [("DELETE".into(), format!("{MR_URL}/notes/12/award_emoji/55"), String::new())]);
         assert!(view.status.as_deref().unwrap().starts_with("Removed your :thumbsup:."), "{view:?}");
+    }
+
+    #[test]
+    fn a_user_without_an_id_owns_no_note_and_no_award() {
+        let host = setup();
+        host.on_fetch(|r| {
+            let path = r.url.strip_prefix(MR_URL).unwrap_or("").split('?').next().unwrap_or("");
+            match (r.method.as_str(), path) {
+                _ if r.url.ends_with("/api/v4/user") => ok(r#"{"username": "me"}"#),
+                ("GET", "/discussions") => ok(r#"[{"id": "d1", "notes": [{"id": 12, "body": "x", "author": {"username": "me"}, "created_at": "2026-01-03"}]}]"#),
+                ("GET", "/notes/12/award_emoji") => ok(r#"[{"id": 55, "name": "thumbsup", "user": {"username": "me"}}]"#),
+                _ => notes(r),
+            }
+        });
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        assert!(!buttons(&view).contains(&"edit-note") && !buttons(&view).contains(&"delete-note"), "{view:?}");
+        click(&mut plugin, &host, "edit-note");
+        click(&mut plugin, &host, "delete-note");
+        click(&mut plugin, &host, "delete-note");
+        assert!(writes(&host).is_empty(), "{:?}", writes(&host));
+
+        click(&mut plugin, &host, "react");
+
+        assert_eq!(writes(&host), [("POST".into(), format!("{MR_URL}/notes/12/award_emoji?name=thumbsup"), String::new())]);
     }
 
     #[test]
@@ -2916,6 +3070,22 @@ mod pipeline_tests {
         assert!(host.notifications().iter().all(|n| !format!("{n:?}").contains("glpat-x")));
         assert!(host.logs().iter().all(|(_, line)| !line.contains("glpat-x")));
         assert!(host.requests().iter().all(|r| !r.url.contains("glpat-x")));
+    }
+
+    #[test]
+    fn a_failed_retry_reloads_the_tree() {
+        let host = setup();
+        host.on_fetch(|req| match req.method == "POST" {
+            true => Ok(HttpResponse { status: 403, headers: vec![], body: br#"{"message":"403 Forbidden"}"#.to_vec() }),
+            false => pipelines(req),
+        });
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "j:301");
+
+        click(&mut plugin, &host, "retry");
+
+        let reloads = host.requests().iter().filter(|r| r.url.contains("/merge_requests/7/pipelines")).count();
+        assert_eq!(reloads, 2);
     }
 
     #[test]

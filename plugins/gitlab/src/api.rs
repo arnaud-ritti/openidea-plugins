@@ -623,7 +623,7 @@ impl Project<'_> {
         }
 
         if let Some(discussion) = reply_to {
-            body["in_reply_to_discussion_id"] = json!(discussion);
+            body["in_reply_to_discussion_id"] = json!(safe::discussion_id(discussion)?);
         }
 
         rest("POST", &self.mr(iid, "/draft_notes"), Some(body)).map(drop)

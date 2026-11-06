@@ -103,14 +103,32 @@ fn looks_secret(path: &str) -> bool {
     name.starts_with(".env") || name.ends_with(".pem") || name.ends_with(".key") || name.starts_with("id_rsa") || name.starts_with("id_ed25519")
 }
 
-/// The paths of `git status --porcelain` lines (`XY path`); a rename lists both sides.
+/// The paths of `git status --porcelain -z` entries (`XY path`); a rename or copy is followed by its source.
 fn porcelain_paths(stdout: &str) -> Vec<String> {
-    stdout
-        .lines()
-        .filter_map(|line| line.get(3..))
-        .flat_map(|paths| paths.split(" -> "))
-        .map(|path| path.trim_matches('"').to_owned())
-        .collect()
+    let mut entries = stdout.split('\0').filter(|e| !e.is_empty());
+    let mut paths = Vec::new();
+
+    while let Some(entry) = entries.next() {
+        let Some(path) = entry.get(3..) else { continue };
+        paths.push(path.to_owned());
+
+        if entry[..2].contains(['R', 'C']) {
+            paths.extend(entries.next().map(str::to_owned));
+        }
+    }
+
+    paths
+}
+
+fn same_files(a: &[String], b: &[String]) -> bool {
+    let sorted = |files: &[String]| {
+        let mut files = files.to_vec();
+        files.sort();
+        files.dedup();
+        files
+    };
+
+    sorted(a) == sorted(b)
 }
 
 /// Shares the project as the form says. Every field is checked before the first `git` run and the local
@@ -177,7 +195,7 @@ pub fn share_with(ctx: &Invocation, form: &ShareForm, namespace_id: Option<u64>,
     };
 
     if form.commit_all {
-        let files = porcelain_paths(&git_ok(&project, &["status", "--porcelain", "--untracked-files=all"])?);
+        let files = porcelain_paths(&git_ok(&project, &["status", "--porcelain", "-z", "--untracked-files=all"])?);
         let secret: Vec<&str> = files.iter().map(String::as_str).filter(|f| looks_secret(f)).collect();
         if !secret.is_empty() {
             return Err(format!("Nothing was committed: {} look secret. Ignore them in .gitignore or commit by hand.", secret.join(", ")).into());
@@ -188,11 +206,19 @@ pub fn share_with(ctx: &Invocation, form: &ShareForm, namespace_id: Option<u64>,
         }
 
         if !files.is_empty() {
-            if confirmed != Some(files.as_slice()) {
+            if !confirmed.is_some_and(|c| same_files(c, &files)) {
                 return Ok(Some(files));
             }
 
             git_ok(&project, &["add", "-A"])?;
+            // A file created between the listing and `add -A` is staged too; only the confirmed set gets committed.
+            let staged: Vec<String> =
+                git_ok(&project, &["diff", "--cached", "--name-only", "-z", "--no-renames"])?.split('\0').filter(|f| !f.is_empty()).map(str::to_owned).collect();
+            if !same_files(&staged, &files) || staged.iter().any(|f| looks_secret(f)) {
+                git_ok(&project, &["reset", "-q"])?;
+                return Ok(Some(staged));
+            }
+
             git_ok(&project, &["commit", "-m", "Initial commit"])?;
         }
     }

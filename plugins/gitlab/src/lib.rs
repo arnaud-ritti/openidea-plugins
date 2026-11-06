@@ -406,14 +406,36 @@ impl GitLab {
         self.selected_note(iid).filter(|n| is_own(n, &me)).map(|n| n.id).ok_or_else(|| "Select one of your own comments first.".into())
     }
 
-    /// What a confirm click is bound to: a delete stays with the note it was first clicked on.
+    /// What a confirm click is bound to: a delete stays with the note, a merge or close with the merge request
+    /// it was first clicked on.
     fn confirm_token(&self, button: &str) -> String {
-        let note = Self::selected().and_then(|iid| Some((self.thread(iid)?.id.clone(), self.selected_note(iid)?.id)));
+        let iid = Self::selected();
+        let note = iid.and_then(|iid| Some((self.thread(iid)?.id.clone(), self.selected_note(iid)?.id)));
 
-        match (button, note) {
-            ("delete-note", Some((thread, note))) => format!("{button}:{thread}:{note}"),
+        match (button, iid, note) {
+            ("delete-note", _, Some((thread, note))) => format!("{button}:{thread}:{note}"),
+            ("merge" | "close", Some(iid), _) => format!("{button}:{iid}"),
             _ => button.to_owned(),
         }
+    }
+
+    /// Switches every merge request view to `iid`, dropping what belonged to the previous one.
+    fn select_merge_request(&mut self, iid: u64) -> Result<(), Error> {
+        storage::set(SELECTED_KEY, &iid.to_string())?;
+        storage::delete(COMMENT_KEY)?;
+        self.details = None;
+        self.anchor = None;
+        self.commit = None;
+        self.confirm = None;
+        self.pipeline_selection = None;
+        self.pipeline_confirm = None;
+        self.pipeline_status = None;
+        self.pipeline_open.clear();
+        host::refresh_view(CHANGES);
+        host::refresh_view(COMMITS);
+        host::refresh_view(PIPELINES);
+
+        Ok(())
     }
 
     /// Threads and, when shown, the timeline events of `iid`.
@@ -585,18 +607,7 @@ impl GitLab {
                 };
 
                 if Self::selected() != Some(iid) {
-                    storage::set(SELECTED_KEY, &iid.to_string())?;
-                    storage::delete(COMMENT_KEY)?;
-                    self.details = None;
-                    self.anchor = None;
-                    self.commit = None;
-                    self.pipeline_selection = None;
-                    self.pipeline_confirm = None;
-                    self.pipeline_status = None;
-                    self.pipeline_open.clear();
-                    host::refresh_view(CHANGES);
-                    host::refresh_view(COMMITS);
-                    host::refresh_view(PIPELINES);
+                    self.select_merge_request(iid)?;
                 }
 
                 match thread {
@@ -721,9 +732,9 @@ impl GitLab {
 
             let can_merge = mr.user.as_ref().is_some_and(|u| u.can_merge);
             let mergeable = mr.detailed_merge_status.as_deref() == Some("mergeable");
-            let merge = match self.confirm.as_deref() {
-                Some("merge") => format!("Confirm Merge !{} into {}", mr.iid, mr.target_branch),
-                _ => "Merge".into(),
+            let merge = match self.confirm == Some(format!("merge:{}", mr.iid)) {
+                true => format!("Confirm Merge !{} into {}", mr.iid, mr.target_branch),
+                false => "Merge".into(),
             };
             view = view.button(Button::new("merge", &merge).icon("github-pr-merged").enabled(can_merge && mergeable));
 
@@ -739,9 +750,9 @@ impl GitLab {
                 true => ("Mark as Ready", "github-pr-open"),
                 false => ("Mark as Draft", "github-pr-draft"),
             };
-            let close = match self.confirm.as_deref() {
-                Some("close") => format!("Confirm Close !{}", mr.iid),
-                _ => "Close".into(),
+            let close = match self.confirm == Some(format!("close:{}", mr.iid)) {
+                true => format!("Confirm Close !{}", mr.iid),
+                false => "Close".into(),
             };
             view = view
                 .button(Button::new("draft", draft).icon(draft_icon))
@@ -896,7 +907,7 @@ impl GitLab {
                 let emoji = safe::emoji(self.emoji.as_deref().unwrap_or(safe::EMOJIS[0]))?;
                 let note = self.reaction_target(mr.iid)?;
                 let me = self.me()?;
-                let mine = api.awards(mr.iid, note)?.into_iter().find(|a| a.name == emoji && a.user.id == me.id);
+                let mine = api.awards(mr.iid, note)?.into_iter().find(|a| a.name == emoji && me.id != 0 && a.user.id == me.id);
 
                 match mine {
                     Some(award) => api.remove_award(mr.iid, note, award.id).map(|_| format!("Removed your :{emoji}:.")),
@@ -1008,9 +1019,9 @@ fn details_fields(details: &Details, thread: Option<&Discussion>, comment: Strin
     fields
 }
 
-/// Only your own comments can be edited or deleted; GitLab writes system notes.
+/// Only your own comments can be edited or deleted; GitLab writes system notes. An unknown id (0) owns nothing.
 fn is_own(note: &Note, me: &User) -> bool {
-    note.author.id == me.id && !note.system
+    me.id != 0 && note.author.id == me.id && !note.system
 }
 
 fn note_actions_enabled() -> bool {
@@ -1645,16 +1656,14 @@ impl GitLab {
                     return Ok(());
                 }
 
-                match Self::pipeline_action(&id, pipeline, job, ctx) {
-                    Ok(done) => {
-                        self.pipeline_status = Some(done);
-                        self.pipelines = None;
-                        if let Some(iid) = Self::selected() {
-                            self.loaded = None;
-                            self.reload_merge_request(iid);
-                        }
-                    }
-                    Err(e) => self.pipeline_status = Some(e.to_string()),
+                self.pipeline_status = Some(match Self::pipeline_action(&id, pipeline, job, ctx) {
+                    Ok(done) => done,
+                    Err(e) => e.to_string(),
+                });
+                self.pipelines = None;
+                if let Some(iid) = Self::selected() {
+                    self.loaded = None;
+                    self.reload_merge_request(iid);
                 }
             }
             _ => {}
