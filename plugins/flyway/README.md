@@ -67,10 +67,12 @@ The bottom view Flyway Migrations runs `info` as JSON (`-outputType=json`; with
 migration with its state: Applied, Pending, Failed, Missing (applied, file
 gone), Out of order, Ignored, Superseded, Deleted. Double-click a row to open
 its file, found by version (or description for repeatable ones) among the
-migration locations, else by the `filepath` Flyway prints. Refresh runs `info`
-again. It needs Flyway 10 or newer, a database Flyway can reach (the
+migration locations, else by the `filepath` Flyway prints. The view runs `info` each time it
+renders, and Refresh runs it again. It needs Flyway 10 or newer, a database Flyway can reach (the
 configuration comes from the project or the `arguments` setting) and the
-permission to run the program; otherwise the view says what failed.
+permission to run the program; otherwise the view says what failed. Not verified:
+with `mvn`, whether the JSON survives Maven's `[INFO]` line prefixes and whether
+the Maven plugin honours `outputType`; `flyway` is the reliable runner.
 
 ## Completion
 
