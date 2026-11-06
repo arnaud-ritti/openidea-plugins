@@ -12,7 +12,7 @@
     },
     "allowRevealSecrets": {
       "type": "boolean",
-      "title": "Allow Show Secret to decode and display secret values (off: values are never shown)",
+      "title": "Allow Show Secret and YAML on a secret (off: secret data is never read; on: YAML of a secret is shown unstripped)",
       "default": false
     },
     "checkDeprecatedApiVersions": {

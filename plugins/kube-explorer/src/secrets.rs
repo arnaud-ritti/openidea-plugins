@@ -115,8 +115,12 @@ impl Json<'_> {
                 Ok(())
             }
             Some(_) => {
+                let start = self.at;
                 while self.bytes.get(self.at).is_some_and(|c| !b",}] \n\r\t".contains(c)) {
                     self.at += 1;
+                }
+                if self.at == start {
+                    return Err(format!("unexpected JSON at byte {start}"));
                 }
                 Ok(())
             }
@@ -185,7 +189,7 @@ pub fn manifest(name: &str, entries: &[(String, String)]) -> Result<String, Stri
     let mut out = format!("apiVersion: v1\nkind: Secret\nmetadata:\n  name: \"{name}\"\ntype: Opaque\ndata:\n");
     for (i, (key, value)) in entries.iter().enumerate() {
         if !valid_key(key) {
-            return Err(format!("\"{key}\" is not a valid key: use letters, digits, '-', '_' and '.'."));
+            return Err("A key is invalid: use letters, digits, '-', '_' and '.' only.".into());
         }
         if entries[..i].iter().any(|(k, _)| k == key) {
             return Err(format!("The key \"{key}\" is given twice."));

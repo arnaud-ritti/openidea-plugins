@@ -13,15 +13,21 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   **Custom Resources** lists the cluster's CRD kinds (`kubectl api-resources`,
   without core and built-in groups) by API group; expanding a kind lists its
   instances, which take Describe, YAML and Delete like any resource.
-- **Secrets**: *Show Secret* (a selected secret) decodes its values in the plugin and
-  shows them only in the panel, until Back. It is off until you turn on
-  `allowRevealSecrets` in the settings; values never go to notifications, logs,
-  storage, the clipboard, temp files or command arguments, and a value that is not
-  UTF-8 is shown as base64. *Create Secret* builds an Opaque Secret from a name and
-  key/value pairs (Add Key for more than one) and runs `kubectl apply -f -` with the
-  manifest on stdin, so values never appear in arguments. Keys are limited to
-  `[-._a-zA-Z0-9]`. The form has no masked field in this plugin API, so typed values are
-  visible on screen; the form is cleared when you submit or click Back.
+- **Secrets**: Show Secret (a selected secret) decodes its values in the plugin and
+  shows them only in the panel. It is off until you turn on `allowRevealSecrets` in
+  the settings; while it is off, YAML on a secret is refused too (that YAML holds the
+  base64 data), and Describe, which prints no values, still works. With it on, YAML
+  on a secret is allowed and is not stripped: it opens in a temp file or the panel
+  like any resource. Show Secret itself never sends values to notifications, logs,
+  storage, the clipboard, temp files or command arguments; a value that is not UTF-8
+  is shown as base64. The SDK has no view-close event, so revealed values clear on Back
+  only (and when the setting is turned off). Create Secret builds an Opaque Secret from
+  a name and key/value pairs (Add Key for more than one) and runs `kubectl create -f -`
+  with the manifest on stdin, so values never appear in arguments and no
+  last-applied annotation is written; it fails on an existing name rather than
+  overwriting. Keys are limited to `[-._a-zA-Z0-9]`. The form has no masked field in
+  this plugin API, so typed values are visible on screen; it is cleared when you
+  submit or click Back.
 - **New file templates** (File › New): Pod, Deployment, StatefulSet, DaemonSet, Job,
   CronJob, Service, Ingress, ConfigMap, Secret (`stringData` placeholder), Namespace,
   Role, RoleBinding, ClusterRole and ClusterRoleBinding, on current stable apiVersions.

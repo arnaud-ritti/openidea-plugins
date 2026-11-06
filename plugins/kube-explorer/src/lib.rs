@@ -150,8 +150,10 @@ impl KubeExplorer {
     fn debug_args(&self, pod: &str, image: &str, target: Option<&str>) -> Result<Vec<String>, String> {
         let named = [("pod", pod), ("image", image)].into_iter().chain(target.map(|t| ("container", t)));
         for (what, value) in named {
-            if value.is_empty() || value.starts_with('-') {
-                return Err(format!("Refusing to debug: the {what} name \"{value}\" is empty or starts with '-'."));
+            if value.is_empty() || value.starts_with('-') || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(format!(
+                    "Refusing to debug: the {what} name \"{value}\" is empty, starts with '-' or has whitespace."
+                ));
             }
         }
         let image = format!("--image={image}");
@@ -164,19 +166,32 @@ impl KubeExplorer {
     fn debug_pod(&self, pod: &str) -> Result<(), Error> {
         let image = host::setting_string("debugImage").filter(|i| !i.trim().is_empty());
         let image = image.as_deref().map_or(DEFAULT_DEBUG_IMAGE, str::trim);
+        self.debug_args(pod, image, None)?;
         let first = self.kubectl(&["get", "pod", pod, "-o", "jsonpath={.spec.containers[0].name}", REQUEST_TIMEOUT], None);
         let target = first.as_deref().map(str::trim).ok().filter(|t| !t.is_empty());
         let args = self.debug_args(pod, image, target)?;
         host::open_terminal(&format!("Debug: {pod}"), KUBECTL, &args)
     }
 
+    fn reveal_allowed() -> bool {
+        host::setting_bool("allowRevealSecrets") == Some(true)
+    }
+
+    /// True when the secret's data may be read; otherwise tells the user how to allow it.
+    fn secret_gate(kind: &str) -> bool {
+        if kind != "secrets" || Self::reveal_allowed() {
+            return true;
+        }
+        host::notify(
+            NotificationLevel::Warning,
+            "Secret values are hidden",
+            "To show them, turn on \"Allow Show Secret\" (allowRevealSecrets) in Settings › Plugins › Kube Explorer.",
+        );
+        false
+    }
+
     fn show_secret(&mut self, name: &str) -> Result<(), Error> {
-        if host::setting_bool("allowRevealSecrets") != Some(true) {
-            host::notify(
-                NotificationLevel::Warning,
-                "Secret values are hidden",
-                "To show them, turn on \"Allow Show Secret\" (allowRevealSecrets) in Settings › Plugins › Kube Explorer.",
-            );
+        if !Self::secret_gate("secrets") {
             return Ok(());
         }
         if name.starts_with('-') {
@@ -202,11 +217,14 @@ impl KubeExplorer {
         let manifest = secrets::manifest(&name, &entries)?;
         self.draft = None;
         host::refresh_view(TREE);
-        let out = host::run_process(KUBECTL, &self.args(&["apply", "-f", "-"]), Some(&manifest))?;
+        let out = host::run_process(KUBECTL, &self.args(&["create", "-f", "-"]), Some(&manifest))?;
         if out.status != Some(0) {
+            if out.stderr.contains("AlreadyExists") || out.stderr.contains("already exists") {
+                return Err(format!("A secret named \"{name}\" already exists; Create Secret does not overwrite it.").into());
+            }
             return Err(failure(KUBECTL, &secrets::redact(&out.stderr, &entries), out.status));
         }
-        host::notify(NotificationLevel::Info, "Secret applied", &format!("{name} in {}", self.target()));
+        host::notify(NotificationLevel::Info, "Secret created", &format!("{name} in {}", self.target()));
         self.reload();
         Ok(())
     }
@@ -308,6 +326,9 @@ impl KubeExplorer {
 
     /// The YAML in an editor on a temp file (saving applies it), else in the panel.
     fn edit_yaml(&mut self, kind: &str, name: &str) -> Result<(), Error> {
+        if !Self::secret_gate(kind) {
+            return Ok(());
+        }
         let _task = host::begin_task(&format!("Loading {kind}/{name}"), false);
         let text = self.kubectl(&["get", kind, name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
         let yaml = without_resource_version(&text);
@@ -353,6 +374,9 @@ impl KubeExplorer {
     }
 
     fn open_yaml(&mut self, kind: &str, name: &str, note: Option<String>) -> Result<(), Error> {
+        if !Self::secret_gate(kind) {
+            return Ok(());
+        }
         let _task = host::begin_task(&format!("Loading {kind}/{name}"), false);
         let text = self.kubectl(&["get", kind, name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
         self.show_yaml(kind, name, text, note);
@@ -442,6 +466,9 @@ impl KubeExplorer {
         }
         if let Some(draft) = &self.draft {
             return Ok(self.render_draft(draft));
+        }
+        if !Self::reveal_allowed() {
+            self.revealed = None;
         }
         if let Some((name, values)) = &self.revealed {
             return Ok(self.render_revealed(name, values));
@@ -1611,6 +1638,22 @@ mod tests {
     }
 
     #[test]
+    fn debug_args_reject_whitespace_image() {
+        let _host = host();
+        let kube = KubeExplorer::default();
+        assert!(kube.debug_args("web", "busybox --privileged", None).is_err());
+        assert!(kube.debug_args("web", "busy\tbox", None).is_err());
+        assert!(kube.debug_args("web", "busybox\n", None).is_err());
+        assert!(kube.debug_args("we b", "busybox", None).is_err());
+        assert!(kube.debug_args("web", "busybox", Some("a b")).is_err());
+        let host = host();
+        host.set_setting("debugImage", "\"busybox --privileged\"");
+        let kube = KubeExplorer { selected: Some(("pods".into(), "web-1".into())), ..Default::default() };
+        assert!(kube.debug_pod("web-1").is_err());
+        assert!(host.terminals().is_empty());
+    }
+
+    #[test]
     fn the_debug_button_opens_a_terminal_on_the_pods_first_container() {
         let host = host();
         host.on_process(KUBECTL, |args, _| match args.iter().any(|a| a.starts_with("jsonpath=")) {
@@ -1645,7 +1688,7 @@ mod tests {
             seen.borrow_mut().push((args.to_vec(), stdin.map(str::to_owned)));
             match args.iter().find(|a| !a.starts_with("--")).map(String::as_str) {
                 Some("get") => ok(&json),
-                Some("apply") if !apply_stderr.is_empty() => {
+                Some("create") if !apply_stderr.is_empty() => {
                     Ok(ProcessOutput { status: Some(1), stdout: String::new(), stderr: apply_stderr.into() })
                 }
                 _ => ok("secret/db created\n"),
@@ -1702,7 +1745,7 @@ mod tests {
         kube.button("submit-secret").unwrap();
         let runs = runs.borrow();
         let (args, stdin) = &runs[0];
-        assert_eq!(args, &["--namespace=shop", "apply", "-f", "-"]);
+        assert_eq!(args, &["--namespace=shop", "create", "-f", "-"]);
         let encoded = secrets::b64_encode(value.as_bytes());
         assert!(args.iter().all(|a| !a.contains(value) && !a.contains(&encoded)));
         let manifest = stdin.as_deref().unwrap();
@@ -1765,5 +1808,69 @@ mod tests {
         kube.button("show-secret").unwrap();
         let (_, values) = kube.revealed.unwrap();
         assert_eq!(values, [("blob".to_owned(), "(binary, base64) //4AgA==".to_owned())]);
+    }
+
+    fn tee_host(allow: bool) -> (MockHost, Runs) {
+        let (host, runs) = secret_host(allow, "apiVersion: v1\nkind: Secret\ndata:\n  p: cGFzcw==\n".into(), "");
+        let host = host.with_capabilities(&["process:kubectl", "process:tee", "editor.read", "storage"]);
+        (host, runs)
+    }
+
+    #[test]
+    fn yaml_of_a_secret_is_refused_when_reveal_is_off() {
+        let (host, runs) = tee_host(false);
+        let mut kube = selected_secret();
+        kube.button("yaml").unwrap();
+        kube.open_yaml("secrets", "db", None).unwrap();
+        assert!(runs.borrow().is_empty());
+        assert!(host.process_runs().is_empty());
+        assert!(kube.details.is_none());
+        let notes = host.notifications();
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].body.contains("allowRevealSecrets"));
+    }
+
+    #[test]
+    fn yaml_of_a_secret_works_when_reveal_is_on() {
+        let (host, runs) = tee_host(true);
+        let mut kube = selected_secret();
+        kube.button("yaml").unwrap();
+        assert!(runs.borrow().iter().any(|(args, _)| args.contains(&"yaml".to_owned())));
+        assert!(host.notifications().is_empty());
+    }
+
+    #[test]
+    fn create_secret_does_not_overwrite_an_existing_secret_message() {
+        let (_host, _) = secret_host(true, String::new(), "Error from server (AlreadyExists): secrets \"db\" already exists");
+        let mut kube = drafting("db", "password", "hunter2");
+        let error = format!("{:?}", kube.button("submit-secret").unwrap_err());
+        assert!(error.contains("already exists") && !error.contains("hunter2"));
+    }
+
+    #[test]
+    fn malformed_json_does_not_hang() {
+        for bad in ["[1}", "{\"a\":[1}]}", "{\"data\":[}", "{\"a\":}", "{", "{\"a\":1,}x"] {
+            let _ = secrets::data_entries(bad);
+        }
+        assert!(secrets::data_entries("{\"a\":[1}]}").is_err());
+    }
+
+    #[test]
+    fn invalid_key_error_does_not_quote_the_key() {
+        let error = secrets::manifest("db", &[("hunter2 secret!".into(), "v".into())]).unwrap_err();
+        assert!(!error.contains("hunter2"));
+        assert!(error.contains("letters, digits"));
+    }
+
+    #[test]
+    fn turning_the_setting_off_hides_revealed_values() {
+        let (host, _) = secret_host(true, secret_json(&[("password", b"hunter2")]), "");
+        let mut kube = selected_secret();
+        kube.button("show-secret").unwrap();
+        assert!(matches!(kube.render_tree().unwrap().body, Body::Form(_)));
+        host.set_setting("allowRevealSecrets", "false");
+        let body = kube.render_tree().unwrap().body;
+        assert!(!format!("{body:?}").contains("hunter2"));
+        assert!(kube.revealed.is_none());
     }
 }
