@@ -404,7 +404,7 @@ mod tests {
                 "`/x/**/y` is redundant: `/x/` matches it too.",
             ]
         );
-        assert!(codes("*.log\ndebug.log\n", GIT) == ["cover-entry"]);
+        assert_eq!(codes("*.log\ndebug.log\n", GIT), ["cover-entry"]);
         assert!(codes("!debug.log\n*.log\n", GIT).is_empty());
     }
 

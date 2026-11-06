@@ -252,3 +252,21 @@ fn embeds_the_templates() {
     assert!(TEMPLATES.len() > 250);
     assert!(TEMPLATES.iter().any(|(n, _)| *n == "Global/macOS"));
 }
+
+#[test]
+fn file_templates_create_files_the_plugin_recognises() {
+    let manifest = include_str!("../plugin.toml");
+    let language = include_str!("../languages/dotignore.toml");
+    let section = manifest.split("[[contributes.fileTemplates]]").nth(1).expect("a file template");
+    let value = |key: &str| {
+        let line = section.lines().find(|l| l.starts_with(&format!("{key} = "))).unwrap();
+        line.split('"').nth(1).unwrap().to_owned()
+    };
+
+    let extension = value("extension");
+    let extensions = language.lines().find(|l| l.starts_with("extensions = ")).unwrap();
+    assert!(extensions.contains(&format!("\"{extension}\"")), "{extension} is not a language extension");
+
+    let body = std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), value("path"))).unwrap();
+    assert!(!body.trim().is_empty());
+}

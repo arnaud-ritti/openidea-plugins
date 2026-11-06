@@ -51,9 +51,8 @@ patterns = [".stylintignore", ".swagger-codegen-ignore", ".terraformignore", ".t
 icon = "icons/ignored.svg"
 iconDark = "icons/ignored_dark.svg"
 
-# New › Ignore File: creates `<name>.gitignore`.
 [[contributes.fileTemplates]]
 id = "gitignore"
 name = "Ignore File"
-extension = "gitignore"
+extension = "ignore"
 path = "file-templates/gitignore"
