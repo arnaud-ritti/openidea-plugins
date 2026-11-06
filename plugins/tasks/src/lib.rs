@@ -13,11 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Context, Error, Event, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, host, register_plugin,
+    Context, Error, Event, Invocation, LogLevel, NotificationLevel, PickItem, Plugin, Project, StatusItem, host, register_plugin,
 };
 
 use git::Git;
-use model::{Choices, DEFAULT_TASK_ID, Task, TaskList, trimmed};
+use model::{Choices, DEFAULT_TASK_ID, NamedContext, Task, TaskList, trimmed};
 
 const VIEW: &str = "tasks";
 const STATUS_ITEM: &str = "active-task";
@@ -68,7 +68,25 @@ impl Plugin for Tasks {
 
                 self.show_form(Form::Close { id: tasks.active.clone() }, &tasks);
                 host::refresh_view(VIEW);
-                host::notify(NotificationLevel::Info, "Close the active task", "Review the close options in the Tasks tool window.");
+                if host::reveal_view(VIEW).is_err() {
+                    host::notify(NotificationLevel::Info, "Close the active task", "Review the close options in the Tasks tool window.");
+                }
+            }
+            "switch" => {
+                let items: Vec<PickItem> = tasks
+                    .tasks
+                    .iter()
+                    .filter(|t| !t.closed && t.id != tasks.active)
+                    .map(|t| PickItem::new(&t.id, &format!("{} {}", t.id, t.summary)))
+                    .collect();
+                if items.is_empty() {
+                    return Err("There is no other open task to switch to.".into());
+                }
+
+                if let Some(id) = host::pick("Switch Task", &items)? {
+                    self.switch_task(&project, &id, false, &tasks.choices)?;
+                    host::refresh_view(VIEW);
+                }
             }
             "open-in-browser" => {
                 let url = tasks.active().url.as_deref().ok_or("The active task isn't an issue, so it has no page to open.")?;
@@ -80,6 +98,12 @@ impl Plugin for Tasks {
                 host::notify(NotificationLevel::Info, "Commit message copied", &message);
             }
             "refresh" => refresh_issues(&project, false)?,
+            "search-issues" => self.search_issues(&project, &tasks, ctx)?,
+            "save-context" => save_context(&project, &tasks)?,
+            "load-context" => load_context(&tasks)?,
+            "remove-context" => remove_context(&project, &tasks)?,
+            "add-repository" => add_repository(&project)?,
+            "remove-repository" => remove_repository(&project, &tasks)?,
             _ => return Err(Error::NotFound(format!("command {id}"))),
         }
 
@@ -400,6 +424,61 @@ impl Tasks {
         self.selected.as_deref().and_then(|key| selected_task(tasks, key)).ok_or_else(|| "Select a task first.".into())
     }
 
+    fn search_issues(&mut self, project: &Project, tasks: &TaskList, ctx: &Invocation) -> Result<(), Error> {
+        let Some(query) = host::input("Search issues", None)?.map(|q| q.trim().to_owned()).filter(|q| !q.is_empty()) else {
+            return Ok(());
+        };
+
+        let _progress = host::begin_task("Searching issues", false);
+        let remotes = project.vcs_remotes().unwrap_or_default();
+        let scope = trackers::Scope { remotes: &remotes, query: Some(&query), repositories: &tasks.repositories };
+        let found = trackers::fetch_all(&scope);
+
+        warn("Some trackers couldn't be searched", &found.errors);
+
+        if found.trackers == 0 {
+            return Err("No issue tracker set up. Enter a token in Settings › Plugins › Tasks.".into());
+        }
+
+        if found.issues.is_empty() {
+            return Err(format!("No issue matches \"{query}\".").into());
+        }
+
+        let items: Vec<PickItem> = found
+            .issues
+            .iter()
+            .enumerate()
+            .map(|(i, t)| PickItem::new(&i.to_string(), &t.label()).description(trackers::name(t)))
+            .collect();
+
+        let Some(index) = host::pick("Go to Issue", &items)?.and_then(|key| key.parse::<usize>().ok()) else {
+            return Ok(());
+        };
+
+        let issue = found.issues[index].clone();
+        let id = issue.id.clone();
+
+        update(&project.root()?, |tasks, _| {
+            if tasks.find_any(&id).is_none() {
+                tasks.issues.push(issue);
+            }
+            Ok(())
+        })?;
+
+        self.selected = Some(format!("issue:{id}"));
+
+        self.start_selected(ctx)?;
+
+        if self.form.is_some() {
+            host::refresh_view(VIEW);
+            if host::reveal_view(VIEW).is_err() {
+                host::notify(NotificationLevel::Info, "Open the issue", "Review the branch options in the Tasks tool window.");
+            }
+        }
+
+        Ok(())
+    }
+
     /// Activating an issue first asks, like OpenTaskDialog, whether to start a branch.
     fn start_selected(&mut self, ctx: &Invocation) -> Result<(), Error> {
         let project = ctx.project().ok_or("No project is open.")?;
@@ -568,12 +647,139 @@ fn update_all_issues() {
     }
 }
 
+fn save_context(project: &Project, tasks: &TaskList) -> Result<(), Error> {
+    let files = tasks.active().files.clone();
+
+    if files.is_empty() {
+        return Err("The active task has no recorded files to save.".into());
+    }
+
+    let Some(name) = host::input("Save context as", None)?.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()) else {
+        return Ok(());
+    };
+
+    update(&project.root()?, |tasks, _| {
+        tasks.contexts.retain(|c| c.name != name);
+        tasks.contexts.push(NamedContext { name: name.clone(), files });
+        Ok(())
+    })?;
+    host::notify(NotificationLevel::Info, "Context saved", &name);
+
+    Ok(())
+}
+
+fn pick_context(tasks: &TaskList, title: &str) -> Result<Option<NamedContext>, Error> {
+    if tasks.contexts.is_empty() {
+        return Err("There is no saved context.".into());
+    }
+
+    let items: Vec<PickItem> = tasks
+        .contexts
+        .iter()
+        .map(|c| PickItem::new(&c.name, &c.name).description(&format!("{} files", c.files.len())))
+        .collect();
+
+    Ok(host::pick(title, &items)?.and_then(|name| tasks.contexts.iter().find(|c| c.name == name).cloned()))
+}
+
+fn load_context(tasks: &TaskList) -> Result<(), Error> {
+    let Some(context) = pick_context(tasks, "Load Context")? else {
+        return Ok(());
+    };
+
+    for file in &context.files {
+        let _ = host::open_location(file, 0, 0);
+    }
+
+    Ok(())
+}
+
+fn remove_context(project: &Project, tasks: &TaskList) -> Result<(), Error> {
+    let Some(context) = pick_context(tasks, "Remove Context")? else {
+        return Ok(());
+    };
+
+    if !host::confirm("Remove context", &format!("Remove the saved context \"{}\"?", context.name))? {
+        return Ok(());
+    }
+
+    update(&project.root()?, |tasks, _| {
+        tasks.contexts.retain(|c| c.name != context.name);
+        Ok(())
+    })
+}
+
+fn add_repository(project: &Project) -> Result<(), Error> {
+    let kinds = ["github", "gitlab", "forgejo"];
+    let items: Vec<PickItem> = kinds.iter().map(|k| PickItem::new(k, trackers::tracker_name(k))).collect();
+
+    let Some(kind) = host::pick("Add repository to", &items)? else {
+        return Ok(());
+    };
+
+    let prompt = match kind.as_str() {
+        "gitlab" => "GitLab project as group/name",
+        _ => "Repository as owner/name",
+    };
+
+    let Some(repository) = host::input(prompt, None)?.map(|r| r.trim().to_owned()).filter(|r| !r.is_empty()) else {
+        return Ok(());
+    };
+
+    if !repository.contains('/') {
+        return Err("Enter the repository as owner/name.".into());
+    }
+
+    update(&project.root()?, |tasks, _| {
+        let list = tasks.repositories.entry(kind).or_default();
+
+        if !list.contains(&repository) {
+            list.push(repository);
+        }
+        Ok(())
+    })?;
+
+    refresh_issues(project, false)
+}
+
+fn remove_repository(project: &Project, tasks: &TaskList) -> Result<(), Error> {
+    let items: Vec<PickItem> = tasks
+        .repositories
+        .iter()
+        .filter(|(kind, _)| trackers::is_repository_tracker(kind))
+        .flat_map(|(kind, list)| list.iter().map(move |r| PickItem::new(&format!("{kind} {r}"), r).description(trackers::tracker_name(kind))))
+        .collect();
+
+    if items.is_empty() {
+        return Err("No repository was added; issues come from the settings or the git remote.".into());
+    }
+
+    let Some(key) = host::pick("Remove repository", &items)? else {
+        return Ok(());
+    };
+
+    let Some((kind, repository)) = key.split_once(' ') else {
+        return Ok(());
+    };
+
+    update(&project.root()?, |tasks, _| {
+        if let Some(list) = tasks.repositories.get_mut(kind) {
+            list.retain(|r| r != repository);
+        }
+        tasks.repositories.retain(|_, list| !list.is_empty());
+        Ok(())
+    })?;
+
+    refresh_issues(project, false)
+}
+
 /// `quiet`: problems go to the log instead of a notification.
 fn refresh_issues(project: &Project, quiet: bool) -> Result<(), Error> {
     let root = project.root()?;
     let _progress = host::begin_task("Updating issues", false);
     let remotes = project.vcs_remotes().unwrap_or_default();
-    let fetched = trackers::fetch_all(&remotes);
+    let repositories = load(&root)?.repositories;
+    let fetched = trackers::fetch_all(&trackers::Scope { remotes: &remotes, query: None, repositories: &repositories });
 
     if fetched.trackers == 0 {
         if !quiet {
@@ -756,7 +962,32 @@ mod tests {
         assert_eq!(plugin.form, Some(Form::Close { id: "LOCAL-00001".into() }));
         assert_eq!(load("/project").unwrap().active, "LOCAL-00001");
         assert_eq!(git.borrow().len(), calls_before);
-        assert!(host.notifications().iter().any(|n| n.body == "Review the close options in the Tasks tool window."));
+        assert_eq!(host.revealed_views(), ["tasks"]);
+        assert!(host.notifications().is_empty());
+    }
+
+    #[test]
+    fn the_switch_command_activates_the_picked_task() {
+        let host = MockHost::install().with_capabilities(ALL);
+        fake_git(&host);
+        let mut plugin = plugin(&host);
+
+        press(&mut plugin, &host, ViewEvent::Button("new".into()));
+        press(&mut plugin, &host, ViewEvent::Field("summary".into(), "Fix login".into()));
+        press(&mut plugin, &host, ViewEvent::Button("ok".into()));
+        host.answer_next_prompt(Some(&[DEFAULT_TASK_ID]));
+
+        plugin.run_command("switch", &host.invocation(), None).unwrap();
+
+        assert_eq!(load("/project").unwrap().active, DEFAULT_TASK_ID);
+    }
+
+    #[test]
+    fn the_switch_command_without_another_task_says_so() {
+        let host = MockHost::install().with_capabilities(ALL);
+        let mut plugin = plugin(&host);
+
+        assert!(plugin.run_command("switch", &host.invocation(), None).is_err());
     }
 
     #[test]
@@ -845,5 +1076,121 @@ mod tests {
         assert_eq!(load("/project").unwrap().active, "tool-12");
         assert!(git.borrow().iter().any(|c| c.starts_with("log -1 --format=tool-12 100%% crash --output=")));
         assert!(!git.borrow().iter().any(|c| c.starts_with("switch -c")));
+    }
+
+    fn github_hit(host: &MockHost) {
+        host.on_fetch(|_| {
+            let body = r#"{"items":[{"number":7,"title":"Crash","html_url":"https://github.com/acme/tool/issues/7","url":"https://api.github.com/repos/acme/tool/issues/7","repository_url":"https://api.github.com/repos/acme/tool"}]}"#;
+            Ok(HttpResponse { status: 200, headers: vec![], body: body.into() })
+        });
+    }
+
+    #[test]
+    fn searching_issues_activates_the_picked_hit() {
+        let host = MockHost::install().with_capabilities(ALL);
+        host.set_secret("github-token", "t0ken");
+        host.set_vcs_remotes(&[("origin", "git@github.com:acme/tool.git")]);
+        github_hit(&host);
+        let mut plugin = plugin(&host);
+
+        host.answer_next_prompt(Some(&["crash"]));
+        host.answer_next_prompt(Some(&["0"]));
+        plugin.run_command("search-issues", &host.invocation(), None).unwrap();
+
+        assert!(host.requests()[0].url.contains("is%3Aopen%20crash"));
+        assert_eq!(plugin.form, Some(Form::Open { id: "tool-7".into() }));
+        assert_eq!(host.revealed_views(), ["tasks"]);
+    }
+
+    #[test]
+    fn searching_issues_without_git_switches_straight_to_the_hit() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage", "vcs.read", "secrets", "net:api.github.com"]);
+        host.set_secret("github-token", "t0ken");
+        host.set_vcs_remotes(&[("origin", "git@github.com:acme/tool.git")]);
+        github_hit(&host);
+        let mut plugin = plugin(&host);
+
+        host.answer_next_prompt(Some(&["crash"]));
+        host.answer_next_prompt(Some(&["0"]));
+        plugin.run_command("search-issues", &host.invocation(), None).unwrap();
+
+        assert_eq!(load("/project").unwrap().active, "tool-7");
+    }
+
+    #[test]
+    fn dismissing_the_issue_search_does_nothing() {
+        let host = MockHost::install().with_capabilities(ALL);
+        let mut plugin = plugin(&host);
+
+        plugin.run_command("search-issues", &host.invocation(), None).unwrap();
+
+        host.answer_next_prompt(Some(&["crash"]));
+        host.set_secret("github-token", "t0ken");
+        host.set_vcs_remotes(&[("origin", "git@github.com:acme/tool.git")]);
+        github_hit(&host);
+        plugin.run_command("search-issues", &host.invocation(), None).unwrap();
+
+        assert_eq!(load("/project").unwrap().active, DEFAULT_TASK_ID);
+        assert!(host.requests().len() == 1);
+    }
+
+    #[test]
+    fn contexts_are_saved_loaded_and_removed_by_name() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage", "events"]);
+        let mut plugin = plugin(&host);
+        plugin.handle_events(&[Event::FileOpened("/project/a.rs".into())], &host.invocation());
+
+        host.answer_next_prompt(Some(&["login"]));
+        plugin.run_command("save-context", &host.invocation(), None).unwrap();
+        assert_eq!(load("/project").unwrap().contexts[0].files, ["/project/a.rs"]);
+
+        host.answer_next_prompt(Some(&["login"]));
+        plugin.run_command("load-context", &host.invocation(), None).unwrap();
+        assert_eq!(host.opened_locations(), [("/project/a.rs".to_owned(), 0, 0)]);
+
+        host.answer_next_prompt(Some(&["login"]));
+        host.answer_next_prompt(None);
+        plugin.run_command("remove-context", &host.invocation(), None).unwrap();
+        assert_eq!(load("/project").unwrap().contexts.len(), 1);
+
+        host.answer_next_prompt(Some(&["login"]));
+        host.answer_next_prompt(Some(&["ok"]));
+        plugin.run_command("remove-context", &host.invocation(), None).unwrap();
+        assert!(load("/project").unwrap().contexts.is_empty());
+    }
+
+    #[test]
+    fn dismissing_save_context_stores_nothing() {
+        let host = MockHost::install().with_capabilities(&["project.read", "storage", "events"]);
+        let mut plugin = plugin(&host);
+        plugin.handle_events(&[Event::FileOpened("/project/a.rs".into())], &host.invocation());
+
+        plugin.run_command("save-context", &host.invocation(), None).unwrap();
+
+        assert!(load("/project").unwrap().contexts.is_empty());
+    }
+
+    #[test]
+    fn added_repositories_are_all_searched_and_can_be_removed() {
+        let host = MockHost::install().with_capabilities(ALL);
+        host.set_secret("github-token", "t0ken");
+        github_hit(&host);
+        let mut plugin = plugin(&host);
+
+        for repo in ["acme/tool", "acme/other"] {
+            host.answer_next_prompt(Some(&["github"]));
+            host.answer_next_prompt(Some(&[repo]));
+            plugin.run_command("add-repository", &host.invocation(), None).unwrap();
+        }
+
+        assert!(host.requests().last().unwrap().url.contains("repo%3Aacme%2Ftool%20repo%3Aacme%2Fother"));
+
+        host.answer_next_prompt(Some(&["github acme/tool"]));
+        plugin.run_command("remove-repository", &host.invocation(), None).unwrap();
+        assert_eq!(load("/project").unwrap().repositories["github"], ["acme/other"]);
+
+        host.answer_next_prompt(None);
+        plugin.run_command("add-repository", &host.invocation(), None).unwrap();
+        assert_eq!(load("/project").unwrap().repositories["github"].len(), 1);
     }
 }

@@ -1,5 +1,7 @@
 //! The task list of a project, after TaskManagerImpl and LocalTaskImpl.
 
+use std::collections::BTreeMap;
+
 use openidea_plugin::Error;
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +106,18 @@ pub struct TaskList {
     pub issues: Vec<Task>,
     #[serde(default)]
     pub choices: Choices,
+    #[serde(default)]
+    pub contexts: Vec<NamedContext>,
+    /// Tracker id -> repositories or projects to read issues from, instead of the settings.
+    #[serde(default)]
+    pub repositories: BTreeMap<String, Vec<String>>,
+}
+
+/// Open files saved under a name, loadable into any task.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedContext {
+    pub name: String,
+    pub files: Vec<String>,
 }
 
 impl TaskList {
@@ -117,6 +131,8 @@ impl TaskList {
             local_tasks_counter: 1,
             issues: Vec::new(),
             choices: Choices::default(),
+            contexts: Vec::new(),
+            repositories: BTreeMap::new(),
         }
     }
 
