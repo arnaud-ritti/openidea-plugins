@@ -544,17 +544,21 @@ impl Plugin for Main {
 }
 
 fn directive_items(index: &Index, replace: Range) -> Vec<CompletionItem> {
-    let core = directives::CORE.iter().map(|name| (*name, None));
-    let custom = index.directives.iter().map(|(name, entry)| (name.as_str(), entry.detail.clone()));
+    let core = directives::CORE.iter().map(|name| (*name, None, true));
+    let custom = index.directives.iter().map(|(name, entry)| (name.as_str(), entry.detail.clone(), false));
 
     let mut seen = BTreeSet::new();
     custom
         .chain(core)
-        .filter(|(name, _)| seen.insert(*name))
-        .map(|(name, detail)| {
+        .filter(|(name, _, _)| seen.insert(*name))
+        .map(|(name, detail, is_core)| {
             let mut item = CompletionItem::new(name, CompletionKind::Keyword);
             item.detail = detail;
             item.replace = Some(replace);
+            if is_core && let Some((_, body)) = directives::SNIPPETS.iter().find(|(n, _)| *n == name) {
+                item.snippet = true;
+                item.insert_text = (*body).to_owned();
+            }
             item
         })
         .collect()

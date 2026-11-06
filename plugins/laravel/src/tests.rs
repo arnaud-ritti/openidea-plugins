@@ -1788,3 +1788,74 @@ fn missing_file_is_treated_as_absent() {
     let host = MockHost::install();
     assert!(views_of(&host).contains(&"welcome".to_owned()));
 }
+
+fn directive_item(plugin: &mut Main, marked: &str, label: &str) -> CompletionItem {
+    let (text, at) = cursor(marked);
+    plugin
+        .completion(&doc("/project/resources/views/posts/show.blade.php", "blade", &text), at, None)
+        .into_iter()
+        .find(|item| item.label == label)
+        .unwrap()
+}
+
+#[test]
+fn snippet_items_carry_arguments_and_the_closing_directive() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let item = directive_item(&mut plugin, "@i|", "if");
+
+    assert!(item.snippet);
+    assert!(item.insert_text.starts_with("if("));
+    assert!(item.insert_text.ends_with("@endif"));
+    let each = directive_item(&mut plugin, "@fore|", "foreach");
+    assert!(each.insert_text.contains("\\$items"));
+}
+
+#[test]
+fn snippet_items_replace_only_the_typed_name() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let item = directive_item(&mut plugin, "<p>\n@fo|\n", "foreach");
+
+    let replace = item.replace.unwrap();
+    assert_eq!((replace.start.line, replace.start.character), (1, 1));
+    assert_eq!((replace.end.line, replace.end.character), (1, 3));
+}
+
+#[test]
+fn directives_without_a_snippet_and_custom_directives_stay_name_only() {
+    let host = MockHost::install();
+    host.add_file("app/Providers/AppServiceProvider.php", "<?php\nBlade::directive('datetime', fn ($e) => $e);\n");
+    let mut plugin = activated(&host);
+
+    for (marked, label) in [("@end|", "endif"), ("@dat|", "datetime"), ("@els|", "else")] {
+        let item = directive_item(&mut plugin, marked, label);
+        assert!(!item.snippet, "{label}");
+        assert!(item.insert_text.is_empty() || item.insert_text == label, "{label}");
+    }
+}
+
+#[test]
+fn every_snippet_names_a_core_directive() {
+    for (name, _) in crate::directives::SNIPPETS {
+        assert!(crate::directives::CORE.contains(name), "{name}");
+    }
+    for name in ["if", "unless", "isset", "empty", "auth", "guest", "env", "production", "section", "push", "pushOnce",
+        "prepend", "for", "foreach", "forelse", "while", "switch", "php", "verbatim", "can", "cannot", "canany", "error",
+        "component", "slot", "extends", "yield", "include", "includeIf", "includeWhen", "includeUnless", "includeFirst",
+        "each", "stack", "props", "class", "style", "csrf", "method", "json", "vite", "lang", "inject", "livewire"]
+    {
+        assert!(crate::directives::SNIPPETS.iter().any(|(n, _)| *n == name), "no snippet for {name}");
+    }
+}
+
+#[test]
+fn snippet_placeholders_are_balanced() {
+    for (name, body) in crate::directives::SNIPPETS {
+        assert!(body.matches("$0").count() <= 1, "{name}");
+        assert_eq!(body.matches("${").count(), body.matches('}').count(), "{name}");
+        assert!(!body.starts_with('@'), "{name}");
+    }
+}
