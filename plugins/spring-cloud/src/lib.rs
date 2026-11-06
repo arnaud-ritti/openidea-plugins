@@ -1241,6 +1241,19 @@ class StreamFunctions {
     }
 
     #[test]
+    fn stream_listener_signature_rules_are_enforced() {
+        let host = setup();
+        host.add_file("src/main/java/com/acme/Channels.java", CHANNELS);
+        let source = "class L {\n    @StreamListener(\"orders\") void twice(@Input(\"orders\") String s) {}\n    @StreamListener void none(String s) {}\n    @StreamListener(\"orders\") @SendTo(\"shipped\") void both(String s, @Output(\"shipped\") MessageChannel out) {}\n    @StreamListener(\"orders\") String returns(String s, @Output(\"shipped\") MessageChannel out) { return s; }\n    @StreamListener(value = \"orders\", condition = \"x\") void reactive(Flux<String> s) {}\n    @StreamListener(Sink.INPUT) void constant(String s) {}\n    @StreamListener(\"orders\") void fine(String s, @Output(\"shipped\") MessageChannel out) {}\n}\n";
+        let mut tools = CloudTools::default();
+        tools.line_markers(&doc(LISTENERS_PATH, "java", source));
+        let found: Vec<String> = codes(&host, LISTENERS_PATH).into_iter().map(|(c, _)| c).collect();
+        for expected in ["stream-listener-input-twice", "stream-listener-no-input", "stream-listener-output-twice", "stream-listener-output-param-return", "stream-listener-condition-reactive"] {
+            assert_eq!(found.iter().filter(|c| *c == expected).count(), 1, "{expected} in {found:?}");
+        }
+    }
+
+    #[test]
     fn legacy_stream_is_quiet_for_library_binding_interfaces_and_other_settings() {
         let host = setup();
         host.add_file("src/main/java/com/acme/Channels.java", "@EnableBinding(com.lib.Foreign.class)\nclass App {}\n");

@@ -212,6 +212,7 @@ pub fn legacy_stream(path: &str, text: &str, java: &Index<JavaFacts>) -> Vec<Fin
                         .with_severity(Severity::Info),
                 );
             }
+            out.extend(handler_signature(m, listener, returns));
             if !returns && let Some(a) = send_to {
                 out.push(
                     Finding::new(a.at, a.end, "send-to-without-return", "`@SendTo` has nothing to send: the method returns void.").with_severity(Severity::Info),
@@ -225,6 +226,34 @@ pub fn legacy_stream(path: &str, text: &str, java: &Index<JavaFacts>) -> Vec<Fin
                 out.push(Finding::new(s.at, s.end, "stream-listener-channel", format!("No `@Input` or `@Output` channel `{}` is declared in the project.", s.value)));
             }
         }
+    }
+    out
+}
+
+/// The signature rules Spring Cloud Stream enforces when it binds a `@StreamListener` method; each fails at startup.
+fn handler_signature(m: &spring_text::java::Member, listener: &spring_text::java::Annotation, returns: bool) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut warn = |at: usize, end: usize, code: &'static str, message: &'static str| out.push(Finding::new(at, end, code, message));
+    let on_listener = listener.arg("value").is_some() || listener.arg("target").is_some();
+    let input_params: Vec<_> = m.params.iter().filter(|p| p.annotation("Input").is_some()).collect();
+    let output_params: Vec<_> = m.params.iter().filter(|p| p.annotation("Output").is_some()).collect();
+    if on_listener && let Some(p) = input_params.first() {
+        warn(p.at, p.at + p.name.len(), "stream-listener-input-twice", "The input is named both on `@StreamListener` and on a parameter's `@Input`; use one of them.");
+    }
+    if !on_listener && input_params.is_empty() {
+        warn(m.at, m.at + m.name.len(), "stream-listener-no-input", "No input binding: give `@StreamListener` a value or annotate a parameter with `@Input`.");
+    }
+    let method_output = m.annotation("SendTo").or_else(|| m.annotation("Output"));
+    if let (Some(a), Some(_)) = (method_output, output_params.first()) {
+        warn(a.at, a.end, "stream-listener-output-twice", "The output is named both on the method and on a parameter's `@Output`; use one of them.");
+    }
+    if returns && let Some(p) = output_params.first() {
+        warn(p.at, p.at + p.name.len(), "stream-listener-output-param-return", "A method with an `@Output` parameter must return void.");
+    }
+    if let Some(condition) = listener.arg("condition")
+        && m.params.iter().any(|p| matches!(p.ty.name.as_str(), "Flux" | "Mono" | "Publisher"))
+    {
+        warn(condition.at, condition.end, "stream-listener-condition-reactive", "A `condition` cannot be used with a reactive (`Flux`, `Mono`, `Publisher`) parameter.");
     }
     out
 }
