@@ -8,10 +8,11 @@ change-notes = "0.1.0 (first release): application module detection, checks for 
 categories = ["frameworks"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-view:modules"]
+activation = ["on-language:java", "on-view:modules", "on-view:diagram"]
 
 [capabilities]
 required = ["project.read"]
+optional = ["clipboard"]
 
 [[contributes.providers]]
 kinds = ["completion", "code-actions", "line-markers"]
@@ -22,3 +23,14 @@ id = "modules"
 title = "Modules"
 icon = "module"
 location = "left"
+
+[[contributes.views]]
+id = "diagram"
+title = "Module Diagram"
+icon = "hierarchy"
+location = "bottom"
+
+[[contributes.commands]]
+id = "copy-docs"
+title = "Spring Modulith: Copy Module Diagram (PlantUML)"
+category = "Spring Modulith"
