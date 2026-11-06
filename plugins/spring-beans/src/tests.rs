@@ -794,3 +794,83 @@ fn ranges_use_utf16_columns_with_multibyte_text() {
     let d = &host.diagnostics()[&document.path][0];
     assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (3, 17, 23));
 }
+
+fn unresolved(text: &str, extra: &[(&str, &str)]) -> Vec<(String, String)> {
+    let host = setup();
+    host.set_setting("springBeans.checkUnresolvedReferences", "true");
+    for (name, content) in extra {
+        host.add_file(&format!("src/main/java/com/acme/{name}"), content);
+    }
+    findings(&host, &mut Navigator::default(), "Subject.java", text)
+}
+
+const BOOT_APP: (&str, &str) = ("App.java", "package com.acme;\n@SpringBootApplication\nclass App {}\n");
+
+#[test]
+fn depends_on_unknown_name_warns_when_enabled() {
+    let text = "@Service\n@DependsOn({\"mail\", \"cache\"})\nclass A {}\n";
+    assert_eq!(unresolved(text, &[]), [pair("unresolved-depends-on", "cache")]);
+    assert!(found(text).is_empty(), "off by default");
+}
+
+#[test]
+fn depends_on_is_quiet_when_project_uses_auto_configuration() {
+    let library = "@Service\n@DependsOn(\"flyway\")\nclass A {}\n";
+    assert!(unresolved(library, &[BOOT_APP]).is_empty());
+    let enable = ("Cfg.java", "package com.acme;\n@EnableAutoConfiguration\nclass Cfg {}\n");
+    assert!(unresolved(library, &[enable]).is_empty());
+    let project_shaped = "@Service\n@DependsOn(\"abstractNotifier\")\nclass A {}\n";
+    assert_eq!(unresolved(project_shaped, &[BOOT_APP]), [pair("unresolved-depends-on", "abstractNotifier")]);
+}
+
+#[test]
+fn depends_on_known_xml_bean_is_quiet() {
+    assert!(unresolved("@Service\n@DependsOn({\"legacy\", \"fake\", \"mailer\", \"users\"})\nclass A {}\n", &[]).is_empty());
+}
+
+#[test]
+fn depends_on_is_quiet_for_library_or_dynamic_name() {
+    assert!(unresolved("@Service\n@DependsOn(Names.CACHE)\nclass A {}\n", &[]).is_empty());
+    assert!(unresolved("import com.acme.DependsOn;\n@Service\n@DependsOn(\"cache\")\nclass A {}\n", &[]).is_empty());
+}
+
+#[test]
+fn component_scan_base_package_without_matching_sources_warns() {
+    let text = "@Configuration\n@ComponentScan(basePackages = {\"com.acme\", \"com.acme.missing\"})\nclass A {}\n";
+    assert_eq!(unresolved(text, &[]), [pair("component-scan-package-missing", "com.acme.missing")]);
+    assert_eq!(unresolved("@ComponentScan(\"com.acme.gone\")\nclass A {}\n", &[]).len(), 1);
+}
+
+#[test]
+fn component_scan_with_class_reference_is_quiet() {
+    let text = "@ComponentScan(basePackageClasses = App.class, basePackages = \"com.acme.missing\")\nclass A {}\n";
+    assert!(unresolved(text, &[]).is_empty());
+}
+
+#[test]
+fn component_scan_is_quiet_for_library_or_dynamic_name() {
+    assert!(unresolved("@ComponentScan(\"org.vendor.lib\")\nclass A {}\n", &[]).is_empty(), "a package outside the project's root");
+    assert!(unresolved("@ComponentScan(Packages.ROOT)\nclass A {}\n", &[]).is_empty());
+    assert!(unresolved("import com.acme.ComponentScan;\n@ComponentScan(\"com.acme.missing\")\nclass A {}\n", &[]).is_empty());
+}
+
+#[test]
+fn unresolved_references_fixed_file_publishes_empty_list() {
+    let host = setup();
+    host.set_setting("springBeans.checkUnresolvedReferences", "true");
+    let mut n = Navigator::default();
+    let broken = "@Service\n@DependsOn(\"cache\")\nclass A {}\n";
+    assert_eq!(findings(&host, &mut n, "Subject.java", broken).len(), 1);
+    assert!(findings(&host, &mut n, "Subject.java", &broken.replace("cache", "mail")).is_empty());
+}
+
+#[test]
+fn unresolved_reference_ranges_use_utf16_columns() {
+    let host = setup();
+    host.set_setting("springBeans.checkUnresolvedReferences", "true");
+    let text = "@Service\n@DependsOn(\"caf\u{e9}\u{1F600}\")\nclass A {}\n";
+    let document = java("Subject.java", text);
+    Navigator::default().line_markers(&document);
+    let d = &host.diagnostics()[&document.path][0];
+    assert_eq!((d.range.start.character, d.range.end.character), (12, 18));
+}

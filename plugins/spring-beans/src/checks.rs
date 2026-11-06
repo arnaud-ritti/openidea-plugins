@@ -32,6 +32,7 @@ pub struct Groups {
     pub configuration: bool,
     pub naming: bool,
     pub self_invocation: bool,
+    pub unresolved_references: bool,
 }
 
 impl Default for Groups {
@@ -43,6 +44,7 @@ impl Default for Groups {
             configuration: true,
             naming: true,
             self_invocation: false,
+            unresolved_references: false,
         }
     }
 }
@@ -58,6 +60,7 @@ impl Groups {
             configuration: on("checkConfiguration", defaults.configuration),
             naming: on("checkNaming", defaults.naming),
             self_invocation: on("checkSelfInvocation", defaults.self_invocation),
+            unresolved_references: on("checkUnresolvedReferences", defaults.unresolved_references),
         }
     }
 }
@@ -82,6 +85,10 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         }
         if groups.self_invocation {
             self_invocation(file, ty, text, &mut out);
+        }
+        if groups.unresolved_references {
+            depends_on(file, ty, world, &mut out);
+            component_scan(file, ty, world, &mut out);
         }
     }
     out
@@ -287,5 +294,63 @@ fn self_invocation(file: &JavaFile, ty: &TypeDecl, text: &str, out: &mut Vec<Fin
                 ));
             }
         }
+    }
+}
+
+fn project_types<'a>(world: &'a World) -> impl Iterator<Item = (&'a str, &'a str)> {
+    world.files.values().flat_map(|m| m.types.iter().map(|t| (t.name.as_str(), t.qualified.as_str())))
+}
+
+/// A name that, ignoring case, is a project class or bean: a typo or a class that was never made a bean.
+fn project_shaped(world: &World, name: &str) -> bool {
+    project_types(world).any(|(simple, _)| simple.eq_ignore_ascii_case(name))
+        || world.beans().any(|(_, b)| names_of(b).any(|n| n.eq_ignore_ascii_case(name)))
+}
+
+fn depends_on(file: &JavaFile, ty: &TypeDecl, world: &World, out: &mut Vec<Finding>) {
+    let auto_configured = world.files.values().any(|m| m.auto_configuration)
+        || world.beans().any(|(_, b)| b.kind == "@SpringBootApplication");
+    let declared = ty.annotations.iter().chain(ty.methods().flat_map(|m| m.annotations.iter()));
+    for annotation in declared.filter(|a| a.name == "DependsOn") {
+        if spring(file, std::slice::from_ref(annotation), "DependsOn").is_none() || is_dynamic(annotation, &["value"]) {
+            continue;
+        }
+        for name in annotation.strings(&["value"]) {
+            if !world.named(&name.value).is_empty() || (auto_configured && !project_shaped(world, &name.value)) {
+                continue;
+            }
+            out.push(Finding::new(
+                name.at,
+                name.end,
+                "unresolved-depends-on",
+                format!("No bean named \"{}\" is defined in the project. Libraries and auto-configuration can still provide it.", name.value),
+            ));
+        }
+    }
+}
+
+/// The first two segments: `com.acme` for `com.acme.billing.Invoice`.
+fn root(qualified: &str) -> String {
+    qualified.split('.').take(2).collect::<Vec<_>>().join(".")
+}
+
+fn component_scan(file: &JavaFile, ty: &TypeDecl, world: &World, out: &mut Vec<Finding>) {
+    let Some(scan) = spring(file, &ty.annotations, "ComponentScan") else { return };
+    if scan.arg("basePackageClasses").is_some() || is_dynamic(scan, &["basePackages", "value"]) {
+        return;
+    }
+    for package in scan.strings(&["basePackages", "value"]) {
+        let wanted = package.value.trim();
+        let ours = project_types(world).any(|(_, q)| root(q) == root(wanted));
+        let present = project_types(world).any(|(_, q)| q.starts_with(&format!("{wanted}.")));
+        if wanted.is_empty() || wanted.contains(['$', '*']) || !ours || present {
+            continue;
+        }
+        out.push(Finding::new(
+            package.at,
+            package.end,
+            "component-scan-package-missing",
+            format!("No source of the project is in package \"{wanted}\", so this scan finds no component there."),
+        ));
     }
 }

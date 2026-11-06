@@ -99,6 +99,8 @@ pub struct FileModel {
     pub injections: Vec<Injection>,
     pub types: Vec<TypeInfo>,
     pub pointcuts: Vec<Pointcut>,
+    /// Declares `@SpringBootApplication` or `@EnableAutoConfiguration`.
+    pub auto_configuration: bool,
 }
 
 /// The model of a Java, Kotlin or Spring XML file (`None`: nothing to keep).
@@ -215,6 +217,7 @@ pub fn is_repository<'a>(kind: &str, mut supers: impl Iterator<Item = &'a str>) 
 fn java_model(text: &str) -> FileModel {
     let file = java::parse(text);
     let mut out = FileModel::default();
+    out.auto_configuration = file.types.iter().any(|t| t.has(&["SpringBootApplication", "EnableAutoConfiguration"]));
     for (index, t) in file.types.iter().enumerate() {
         let supers: Vec<String> = t.supers().map(|s| s.name.clone()).collect();
         out.types.push(TypeInfo {

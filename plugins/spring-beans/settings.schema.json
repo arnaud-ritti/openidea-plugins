@@ -29,6 +29,11 @@
       "type": "boolean",
       "title": "Warn when a method calls a @Transactional, @Async or @Cacheable method of its own class (text-based, may miss or over-report)",
       "default": false
+    },
+    "springBeans.checkUnresolvedReferences": {
+      "type": "boolean",
+      "title": "Warn about @DependsOn names no project bean defines and @ComponentScan packages without sources (beans from libraries and auto-configuration are invisible, so this may over-report)",
+      "default": false
     }
   }
 }
