@@ -17,7 +17,7 @@ const CAPS: &[&str] = &[
 const MR: &str = r#"{
     "iid": 7, "title": "Add parser", "description": "Adds it", "state": "opened", "draft": false,
     "source_project_id": 5, "target_project_id": 5,
-    "diff_refs": {"base_sha": "base", "head_sha": "head", "start_sha": "start"},
+    "diff_refs": {"base_sha": "abcdef0", "head_sha": "abcdef1", "start_sha": "start"},
     "source_branch": "feature", "target_branch": "main", "author": {"id": 2, "username": "ann", "name": "Ann"},
     "reviewers": [], "web_url": "https://gitlab.com/g/p/-/merge_requests/7", "sha": "abc123",
     "detailed_merge_status": "mergeable", "head_pipeline": {"status": "success"},
@@ -462,7 +462,7 @@ fn comments_on_diff_lines_carry_the_position() {
     assert!(posted[0].1.ends_with("/merge_requests/7/discussions"));
     assert_eq!(
         posted[0].2,
-        r#"{"body":"gone?","position":{"base_sha":"base","head_sha":"head","new_line":null,"new_path":"src/a.rs","old_line":4,"old_path":"src/a.rs","position_type":"text","start_sha":"start"}}"#
+        r#"{"body":"gone?","position":{"base_sha":"abcdef0","head_sha":"abcdef1","new_line":null,"new_path":"src/a.rs","old_line":4,"old_path":"src/a.rs","position_type":"text","start_sha":"start"}}"#
     );
     assert!(posted[1].1.ends_with("/merge_requests/7/draft_notes"));
     assert!(posted[1].2.contains(r#""new_line":3"#) && posted[1].2.contains(r#""old_line":3"#));
@@ -500,7 +500,7 @@ fn viewed_files_are_remembered_for_the_head_commit() {
     plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
     let view = plugin.render(CHANGES, None, &host.invocation()).unwrap();
 
-    assert_eq!(host.storage().get("viewed:g/p:7").map(String::as_str), Some(r#"{"src/a.rs":"head"}"#));
+    assert_eq!(host.storage().get("viewed:g/p:7").map(String::as_str), Some(r#"{"src/a.rs":"abcdef1"}"#));
     let Body::Html(html) = &view.body else { panic!("{view:?}") };
     assert!(html.contains("class=\"file collapsed\""));
 }
@@ -749,8 +749,29 @@ fn viewed_falls_back_to_the_head_without_local_history() {
 
     plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
 
-    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"head"}"#);
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
     assert!(changes_html(&mut plugin, &host).contains(" checked"));
+}
+
+#[test]
+fn non_hex_shas_are_not_passed_to_git() {
+    let host = setup();
+    let git_calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = git_calls.clone();
+    host.on_process("git", move |_, _| {
+        counter.set(counter.get() + 1);
+        Ok(ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+    });
+    host.on_fetch(|req| match req.url.ends_with("/merge_requests/7") {
+        true => ok(&MR.replace("\"abcdef0\"", "\"--output=/tmp/x\"")),
+        false => gitlab(req),
+    });
+    let mut plugin = selected(&host);
+
+    plugin.handle(CHANGES, ViewEvent::Message(r#"{"type":"viewed","path":"src/a.rs","viewed":true}"#.into()), &host.invocation()).unwrap();
+
+    assert_eq!(git_calls.get(), 0);
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
 }
 
 fn branch_with_suggestion(body: &str) -> (MockHost, GitLab) {

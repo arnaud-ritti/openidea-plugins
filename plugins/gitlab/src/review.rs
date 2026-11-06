@@ -100,10 +100,18 @@ fn last_commits(ctx: &openidea_plugin::Invocation, refs: Option<&DiffRefs>) -> B
         return BTreeMap::new();
     };
 
+    if ![&refs.base_sha, &refs.head_sha].into_iter().all(|sha| is_hex_sha(sha)) {
+        return BTreeMap::new();
+    }
+
     let range = format!("{}..{}", refs.base_sha, refs.head_sha);
     let args = ["-c", "core.quotepath=off", "log", "--name-only", "--no-renames", "--format=%x01%H", "-n", "1000", &range];
 
     git_ok(&project, &args).map(|log| parse_last_commits(&log)).unwrap_or_default()
+}
+
+fn is_hex_sha(sha: &str) -> bool {
+    (7..=64).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// What a file's viewed mark is compared with: its last commit, else the head.
