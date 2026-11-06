@@ -1,7 +1,7 @@
 id = "aritti.spring-shell"
 name = "Spring Shell Tools"
 version = "0.1.0"
-description = "Spring Shell commands in Java projects, for both the @ShellComponent/@ShellMethod model and the @Command model. Checks availability methods (unknown command names, wrong return type), duplicate command names and unknown @CommandAvailability providers, completes command names, groups and provider beans, and links commands to their availability methods and providers. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "Spring Shell commands in Java and Kotlin projects, for both the @ShellComponent/@ShellMethod model and the @Command model. Checks availability methods (unknown command names, wrong return type), duplicate command names and unknown @CommandAvailability providers, completes command names, groups and provider beans, and links commands to their availability methods and providers. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0 (first release): command index, availability checks and navigation, duplicate command check, completion of command names, groups and availability providers."

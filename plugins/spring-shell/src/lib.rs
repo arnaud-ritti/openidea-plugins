@@ -1,7 +1,7 @@
 //! Spring Shell Tools for OpenIDEA: indexes the shell commands of a project
 //! (`@ShellMethod` and `@Command` methods), checks availability methods and
 //! providers, and completes and links the names they refer to. Text-based,
-//! Java only.
+//! Java and Kotlin.
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
@@ -447,6 +447,13 @@ class KtConfig {
         assert!(messages.iter().any(|m| m.contains("nope")), "{messages:?}");
         assert!(messages.iter().any(|m| m.contains("ktMissing")), "{messages:?}");
         assert_eq!(messages.len(), 2, "{messages:?}");
+    }
+
+    #[test]
+    fn kotlin_template_keys_are_not_commands() {
+        let src = "@ShellComponent\nclass K {\n    @ShellMethod(key = [\"$p-run\", \"ok\"])\n    fun a() {}\n}\n";
+        let keys: Vec<_> = commands(&parse_source("K.kt", src), src).into_iter().map(|c| c.key).collect();
+        assert_eq!(keys, ["ok"]);
     }
 
     #[test]
