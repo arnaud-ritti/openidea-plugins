@@ -37,7 +37,8 @@ from JetBrains' [Properties plugin](https://plugins.jetbrains.com/plugin/11594-p
   of Java/Kotlin i18n calls (`getString`, `getMessage`, `message`…).
 - Properties: Copy Property Key / Copy Property Value copy the key or value
   under the caret (unescaped).
-- New › XML Properties File.
+- New › Properties File and New › XML Properties File. The first is a manifest
+  entry only and can't be switched off.
 
 ```sh
 cargo test

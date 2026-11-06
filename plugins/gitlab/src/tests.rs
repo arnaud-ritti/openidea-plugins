@@ -62,7 +62,14 @@ fn gitlab(req: &HttpRequest) -> Result<HttpResponse, Error> {
             ok(r#"[{"created_at": "2026-01-04", "user": {"username": "bob"}, "state": "reopened"}]"#)
         }
         ("GET", p) if p.starts_with(&format!("{mr}/resource_")) => ok("[]"),
+        ("GET", p) if p.starts_with("/api/v4/projects/g%2Fp/repository/branches?") => ok(r#"[{"name": "main"}, {"name": "develop"}, {"name": "feature"}]"#),
+        ("GET", p) if p.starts_with("/api/v4/namespaces?") => ok(r#"[{"id": 3, "full_path": "me", "kind": "user"}, {"id": 12, "full_path": "team/sub", "kind": "group"}]"#),
+        ("GET", "/api/v4/users?username=ann") =>ok(r#"[{"id": 2, "username": "ann"}]"#),
+        ("GET", "/api/v4/users?username=bob") => ok(r#"[{"id": 3, "username": "bob"}]"#),
+        ("GET", p) if p.starts_with("/api/v4/users?") => ok("[]"),
+        ("POST", "/api/v4/projects/g%2Fp/merge_requests") => ok(r#"{"iid": 8, "title": "Add parser", "web_url": "https://gitlab.com/g/p/-/merge_requests/8"}"#),
         ("POST", "/api/v4/snippets") => ok(r#"{"web_url": "https://gitlab.com/-/snippets/9"}"#),
+        ("POST", "/api/v4/projects/g%2Fp/snippets") => ok(r#"{"web_url": "https://gitlab.com/g/p/-/snippets/10"}"#),
         ("POST", "/api/v4/projects") => ok(
             r#"{"web_url": "https://gitlab.com/me/project", "http_url_to_repo": "https://gitlab.com/me/project.git",
                 "ssh_url_to_repo": "git@gitlab.com:me/project.git"}"#,
@@ -223,7 +230,7 @@ fn details_offer_the_review_flow() {
 
     assert_eq!(
         buttons(&view),
-        ["comment", "approve", "merge", "review", "draft", "close", "checkout", "browser", "copy", "refresh"]
+        ["comment", "react", "approve", "merge", "review", "draft", "close", "checkout", "browser", "copy", "refresh"]
     );
     assert!(view.toolbar.iter().all(|b| b.icon.is_some()), "{view:?}");
     assert_eq!(
@@ -232,9 +239,10 @@ fn details_offer_the_review_flow() {
     );
     let Body::Form(fields) = &view.body else { panic!("{view:?}") };
     let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
-    assert_eq!(keys, ["comment", "as-draft", "remove-source-branch", "squash", "description"]);
-    assert_eq!(fields[4].label, "Description (read-only)");
-    assert_eq!(fields[4].value, FieldValue::Multiline("Adds it".into()));
+    assert_eq!(keys, ["comment", "as-draft", "emoji", "remove-source-branch", "squash", "description"]);
+    assert_eq!(fields[2].value, FieldValue::Choice(safe::EMOJIS.map(str::to_owned).to_vec(), "thumbsup".into()));
+    assert_eq!(fields[5].label, "Description (read-only)");
+    assert_eq!(fields[5].value, FieldValue::Multiline("Adds it".into()));
     assert!(!fields.iter().any(|f| matches!(f.value, FieldValue::Text(_))), "no read-only facts as inputs: {fields:?}");
 }
 
@@ -381,6 +389,72 @@ fn merge_sends_the_head_sha_and_options() {
     assert!(posted[0].1.ends_with("/merge_requests/7/merge"));
     assert_eq!(posted[0].2, r#"{"sha":"abc123","should_remove_source_branch":true,"squash":true}"#);
     assert!(host.refreshed_views().ends_with(&[DETAILS.into(), CHANGES.into(), LIST.into()]));
+}
+
+fn branch_on_merge_request_8() -> MockHost {
+    let host = setup();
+    host.set_vcs_status(Some(status("feature")));
+    host.on_fetch(|r| {
+        let mr8 = MR.replace(r#""iid": 7"#, r#""iid": 8"#);
+        if r.url.contains("source_branch=feature") {
+            return ok(&format!("[{mr8}]"));
+        }
+        if r.url.split('?').next().unwrap().ends_with("/merge_requests/8") {
+            return ok(&mr8);
+        }
+        let mut as_7 = r.clone();
+        as_7.url = r.url.replace("/merge_requests/8/", "/merge_requests/7/");
+        gitlab(&as_7)
+    });
+    host
+}
+
+#[test]
+fn a_merge_confirm_does_not_follow_a_switch_to_the_branch_merge_request() {
+    let host = branch_on_merge_request_8();
+    let mut plugin = selected(&host);
+    plugin.handle(DETAILS, ViewEvent::Button("merge".into()), &host.invocation()).unwrap();
+    plugin.handle_events(&[Event::VcsChanged("/project".into())], &host.invocation());
+
+    plugin.run_command("show-branch-merge-request", &host.invocation(), None).unwrap();
+    plugin.render(DETAILS, None, &host.invocation()).unwrap();
+    plugin.handle(DETAILS, ViewEvent::Button("merge".into()), &host.invocation()).unwrap();
+
+    assert!(writes(&host).is_empty(), "{:?}", writes(&host));
+    let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+    assert_eq!(label(&view, "merge"), "Confirm Merge !8 into main");
+}
+
+#[test]
+fn a_close_confirm_is_bound_to_its_merge_request() {
+    let host = branch_on_merge_request_8();
+    let mut plugin = selected(&host);
+    plugin.handle(DETAILS, ViewEvent::Button("close".into()), &host.invocation()).unwrap();
+    storage::set(SELECTED_KEY, "8").unwrap();
+    plugin.details = None;
+    plugin.render(DETAILS, None, &host.invocation()).unwrap();
+
+    plugin.handle(DETAILS, ViewEvent::Button("close".into()), &host.invocation()).unwrap();
+
+    assert!(writes(&host).is_empty(), "{:?}", writes(&host));
+}
+
+#[test]
+fn showing_the_branch_merge_request_resets_the_pipeline_view() {
+    let host = branch_on_merge_request_8();
+    let mut plugin = selected(&host);
+    plugin.pipeline_selection = Some(PipelineKey::Pipeline(41));
+    plugin.pipeline_confirm = Some(41);
+    plugin.pipeline_status = Some("Pipeline retried.".into());
+    plugin.pipeline_open.insert("p:41".into(), false);
+    plugin.handle_events(&[Event::VcsChanged("/project".into())], &host.invocation());
+    let before = host.refreshed_views().len();
+
+    plugin.run_command("show-branch-merge-request", &host.invocation(), None).unwrap();
+
+    assert_eq!((plugin.pipeline_selection, plugin.pipeline_confirm, plugin.pipeline_status.as_deref()), (None, None, None));
+    assert!(plugin.pipeline_open.is_empty());
+    assert!(host.refreshed_views()[before..].contains(&PIPELINES.to_owned()));
 }
 
 #[test]
@@ -559,7 +633,7 @@ fn check_out_fetches_and_tracks_the_source_branch() {
     assert_eq!(
         git_runs(&host),
         [
-            "fetch origin +refs/heads/feature:refs/remotes/origin/feature",
+            "fetch -- origin +refs/heads/feature:refs/remotes/origin/feature",
             "rev-parse --verify --quiet refs/heads/feature",
             "checkout -b feature --track origin/feature",
         ]
@@ -587,12 +661,160 @@ fn clones_next_to_the_current_project_in_a_terminal() {
     plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
 
     let terminal = &host.terminals()[0];
-    assert_eq!(terminal.args, ["clone", "https://gitlab.com/me/tool.git", "/tool"]);
+    assert_eq!(terminal.args, ["clone", "--", "https://gitlab.com/me/tool.git", "/tool"]);
 
     host.set_setting("cloneDirectory", r#""/src""#);
     host.set_setting("cloneUsingSsh", "true");
     plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
-    assert_eq!(host.terminals()[1].args, ["clone", "git@gitlab.com:me/tool.git", "/src/tool"]);
+    assert_eq!(host.terminals()[1].args, ["clone", "--", "git@gitlab.com:me/tool.git", "/src/tool"]);
+}
+
+#[test]
+fn clone_puts_the_url_and_target_after_double_dash() {
+    let host = setup();
+    host.set_setting("cloneDirectory", r#""/work""#);
+    let mut plugin = GitLab::default();
+    plugin.render(PROJECTS, None, &host.invocation()).unwrap();
+
+    plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
+
+    assert_eq!(host.terminals()[0].args, ["clone", "--", "https://gitlab.com/me/tool.git", "/work/tool"]);
+}
+
+fn projects_with(path: &'static str, url: &'static str) -> impl Fn(&HttpRequest) -> Result<HttpResponse, Error> {
+    move |r| match r.url.contains("membership=true") {
+        true => ok(&format!(
+            r#"[{{"name": "Tool", "path": "{path}", "path_with_namespace": "me/tool", "name_with_namespace": "Me / Tool",
+                "http_url_to_repo": "{url}", "ssh_url_to_repo": "git@gitlab.com:me/tool.git"}}]"#
+        )),
+        false => gitlab(r),
+    }
+}
+
+#[test]
+fn clone_refuses_a_project_path_starting_with_a_dash() {
+    let host = setup();
+    for (path, url) in [("-x", "https://gitlab.com/me/tool.git"), ("--upload-pack=x", "https://gitlab.com/me/tool.git"), ("tool", "https://gitlab.com/me/tool.git;rm -rf ~")] {
+        host.on_fetch(projects_with(path, url));
+        let mut plugin = GitLab::default();
+        plugin.render(PROJECTS, None, &host.invocation()).unwrap();
+
+        let result = plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation());
+
+        assert!(result.is_err(), "{path} {url}");
+    }
+    assert!(host.terminals().is_empty());
+}
+
+#[test]
+fn share_refuses_a_branch_name_that_reads_as_an_option() {
+    let host = setup();
+    host.set_vcs_status(Some(status("--upload-pack=x")));
+    host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
+    host.on_process("git", git_ok);
+
+    let result = GitLab::default().run_command("share-project", &host.invocation(), None);
+
+    assert!(result.is_err());
+    assert!(writes(&host).is_empty() && host.terminals().is_empty() && host.process_runs().is_empty());
+}
+
+#[test]
+fn reply_and_resolve_encode_the_discussion_id() {
+    let host = setup();
+    let api = api::Project("g/p");
+
+    for id in ["abc/notes", "abc?x=1", "abc#x", "..", "%2F"] {
+        assert!(api.reply(7, id, "x").is_err(), "{id}");
+        assert!(api.resolve(7, id, true).is_err(), "{id}");
+    }
+    assert!(host.requests().is_empty());
+
+    api.reply(7, "abc123", "x").unwrap();
+    api.resolve(7, "abc123", false).unwrap();
+
+    let posted = writes(&host);
+    assert_eq!(posted[0].1, "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7/discussions/abc123/notes");
+    assert_eq!(posted[1].1, "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7/discussions/abc123?resolved=false");
+}
+
+#[test]
+fn a_draft_reply_to_a_hostile_discussion_id_sends_nothing() {
+    let host = setup();
+    let api = api::Project("g/p");
+
+    for id in ["abc/notes", "abc?x=1", "abc#x", "..", "%2F", ""] {
+        assert!(api.create_draft(7, "x", None, Some(id)).is_err(), "{id}");
+    }
+    assert!(host.requests().is_empty());
+
+    api.create_draft(7, "x", None, Some("abc123")).unwrap();
+
+    assert!(writes(&host)[0].2.contains(r#""in_reply_to_discussion_id":"abc123""#));
+}
+
+#[test]
+fn the_token_never_appears_in_requests_logs_notifications_or_views() {
+    let host = setup();
+    host.on_process("git", git_ok);
+    let mut plugin = GitLab::default();
+    let mut views = Vec::new();
+
+    views.push(format!("{:?}", plugin.render(LIST, None, &host.invocation()).unwrap()));
+    plugin.handle(LIST, ViewEvent::Select("mr:7".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(DETAILS, None, &host.invocation()).unwrap()));
+    views.push(format!("{:?}", plugin.render(CHANGES, None, &host.invocation()).unwrap()));
+    plugin.handle(DETAILS, field("comment", "LGTM"), &host.invocation()).unwrap();
+    plugin.handle(DETAILS, ViewEvent::Button("comment".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(DETAILS, None, &host.invocation()).unwrap()));
+    views.push(format!("{:?}", plugin.render(PROJECTS, None, &host.invocation()).unwrap()));
+    plugin.handle(PROJECTS, ViewEvent::Activate("me/tool".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(NEW_MR, None, &host.invocation()).unwrap()));
+    plugin.handle(NEW_MR, field("title", "Add parser"), &host.invocation()).unwrap();
+    plugin.handle(NEW_MR, field("assignee", "ann"), &host.invocation()).unwrap();
+    plugin.handle(NEW_MR, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(NEW_MR, None, &host.invocation()).unwrap()));
+    host.open_editor("/project/src/a.rs", "rust", "fn main() {}\n", &[(0, 0, 0, 0)]);
+    plugin.handle(NEW_SNIPPET, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
+    views.push(format!("{:?}", plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap()));
+    host.set_vcs_remotes(&[("origin", "git@github.com:x/y.git")]);
+    GitLab::default().run_command("share-project", &host.invocation(), None).unwrap();
+
+    assert_eq!(api::authorization(), "Bearer {{secret:token}}");
+    let requests = host.requests();
+    assert!(requests.len() >= 5, "{requests:?}");
+    for request in &requests {
+        let authorization: Vec<_> = request.headers.iter().filter(|(name, _)| name == "Authorization").collect();
+        assert_eq!(authorization, [&("Authorization".to_owned(), "Bearer glpat-x".to_owned())], "{}", request.url);
+        assert!(!request.url.contains("glpat-x"));
+        assert!(!String::from_utf8_lossy(request.body.as_deref().unwrap_or_default()).contains("glpat-x"));
+        assert!(request.headers.iter().filter(|(name, _)| name != "Authorization").all(|(_, value)| !value.contains("glpat-x")));
+    }
+    assert!(host.logs().iter().all(|(_, line)| !line.contains("glpat-x")));
+    assert!(host.notifications().iter().all(|n| !format!("{n:?}").contains("glpat-x")));
+    assert!(host.terminals().iter().all(|t| !format!("{t:?}").contains("glpat-x")));
+    assert!(host.process_runs().iter().all(|r| !format!("{r:?}").contains("glpat-x")));
+    assert!(views.iter().all(|v| !v.contains("glpat-x")));
+    assert!(!host.terminals().is_empty() && !host.notifications().is_empty());
+}
+
+#[test]
+fn an_error_response_is_shown_without_markup_or_over_200_characters() {
+    let host = setup();
+    let page = "<!DOCTYPE html><html><head><title>GitLab is not responding (502)</title><style>body { color: red; }</style></head><body><h1>502</h1></body></html>";
+    let long = format!(r#"{{"message":"<b>{}</b>"}}"#, "x".repeat(500));
+    for body in [page.to_owned(), long, format!("<p>{}</p>", "y".repeat(500))] {
+        host.on_fetch(move |_| Ok(HttpResponse { status: 502, headers: vec![], body: body.clone().into_bytes() }));
+
+        let message = api::current_user().unwrap_err().to_string();
+
+        assert!(!message.contains('<') && !message.contains('>') && !message.contains('{'), "{message}");
+        assert!(message.chars().count() <= 200, "{}", message.chars().count());
+        assert!(message.starts_with("GitLab returned 502: "), "{message}");
+    }
+
+    host.on_fetch(move |_| Ok(HttpResponse { status: 502, headers: vec![], body: page.as_bytes().to_vec() }));
+    assert_eq!(api::current_user().unwrap_err().to_string(), "GitLab returned 502: GitLab is not responding (502)");
 }
 
 #[test]
@@ -618,8 +840,8 @@ fn share_creates_the_project_adds_the_remote_and_pushes() {
     GitLab::default().run_command("share-project", &host.invocation(), None).unwrap();
 
     assert_eq!(writes(&host)[0].2, r#"{"name":"project","visibility":"private"}"#);
-    assert_eq!(git_runs(&host), ["--version", "remote add gitlab https://gitlab.com/me/project.git"]);
-    assert_eq!(host.terminals()[0].args, ["push", "-u", "gitlab", "main"]);
+    assert_eq!(git_runs(&host), ["--version", "remote add -- gitlab https://gitlab.com/me/project.git"]);
+    assert_eq!(host.terminals()[0].args, ["push", "-u", "--", "gitlab", "main"]);
 }
 
 #[test]
@@ -1239,7 +1461,7 @@ mod worktree_tests {
         let plan = branch::worktree_plan("/work/tool", "origin", &merge_request("feature/x")).unwrap();
 
         assert_eq!(plan.path, "/work/tool-feature-x");
-        assert_eq!(plan.fetch, ["fetch", "origin", "+refs/heads/feature/x:refs/remotes/origin/feature/x"]);
+        assert_eq!(plan.fetch, ["fetch", "--", "origin", "+refs/heads/feature/x:refs/remotes/origin/feature/x"]);
         assert_eq!(plan.add, ["worktree", "add", "--detach", "--", "/work/tool-feature-x", "origin/feature/x"]);
     }
 
@@ -1250,7 +1472,7 @@ mod worktree_tests {
         mr.author.username = "ann".into();
         let plan = branch::worktree_plan("/work/tool", "origin", &mr).unwrap();
 
-        assert_eq!(plan.fetch, ["fetch", "origin", "+refs/merge-requests/7/head:refs/remotes/origin/fork/ann/fix"]);
+        assert_eq!(plan.fetch, ["fetch", "--", "origin", "+refs/merge-requests/7/head:refs/remotes/origin/fork/ann/fix"]);
         assert_eq!(plan.add.last().map(String::as_str), Some("origin/fork/ann/fix"));
     }
 
@@ -1279,7 +1501,7 @@ mod worktree_tests {
         assert_eq!(
             git_runs(&host),
             [
-                "fetch origin +refs/heads/feature:refs/remotes/origin/feature",
+                "fetch -- origin +refs/heads/feature:refs/remotes/origin/feature",
                 "worktree add --detach -- /project-feature origin/feature",
             ]
         );
@@ -1336,5 +1558,1552 @@ mod worktree_tests {
         let error = GitLab::default().run_command("update-merge-request-branch", &host.invocation(), None).unwrap_err();
 
         assert_eq!(error.to_string(), "Rebase of !7 failed: Rebase failed. Please rebase locally");
+    }
+}
+
+mod merge_request_form_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn on_feature() -> MockHost {
+        let host = setup();
+        host.set_vcs_status(Some(status("feature")));
+        host
+    }
+
+    fn open(host: &MockHost) -> (GitLab, View) {
+        let mut plugin = GitLab::default();
+        let view = plugin.render(NEW_MR, None, &host.invocation()).unwrap();
+        (plugin, view)
+    }
+
+    fn fill(plugin: &mut GitLab, host: &MockHost, fields: &[(&str, &str)]) {
+        for (key, value) in fields {
+            plugin.handle(NEW_MR, field(key, value), &host.invocation()).unwrap();
+        }
+    }
+
+    fn create(plugin: &mut GitLab, host: &MockHost) -> View {
+        plugin.handle(NEW_MR, ViewEvent::Button("create".into()), &host.invocation()).unwrap();
+        plugin.render(NEW_MR, None, &host.invocation()).unwrap()
+    }
+
+    fn created(host: &MockHost) -> Vec<Value> {
+        writes(host)
+            .into_iter()
+            .filter(|(method, url, _)| method == "POST" && url == "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests")
+            .map(|(_, _, body)| serde_json::from_str(&body).unwrap())
+            .collect()
+    }
+
+    fn value<'a>(view: &'a View, key: &str) -> &'a FieldValue {
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+        &fields.iter().find(|f| f.key == key).unwrap().value
+    }
+
+    #[test]
+    fn form_lists_the_branches_and_defaults_the_target_to_the_project_default() {
+        let host = on_feature();
+
+        let (_, view) = open(&host);
+
+        let branches = vec!["main".to_owned(), "develop".to_owned(), "feature".to_owned()];
+        assert_eq!(value(&view, "target-branch"), &FieldValue::Choice(branches, "main".into()));
+        assert_eq!(view.status.as_deref(), Some("feature → main"));
+        assert_eq!(buttons(&view), ["create", "refresh"]);
+        assert!(host.requests().iter().any(|r| r.url.contains("/repository/branches?per_page=100&page=1")));
+    }
+
+    #[test]
+    fn create_posts_title_source_target_and_options() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(
+            &mut plugin,
+            &host,
+            &[
+                ("title", "Add parser"),
+                ("description", "Adds it"),
+                ("target-branch", "develop"),
+                ("source-branch", "evil"),
+                ("squash", "true"),
+                ("remove-source-branch", "true"),
+            ],
+        );
+
+        create(&mut plugin, &host);
+
+        let body = &created(&host)[0];
+        assert_eq!(body["source_branch"], "feature");
+        assert_eq!(body["target_branch"], "develop");
+        assert_eq!(body["title"], "Add parser");
+        assert_eq!(body["description"], "Adds it");
+        assert_eq!(body["squash"], true);
+        assert_eq!(body["remove_source_branch"], true);
+        assert_eq!(body["labels"], "");
+        assert_eq!(body["reviewer_ids"], serde_json::json!([]));
+        assert!(body.get("assignee_id").is_none());
+    }
+
+    #[test]
+    fn draft_prefixes_the_title_with_draft() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("draft", "true")]);
+
+        create(&mut plugin, &host);
+
+        assert_eq!(created(&host)[0]["title"], "Draft: Add parser");
+    }
+
+    #[test]
+    fn assignee_and_reviewers_are_resolved_by_username_lookup() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("assignee", "ann"), ("reviewers", "ann, @bob")]);
+
+        create(&mut plugin, &host);
+
+        let body = &created(&host)[0];
+        assert_eq!(body["assignee_id"], 2);
+        assert_eq!(body["reviewer_ids"], serde_json::json!([2, 3]));
+        assert!(host.requests().iter().any(|r| r.url == "https://gitlab.com/api/v4/users?username=bob"));
+    }
+
+    #[test]
+    fn an_unknown_username_fails_and_creates_nothing() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("reviewers", "ann ghost")]);
+
+        let view = create(&mut plugin, &host);
+
+        assert!(writes(&host).is_empty());
+        assert!(view.status.as_deref().unwrap().contains("ghost"), "{view:?}");
+    }
+
+    #[test]
+    fn usernames_with_url_metacharacters_are_refused_before_any_request() {
+        for (key, name) in [("assignee", "a&b#c/d"), ("assignee", "-x"), ("reviewers", "ann, a&b#c/d"), ("reviewers", "-x")] {
+            let host = on_feature();
+            let (mut plugin, _) = open(&host);
+            fill(&mut plugin, &host, &[("title", "Add parser"), (key, name)]);
+
+            let view = create(&mut plugin, &host);
+
+            assert!(host.requests().iter().all(|r| !r.url.contains("/users")), "{name}");
+            assert!(writes(&host).is_empty(), "{name}");
+            assert!(view.status.as_deref().unwrap().contains("refusing the username"), "{view:?}");
+        }
+    }
+
+    #[test]
+    fn a_target_branch_outside_the_listed_branches_is_ignored() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("target-branch", "develop"), ("target-branch", "main\"}, \"x"), ("target-branch", "--evil")]);
+
+        let view = plugin.render(NEW_MR, None, &host.invocation()).unwrap();
+        create(&mut plugin, &host);
+
+        let FieldValue::Choice(_, chosen) = value(&view, "target-branch") else { panic!("{view:?}") };
+        assert_eq!(chosen, "develop");
+        assert_eq!(created(&host)[0]["target_branch"], "develop");
+    }
+
+    #[test]
+    fn labels_are_trimmed_and_empty_ones_dropped() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser"), ("labels", " bug , ,ui ,,")]);
+
+        create(&mut plugin, &host);
+
+        assert_eq!(created(&host)[0]["labels"], "bug,ui");
+    }
+
+    #[test]
+    fn a_detached_head_refuses_and_says_so() {
+        let host = setup();
+        host.set_vcs_status(Some(RepositoryStatus { branch: None, ..status("main") }));
+        let (mut plugin, view) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser")]);
+
+        create(&mut plugin, &host);
+
+        assert_eq!(view.body, Body::Message(DETACHED.into()));
+        assert!(writes(&host).is_empty());
+    }
+
+    #[test]
+    fn an_empty_title_is_refused() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "   ")]);
+
+        let view = create(&mut plugin, &host);
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(view.status.as_deref(), Some("Write a title first. · feature → main"));
+    }
+
+    #[test]
+    fn creating_reports_the_web_url_in_a_notification_and_refreshes_the_list() {
+        let host = on_feature();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser")]);
+
+        let view = create(&mut plugin, &host);
+
+        let notification = &host.notifications()[0];
+        assert_eq!(notification.title, "Merge request created");
+        assert!(notification.body.contains("https://gitlab.com/g/p/-/merge_requests/8"), "{notification:?}");
+        assert!(host.refreshed_views().iter().any(|v| v == LIST));
+        assert_eq!(value(&view, "title"), &FieldValue::Text(String::new()));
+
+        create(&mut plugin, &host);
+        assert_eq!(created(&host).len(), 1, "a second click on the emptied form creates nothing");
+    }
+
+    #[test]
+    fn the_form_is_quiet_when_forms_setting_is_off() {
+        let host = on_feature();
+        host.set_setting("forms", "false");
+
+        let (mut plugin, view) = open(&host);
+        fill(&mut plugin, &host, &[("title", "Add parser")]);
+        create(&mut plugin, &host);
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert!(host.requests().is_empty());
+    }
+
+    #[test]
+    fn without_a_token_the_form_asks_for_one() {
+        let host = MockHost::install().with_capabilities(CAPS);
+        host.set_vcs_status(Some(status("feature")));
+
+        let (_, view) = open(&host);
+
+        assert_eq!(view.body, Body::Message(NO_TOKEN.into()));
+        assert!(host.requests().is_empty());
+    }
+}
+
+mod snippet_form_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn open(host: &MockHost) -> (GitLab, View) {
+        let mut plugin = GitLab::default();
+        let view = plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap();
+        (plugin, view)
+    }
+
+    fn fill(plugin: &mut GitLab, host: &MockHost, fields: &[(&str, &str)]) {
+        for (key, value) in fields {
+            plugin.handle(NEW_SNIPPET, field(key, value), &host.invocation()).unwrap();
+        }
+    }
+
+    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
+        plugin.handle(NEW_SNIPPET, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
+        plugin.render(NEW_SNIPPET, None, &host.invocation()).unwrap()
+    }
+
+    fn posted(host: &MockHost) -> Vec<(String, Value)> {
+        writes(host).into_iter().map(|(_, url, body)| (url, serde_json::from_str(&body).unwrap())).collect()
+    }
+
+    fn with_file(text: &str, selection: (u32, u32, u32, u32)) -> MockHost {
+        let host = setup();
+        host.open_editor("/project/src/a.rs", "rust", text, &[selection]);
+        host
+    }
+
+    #[test]
+    fn form_creates_a_private_personal_snippet_from_the_selection() {
+        let host = with_file("fn main() {}\n", (0, 3, 0, 7));
+        let (mut plugin, view) = open(&host);
+        fill(&mut plugin, &host, &[("description", "The entry point")]);
+
+        click(&mut plugin, &host, "create");
+
+        assert_eq!(buttons(&view), ["create"]);
+        let posted = writes(&host);
+        assert_eq!(posted[0].1, "https://gitlab.com/api/v4/snippets");
+        assert_eq!(
+            posted[0].2,
+            r#"{"description":"The entry point","files":[{"content":"main","file_path":"src/a.rs"}],"title":"a.rs","visibility":"private"}"#
+        );
+        assert_eq!(host.clipboard().as_deref(), Some("https://gitlab.com/-/snippets/9"));
+        assert_eq!(host.notifications()[0].title, "Snippet created");
+    }
+
+    #[test]
+    fn project_scope_posts_to_the_encoded_project_path() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        let (mut plugin, view) = open(&host);
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+        let scope = &fields.iter().find(|f| f.key == "scope").unwrap().value;
+        assert_eq!(scope, &FieldValue::Choice(vec!["Personal".into(), "Project g/p".into()], "Personal".into()));
+        fill(&mut plugin, &host, &[("title", "Mine"), ("file-path", "notes/x.txt"), ("scope", "Project g/p")]);
+
+        click(&mut plugin, &host, "create");
+
+        let posted = posted(&host);
+        assert_eq!(posted[0].0, "https://gitlab.com/api/v4/projects/g%2Fp/snippets");
+        assert_eq!(posted[0].1["title"], "Mine");
+        assert_eq!(posted[0].1["files"][0]["file_path"], "notes/x.txt");
+    }
+
+    #[test]
+    fn public_visibility_needs_a_second_click() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("visibility", "public")]);
+
+        let view = click(&mut plugin, &host, "create");
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(label(&view, "confirm-public"), "Confirm public");
+
+        click(&mut plugin, &host, "confirm-public");
+
+        let posted = posted(&host);
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].1["visibility"], "public");
+    }
+
+    #[test]
+    fn a_focus_change_after_the_public_warning_publishes_nothing() {
+        let host = with_file("a\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("visibility", "public")]);
+        let warned = click(&mut plugin, &host, "create");
+        assert!(warned.status.as_deref().unwrap().contains("src/a.rs"), "{warned:?}");
+
+        host.open_editor("/project/.env", "dotenv", "TOKEN=secret\n", &[(0, 0, 0, 0)]);
+        let view = click(&mut plugin, &host, "confirm-public");
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(buttons(&view), ["create"]);
+        assert!(view.status.as_deref().unwrap().contains("changed"), "{view:?}");
+
+        click(&mut plugin, &host, "create");
+        click(&mut plugin, &host, "confirm-public");
+        let posted = posted(&host);
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].1["files"][0]["file_path"], ".env");
+    }
+
+    #[test]
+    fn changing_any_field_cancels_the_pending_public_confirm() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("visibility", "public")]);
+        click(&mut plugin, &host, "create");
+
+        fill(&mut plugin, &host, &[("title", "Other")]);
+        let view = click(&mut plugin, &host, "confirm-public");
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(buttons(&view), ["create"]);
+    }
+
+    #[test]
+    fn a_visibility_outside_the_choices_is_ignored() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("visibility", "internal"), ("visibility", "everyone"), ("scope", "Project evil/x")]);
+
+        click(&mut plugin, &host, "create");
+
+        let posted = posted(&host);
+        assert_eq!(posted[0].0, "https://gitlab.com/api/v4/snippets");
+        assert_eq!(posted[0].1["visibility"], "internal");
+    }
+
+    #[test]
+    fn file_path_traversal_is_refused() {
+        for path in ["../../x", "/etc/x"] {
+            let host = with_file("x\n", (0, 0, 0, 0));
+            let (mut plugin, _) = open(&host);
+            fill(&mut plugin, &host, &[("file-path", path)]);
+
+            let view = click(&mut plugin, &host, "create");
+
+            assert!(writes(&host).is_empty(), "{path}");
+            assert!(view.status.as_deref().unwrap().contains("refusing the file path"), "{view:?}");
+        }
+    }
+
+    #[test]
+    fn no_focused_file_says_focus_a_file_first() {
+        let host = setup();
+        let (mut plugin, _) = open(&host);
+
+        let view = click(&mut plugin, &host, "create");
+
+        assert!(writes(&host).is_empty());
+        assert_eq!(view.status.as_deref(), Some("Focus a file first."));
+    }
+
+    #[test]
+    fn an_empty_selection_falls_back_to_the_whole_file_and_an_empty_file_is_refused() {
+        let host = with_file("a\nb\n", (1, 0, 1, 0));
+        let (mut plugin, _) = open(&host);
+        click(&mut plugin, &host, "create");
+        assert_eq!(posted(&host)[0].1["files"][0]["content"], "a\nb\n");
+
+        let host = with_file("", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+        let view = click(&mut plugin, &host, "create");
+        assert!(writes(&host).is_empty());
+        assert_eq!(view.status.as_deref(), Some("The file is empty."));
+    }
+
+    #[test]
+    fn crlf_content_is_sent_unchanged() {
+        let host = with_file("a\r\nb\r\n", (0, 0, 0, 0));
+        let (mut plugin, _) = open(&host);
+
+        click(&mut plugin, &host, "create");
+
+        assert_eq!(posted(&host)[0].1["files"][0]["content"], "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn multibyte_selection_is_cut_on_utf16_columns() {
+        let host = with_file("a😀b", (0, 3, 0, 5));
+        let (mut plugin, _) = open(&host);
+
+        click(&mut plugin, &host, "create");
+
+        assert_eq!(posted(&host)[0].1["files"][0]["content"], "b");
+    }
+
+    #[test]
+    fn the_form_is_quiet_when_forms_setting_is_off() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        host.set_setting("forms", "false");
+
+        let (mut plugin, view) = open(&host);
+        click(&mut plugin, &host, "create");
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert!(host.requests().is_empty());
+    }
+}
+
+#[test]
+fn check_out_refuses_a_merge_request_branch_that_reads_as_an_option() {
+    let host = setup();
+    host.on_process("git", git_ok);
+    host.on_fetch(|r| match r.url.contains("/merge_requests/7") && !r.url.contains("/merge_requests/7/") {
+        true => ok(&MR.replace(r#""source_branch": "feature""#, r#""source_branch": "--upload-pack=x""#)),
+        false => gitlab(r),
+    });
+    let mut plugin = selected(&host);
+
+    plugin.handle(DETAILS, ViewEvent::Button("checkout".into()), &host.invocation()).unwrap();
+
+    assert!(host.process_runs().is_empty(), "{:?}", git_runs(&host));
+}
+
+mod share_form_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn git_staging(files: &'static str, staged: String, failing: &'static str) -> impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> {
+        move |args, _| {
+            let stdout = match args[0].as_str() {
+                "status" => files.replace('\n', "\0"),
+                "diff" => staged.clone(),
+                "symbolic-ref" => "main\n".into(),
+                _ => String::new(),
+            };
+            let status = if args[0] == failing { 1 } else { 0 };
+            Ok(ProcessOutput { status: Some(status), stdout, stderr: "boom".into() })
+        }
+    }
+
+    fn git_with(files: &'static str, failing: &'static str) -> impl Fn(&[String], Option<&str>) -> Result<ProcessOutput, Error> {
+        git_staging(files, files.lines().map(|l| format!("{}\0", &l[3..])).collect(), failing)
+    }
+
+    fn unshared() -> MockHost {
+        let host = setup();
+        host.set_vcs_remotes(&[]);
+        host.on_process("git", git_ok);
+        host
+    }
+
+    fn open(host: &MockHost) -> (GitLab, View) {
+        let mut plugin = GitLab::default();
+        let view = plugin.render(SHARE, None, &host.invocation()).unwrap();
+        (plugin, view)
+    }
+
+    fn fill(plugin: &mut GitLab, host: &MockHost, fields: &[(&str, &str)]) {
+        for (key, value) in fields {
+            plugin.handle(SHARE, field(key, value), &host.invocation()).unwrap();
+        }
+    }
+
+    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
+        plugin.handle(SHARE, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
+        plugin.render(SHARE, None, &host.invocation()).unwrap()
+    }
+
+    fn created(host: &MockHost) -> Vec<Value> {
+        writes(host).into_iter().filter(|(_, url, _)| url == "https://gitlab.com/api/v4/projects").map(|(_, _, body)| serde_json::from_str(&body).unwrap()).collect()
+    }
+
+    fn value<'a>(view: &'a View, key: &str) -> &'a FieldValue {
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+
+        &fields.iter().find(|f| f.key == key).unwrap().value
+    }
+
+    fn nothing_happened(host: &MockHost) {
+        assert!(writes(host).is_empty(), "{:?}", writes(host));
+        assert!(host.process_runs().is_empty(), "{:?}", git_runs(host));
+        assert!(host.terminals().is_empty());
+    }
+
+    #[test]
+    fn share_form_creates_in_the_chosen_namespace_with_description_and_visibility() {
+        let host = unshared();
+        let (mut plugin, view) = open(&host);
+        fill(&mut plugin, &host, &[("name", "tool"), ("namespace", "team/sub"), ("description", "A tool"), ("visibility", "internal")]);
+
+        click(&mut plugin, &host, "share");
+
+        assert_eq!(value(&view, "namespace"), &FieldValue::Choice(vec!["Personal".into(), "me".into(), "team/sub".into()], "Personal".into()));
+        assert!(host.requests().iter().any(|r| r.url == "https://gitlab.com/api/v4/namespaces?per_page=100&page=1"));
+        assert_eq!(created(&host), [serde_json::json!({"name": "tool", "namespace_id": 12, "description": "A tool", "visibility": "internal"})]);
+        assert_eq!(host.notifications()[0].body, "https://gitlab.com/me/project");
+    }
+
+    #[test]
+    fn remote_names_starting_with_a_dash_are_refused_before_any_request() {
+        for remote in ["-u", "--mirror"] {
+            let host = unshared();
+            let (mut plugin, _) = open(&host);
+            fill(&mut plugin, &host, &[("remote", remote)]);
+
+            let view = click(&mut plugin, &host, "share");
+
+            nothing_happened(&host);
+            assert!(view.status.unwrap_or_default().contains("refusing"), "{remote}");
+        }
+    }
+
+    #[test]
+    fn remote_name_with_shell_metacharacters_is_refused() {
+        for remote in ["a;b", "a b", "$(x)"] {
+            let host = unshared();
+            let (mut plugin, _) = open(&host);
+            fill(&mut plugin, &host, &[("remote", remote)]);
+
+            click(&mut plugin, &host, "share");
+
+            nothing_happened(&host);
+        }
+    }
+
+    #[test]
+    fn a_branch_with_shell_metacharacters_is_refused_before_pushing() {
+        let host = unshared();
+        host.set_vcs_status(Some(status("x;rm -rf ~")));
+        let (mut plugin, _) = open(&host);
+
+        click(&mut plugin, &host, "share");
+
+        nothing_happened(&host);
+        assert!(created(&host).is_empty());
+    }
+
+    #[test]
+    fn remote_add_and_push_put_names_after_double_dash() {
+        let host = unshared();
+        let (mut plugin, _) = open(&host);
+
+        click(&mut plugin, &host, "share");
+
+        assert_eq!(created(&host), [serde_json::json!({"name": "project", "visibility": "private"})]);
+        assert_eq!(git_runs(&host), ["--version", "remote add -- origin https://gitlab.com/me/project.git"]);
+        assert_eq!(host.terminals()[0].args, ["push", "-u", "--", "origin", "main"]);
+    }
+
+    #[test]
+    fn a_returned_clone_url_on_another_host_is_refused_and_not_added() {
+        let host = unshared();
+        host.on_fetch(|r| match r.method == "POST" && r.url.ends_with("/api/v4/projects") {
+            true => ok(r#"{"web_url": "https://gitlab.com/me/project", "http_url_to_repo": "https://evil.test/x.git", "ssh_url_to_repo": "git@evil.test:x.git"}"#),
+            false => gitlab(r),
+        });
+        let (mut plugin, _) = open(&host);
+
+        let view = click(&mut plugin, &host, "share");
+
+        assert_eq!(git_runs(&host), ["--version"]);
+        assert!(host.terminals().is_empty());
+        assert!(view.status.unwrap_or_default().contains("refusing the clone URL"));
+    }
+
+    #[test]
+    fn init_runs_only_when_there_is_no_repository_and_the_box_is_ticked() {
+        let host = unshared();
+        host.set_vcs_status(None);
+        host.on_process("git", git_with("?? src/a.rs\n", ""));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+
+        click(&mut plugin, &host, "share");
+        assert!(host.process_runs().is_empty(), "{:?}", git_runs(&host));
+
+        fill(&mut plugin, &host, &[("init", "true")]);
+        click(&mut plugin, &host, "share");
+        assert_eq!(git_runs(&host), ["--version", "init", "symbolic-ref --short HEAD", "status --porcelain -z --untracked-files=all"]);
+
+        let host = unshared();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("init", "true")]);
+        click(&mut plugin, &host, "share");
+        assert!(!git_runs(&host).contains(&"init".to_owned()), "{:?}", git_runs(&host));
+        assert_eq!(created(&host).len(), 1);
+    }
+
+    #[test]
+    fn commit_all_lists_files_and_waits_for_the_second_click() {
+        let host = unshared();
+        host.on_process("git", git_with("?? src/a.rs\n M README.md\n", ""));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+
+        let view = click(&mut plugin, &host, "share");
+
+        assert_eq!(buttons(&view), ["confirm-commit", "refresh"]);
+        assert!(view.status.as_deref().unwrap_or_default().contains("2 files"), "{:?}", view.status);
+        assert_eq!(value(&view, "files"), &FieldValue::Multiline("src/a.rs\nREADME.md".into()));
+        assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")));
+        assert!(writes(&host).is_empty());
+
+        click(&mut plugin, &host, "confirm-commit");
+
+        assert_eq!(
+            git_runs(&host)[3..],
+            [
+                "status --porcelain -z --untracked-files=all",
+                "add -A",
+                "diff --cached --name-only -z --no-renames",
+                "commit -m Initial commit",
+                "remote add -- origin https://gitlab.com/me/project.git"
+            ]
+        );
+        assert_eq!(created(&host).len(), 1);
+        assert_eq!(host.terminals().len(), 1);
+    }
+
+    #[test]
+    fn a_file_staged_after_the_confirm_is_unstaged_and_listed_again() {
+        let host = unshared();
+        host.on_process("git", git_with("?? src/a.rs\n", ""));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+        click(&mut plugin, &host, "share");
+
+        host.on_process("git", git_staging("?? src/a.rs\n", "src/a.rs\0notes.txt\0".into(), ""));
+        let view = click(&mut plugin, &host, "confirm-commit");
+
+        let runs = git_runs(&host);
+        assert!(runs.contains(&"reset -q".to_owned()), "{runs:?}");
+        assert!(!runs.iter().any(|r| r.starts_with("commit") || r.starts_with("remote")), "{runs:?}");
+        assert!(created(&host).is_empty());
+        assert!(host.terminals().is_empty());
+        assert_eq!(buttons(&view), ["confirm-commit", "refresh"]);
+        assert_eq!(value(&view, "files"), &FieldValue::Multiline("src/a.rs\nnotes.txt".into()));
+    }
+
+    #[test]
+    fn porcelain_renames_list_both_sides_and_order_does_not_matter_for_the_confirm() {
+        let host = unshared();
+        host.on_process("git", git_staging("R  new.rs\nold.rs\n?? b.rs\n", "b.rs\0new.rs\0old.rs\0".into(), ""));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+
+        let view = click(&mut plugin, &host, "share");
+        assert_eq!(value(&view, "files"), &FieldValue::Multiline("new.rs\nold.rs\nb.rs".into()));
+
+        click(&mut plugin, &host, "confirm-commit");
+
+        assert!(git_runs(&host).contains(&"commit -m Initial commit".to_owned()));
+        assert_eq!(created(&host).len(), 1);
+    }
+
+    #[test]
+    fn the_commit_confirm_is_bound_to_the_files_it_listed() {
+        let host = unshared();
+        host.on_process("git", git_with("?? src/a.rs\n", ""));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+        click(&mut plugin, &host, "share");
+
+        host.on_process("git", git_with("?? src/a.rs\n?? notes.txt\n", ""));
+        let view = click(&mut plugin, &host, "confirm-commit");
+
+        assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")));
+        assert!(writes(&host).is_empty());
+        assert_eq!(buttons(&view), ["confirm-commit", "refresh"]);
+        assert!(view.status.unwrap_or_default().contains("changed"));
+    }
+
+    #[test]
+    fn changing_a_field_cancels_the_pending_commit_confirm() {
+        let host = unshared();
+        host.on_process("git", git_with("?? src/a.rs\n", ""));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+        click(&mut plugin, &host, "share");
+
+        fill(&mut plugin, &host, &[("remote", "gitlab")]);
+        let view = click(&mut plugin, &host, "confirm-commit");
+
+        assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")));
+        assert_eq!(buttons(&view), ["share", "refresh"]);
+    }
+
+    #[test]
+    fn commit_all_refuses_secret_looking_files() {
+        for file in [".env", "deploy.key", "id_rsa", "config/.env.local", "certs/site.PEM", ".ssh/id_ed25519.pub"] {
+            let host = unshared();
+            host.on_process("git", git_with(Box::leak(format!("?? src/a.rs\n?? {file}\n").into_boxed_str()), ""));
+            let (mut plugin, _) = open(&host);
+            fill(&mut plugin, &host, &[("commit-all", "true")]);
+
+            let view = click(&mut plugin, &host, "share");
+
+            assert!(!git_runs(&host).iter().any(|r| r.starts_with("add")), "{file}");
+            assert!(writes(&host).is_empty(), "{file}");
+            assert_eq!(buttons(&view), ["share", "refresh"], "{file}");
+            assert!(view.status.unwrap_or_default().contains(file), "{file}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_created_when_git_init_or_commit_fails() {
+        let host = unshared();
+        host.set_vcs_status(None);
+        host.on_process("git", git_with("?? src/a.rs\n", "init"));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("init", "true"), ("commit-all", "true")]);
+        let view = click(&mut plugin, &host, "share");
+        assert!(writes(&host).is_empty());
+        assert!(view.status.unwrap_or_default().contains("Git init failed"));
+
+        let host = unshared();
+        host.on_process("git", git_with("?? src/a.rs\n", "commit"));
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("commit-all", "true")]);
+        click(&mut plugin, &host, "share");
+        click(&mut plugin, &host, "confirm-commit");
+        assert!(writes(&host).is_empty());
+        assert!(host.terminals().is_empty());
+    }
+
+    #[test]
+    fn an_existing_gitlab_remote_refuses() {
+        let host = setup();
+        host.on_process("git", git_ok);
+        let (mut plugin, _) = open(&host);
+
+        let view = click(&mut plugin, &host, "share");
+
+        nothing_happened(&host);
+        assert!(view.status.unwrap_or_default().contains("already has a gitlab.com remote"));
+
+        host.set_vcs_remotes(&[("upstream", "git@github.com:x/y.git")]);
+        fill(&mut plugin, &host, &[("remote", "upstream")]);
+        click(&mut plugin, &host, "share");
+        nothing_happened(&host);
+    }
+
+    #[test]
+    fn share_without_process_git_names_the_capability() {
+        let without_git: Vec<&str> = CAPS.iter().copied().filter(|c| *c != "process:git").collect();
+        let host = unshared().with_capabilities(&without_git);
+
+        let result = GitLab::default().run_command("share-project", &host.invocation(), None);
+
+        assert_eq!(result, Err(Error::Denied("process:git".into())));
+        assert!(writes(&host).is_empty());
+    }
+
+    #[test]
+    fn a_namespace_outside_the_choices_is_ignored() {
+        let host = unshared();
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("namespace", "evil/ns"), ("visibility", "secret")]);
+
+        let view = click(&mut plugin, &host, "share");
+
+        assert_eq!(value(&view, "namespace"), &FieldValue::Choice(vec!["Personal".into(), "me".into(), "team/sub".into()], "Personal".into()));
+        assert_eq!(created(&host), [serde_json::json!({"name": "project", "visibility": "private"})]);
+    }
+
+    #[test]
+    fn the_form_is_quiet_when_forms_setting_is_off() {
+        let host = unshared();
+        host.set_setting("forms", "false");
+
+        let (mut plugin, view) = open(&host);
+        click(&mut plugin, &host, "share");
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert!(host.requests().is_empty());
+        assert!(host.process_runs().is_empty());
+    }
+}
+
+mod note_action_tests {
+    use super::*;
+
+    const MR_URL: &str = "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7";
+
+    const MINE: &str = r#"[
+        {"id": "d1", "notes": [
+            {"id": 11, "body": "Why?", "author": {"id": 3, "username": "bob"}, "created_at": "2026-01-02", "resolvable": true},
+            {"id": 12, "body": "Because", "author": {"id": 1, "username": "me"}, "created_at": "2026-01-03"},
+            {"id": 14, "body": "Also", "author": {"id": 1, "username": "me"}, "created_at": "2026-01-04"}
+        ]},
+        {"id": "d2", "notes": [{"id": 13, "body": "changed the description", "author": {"id": 1, "username": "me"}, "created_at": "2026-01-01", "system": true}]}
+    ]"#;
+
+    fn notes(req: &HttpRequest) -> Result<HttpResponse, Error> {
+        let path = req.url.strip_prefix(MR_URL).unwrap_or("").split('?').next().unwrap_or("");
+
+        match (req.method.as_str(), path) {
+            ("GET", "/discussions") => ok(MINE),
+            ("GET", "/notes/12/award_emoji") => ok(
+                r#"[{"id": 55, "name": "thumbsup", "user": {"id": 1, "username": "me"}},
+                    {"id": 56, "name": "rocket", "user": {"id": 3, "username": "bob"}}]"#,
+            ),
+            ("GET", p) if p.ends_with("/award_emoji") => ok("[]"),
+            ("DELETE", _) => ok(""),
+            _ => gitlab(req),
+        }
+    }
+
+    fn host() -> MockHost {
+        let host = setup();
+        host.on_fetch(notes);
+        host
+    }
+
+    fn on(host: &MockHost, key: &str) -> GitLab {
+        let mut plugin = GitLab::default();
+        plugin.handle(LIST, ViewEvent::Select(key.into()), &host.invocation()).unwrap();
+        plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        plugin
+    }
+
+    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
+        plugin.handle(DETAILS, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
+        plugin.render(DETAILS, None, &host.invocation()).unwrap()
+    }
+
+    fn comment(view: &View) -> &FieldValue {
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+        &fields.iter().find(|f| f.key == COMMENT_KEY).unwrap().value
+    }
+
+    #[test]
+    fn edit_saves_the_comment_text_to_the_selected_own_note() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        assert_eq!(label(&view, "edit-note"), "Save Edit");
+
+        plugin.handle(DETAILS, field("comment", "Because of X"), &host.invocation()).unwrap();
+        let view = click(&mut plugin, &host, "edit-note");
+
+        assert_eq!(writes(&host), [("PUT".into(), format!("{MR_URL}/notes/12"), r#"{"body":"Because of X"}"#.into())]);
+        assert!(view.status.as_deref().unwrap().starts_with("Comment edited."), "{view:?}");
+        assert_eq!(host.storage().get("comment"), None);
+    }
+
+    #[test]
+    fn edit_and_delete_are_not_offered_for_someone_elses_note_or_a_system_note() {
+        for key in ["d:7:d1", "n:7:d1:11", "d:7:d2"] {
+            let host = host();
+            let mut plugin = on(&host, key);
+            plugin.handle(DETAILS, field("comment", "taken over"), &host.invocation()).unwrap();
+
+            let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+            assert!(!buttons(&view).contains(&"edit-note") && !buttons(&view).contains(&"delete-note"), "{key}: {view:?}");
+
+            click(&mut plugin, &host, "edit-note");
+            click(&mut plugin, &host, "delete-note");
+            click(&mut plugin, &host, "delete-note");
+            assert!(writes(&host).is_empty(), "{key}");
+        }
+    }
+
+    #[test]
+    fn delete_needs_a_second_click() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        assert_eq!(label(&view, "delete-note"), "Delete Comment");
+
+        let view = click(&mut plugin, &host, "delete-note");
+        assert!(writes(&host).is_empty(), "the first click only asks to confirm");
+        assert_eq!(label(&view, "delete-note"), "Confirm Delete Comment");
+
+        let view = click(&mut plugin, &host, "delete-note");
+
+        assert_eq!(writes(&host), [("DELETE".into(), format!("{MR_URL}/notes/12"), String::new())]);
+        assert!(view.status.as_deref().unwrap().starts_with("Comment deleted."), "{view:?}");
+    }
+
+    #[test]
+    fn another_action_cancels_a_pending_delete() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        click(&mut plugin, &host, "delete-note");
+        plugin.handle(LIST, ViewEvent::Select("n:7:d1:14".into()), &host.invocation()).unwrap();
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        assert_eq!(label(&view, "delete-note"), "Delete Comment");
+
+        click(&mut plugin, &host, "delete-note");
+        click(&mut plugin, &host, "copy");
+        let view = click(&mut plugin, &host, "delete-note");
+        assert!(writes(&host).is_empty());
+        assert_eq!(label(&view, "delete-note"), "Confirm Delete Comment");
+
+        storage::set("note", "12").unwrap();
+        click(&mut plugin, &host, "delete-note");
+        assert!(writes(&host).is_empty(), "a confirm shown for note 14 does not delete note 12");
+
+        click(&mut plugin, &host, "delete-note");
+        assert_eq!(writes(&host), [("DELETE".into(), format!("{MR_URL}/notes/12"), String::new())]);
+    }
+
+    #[test]
+    fn react_adds_the_chosen_emoji_to_the_selected_note() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        plugin.handle(DETAILS, field("emoji", "rocket"), &host.invocation()).unwrap();
+        let view = click(&mut plugin, &host, "react");
+
+        assert_eq!(writes(&host), [("POST".into(), format!("{MR_URL}/notes/12/award_emoji?name=rocket"), String::new())]);
+        assert!(view.status.as_deref().unwrap().starts_with("Reacted with :rocket:."), "{view:?}");
+    }
+
+    #[test]
+    fn react_again_removes_my_own_award() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        let view = click(&mut plugin, &host, "react");
+
+        assert_eq!(writes(&host), [("DELETE".into(), format!("{MR_URL}/notes/12/award_emoji/55"), String::new())]);
+        assert!(view.status.as_deref().unwrap().starts_with("Removed your :thumbsup:."), "{view:?}");
+    }
+
+    #[test]
+    fn a_user_without_an_id_owns_no_note_and_no_award() {
+        let host = setup();
+        host.on_fetch(|r| {
+            let path = r.url.strip_prefix(MR_URL).unwrap_or("").split('?').next().unwrap_or("");
+            match (r.method.as_str(), path) {
+                _ if r.url.ends_with("/api/v4/user") => ok(r#"{"username": "me"}"#),
+                ("GET", "/discussions") => ok(r#"[{"id": "d1", "notes": [{"id": 12, "body": "x", "author": {"username": "me"}, "created_at": "2026-01-03"}]}]"#),
+                ("GET", "/notes/12/award_emoji") => ok(r#"[{"id": 55, "name": "thumbsup", "user": {"username": "me"}}]"#),
+                _ => notes(r),
+            }
+        });
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        assert!(!buttons(&view).contains(&"edit-note") && !buttons(&view).contains(&"delete-note"), "{view:?}");
+        click(&mut plugin, &host, "edit-note");
+        click(&mut plugin, &host, "delete-note");
+        click(&mut plugin, &host, "delete-note");
+        assert!(writes(&host).is_empty(), "{:?}", writes(&host));
+
+        click(&mut plugin, &host, "react");
+
+        assert_eq!(writes(&host), [("POST".into(), format!("{MR_URL}/notes/12/award_emoji?name=thumbsup"), String::new())]);
+    }
+
+    #[test]
+    fn react_without_a_selected_note_awards_the_merge_request() {
+        let host = host();
+        let mut plugin = on(&host, "mr:7");
+
+        plugin.handle(DETAILS, field("emoji", "tada"), &host.invocation()).unwrap();
+        click(&mut plugin, &host, "react");
+
+        assert_eq!(writes(&host), [("POST".into(), format!("{MR_URL}/award_emoji?name=tada"), String::new())]);
+    }
+
+    #[test]
+    fn an_emoji_outside_the_list_is_refused_and_no_request_is_sent() {
+        for emoji in ["thumbsup&name=x", "../x"] {
+            let host = host();
+            let mut plugin = on(&host, "n:7:d1:12");
+            let before = host.requests().len();
+
+            plugin.handle(DETAILS, field("emoji", emoji), &host.invocation()).unwrap();
+            plugin.handle(DETAILS, ViewEvent::Button("react".into()), &host.invocation()).unwrap();
+
+            assert_eq!(host.requests().len(), before, "{emoji}");
+            assert!(plugin.status.as_deref().unwrap().contains("refusing the emoji"), "{emoji}");
+
+            let api = api::Project("g/p");
+            assert!(api.add_award(7, Some(12), emoji).is_err());
+            assert_eq!(host.requests().len(), before, "{emoji}");
+        }
+    }
+
+    #[test]
+    fn note_ids_come_from_the_tree_key_not_from_form_text() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        for key in ["note", "note-id", "note_id", "id"] {
+            plugin.handle(DETAILS, field(key, "14"), &host.invocation()).unwrap();
+        }
+        plugin.handle(DETAILS, field("comment", "14"), &host.invocation()).unwrap();
+        click(&mut plugin, &host, "edit-note");
+        click(&mut plugin, &host, "delete-note");
+        click(&mut plugin, &host, "delete-note");
+
+        let urls: Vec<String> = writes(&host).into_iter().map(|w| w.1).collect();
+        assert_eq!(urls, [format!("{MR_URL}/notes/12"), format!("{MR_URL}/notes/12")]);
+    }
+
+    #[test]
+    fn a_failed_edit_keeps_the_comment_text_and_says_why() {
+        let host = host();
+        host.on_fetch(|r| match r.method == "PUT" {
+            true => Ok(HttpResponse { status: 400, headers: vec![], body: br#"{"message":"note is too long"}"#.to_vec() }),
+            false => notes(r),
+        });
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        plugin.handle(DETAILS, field("comment", "LGTM"), &host.invocation()).unwrap();
+        let view = click(&mut plugin, &host, "edit-note");
+
+        assert_eq!(host.storage().get("comment").map(String::as_str), Some("LGTM"));
+        assert!(view.status.as_deref().unwrap().contains("note is too long"), "{view:?}");
+        assert_eq!(comment(&view), &FieldValue::Multiline("LGTM".into()));
+    }
+
+    #[test]
+    fn note_actions_are_quiet_when_the_setting_is_off() {
+        let host = host();
+        host.set_setting("noteActions", "false");
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        let view = plugin.render(DETAILS, None, &host.invocation()).unwrap();
+        let Body::Form(fields) = &view.body else { panic!("{view:?}") };
+        assert!(!fields.iter().any(|f| f.key == "emoji"), "{view:?}");
+        assert!(buttons(&view).iter().all(|b| !["edit-note", "delete-note", "react"].contains(b)), "{view:?}");
+
+        plugin.handle(DETAILS, field("comment", "x"), &host.invocation()).unwrap();
+        for id in ["edit-note", "delete-note", "delete-note", "react"] {
+            click(&mut plugin, &host, id);
+        }
+
+        assert!(writes(&host).is_empty());
+        assert!(host.requests().iter().all(|r| !r.url.contains("award_emoji")));
+        assert_eq!(plugin.status, None);
+    }
+
+    #[test]
+    fn an_empty_edit_is_refused() {
+        let host = host();
+        let mut plugin = on(&host, "n:7:d1:12");
+
+        plugin.handle(DETAILS, field("comment", " \n "), &host.invocation()).unwrap();
+        let view = click(&mut plugin, &host, "edit-note");
+
+        assert!(writes(&host).is_empty());
+        assert!(view.status.as_deref().unwrap().starts_with("Write the new text"), "{view:?}");
+    }
+}
+
+mod commit_tests {
+    use super::*;
+
+    const SHA1: &str = "aaaaaaa1111111111111111111111111111111aa";
+    const SHA2: &str = "bbbbbbb2222222222222222222222222222222bb";
+    const MR_URL: &str = "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests/7";
+    const REPO_URL: &str = "https://gitlab.com/api/v4/projects/g%2Fp/repository";
+
+    fn commits(req: &HttpRequest) -> Result<HttpResponse, Error> {
+        let url = req.url.split('?').next().unwrap_or("");
+
+        match url {
+            u if u == format!("{MR_URL}/commits") => ok(&format!(
+                r#"[{{"id": "{SHA2}", "short_id": "bbbbbbb2", "title": "Second <b>", "author_name": "Ann"}},
+                    {{"id": "{SHA1}", "short_id": "aaaaaaa1", "title": "First", "author_name": "Bob"}}]"#
+            )),
+            u if u == format!("{REPO_URL}/commits/{SHA1}/diff") => ok(
+                r#"[{"old_path": "src/b.rs", "new_path": "src/b.rs", "diff": "@@ -1,2 +1,2 @@\r\n é\r\n-ü😀<script>\r\n+ü😀x</td>\r\n z\r\n"}]"#,
+            ),
+            _ => gitlab(req),
+        }
+    }
+
+    fn host() -> MockHost {
+        let host = setup();
+        host.on_fetch(commits);
+        host
+    }
+
+    fn on_mr(host: &MockHost) -> GitLab {
+        let mut plugin = selected(host);
+        plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        plugin
+    }
+
+    fn pick(plugin: &mut GitLab, host: &MockHost, key: &str) {
+        plugin.handle(COMMITS, ViewEvent::Activate(key.into()), &host.invocation()).unwrap();
+    }
+
+    fn commit_requests(host: &MockHost) -> Vec<String> {
+        host.requests().into_iter().map(|r| r.url).filter(|u| u.contains("/repository/commits/")).collect()
+    }
+
+    #[test]
+    fn lists_the_commits_of_the_selected_merge_request() {
+        let host = host();
+        let mut plugin = selected(&host);
+
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+
+        let Body::Tree(items) = &view.body else { panic!("{view:?}") };
+        let rows: Vec<(&str, &str)> = items.iter().map(|i| (i.key.as_str(), i.label.as_str())).collect();
+        assert_eq!(rows, [(SHA2, "bbbbbbb2 Second <b>"), (SHA1, "aaaaaaa1 First")]);
+        assert_eq!(items[1].detail.as_deref(), Some("Bob"));
+        assert!(host.requests().iter().any(|r| r.url.starts_with(&format!("{MR_URL}/commits?per_page="))));
+    }
+
+    #[test]
+    fn activating_a_commit_shows_its_diff_in_the_changes_view_without_comment_threads() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        assert!(changes_html(&mut plugin, &host).contains("Why?"), "the merge request diff shows its threads");
+
+        pick(&mut plugin, &host, SHA1);
+
+        assert_eq!(plugin.commit.as_deref(), Some(SHA1));
+        assert!(host.refreshed_views().contains(&CHANGES.to_owned()));
+        let html = changes_html(&mut plugin, &host);
+        assert!(html.contains("src/b.rs") && !html.contains("src/a.rs"), "{html}");
+        assert!(!html.contains("Why?") && !html.contains("data-reply"), "no comment threads in commit mode");
+        assert!(html.contains("aaaaaaa1"), "{html}");
+        assert_eq!(commit_requests(&host), [format!("{REPO_URL}/commits/{SHA1}/diff?per_page=100&page=1")]);
+
+        let comment = r#"{"type":"comment","oldPath":"src/b.rs","newPath":"src/b.rs","old":null,"new":2,"body":"x","draft":false}"#;
+        plugin.handle(CHANGES, ViewEvent::Message(comment.into()), &host.invocation()).unwrap();
+        assert!(writes(&host).is_empty(), "commit diffs are read-only");
+    }
+
+    #[test]
+    fn all_changes_returns_to_the_merge_request_diff() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        assert!(buttons(&view).contains(&"all-changes"), "{view:?}");
+
+        plugin.handle(COMMITS, ViewEvent::Button("all-changes".into()), &host.invocation()).unwrap();
+
+        assert_eq!(plugin.commit, None);
+        let html = changes_html(&mut plugin, &host);
+        assert!(html.contains("src/a.rs") && html.contains("Why?"), "{html}");
+    }
+
+    #[test]
+    fn selecting_another_merge_request_clears_the_commit() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+
+        plugin.handle(LIST, ViewEvent::Select("mr:8".into()), &host.invocation()).unwrap();
+
+        assert_eq!(plugin.commit, None);
+        assert!(host.refreshed_views().contains(&COMMITS.to_owned()));
+    }
+
+    #[test]
+    fn a_non_hex_commit_key_sends_no_request() {
+        let host = setup();
+        host.on_fetch(|req| match req.url.contains("/merge_requests/7/commits") {
+            true => ok(r#"[{"id": "abc/../x", "short_id": "a"}, {"id": "HEAD", "short_id": "h"}, {"id": "abcdef1?x", "short_id": "q"}]"#),
+            false => gitlab(req),
+        });
+        let mut plugin = on_mr(&host);
+        let before = host.requests().len();
+
+        for key in ["abc/../x", "HEAD", "abcdef1?x"] {
+            pick(&mut plugin, &host, key);
+            plugin.handle(COMMITS, ViewEvent::Select(key.into()), &host.invocation()).unwrap();
+            assert_eq!(plugin.commit, None, "{key}");
+            changes_html(&mut plugin, &host);
+        }
+
+        assert!(commit_requests(&host).is_empty(), "{:?}", commit_requests(&host));
+        assert!(host.requests()[before..].iter().all(|r| !r.url.contains("..") && !r.url.contains("HEAD")));
+    }
+
+    #[test]
+    fn an_empty_commit_list_shows_a_message_not_a_blank_list() {
+        let host = setup();
+        host.on_fetch(|req| match req.url.contains("/merge_requests/7/commits") {
+            true => ok("[]"),
+            false => gitlab(req),
+        });
+        let mut plugin = selected(&host);
+
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+
+        assert_eq!(view.body, Body::Message("!7 has no commits.".into()));
+    }
+
+    #[test]
+    fn the_view_is_quiet_without_a_selected_merge_request() {
+        let host = host();
+        let mut plugin = GitLab::default();
+
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        plugin.handle(COMMITS, ViewEvent::Activate(SHA1.into()), &host.invocation()).unwrap();
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert_eq!(plugin.commit, None);
+        assert!(host.requests().is_empty());
+    }
+
+    #[test]
+    fn the_view_is_quiet_when_the_setting_is_off() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+        host.set_setting("commitsView", "false");
+        let before = host.requests().len();
+
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        pick(&mut plugin, &host, SHA2);
+        let html = changes_html(&mut plugin, &host);
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert!(html.contains("src/a.rs") && html.contains("Why?"), "the merge request diff, not the commit");
+        assert!(host.requests()[before..].iter().all(|r| !r.url.contains("commits")));
+    }
+
+    #[test]
+    fn diff_text_with_html_is_escaped_in_commit_mode() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+
+        let html = changes_html(&mut plugin, &host);
+
+        assert!(html.contains("<td class=\"code\">ü😀&lt;script&gt;</td>"), "{html}");
+        assert!(html.contains("<td class=\"code\">ü😀x&lt;/td&gt;</td>"), "{html}");
+        let view = plugin.render(COMMITS, None, &host.invocation()).unwrap();
+        assert!(view.status.as_deref().unwrap_or("").contains("aaaaaaa1"), "{view:?}");
+    }
+
+    #[test]
+    fn crlf_and_multibyte_diff_lines_keep_their_numbers() {
+        let lines = review::parse_diff("@@ -1,2 +1,2 @@\r\n é\r\n-ü😀\r\n+ü😀x\r\n z\r\n");
+
+        let numbers: Vec<(char, Option<u32>, Option<u32>, &str)> = lines.iter().map(|l| (l.kind, l.old, l.new, l.text.as_str())).collect();
+        assert_eq!(
+            numbers,
+            [('@', None, None, "@@ -1,2 +1,2 @@"), (' ', Some(1), Some(1), "é"), ('-', Some(2), None, "ü😀"), ('+', None, Some(2), "ü😀x"), (' ', Some(3), Some(3), "z")]
+        );
+
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, SHA1);
+        let html = changes_html(&mut plugin, &host);
+        assert!(html.contains("id=\"f0-2-\"") && html.contains("id=\"f0--2\"") && html.contains("id=\"f0-3-3\""), "{html}");
+        assert!(!html.contains('\r'));
+    }
+}
+
+mod pipeline_tests {
+    use super::*;
+
+    const API: &str = "https://gitlab.com/api/v4/projects/g%2Fp";
+
+    const JOBS_41: &str = r#"[
+        {"id": 303, "name": "lint", "stage": "test", "status": "failed", "allow_failure": true, "web_url": "https://gitlab.com/g/p/-/jobs/303"},
+        {"id": 302, "name": "unit", "stage": "test", "status": "running", "web_url": "https://gitlab.com/g/p/-/jobs/302"},
+        {"id": 301, "name": "compile", "stage": "build", "status": "success", "web_url": "https://gitlab.com/g/p/-/jobs/301"}
+    ]"#;
+
+    fn pipelines(req: &HttpRequest) -> Result<HttpResponse, Error> {
+        let url = req.url.split('?').next().unwrap_or("");
+
+        match (req.method.as_str(), url.strip_prefix(API).unwrap_or("")) {
+            ("GET", "/merge_requests/7/pipelines") => ok(
+                r#"[{"id": 41, "status": "running", "web_url": "https://gitlab.com/g/p/-/pipelines/41"},
+                    {"id": 40, "status": "failed", "web_url": "https://gitlab.com/g/p/-/pipelines/40"}]"#,
+            ),
+            ("GET", "/pipelines/41/jobs") => ok(JOBS_41),
+            ("GET", "/pipelines/40/jobs") => ok(r#"[{"id": 300, "name": "unit", "stage": "test", "status": "failed", "web_url": "https://gitlab.com/g/p/-/jobs/300"}]"#),
+            _ => gitlab(req),
+        }
+    }
+
+    fn host() -> MockHost {
+        let host = setup();
+        host.on_fetch(pipelines);
+        host
+    }
+
+    fn on_mr(host: &MockHost) -> GitLab {
+        let mut plugin = selected(host);
+        plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        plugin
+    }
+
+    fn pick(plugin: &mut GitLab, host: &MockHost, key: &str) {
+        plugin.handle(PIPELINES, ViewEvent::Select(key.into()), &host.invocation()).unwrap();
+    }
+
+    fn click(plugin: &mut GitLab, host: &MockHost, id: &str) -> View {
+        plugin.handle(PIPELINES, ViewEvent::Button(id.into()), &host.invocation()).unwrap();
+        plugin.render(PIPELINES, None, &host.invocation()).unwrap()
+    }
+
+    fn rows(view: &View) -> Vec<(&str, Option<&str>, &str, Option<&str>)> {
+        let Body::Tree(items) = &view.body else { panic!("{view:?}") };
+
+        items.iter().map(|i| (i.key.as_str(), i.parent.as_deref(), i.label.as_str(), i.icon.as_deref())).collect()
+    }
+
+    #[test]
+    fn shows_pipelines_with_jobs_grouped_by_stage_and_status_icons() {
+        let host = host();
+        let mut plugin = selected(&host);
+
+        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+
+        assert_eq!(
+            rows(&view),
+            [
+                ("p:41", None, "#41", Some("run")),
+                ("s:41:build", Some("p:41"), "build", Some("success")),
+                ("j:301", Some("s:41:build"), "compile", Some("success")),
+                ("s:41:test", Some("p:41"), "test", Some("run")),
+                ("j:302", Some("s:41:test"), "unit", Some("run")),
+                ("j:303", Some("s:41:test"), "lint", Some("warning")),
+                ("p:40", None, "#40", Some("error")),
+            ]
+        );
+        let Body::Tree(items) = &view.body else { unreachable!() };
+        assert!(items[0].expanded && items[6].expandable && !items[6].expanded);
+        assert_eq!(items[0].detail.as_deref(), Some("Pipeline running"));
+        assert_eq!(items[5].detail.as_deref(), Some("Failed (allowed to fail)"));
+        assert!(!host.requests().iter().any(|r| r.url.contains("/pipelines/40/jobs")), "a collapsed pipeline loads no jobs");
+
+        plugin.handle(PIPELINES, ViewEvent::Expand("p:40".into()), &host.invocation()).unwrap();
+        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+
+        assert!(rows(&view).contains(&("j:300", Some("s:40:test"), "unit", Some("error"))), "{view:?}");
+        assert!(host.refreshed_views().contains(&PIPELINES.to_owned()));
+    }
+
+    #[test]
+    fn retry_posts_to_the_selected_job() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "j:301");
+
+        let view = click(&mut plugin, &host, "retry");
+
+        assert_eq!(writes(&host), [("POST".to_owned(), format!("{API}/jobs/301/retry"), String::new())]);
+        assert_eq!(view.status.as_deref(), Some("Job retried."));
+        let reloads = host.requests().iter().filter(|r| r.url.contains("/merge_requests/7/pipelines")).count();
+        assert_eq!(reloads, 2, "the tree reloads after the action");
+    }
+
+    #[test]
+    fn retry_on_a_pipeline_posts_to_pipeline_retry() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "p:40");
+
+        let view = click(&mut plugin, &host, "retry");
+
+        assert_eq!(writes(&host), [("POST".to_owned(), format!("{API}/pipelines/40/retry"), String::new())]);
+        assert_eq!(view.status.as_deref(), Some("Pipeline retried."));
+    }
+
+    #[test]
+    fn cancel_needs_a_second_click() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "p:41");
+
+        let view = click(&mut plugin, &host, "cancel");
+        assert!(writes(&host).is_empty());
+        assert_eq!(label(&view, "cancel"), "Confirm Cancel Pipeline #41");
+
+        pick(&mut plugin, &host, "j:302");
+        pick(&mut plugin, &host, "p:41");
+        let view = click(&mut plugin, &host, "cancel");
+        assert!(writes(&host).is_empty(), "a selection change cancels the confirm");
+
+        click(&mut plugin, &host, "refresh");
+        pick(&mut plugin, &host, "p:41");
+        let view_after_other = click(&mut plugin, &host, "cancel");
+        assert!(writes(&host).is_empty(), "another action cancels the confirm");
+        assert_eq!(label(&view_after_other, "cancel"), "Confirm Cancel Pipeline #41");
+        assert_eq!(label(&view, "cancel"), "Confirm Cancel Pipeline #41");
+
+        let view = click(&mut plugin, &host, "cancel");
+
+        assert_eq!(writes(&host), [("POST".to_owned(), format!("{API}/pipelines/41/cancel"), String::new())]);
+        assert_eq!(view.status.as_deref(), Some("Pipeline canceled."));
+        assert_eq!(label(&view, "cancel"), "Cancel Pipeline");
+    }
+
+    #[test]
+    fn tree_keys_with_non_numeric_ids_send_no_request() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        let before = host.requests().len();
+
+        for key in ["j:1/../2", "p:1?x", "j:-1", "s:1/../2:test"] {
+            pick(&mut plugin, &host, key);
+            plugin.handle(PIPELINES, ViewEvent::Expand(key.into()), &host.invocation()).unwrap();
+            for button in ["retry", "cancel", "cancel", "browser"] {
+                plugin.handle(PIPELINES, ViewEvent::Button(button.into()), &host.invocation()).unwrap();
+            }
+        }
+
+        assert_eq!(host.requests().len(), before);
+        assert!(host.opened_urls().is_empty());
+        plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        assert!(host.requests()[before..].iter().all(|r| !r.url.contains("..") && !r.url.contains("?x") && !r.url.contains("/-1")));
+    }
+
+    #[test]
+    fn open_in_browser_refuses_a_job_url_on_another_host() {
+        let host = setup();
+        host.on_fetch(|req| match req.url.contains("/pipelines/41/jobs") {
+            true => ok(
+                r#"[{"id": 1, "name": "evil", "stage": "test", "status": "failed", "web_url": "https://evil.test/j/1"},
+                    {"id": 2, "name": "script", "stage": "test", "status": "failed", "web_url": "javascript:alert(1)"}]"#,
+            ),
+            false => pipelines(req),
+        });
+        let mut plugin = on_mr(&host);
+
+        for key in ["j:1", "j:2"] {
+            pick(&mut plugin, &host, key);
+            let view = click(&mut plugin, &host, "browser");
+            assert!(view.status.as_deref().unwrap_or("").contains("refusing the URL"), "{view:?}");
+        }
+        assert!(host.opened_urls().is_empty());
+
+        pick(&mut plugin, &host, "p:41");
+        click(&mut plugin, &host, "browser");
+
+        assert_eq!(host.opened_urls(), ["https://gitlab.com/g/p/-/pipelines/41"]);
+    }
+
+    #[test]
+    fn retry_is_disabled_for_a_running_job() {
+        let host = host();
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "j:302");
+
+        let view = click(&mut plugin, &host, "retry");
+
+        let retry = view.toolbar.iter().find(|b| b.id == "retry").unwrap();
+        assert_eq!(retry, &Button::new("retry", "Retry Job").icon("rerun").enabled(false));
+        assert!(writes(&host).is_empty());
+    }
+
+    #[test]
+    fn a_merge_request_without_pipelines_shows_a_message() {
+        let host = setup();
+        host.on_fetch(|req| match req.url.contains("/merge_requests/7/pipelines") {
+            true => ok("[]"),
+            false => gitlab(req),
+        });
+        let mut plugin = selected(&host);
+
+        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+
+        assert_eq!(view.body, Body::Message("!7 has no pipelines.".into()));
+    }
+
+    #[test]
+    fn a_failed_retry_reports_the_gitlab_error_without_the_token() {
+        let host = setup();
+        host.on_fetch(|req| match req.method == "POST" {
+            true => Ok(HttpResponse { status: 403, headers: vec![], body: br#"{"message":"403 Forbidden"}"#.to_vec() }),
+            false => pipelines(req),
+        });
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "j:301");
+
+        let view = click(&mut plugin, &host, "retry");
+
+        assert_eq!(view.status.as_deref(), Some("GitLab returned 403: 403 Forbidden"));
+        assert!(!format!("{view:?}").contains("glpat-x"));
+        assert!(host.notifications().iter().all(|n| !format!("{n:?}").contains("glpat-x")));
+        assert!(host.logs().iter().all(|(_, line)| !line.contains("glpat-x")));
+        assert!(host.requests().iter().all(|r| !r.url.contains("glpat-x")));
+    }
+
+    #[test]
+    fn a_failed_retry_reloads_the_tree() {
+        let host = setup();
+        host.on_fetch(|req| match req.method == "POST" {
+            true => Ok(HttpResponse { status: 403, headers: vec![], body: br#"{"message":"403 Forbidden"}"#.to_vec() }),
+            false => pipelines(req),
+        });
+        let mut plugin = on_mr(&host);
+        pick(&mut plugin, &host, "j:301");
+
+        click(&mut plugin, &host, "retry");
+
+        let reloads = host.requests().iter().filter(|r| r.url.contains("/merge_requests/7/pipelines")).count();
+        assert_eq!(reloads, 2);
+    }
+
+    #[test]
+    fn the_view_is_quiet_when_the_setting_is_off() {
+        let host = host();
+        let mut plugin = selected(&host);
+        host.set_setting("pipelineView", "false");
+        let before = host.requests().len();
+
+        let view = plugin.render(PIPELINES, None, &host.invocation()).unwrap();
+        pick(&mut plugin, &host, "j:301");
+        plugin.handle(PIPELINES, ViewEvent::Expand("p:40".into()), &host.invocation()).unwrap();
+        for button in ["retry", "cancel", "cancel", "browser"] {
+            plugin.handle(PIPELINES, ViewEvent::Button(button.into()), &host.invocation()).unwrap();
+        }
+
+        assert!(matches!(view.body, Body::Message(_)), "{view:?}");
+        assert_eq!(host.requests().len(), before);
+        assert!(host.opened_urls().is_empty());
     }
 }

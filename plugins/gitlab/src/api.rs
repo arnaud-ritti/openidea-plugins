@@ -9,6 +9,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::safe;
+
 // ponytail: gitlab.com only; a self-hosted server needs its own `net:<host>` capability in plugin.toml.
 pub const SERVER: &str = "https://gitlab.com";
 pub const SERVER_HOST: &str = "gitlab.com";
@@ -25,7 +27,20 @@ pub struct User {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Pipeline {
+    pub id: u64,
     pub status: String,
+    pub web_url: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Job {
+    pub id: u64,
+    pub name: String,
+    pub stage: String,
+    pub status: String,
+    pub web_url: String,
+    pub allow_failure: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -160,6 +175,14 @@ impl Discussion {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
+pub struct Award {
+    pub id: u64,
+    pub name: String,
+    pub user: User,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct DraftNote {
     pub id: u64,
     pub note: String,
@@ -176,6 +199,15 @@ pub struct FileDiff {
     pub new_file: bool,
     pub deleted_file: bool,
     pub renamed_file: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Commit {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub author_name: String,
 }
 
 /// A state, label or milestone change of a merge request.
@@ -199,6 +231,24 @@ pub struct ProjectInfo {
     pub web_url: String,
     pub http_url_to_repo: String,
     pub ssh_url_to_repo: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NewMergeRequest {
+    pub source_branch: String,
+    pub target_branch: String,
+    pub title: String,
+    pub description: String,
+    pub assignee_id: Option<u64>,
+    pub reviewer_ids: Vec<u64>,
+    pub labels: Vec<String>,
+    pub squash: bool,
+    pub remove_source_branch: bool,
+}
+
+#[derive(Deserialize)]
+struct Branch {
+    name: String,
 }
 
 /// The `position` of a new diff comment on line `old`/`new` (1-based; both for a context line).
@@ -267,23 +317,51 @@ pub fn new_token_url() -> String {
     format!("{SERVER}/-/user_settings/personal_access_tokens?name=OpenIDEA%20GitLab&scopes=api,read_user")
 }
 
+fn html_title(body: &str) -> Option<&str> {
+    let start = body.find("<title>")? + "<title>".len();
+
+    Some(&body[start..start + body[start..].find("</title>")?])
+}
+
+fn without_markup(text: &str) -> String {
+    let mut plain = String::new();
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => plain.push(c),
+            _ => {}
+        }
+    }
+
+    plain.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// An HTML error page (a proxy's 502) is reduced to its title.
 fn error_message(body: &str) -> String {
-    let Ok(json) = serde_json::from_str::<Value>(body) else {
-        return body.chars().take(200).collect();
+    let message = match serde_json::from_str::<Value>(body) {
+        Ok(json) => match json.get("message").or_else(|| json.get("error")) {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => json.to_string(),
+        },
+        Err(_) => html_title(body).unwrap_or(body).to_owned(),
     };
 
-    match json.get("message").or_else(|| json.get("error")) {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => json.to_string(),
-    }
+    without_markup(&message)
+}
+
+/// The IDE fills the placeholder; the plugin never sees the token.
+pub(crate) fn authorization() -> String {
+    format!("Bearer {{{{secret:{TOKEN}}}}}")
 }
 
 fn send(method: &str, url: String, body: Option<Value>) -> Result<Value, Error> {
     let mut request = HttpRequest {
         method: method.into(),
         url,
-        headers: vec![("Authorization".into(), format!("Bearer {{{{secret:{TOKEN}}}}}"))],
+        headers: vec![("Authorization".into(), authorization())],
         body: None,
         timeout_ms: Some(20_000),
     };
@@ -300,7 +378,7 @@ fn send(method: &str, url: String, body: Option<Value>) -> Result<Value, Error> 
         200..=299 if text.trim().is_empty() => Ok(Value::Null),
         200..=299 => serde_json::from_str(&text).map_err(|e| Error::Failed(format!("Unexpected GitLab response: {e}"))),
         401 => Err("GitLab rejected the access token. Check it in Settings › Plugins › GitLab.".into()),
-        status => Err(Error::Failed(format!("GitLab returned {status}: {}", error_message(&text)))),
+        status => Err(Error::Failed(format!("GitLab returned {status}: {}", error_message(&text)).chars().take(200).collect())),
     }
 }
 
@@ -365,15 +443,45 @@ pub fn current_user() -> Result<User, Error> {
     parse(rest("GET", "/user", None)?)
 }
 
-pub fn create_snippet(title: &str, file_path: &str, content: &str) -> Result<String, Error> {
-    let body = json!({
-        "title": title,
-        "visibility": "private",
-        "files": [{ "file_path": file_path, "content": content }],
+pub const VISIBILITIES: [&str; 3] = ["private", "internal", "public"];
+
+pub struct SnippetDraft {
+    pub title: String,
+    pub description: String,
+    pub visibility: String,
+    pub file_path: String,
+    pub content: String,
+    /// `group/name` for a project snippet, `None` for a personal one.
+    pub project: Option<String>,
+}
+
+pub fn create_snippet(draft: &SnippetDraft) -> Result<String, Error> {
+    if !VISIBILITIES.contains(&draft.visibility.as_str()) {
+        return Err(format!("Unknown visibility {:?}.", draft.visibility).into());
+    }
+
+    let mut body = json!({
+        "title": draft.title,
+        "visibility": draft.visibility,
+        "files": [{ "file_path": draft.file_path, "content": draft.content }],
     });
-    let snippet = rest("POST", "/snippets", Some(body))?;
+    if !draft.description.is_empty() {
+        body["description"] = json!(draft.description);
+    }
+
+    let path = match &draft.project {
+        Some(project) => Project(project).path("/snippets"),
+        None => "/snippets".to_owned(),
+    };
+    let snippet = rest("POST", &path, Some(body))?;
 
     snippet["web_url"].as_str().map(str::to_owned).ok_or_else(|| "GitLab returned no snippet URL.".into())
+}
+
+pub fn user_id(username: &str) -> Result<u64, Error> {
+    let users: Vec<User> = parse(rest("GET", &format!("/users?username={}", encode(safe::username(username)?)), None)?)?;
+
+    users.first().map(|u| u.id).ok_or_else(|| format!("No GitLab user is named {username}.").into())
 }
 
 /// Projects the user is a member of, most recently active first.
@@ -381,9 +489,32 @@ pub fn member_projects() -> Result<Vec<ProjectInfo>, Error> {
     paged("/projects?membership=true&simple=true&order_by=last_activity_at", 100)
 }
 
-/// A private project in the user's own namespace (the original dialog's defaults).
-pub fn create_project(name: &str) -> Result<ProjectInfo, Error> {
-    parse(rest("POST", "/projects", Some(json!({ "name": name, "visibility": "private" })))?)
+#[derive(Clone, Debug, Deserialize)]
+pub struct Namespace {
+    pub id: u64,
+    pub full_path: String,
+}
+
+/// The user's namespace and the groups they can create projects in.
+pub fn namespaces() -> Result<Vec<Namespace>, Error> {
+    paged("/namespaces", 100)
+}
+
+/// `namespace_id: None` is the user's own namespace; an empty description is left out.
+pub fn create_project(name: &str, namespace_id: Option<u64>, description: &str, visibility: &str) -> Result<ProjectInfo, Error> {
+    if !VISIBILITIES.contains(&visibility) {
+        return Err(format!("Unknown visibility {visibility:?}.").into());
+    }
+
+    let mut body = json!({ "name": name, "visibility": visibility });
+    if let Some(id) = namespace_id {
+        body["namespace_id"] = json!(id);
+    }
+    if !description.is_empty() {
+        body["description"] = json!(description);
+    }
+
+    parse(rest("POST", "/projects", Some(body))?)
 }
 
 /// One GitLab project (`group/name`).
@@ -407,6 +538,31 @@ impl Project<'_> {
         parse(rest("GET", &self.mr(iid, ""), None)?)
     }
 
+    /// Names a `git` ref can carry; anything else the server lists is dropped.
+    pub fn branches(&self) -> Result<Vec<String>, Error> {
+        let branches: Vec<Branch> = paged(&self.path("/repository/branches"), 100)?;
+
+        Ok(branches.into_iter().map(|b| b.name).filter(|name| safe::ref_name(name).is_ok()).collect())
+    }
+
+    pub fn create_merge_request(&self, new: &NewMergeRequest) -> Result<MergeRequest, Error> {
+        let mut body = json!({
+            "source_branch": new.source_branch,
+            "target_branch": new.target_branch,
+            "title": new.title,
+            "description": new.description,
+            "reviewer_ids": new.reviewer_ids,
+            "labels": new.labels.join(","),
+            "squash": new.squash,
+            "remove_source_branch": new.remove_source_branch,
+        });
+        if let Some(id) = new.assignee_id {
+            body["assignee_id"] = json!(id);
+        }
+
+        parse(rest("POST", &self.path("/merge_requests"), Some(body))?)
+    }
+
     pub fn approvals(&self, iid: u64) -> Result<Approvals, Error> {
         parse(rest("GET", &self.mr(iid, "/approvals"), None)?)
     }
@@ -425,6 +581,36 @@ impl Project<'_> {
         paged(&self.mr(iid, "/diffs"), 100)
     }
 
+    /// Newest first, as GitLab lists them.
+    pub fn mr_commits(&self, iid: u64) -> Result<Vec<Commit>, Error> {
+        paged(&self.mr(iid, "/commits"), 100)
+    }
+
+    // ponytail: the newest 20 pipelines only; page further if older ones are ever needed.
+    pub fn mr_pipelines(&self, iid: u64) -> Result<Vec<Pipeline>, Error> {
+        parse(rest("GET", &self.mr(iid, "/pipelines?per_page=20"), None)?)
+    }
+
+    pub fn pipeline_jobs(&self, pipeline_id: u64) -> Result<Vec<Job>, Error> {
+        paged(&self.path(&format!("/pipelines/{pipeline_id}/jobs")), 100)
+    }
+
+    pub fn retry_job(&self, job_id: u64) -> Result<(), Error> {
+        rest("POST", &self.path(&format!("/jobs/{job_id}/retry")), None).map(drop)
+    }
+
+    pub fn retry_pipeline(&self, id: u64) -> Result<(), Error> {
+        rest("POST", &self.path(&format!("/pipelines/{id}/retry")), None).map(drop)
+    }
+
+    pub fn cancel_pipeline(&self, id: u64) -> Result<(), Error> {
+        rest("POST", &self.path(&format!("/pipelines/{id}/cancel")), None).map(drop)
+    }
+
+    pub fn commit_diff(&self, sha: &str) -> Result<Vec<FileDiff>, Error> {
+        paged(&self.path(&format!("/repository/commits/{}/diff", encode(safe::hex_sha(sha)?))), 100)
+    }
+
     pub fn draft_notes(&self, iid: u64) -> Result<Vec<DraftNote>, Error> {
         parse(rest("GET", &self.mr(iid, "/draft_notes"), None)?)
     }
@@ -437,7 +623,7 @@ impl Project<'_> {
         }
 
         if let Some(discussion) = reply_to {
-            body["in_reply_to_discussion_id"] = json!(discussion);
+            body["in_reply_to_discussion_id"] = json!(safe::discussion_id(discussion)?);
         }
 
         rest("POST", &self.mr(iid, "/draft_notes"), Some(body)).map(drop)
@@ -508,13 +694,43 @@ impl Project<'_> {
     }
 
     pub fn reply(&self, iid: u64, discussion: &str, body: &str) -> Result<(), Error> {
-        rest("POST", &self.mr(iid, &format!("/discussions/{discussion}/notes")), Some(json!({ "body": body }))).map(drop)
+        rest("POST", &self.mr(iid, &format!("/discussions/{}/notes", encode(safe::discussion_id(discussion)?))), Some(json!({ "body": body }))).map(drop)
     }
 
     pub fn resolve(&self, iid: u64, discussion: &str, resolved: bool) -> Result<(), Error> {
-        let path = self.mr(iid, &format!("/discussions/{discussion}?resolved={resolved}"));
+        let path = self.mr(iid, &format!("/discussions/{}?resolved={resolved}", encode(safe::discussion_id(discussion)?)));
 
         rest("PUT", &path, None).map(drop)
+    }
+
+    pub fn edit_note(&self, iid: u64, note_id: u64, body: &str) -> Result<(), Error> {
+        rest("PUT", &self.mr(iid, &format!("/notes/{note_id}")), Some(json!({ "body": body }))).map(drop)
+    }
+
+    pub fn delete_note(&self, iid: u64, note_id: u64) -> Result<(), Error> {
+        rest("DELETE", &self.mr(iid, &format!("/notes/{note_id}")), None).map(drop)
+    }
+
+    /// The award emoji of a note, or of the merge request itself when `note_id` is `None`.
+    fn awards_path(&self, iid: u64, note_id: Option<u64>) -> String {
+        match note_id {
+            Some(note) => self.mr(iid, &format!("/notes/{note}/award_emoji")),
+            None => self.mr(iid, "/award_emoji"),
+        }
+    }
+
+    pub fn awards(&self, iid: u64, note_id: Option<u64>) -> Result<Vec<Award>, Error> {
+        paged(&self.awards_path(iid, note_id), 100)
+    }
+
+    pub fn add_award(&self, iid: u64, note_id: Option<u64>, name: &str) -> Result<(), Error> {
+        let path = format!("{}?name={}", self.awards_path(iid, note_id), encode(safe::emoji(name)?));
+
+        rest("POST", &path, None).map(drop)
+    }
+
+    pub fn remove_award(&self, iid: u64, note_id: Option<u64>, award_id: u64) -> Result<(), Error> {
+        rest("DELETE", &format!("{}/{award_id}", self.awards_path(iid, note_id)), None).map(drop)
     }
 
     /// REST has no draft flag; the original uses this same mutation.

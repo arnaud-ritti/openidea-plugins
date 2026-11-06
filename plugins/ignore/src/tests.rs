@@ -177,6 +177,23 @@ fn user_templates_are_created_listed_used_and_deleted() {
 }
 
 #[test]
+fn deleting_a_user_template_drops_its_star() {
+    let host = MockHost::install();
+    host::storage::set("template:PHP", "/vendor/\n").unwrap();
+    host::storage::set("starred:u:PHP", "1").unwrap();
+    host::storage::set("starred:t:Rust", "1").unwrap();
+    let mut plugin = IgnorePlugin::default();
+    let ctx = host.invocation();
+    plugin.handle("templates", ViewEvent::Select("u:PHP".into()), &ctx).unwrap();
+
+    plugin.handle("templates", ViewEvent::Button("delete".into()), &ctx).unwrap();
+    plugin.handle("templates", ViewEvent::Button("confirm-delete".into()), &ctx).unwrap();
+
+    assert!(host.storage().get("starred:u:PHP").is_none());
+    assert_eq!(host.storage().get("starred:t:Rust").map(String::as_str), Some("1"));
+}
+
+#[test]
 fn cancelling_a_deletion_keeps_the_template() {
     let host = MockHost::install();
     host::storage::set("template:PHP", "/vendor/\n").unwrap();
@@ -209,13 +226,13 @@ fn toolbar_buttons_follow_the_editor_and_selection() {
     let enabled = |plugin: &mut IgnorePlugin| -> Vec<bool> {
         plugin.render("templates", None, &ctx).unwrap().toolbar.iter().map(|b| b.enabled).collect()
     };
-    assert_eq!(enabled(&mut plugin), [false, false]);
+    assert_eq!(enabled(&mut plugin), [false, false, false]);
 
     host.open_editor("/project/.gitignore", "ignore", "", &[(0, 0, 0, 0)]);
     plugin.handle("templates", ViewEvent::Select("t:Rust".into()), &ctx).unwrap();
-    assert_eq!(enabled(&mut plugin), [true, false]);
+    assert_eq!(enabled(&mut plugin), [true, false, true]);
     plugin.handle("templates", ViewEvent::Select("u:PHP".into()), &ctx).unwrap();
-    assert_eq!(enabled(&mut plugin), [true, true]);
+    assert_eq!(enabled(&mut plugin), [true, true, true]);
     assert_eq!(host.refreshed_views(), ["templates", "templates"]);
 }
 
@@ -237,7 +254,7 @@ fn expanding_a_group_redraws_the_view() {
 
 #[test]
 fn template_tree_nests_community_folders() {
-    let items = template_tree(&[], &HashSet::new());
+    let items = template_tree(&[], &HashSet::new(), &HashSet::new());
     let parent = |key: &str| items.iter().find(|i| i.key == key).and_then(|i| i.parent.clone());
     assert_eq!(parent("t:Rust").as_deref(), Some("g:"));
     assert_eq!(parent("t:Global/macOS").as_deref(), Some("g:Global"));
@@ -269,4 +286,119 @@ fn file_templates_create_files_the_plugin_recognises() {
 
     let body = std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), value("path"))).unwrap();
     assert!(!body.trim().is_empty());
+}
+
+fn tree(plugin: &mut IgnorePlugin, host: &MockHost) -> Vec<TreeItem> {
+    let View { body: Body::Tree(items), .. } = plugin.render("templates", None, &host.invocation()).unwrap() else { panic!() };
+    items
+}
+
+fn unignore_edit(content: &str) -> Vec<CodeAction> {
+    let host = MockHost::install();
+    host.add_file(".gitignore", content);
+    IgnorePlugin::default().code_actions(&doc("/project/src/a.rs", ""), Range::default())
+}
+
+#[test]
+fn unignore_action_is_absent_when_the_setting_is_off() {
+    let host = MockHost::install();
+    host.add_file(".gitignore", "/target/\n");
+    host.set_setting("unignoreActions", "false");
+    let actions = IgnorePlugin::default().code_actions(&doc("/project/src/a.rs", ""), Range::default());
+    assert_eq!(actions.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(), ["Add /src/a.rs to .gitignore"]);
+}
+
+#[test]
+fn unignore_action_is_offered_by_default() {
+    let titles: Vec<String> = unignore_edit("/target/\n").into_iter().map(|a| a.title).collect();
+    assert_eq!(titles, ["Add /src/a.rs to .gitignore", "Add !/src/a.rs to .gitignore (unignore)"]);
+}
+
+#[test]
+fn star_button_toggles_and_persists_a_template() {
+    let host = MockHost::install();
+    let mut plugin = IgnorePlugin::default();
+    let ctx = host.invocation();
+    plugin.handle("templates", ViewEvent::Select("t:Rust".into()), &ctx).unwrap();
+    plugin.handle("templates", ViewEvent::Button("star".into()), &ctx).unwrap();
+    assert_eq!(host.storage().get("starred:t:Rust").map(String::as_str), Some("1"));
+    let label = |plugin: &mut IgnorePlugin| plugin.render("templates", None, &ctx).unwrap().toolbar[2].label.clone();
+    assert_eq!(label(&mut plugin), "Unstar");
+    plugin.handle("templates", ViewEvent::Button("star".into()), &ctx).unwrap();
+    assert!(host.storage().get("starred:t:Rust").is_none());
+    assert_eq!(label(&mut plugin), "Star");
+}
+
+#[test]
+fn starred_templates_are_listed_under_starred_and_marked() {
+    let host = MockHost::install();
+    assert!(tree(&mut IgnorePlugin::default(), &host).iter().all(|i| i.key != "g:starred"));
+
+    host::storage::set("starred:t:Rust", "1").unwrap();
+    let items = tree(&mut IgnorePlugin::default(), &host);
+    assert!(items.iter().any(|i| i.key == "g:starred"));
+    let listed = items.iter().find(|i| i.parent.as_deref() == Some("g:starred")).unwrap();
+    assert_eq!(listed.icon.as_deref(), Some("star"));
+    assert_eq!(items.iter().find(|i| i.key == "t:Rust").unwrap().icon.as_deref(), Some("star"));
+    let keys: HashSet<&str> = items.iter().map(|i| i.key.as_str()).collect();
+    assert_eq!(keys.len(), items.len(), "unique keys");
+}
+
+#[test]
+fn the_star_button_is_disabled_without_a_template_selected() {
+    let host = MockHost::install();
+    let mut plugin = IgnorePlugin::default();
+    let ctx = host.invocation();
+    plugin.handle("templates", ViewEvent::Select("g:Global".into()), &ctx).unwrap();
+    assert!(!plugin.render("templates", None, &ctx).unwrap().toolbar[2].enabled);
+    assert!(plugin.handle("templates", ViewEvent::Button("star".into()), &ctx).is_err());
+    assert!(host.storage().is_empty());
+}
+
+#[test]
+fn starring_a_deleted_user_template_is_dropped_on_render() {
+    let host = MockHost::install();
+    host::storage::set("starred:u:Gone", "1").unwrap();
+    let items = tree(&mut IgnorePlugin::default(), &host);
+    assert!(items.iter().all(|i| i.key != "g:starred" && !i.key.contains("Gone")));
+}
+
+#[test]
+fn unignore_edit_uses_crlf_in_a_crlf_gitignore() {
+    let content = "/target/\r\n";
+    let actions = unignore_edit(content);
+    let edit = &actions[1].edits[0].1[0];
+    assert_eq!(edit.text, "!/src/a.rs\r\n");
+    assert!(!edit.text.replace("\r\n", "").contains('\n'));
+}
+
+#[test]
+fn template_insertion_uses_crlf_in_a_crlf_file() {
+    let host = MockHost::install();
+    host.open_editor("/project/.gitignore", "ignore", "/target/\r\n", &[(0, 0, 0, 0)]);
+    IgnorePlugin::default().handle("templates", ViewEvent::Activate("t:Rust".into()), &host.invocation()).unwrap();
+    let text = host.editor_text();
+    assert!(text.starts_with("/target/\r\n\r\n### Rust template\r\n"), "{text:?}");
+    assert!(!text.replace("\r\n", "").contains('\n'));
+}
+
+#[test]
+fn appending_to_a_file_without_final_newline_adds_one_crlf() {
+    let edit = append("a\r\nb", "c\r\n", false);
+    assert_eq!(apply("a\r\nb", &edit), "a\r\nb\r\nc\r\n");
+    assert_eq!(append("a", "c\n", false).text, "\nc\n");
+}
+
+#[test]
+fn unignore_ranges_use_utf16_columns_with_multibyte_text() {
+    let actions = unignore_edit("/\u{fc}\u{1F600}");
+    let range = actions[0].edits[0].1[0].range;
+    assert_eq!(range.start, Position { line: 0, character: 4 });
+}
+
+#[test]
+fn a_missing_gitignore_offers_no_action() {
+    let host = MockHost::install();
+    assert!(IgnorePlugin::default().code_actions(&doc("/project/src/a.rs", ""), Range::default()).is_empty());
+    drop(host);
 }

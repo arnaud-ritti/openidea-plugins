@@ -19,6 +19,7 @@ use templates::TEMPLATES;
 
 const IGNORED_STATUS: &str = "ignored";
 const USER_TEMPLATE: &str = "template:";
+const STARRED_PREFIX: &str = "starred:";
 
 fn range(text: &str, bytes: &std::ops::Range<usize>) -> Range {
     Range::new(text::position(text, bytes.start), text::position(text, bytes.end))
@@ -51,16 +52,23 @@ fn quick_fixes(doc: &Document, line: u32, dialect: Dialect) -> Vec<CodeAction> {
         .collect()
 }
 
-/// Inserts `addition` (whole lines) after the last line of `content`.
+fn line_ending(content: &str) -> &'static str {
+    if content.contains("\r\n") { "\r\n" } else { "\n" }
+}
+
+/// Inserts `addition` (whole lines) after the last line of `content`, with the
+/// line ending the file already uses.
 fn append(content: &str, addition: &str, blank_line: bool) -> TextEdit {
     let end = text::position(content, content.len());
+    let newline = line_ending(content);
     let mut prefix = String::new();
     if !content.is_empty() && !content.ends_with('\n') {
-        prefix.push('\n');
+        prefix.push_str(newline);
     }
     if !content.is_empty() && blank_line {
-        prefix.push('\n');
+        prefix.push_str(newline);
     }
+    let addition = addition.replace("\r\n", "\n").replace('\n', newline);
     TextEdit { range: Range::new(end, end), text: format!("{prefix}{addition}") }
 }
 
@@ -82,8 +90,11 @@ fn gitignore_actions(path: &str) -> Vec<CodeAction> {
     let listed: HashSet<&str> = content.lines().map(str::trim).collect();
     let entry = format!("/{}", relative.replace('[', "\\[").replace(']', "\\]"));
 
-    [(entry.clone(), ""), (format!("!{entry}"), " (unignore)")]
+    let unignore = setting("unignoreActions", true).then(|| (format!("!{entry}"), " (unignore)"));
+
+    [(entry.clone(), "")]
         .into_iter()
+        .chain(unignore)
         .filter(|(line, _)| !listed.contains(line.as_str()))
         .map(|(line, note)| CodeAction {
             title: format!("Add {line} to .gitignore{note}"),
@@ -197,15 +208,22 @@ fn template_content(key: &str) -> Result<(String, String), Error> {
     Ok((template_label(name).0.to_owned(), (*content).to_owned()))
 }
 
-fn template_tree(user: &[String], expanded: &HashSet<String>) -> Vec<TreeItem> {
+fn starred() -> HashSet<String> {
+    let keys = host::storage::keys(STARRED_PREFIX).unwrap_or_default();
+    keys.into_iter().filter_map(|k| k.strip_prefix(STARRED_PREFIX).map(str::to_owned)).collect()
+}
+
+fn template_tree(user: &[String], expanded: &HashSet<String>, starred: &HashSet<String>) -> Vec<TreeItem> {
     let group = |key: &str, label: &str| TreeItem::new(key, label).icon("folder").expandable(expanded.contains(key));
     let mut items = vec![
+        group("g:starred", "Starred"),
         group("g:user", "User templates"),
         group("g:", "Languages and frameworks"),
         group("g:Global", "Global templates (OS, editors, tools)"),
         group("g:community", "Community templates"),
     ];
     items.extend(user.iter().map(|name| TreeItem::new(&format!("u:{name}"), name).icon("star").parent("g:user")));
+    let icon = |key: &str| if starred.contains(key) { "star" } else { "file-ignored" };
     // An expandable item without children shows as loading forever.
     if user.is_empty() {
         items.push(TreeItem::new("g:user:none", "No user templates. Use Create User Template to add one.").icon("info").parent("g:user"));
@@ -219,8 +237,25 @@ fn template_tree(user: &[String], expanded: &HashSet<String>) -> Vec<TreeItem> {
             let (sub, parent) = template_label(dir);
             items.push(group(&format!("g:{dir}"), sub).parent(&format!("g:{}", parent.unwrap_or(""))));
         }
-        items.push(TreeItem::new(&format!("t:{name}"), label).icon("file-ignored").parent(&format!("g:{dir}")));
+        let key = format!("t:{name}");
+        items.push(TreeItem::new(&key, label).icon(icon(&key)).parent(&format!("g:{dir}")));
     }
+
+    let mut listed: Vec<(String, String)> = Vec::new();
+    for key in starred {
+        let label = match key.strip_prefix("u:") {
+            Some(name) => user.iter().any(|u| u == name).then_some(name),
+            None => key.strip_prefix("t:").filter(|n| TEMPLATES.iter().any(|(t, _)| t == n)).map(|n| template_label(n).0),
+        };
+        if let Some(label) = label {
+            listed.push((key.clone(), label.to_owned()));
+        }
+    }
+    listed.sort();
+    if listed.is_empty() {
+        items.retain(|i| i.key != "g:starred");
+    }
+    items.extend(listed.iter().map(|(key, label)| TreeItem::new(&format!("s:{key}"), label).icon("star").parent("g:starred")));
     items
 }
 
@@ -236,7 +271,13 @@ struct IgnorePlugin {
 
 impl IgnorePlugin {
     fn selected_user_template(&self) -> Option<&str> {
-        self.selected.as_deref().and_then(|k| k.strip_prefix("u:"))
+        self.selected_template().and_then(|k| k.strip_prefix("u:"))
+    }
+
+    fn selected_template(&self) -> Option<&str> {
+        let key = self.selected.as_deref()?;
+        let key = key.strip_prefix("s:").unwrap_or(key);
+        (key.starts_with("t:") || key.starts_with("u:")).then_some(key)
     }
 
     fn add_template(&self, key: &str, ctx: &Invocation) -> Result<(), Error> {
@@ -256,7 +297,11 @@ impl IgnorePlugin {
         let edit = match caret {
             Some(caret) => {
                 let line_start = Position::new(caret.start.line, 0);
-                TextEdit { range: Range::new(line_start, line_start), text: format!("{block}\n") }
+                let newline = line_ending(&doc.text);
+                TextEdit {
+                    range: Range::new(line_start, line_start),
+                    text: format!("{block}{newline}").replace("\r\n", "\n").replace('\n', newline),
+                }
             }
             None => append(&doc.text, &block, true),
         };
@@ -360,15 +405,21 @@ impl Views for IgnorePlugin {
 
         let user = user_templates();
         let user_selected = self.selected_user_template().is_some();
-        Ok(View::new(Body::Tree(template_tree(&user, &self.expanded)))
+        let starred = starred();
+        let selected = self.selected_template();
+        let star_label = if selected.is_some_and(|k| starred.contains(k)) { "Unstar" } else { "Star" };
+        Ok(View::new(Body::Tree(template_tree(&user, &self.expanded, &starred)))
             .button(Button::new("new", "Create User Template").icon("plus").enabled(ctx.editor().is_some()))
             .button(Button::new("delete", "Delete User Template").icon("trash").enabled(user_selected))
+            .button(Button::new("star", star_label).icon("star").enabled(selected.is_some()))
             .status("Double-click a template to add it to the open ignore file."))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
         match event {
-            ViewEvent::Activate(key) if !key.starts_with("g:") => return self.add_template(&key, ctx),
+            ViewEvent::Activate(key) if !key.starts_with("g:") => {
+                return self.add_template(key.strip_prefix("s:").unwrap_or(&key), ctx);
+            }
             ViewEvent::Select(key) => {
                 self.selected = Some(key);
                 host::refresh_view(view);
@@ -389,6 +440,15 @@ impl Views for IgnorePlugin {
                         self.naming = Some(name.unwrap_or_default());
                     }
                     "save" => self.save_user_template(ctx)?,
+                    "star" => {
+                        let key = self.selected_template().ok_or("Select a template to star.")?;
+                        let storage_key = format!("{STARRED_PREFIX}{key}");
+                        if host::storage::get(&storage_key)?.is_some() {
+                            host::storage::delete(&storage_key)?;
+                        } else {
+                            host::storage::set(&storage_key, "1")?;
+                        }
+                    }
                     "cancel" => {
                         self.naming = None;
                         self.deleting = None;
@@ -400,6 +460,7 @@ impl Views for IgnorePlugin {
                     "confirm-delete" => {
                         let Some(name) = self.deleting.take() else { return Ok(()) };
                         host::storage::delete(&format!("{USER_TEMPLATE}{name}"))?;
+                        host::storage::delete(&format!("{STARRED_PREFIX}u:{name}"))?;
                         self.selected = None;
                         host::notify(NotificationLevel::Info, "User template deleted", &format!("Deleted user template {name}."));
                     }

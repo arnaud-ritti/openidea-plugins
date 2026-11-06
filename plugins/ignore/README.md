@@ -23,8 +23,11 @@ commit `860a6855`, Apache-2.0) by Jakub Chrzanowski and JetBrains.
   doesn't detect (.chefignore, .p4ignore, .vercelignore…). The IDE's own
   `ignore` language (.gitignore, .dockerignore…) can't take a plugin's
   highlighting.
-- Settings › Plugins › .ignore: turn off the warning or the status, and insert
-  templates at the caret.
+- Star a template with _Star_ in the Ignore Templates tool window; starred
+  templates (kept in storage) are listed in a _Starred_ group.
+- Settings › Plugins › .ignore: turn off the warning, the status or the unignore
+  variant of the quick fix (`unignoreActions`), and insert templates at the caret.
+- Adding an entry to a file with CRLF line endings keeps them CRLF.
 
 The redundant-entry check compares patterns. The original matched them against
 the files on disk, which plugins can't list once they are ignored. Only entries

@@ -293,3 +293,13 @@ Blade -> `blade`: no change in `aritti.blade`; the directive snippets of this pa
 Laravel Idea -> `laravel`: done are `LaravelFunctionsInspection` as `env-outside-config`, the `latest(col)`/`oldest(col)` suggestions for date columns, the class-directive, bulk-rule, bulk-controller, rule-object and facade-import rewrites (the `Context` facade imports `Illuminate\Support\Facades\Context`), the `controllersNamespace` setting, and about 45 Blade directive snippets. Narrowed: the rule-object rewrite covers `exists`, `unique`, `in` and `not_in`; the facade import is skipped in rare code such as `$class = Auth::user()`; the `switch` snippet has no `@case`.
 
 Free Laravel plugin -> `laravel`: `ide-blade.json` namespaces are read from the project root and `.idea/` only, `\uXXXX` escapes are not decoded, and a blank namespace adds a plain view root.
+
+### Plan 5: tooling
+
+Branch `gap-f-tooling` ([plan](superpowers/plans/2026-11-06-gap-f-tooling.md)). Built with unit tests against the mock host; nothing was run in the IDE. Details and the unverified items are in the "Gap F pass on tooling" part of `PARITY.md` and the `aritti.gitlab` section of `LIMITATIONS.md`.
+
+GitLab -> gitlab: six of the seven F rows are done, each narrower than the original. Create Merge Request is a form view without pickers or milestone (at most 1000 branches). Create Snippet takes only the focused file or selection, and a public snippet needs a second click. Share Project runs an optional `git init` and an initial commit behind a confirm bound to the listed files, refuses secret-looking files and has no file-selection tree. Note edit, delete and award emoji work on your own non-system notes with a fixed list of 8 emoji. The commit list shows a commit's diff read-only, without comments or viewed marks. The pipeline view lists the newest 20 pipelines with retry, cancel and open in browser, and has no job log or manual play. The row ruled out is Open on GitLab menus, reclassed **B**: commands in the Project view menu get no selection. Not a gap row, but added in the same pass: `safe.rs` input guards, which refuse a branch or path outside `[A-Za-z0-9._/@+-]`, and `--` in the clone and share git calls.
+
+.ignore -> ignore: the one F row is done: the `unignoreActions` setting and starred templates kept in storage. Appends now keep CRLF files CRLF.
+
+Properties -> properties: the one F row is done: New > Properties File, declared in the manifest only, so it cannot be switched off. Whether the host accepts the one-newline template body is unverified.

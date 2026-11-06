@@ -22,7 +22,7 @@ categories = ["vcs"]
 engines.openidea = "^1.0"
 wasm = "dist/plugin.wasm"
 activation = [
-    "on-view:merge-requests", "on-view:merge-request", "on-view:merge-request-changes", "on-view:gitlab-projects",
+    "on-view:merge-requests", "on-view:merge-request", "on-view:merge-request-changes", "on-view:gitlab-projects", "on-view:new-merge-request", "on-view:new-snippet", "on-view:share-project-form", "on-view:merge-request-commits", "on-view:merge-request-pipeline",
     "on-event:vcs-changed", "on-event:file-opened", "on-event:file-saved",
     "on-file:**/.gitlab-ci.yml", "on-file:**/*.gitlab-ci.yml",
 ]
@@ -73,6 +73,36 @@ id = "gitlab-projects"
 title = "GitLab Projects"
 icon = "icons/gitlab.svg"
 location = "left"
+
+[[contributes.views]]
+id = "new-merge-request"
+title = "Create Merge Request"
+icon = "icons/gitlab.svg"
+location = "right"
+
+[[contributes.views]]
+id = "new-snippet"
+title = "Create Snippet"
+icon = "icons/gitlab.svg"
+location = "right"
+
+[[contributes.views]]
+id = "share-project-form"
+title = "Share Project on GitLab"
+icon = "icons/gitlab.svg"
+location = "right"
+
+[[contributes.views]]
+id = "merge-request-commits"
+title = "Merge Request Commits"
+icon = "icons/gitlab.svg"
+location = "right"
+
+[[contributes.views]]
+id = "merge-request-pipeline"
+title = "Merge Request Pipelines"
+icon = "icons/gitlab.svg"
+location = "right"
 
 [[contributes.commands]]
 id = "open-in-browser"
