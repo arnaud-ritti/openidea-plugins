@@ -7,11 +7,15 @@ use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Range, host, register_plugin};
 use spring_text::index::{COMMAND_BUDGET, Indexes, PROVIDER_BUDGET, project_of};
+use openidea_plugin::Project;
+use spring_text::constants::Constants;
 use spring_text::{config, xml};
 use spring_text::java::{self, Annotation, Arg, Call, CallArg, JavaFile, Str, Tok};
 use spring_text::{parse_source, range, source_calls};
 use spring_text::tree::Expansion;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+mod listener_xml;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,8 +123,8 @@ fn is_extra(a: &CallArg) -> bool {
 /// What a `RabbitTemplate` send names: `(routingKey, msg)` goes through the
 /// default exchange to the queue of that name, `(exchange, routingKey, msg)`
 /// to the exchange.
-fn rabbit_target(c: &Call) -> Option<(&'static str, &Str)> {
-    let literal = |i: usize| c.args.get(i).and_then(|a| a.string.as_ref());
+fn rabbit_target(c: &Call) -> Option<(&'static str, Str)> {
+    let literal = |i: usize| c.args.get(i).and_then(arg_str);
     let n = c.args.len();
     let first = literal(0).filter(|_| n >= 2)?;
     if n == 2 || (n == 3 && literal(1).is_none() && is_extra(&c.args[2])) {
@@ -132,9 +136,50 @@ fn rabbit_target(c: &Call) -> Option<(&'static str, &Str)> {
     Some(("exchange", first))
 }
 
+/// Starts the name of a destination written as a constant (`Queues.ORDERS`), until the project's constants resolve it.
+const CONSTANT: char = '\u{1}';
+
+/// `Type.NAME` of a constant expression: the last two segments, or `own.NAME` for a bare name.
+fn constant_key(expr: &str, own: Option<&str>) -> Option<String> {
+    let ident = |p: &str| p.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && p.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let parts: Vec<&str> = expr.split('.').collect();
+    if !parts.iter().all(|p| ident(p)) {
+        return None;
+    }
+    match parts.as_slice() {
+        [name] => Some(format!("{}.{name}", own?)),
+        [.., ty, name] => Some(format!("{ty}.{name}")),
+        [] => None,
+    }
+}
+
+fn constant_str(expr: &str, at: usize, own: Option<&str>) -> Option<Str> {
+    let key = constant_key(expr, own)?;
+    Some(Str { value: format!("{CONSTANT}{key}"), at, end: at + expr.len() })
+}
+
+/// The constants named in an annotation attribute (`queues = {Queues.A, Queues.B}`).
+fn constant_strs(arg: &Arg, own: Option<&str>) -> Vec<Str> {
+    let mut at = arg.at;
+    let mut out = Vec::new();
+    for piece in arg.text.split(',') {
+        let wrapped = |c: char| c.is_whitespace() || "{}[]".contains(c);
+        let lead = piece.len() - piece.trim_start_matches(wrapped).len();
+        out.extend(constant_str(piece.trim_matches(wrapped), at + lead, own));
+        at += piece.len() + 1;
+    }
+    out
+}
+
+/// The literal of a call argument, or the constant it names (`Topics.ORDERS`).
+fn arg_str(a: &CallArg) -> Option<Str> {
+    a.string.clone().or_else(|| a.text.contains('.').then(|| constant_str(a.text.trim(), a.at, None)).flatten())
+}
+
 struct Collector<'a> {
     text: &'a str,
     out: Vec<Endpoint>,
+    own: Option<String>,
 }
 
 impl Collector<'_> {
@@ -166,6 +211,11 @@ impl Collector<'_> {
         };
         for s in a.strings(attrs) {
             self.add(broker, space(broker), Role::Consumer, &via, s);
+        }
+        if let Some(arg) = attrs.iter().find_map(|n| a.arg(n)) {
+            for s in constant_strs(arg, self.own.as_deref()) {
+                self.add(broker, space(broker), Role::Consumer, &via, &s);
+            }
         }
         if broker != Broker::Rabbit || (a.arg("bindings").is_none() && a.arg("queuesToDeclare").is_none()) {
             return;
@@ -215,8 +265,7 @@ impl Collector<'_> {
     }
 
     fn call(&mut self, c: &Call, file: &JavaFile) {
-        let literal = |i: usize| c.args.get(i).and_then(|a| a.string.as_ref());
-        let Some(first) = literal(0) else { return };
+        let Some(first) = c.args.first().and_then(arg_str) else { return };
         if c.is_new {
             let (broker, space, role) = match c.name.as_str() {
                 "NewTopic" => (Broker::Kafka, "topic", Role::Declaration),
@@ -228,31 +277,31 @@ impl Collector<'_> {
                 "ActiveMQQueue" | "ActiveMQTopic" => (Broker::Jms, "destination", Role::Declaration),
                 _ => return,
             };
-            return self.add(broker, space, role, &format!("new {}", c.name), first);
+            return self.add(broker, space, role, &format!("new {}", c.name), &first);
         }
         let Some(receiver) = c.receiver.as_deref() else { return };
         let via = format!("{receiver}.{}", c.name);
         match (receiver, c.name.as_str()) {
-            ("TopicBuilder", "name") => self.add(Broker::Kafka, "topic", Role::Declaration, &via, first),
+            ("TopicBuilder", "name") => self.add(Broker::Kafka, "topic", Role::Declaration, &via, &first),
             ("QueueBuilder", "durable" | "nonDurable") => {
-                self.add(Broker::Rabbit, "queue", Role::Declaration, &via, first)
+                self.add(Broker::Rabbit, "queue", Role::Declaration, &via, &first)
             }
             ("ExchangeBuilder", "topicExchange" | "directExchange" | "fanoutExchange" | "headersExchange") => {
-                self.add(Broker::Rabbit, "exchange", Role::Declaration, &via, first)
+                self.add(Broker::Rabbit, "exchange", Role::Declaration, &via, &first)
             }
             (_, "send" | "convertAndSend" | "convertSendAndReceive" | "sendAndReceive") => {
                 match Broker::hinted_by(receiver).or_else(|| declared_type(file, receiver).and_then(Broker::hinted_by))
                 {
                     Some(Broker::Kafka) if c.name == "send" => {
-                        self.add(Broker::Kafka, "topic", Role::Producer, &c.name, first)
+                        self.add(Broker::Kafka, "topic", Role::Producer, &c.name, &first)
                     }
                     Some(Broker::Rabbit) => {
                         if let Some((space, s)) = rabbit_target(c) {
-                            self.add(Broker::Rabbit, space, Role::Producer, &c.name, s);
+                            self.add(Broker::Rabbit, space, Role::Producer, &c.name, &s);
                         }
                     }
                     Some(Broker::Jms) if c.args.len() >= 2 => {
-                        self.add(Broker::Jms, "destination", Role::Producer, &c.name, first)
+                        self.add(Broker::Jms, "destination", Role::Producer, &c.name, &first)
                     }
                     _ => {}
                 }
@@ -305,7 +354,7 @@ pub fn parse(path: &str, text: &str) -> Option<Vec<Endpoint>> {
         if !text.contains("listener") {
             return None;
         }
-        let mut collector = Collector { text, out: Vec::new() };
+        let mut collector = Collector { text, out: Vec::new(), own: None };
         xml_listeners(text, &mut collector);
         return (!collector.out.is_empty()).then_some(collector.out);
     }
@@ -314,8 +363,9 @@ pub fn parse(path: &str, text: &str) -> Option<Vec<Endpoint>> {
         return None;
     }
     let file = parse_source(path, text);
-    let mut collector = Collector { text, out: Vec::new() };
+    let mut collector = Collector { text, out: Vec::new(), own: None };
     for t in &file.types {
+        collector.own = Some(t.name.clone());
         for a in &t.annotations {
             collector.listener(a);
         }
@@ -337,6 +387,23 @@ pub fn parse(path: &str, text: &str) -> Option<Vec<Endpoint>> {
     let mut out = collector.out;
     out.sort_by_key(|e| e.at);
     (!out.is_empty()).then_some(out)
+}
+
+/// The string constants a source declares, as `Type.NAME` and value.
+fn parse_constants(path: &str, text: &str) -> Option<Vec<(String, String)>> {
+    if !text.contains("static final") && !text.contains("const val") {
+        return None;
+    }
+    let file = parse_source(path, text);
+    let mut constants = Constants::default();
+    constants.add(&file, text);
+    let found: Vec<_> = file
+        .types
+        .iter()
+        .flat_map(|t| t.fields().map(move |f| format!("{}.{}", t.name, f.name)))
+        .filter_map(|key| constants.resolve(&key, None).map(|value| (key, value)))
+        .collect();
+    (!found.is_empty()).then_some(found)
 }
 
 /// Configuration values by relaxed key: `application.*` files win over profile and bootstrap ones.
@@ -401,7 +468,13 @@ fn expand(text: &str, props: &Props, depth: u8) -> Option<String> {
 }
 
 /// The endpoint with its placeholders resolved; `None` when they can't be, or the name isn't one destination.
-fn resolved(mut e: Endpoint, props: &Props) -> Option<Endpoint> {
+fn resolved(mut e: Endpoint, props: &Props, constants: &HashMap<String, String>) -> Option<Endpoint> {
+    if let Some(key) = e.name.strip_prefix(CONSTANT) {
+        e.name = constants.get(key)?.clone();
+        if e.name.is_empty() {
+            return None;
+        }
+    }
     if e.name.contains("${") {
         e.name = expand(&e.name, props, 2)?;
         if e.name.is_empty() || e.name.contains([',', ' ', '$', '#']) {
@@ -433,6 +506,8 @@ type Destinations<'a> = BTreeMap<(&'a str, &'static str), Vec<(&'a str, &'a Endp
 pub struct Messaging {
     index: Indexes<Vec<Endpoint>>,
     config: Indexes<Vec<(String, String)>>,
+    constants: Indexes<Vec<(String, String)>>,
+    listener_beans: Indexes<listener_xml::Info>,
     expansion: Expansion,
 }
 
@@ -450,19 +525,26 @@ impl Default for Messaging {
         Self {
             index: Indexes::new(&["**/*.java", "**/*.kt", "**/*.xml"], parse),
             config: Indexes::new(&CONFIG_GLOBS, parse_config),
+            constants: Indexes::new(&["**/*.java", "**/*.kt"], parse_constants),
+            listener_beans: Indexes::new(&["**/*.java", "**/*.kt", "**/*.xml"], listener_xml::parse),
             expansion: Expansion::default() }
     }
 }
 
 impl Messaging {
+    fn constant_values(&mut self, project: &Project, budget: Duration) -> HashMap<String, String> {
+        self.constants.get(project, budget).iter().flat_map(|(_, found)| found.iter().cloned()).collect()
+    }
+
     /// Every endpoint of the document's project, by file.
     fn endpoints(&mut self, doc: &Document) -> Vec<(String, Endpoint)> {
         let Some(project) = project_of(&doc.path) else { return Vec::new() };
         let props = props_of(self.config.get(&project, PROVIDER_BUDGET).iter());
+        let constants = self.constant_values(&project, PROVIDER_BUDGET);
         let Some(index) = self.index.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
         index
             .iter()
-            .flat_map(|(p, es)| es.iter().filter_map(|e| resolved(e.clone(), &props)).map(move |e| (p.to_owned(), e)))
+            .flat_map(|(p, es)| es.iter().filter_map(|e| resolved(e.clone(), &props, &constants)).map(move |e| (p.to_owned(), e)))
             .collect()
     }
 }
@@ -480,8 +562,38 @@ fn links<'a>(doc: &Document, all: &'a [(String, Endpoint)]) -> Vec<(&'a Endpoint
         .collect()
 }
 
+impl Messaging {
+    /// Bean names for a `<rabbit:listener ref>` or `<jms:listener ref>`, the methods of that bean for `method`.
+    fn listener_completion(&mut self, doc: &Document, at: usize) -> Vec<CompletionItem> {
+        if doc.language != "xml" {
+            return Vec::new();
+        }
+        let Some(beans) = self.listener_beans.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        let Some((target, _, from, to)) = listener_xml::target_at(&doc.text, beans, at) else { return Vec::new() };
+        let replace = Some(range(&doc.text, from, to));
+        match target {
+            listener_xml::Target::Bean => listener_xml::bean_names(beans)
+                .into_iter()
+                .map(|(name, class)| CompletionItem { detail: class, replace, ..CompletionItem::new(&name, CompletionKind::Reference) })
+                .collect(),
+            listener_xml::Target::Method(Some(class)) => listener_xml::method_names(beans, &class)
+                .into_iter()
+                .map(|name| CompletionItem { replace, ..CompletionItem::new(&name, CompletionKind::Method) })
+                .collect(),
+            listener_xml::Target::Method(None) => Vec::new(),
+        }
+    }
+}
+
 impl Providers for Messaging {
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        if doc.language == "xml" {
+            let problems = match self.listener_beans.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) {
+                Some(beans) => listener_xml::problems(&doc.text, beans),
+                None => Vec::new(),
+            };
+            let _ = host::publish_diagnostics(&doc.path, &problems);
+        }
         let all = self.endpoints(doc);
         links(doc, &all)
             .into_iter()
@@ -510,18 +622,27 @@ impl Providers for Messaging {
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
         let Some(at) = offset(&doc.text, at) else { return Vec::new() };
         let all = self.endpoints(doc);
-        links(doc, &all)
+        let destinations: Vec<Location> = links(doc, &all)
             .into_iter()
             .filter(|(e, _)| e.holds(at))
             .flat_map(|(_, others)| others.into_iter().map(|(p, o)| location(p, o)))
-            .collect()
+            .collect();
+        if !destinations.is_empty() || doc.language != "xml" {
+            return destinations;
+        }
+        let Some(beans) = self.listener_beans.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
+        match listener_xml::target_at(&doc.text, beans, at) {
+            Some((listener_xml::Target::Bean, name, ..)) => listener_xml::bean_locations(beans, &name),
+            Some((listener_xml::Target::Method(Some(class)), name, ..)) => listener_xml::method_locations(beans, &class, &name),
+            _ => Vec::new(),
+        }
     }
 
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some(at) = offset(&doc.text, at) else { return Vec::new() };
         let all = self.endpoints(doc);
         let Some(here) = all.iter().find(|(p, e)| *p == doc.path && e.holds(at)).map(|(_, e)| e) else {
-            return Vec::new();
+            return self.listener_completion(doc, at);
         };
         let replace = range(&doc.text, here.at, here.end);
         let mut seen = BTreeSet::new();
@@ -547,6 +668,7 @@ impl Views for Messaging {
             return Ok(View::message("Open a project to see its messaging destinations."));
         };
         let props = props_of(self.config.get(&project, COMMAND_BUDGET).iter());
+        let constants = self.constant_values(&project, COMMAND_BUDGET);
         let index = self.index.get(&project, COMMAND_BUDGET);
         let complete = index.complete();
         if !complete {
@@ -556,7 +678,7 @@ impl Views for Messaging {
         let mut tree: BTreeMap<Broker, Destinations> = BTreeMap::new();
         let all: Vec<(&str, Endpoint)> = index
             .iter()
-            .flat_map(|(path, es)| es.iter().filter_map(|e| resolved(e.clone(), &props)).map(move |e| (path, e)))
+            .flat_map(|(path, es)| es.iter().filter_map(|e| resolved(e.clone(), &props, &constants)).map(move |e| (path, e)))
             .collect();
         for (path, e) in &all {
             tree.entry(e.broker).or_default().entry((e.name.as_str(), e.space)).or_default().push((*path, e));
@@ -614,6 +736,8 @@ impl Views for Messaging {
                 {
                     self.index.reset();
                     self.config.reset();
+                    self.constants.reset();
+                    self.listener_beans.reset();
                 }
                 host::refresh_view(view);
             }
@@ -643,6 +767,7 @@ register_plugin!(Messaging, providers, views);
 mod tests {
     use super::*;
     use openidea_plugin::mock::MockHost;
+    use openidea_plugin::Severity;
 
     const VIEW: &str = "messaging";
 
@@ -739,6 +864,7 @@ class KtEvents(private val kafkaTemplate: KafkaTemplate<String, String>, val rab
             (Kafka, "topic", "orders".into(), Role::Consumer, "@KafkaListener".into()),
             (Kafka, "topic", "audit".into(), Role::Consumer, "@KafkaListener".into()),
             (Kafka, "topic", "replies".into(), Role::Producer, "@SendTo".into()),
+            (Rabbit, "queue", format!("{CONSTANT}KtEvents.QUEUE"), Role::Consumer, "@RabbitListener".into()),
             (Jms, "destination", "invoices".into(), Role::Consumer, "@JmsListener".into()),
             (Kafka, "topic", "orders".into(), Role::Producer, "send".into()),
             (Rabbit, "queue", "mails".into(), Role::Producer, "convertAndSend".into()),
@@ -1033,5 +1159,109 @@ class KtEvents(private val kafkaTemplate: KafkaTemplate<String, String>, val rab
         let back: Vec<_> = m.line_markers(&j).iter().map(|k| (k.line, k.tooltip.clone())).collect();
         assert_eq!(back[0].1, "JMS destination audit: beans.xml:5 (<jms:listener>)");
         assert_eq!(back[1].1, "RabbitMQ queue mails: beans.xml:8 (<rabbit:listener>)");
+    }
+
+    const QUEUES: &str = "package com.acme.mail;\n\npublic final class Queues {\n    public static final String MAILS = \"mails\";\n    public static final String EVENTS = \"mail-\" + \"events\";\n}\n";
+    const CONSTANT_USER: &str = r#"package com.acme.mail;
+
+class Sender {
+    @RabbitListener(queues = {Queues.MAILS, Queues.GHOST})
+    void onMail(Mail m) {}
+
+    void publish() {
+        rabbitTemplate.convertAndSend(Queues.EVENTS, "x");
+        kafkaTemplate.send(Topics.UNKNOWN, "x");
+    }
+}
+"#;
+
+    #[test]
+    fn destinations_named_by_constants_link_to_literals() {
+        let host = MockHost::install();
+        host.add_file("src/main/java/com/acme/mail/Queues.java", QUEUES);
+        host.add_file("src/main/java/com/acme/mail/Sender.java", CONSTANT_USER);
+        host.add_file("src/main/java/com/acme/mail/Other.java", "class Other { void go() { rabbit.convertAndSend(\"mails\", \"x\"); } }");
+        let mut m = Messaging::default();
+        let d = doc("mail/Sender.java", CONSTANT_USER);
+        let all: Vec<_> = m.endpoints(&d).into_iter().map(|(p, e)| (file_name(&p).to_owned(), e.name, e.role)).collect();
+        assert!(all.contains(&("Sender.java".into(), "mails".into(), Role::Consumer)), "{all:?}");
+        assert!(all.contains(&("Sender.java".into(), "mail-events".into(), Role::Producer)));
+        assert!(!all.iter().any(|(_, n, _)| n.contains("GHOST") || n.contains("UNKNOWN") || n.contains(CONSTANT)), "unresolved constants are dropped");
+        let at = openidea_plugin::text::position(CONSTANT_USER, CONSTANT_USER.find("Queues.MAILS").unwrap() + 3);
+        let linked: Vec<_> = m.definition(&d, at).iter().map(|l| file_name(&l.path).to_owned()).collect();
+        assert_eq!(linked, ["Other.java"]);
+    }
+
+    const LISTENERS_XML: &str = r#"<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:jms="http://www.springframework.org/schema/jms"
+       xmlns:rabbit="http://www.springframework.org/schema/rabbit">
+    <bean id="mailBean" class="com.acme.mail.MailHandler"/>
+    <jms:listener-container acknowledge="sometimes" cache="auto">
+        <jms:listener ref="mailBean" method="missing"/>
+        <jms:listener destination="audit" ref="ghostBean"/>
+    </jms:listener-container>
+    <rabbit:listener-container acknowledge="manual">
+        <rabbit:listener queue-names="q" ref="mailBean" method="handle"/>
+        <rabbit:listener queue-names="q" ref="${bean}" method="x"/>
+        <rabbit:listener queue-names="q"/>
+    </rabbit:listener-container>
+    <rabbit:topic-exchange auto-delete="maybe"/>
+</beans>
+"#;
+    const HANDLER: &str = "package com.acme.mail;\n\npublic class MailHandler {\n    public void handle(String m) {}\n}\n";
+
+    fn xml_doc(text: &str) -> Document {
+        Document { path: "/project/src/main/resources/listeners.xml".into(), language: "xml".into(), version: 1, text: text.into() }
+    }
+
+    fn listener_host() -> MockHost {
+        let host = MockHost::install();
+        host.add_file("src/main/resources/listeners.xml", LISTENERS_XML);
+        host.add_file("src/main/java/com/acme/mail/MailHandler.java", HANDLER);
+        host
+    }
+
+    #[test]
+    fn xml_listener_elements_are_checked_against_the_tables() {
+        let host = listener_host();
+        let mut m = Messaging::default();
+        m.line_markers(&xml_doc(LISTENERS_XML));
+        let found: Vec<_> = host.diagnostics()["/project/src/main/resources/listeners.xml"]
+            .iter()
+            .map(|d| (d.range.start.line, d.code.clone().unwrap(), d.severity))
+            .collect();
+        assert_eq!(found, [
+            (11, "missing-attribute".to_owned(), Severity::Warning),
+            (13, "missing-attribute".into(), Severity::Warning),
+            (13, "invalid-attribute-value".into(), Severity::Warning),
+            (4, "invalid-attribute-value".into(), Severity::Warning),
+            (5, "missing-attribute".into(), Severity::Warning),
+            (6, "unresolved-reference".into(), Severity::Info),
+            (5, "unresolved-listener-method".into(), Severity::Warning),
+        ]);
+    }
+
+    #[test]
+    fn xml_listener_ref_and_method_navigate_and_complete() {
+        let _host = listener_host();
+        let mut m = Messaging::default();
+        let d = xml_doc(LISTENERS_XML);
+        let after = |needle: &str| openidea_plugin::text::position(LISTENERS_XML, LISTENERS_XML.find(needle).unwrap() + needle.len());
+        let bean = m.definition(&d, after("queue-names=\"q\" ref=\"mail"));
+        assert_eq!((bean.len(), bean[0].range.start.line), (1, 3));
+        let method = m.definition(&d, after("method=\"han"));
+        assert!(method[0].path.ends_with("MailHandler.java"));
+        let labels = |items: Vec<CompletionItem>| items.into_iter().map(|i| i.label).collect::<Vec<_>>();
+        assert_eq!(labels(m.completion(&d, after("method=\"han"), None)), ["handle"]);
+        assert!(labels(m.completion(&d, after("ref=\"mail"), None)).contains(&"mailBean".to_owned()));
+        assert!(m.completion(&d, after("<rabbit:listener-container acknowledge=\"ma"), None).is_empty());
+    }
+
+    #[test]
+    fn xml_listener_checks_are_quiet_for_valid_files() {
+        let host = listener_host();
+        let ok = "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:rabbit=\"http://www.springframework.org/schema/rabbit\">\n<bean id=\"mailBean\" class=\"com.acme.mail.MailHandler\"/>\n<rabbit:listener-container acknowledge=\"auto\"><rabbit:listener queues=\"q\" ref=\"mailBean\" method=\"handle\"/></rabbit:listener-container>\n</beans>\n";
+        Messaging::default().line_markers(&xml_doc(ok));
+        assert!(host.diagnostics().get("/project/src/main/resources/listeners.xml").is_none_or(|found| found.is_empty()));
     }
 }
