@@ -4,10 +4,12 @@ mod catalog;
 mod changelog;
 mod checks;
 mod complete;
+mod generate;
 mod indexer;
 mod json;
 
-use changelog::{Changelog, Include, Target};
+use changelog::{Changelog, Format, Include, Target};
+use openidea_plugin::PickItem;
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use spring_text::tree::Expansion;
@@ -34,7 +36,7 @@ pub struct Liquibase {
 }
 
 impl Plugin for Liquibase {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         match id {
             "update-confirmed" => {
                 if confirmed("Liquibase: update", "Update applies every pending changeset to the database. Run it?")? {
@@ -58,12 +60,18 @@ impl Plugin for Liquibase {
                 }
                 Ok(None)
             }
+            "new-changeset" => self.new_changeset(ctx),
+            "new-changelog" => self.new_changelog(ctx),
             _ => Err(Error::NotFound(format!("command {id}"))),
         }
     }
 }
 
 const TITLE: &str = "Liquibase Changelogs";
+
+fn root_relative<'a>(path: &'a str, root: &str) -> &'a str {
+    path.strip_prefix(root).map_or(path, |rest| rest.trim_start_matches('/'))
+}
 
 /// A host that cannot show the dialog (`Invalid`) leaves a command that writes to the database unconfirmed, so it does not run.
 fn confirmed(title: &str, body: &str) -> Result<bool, Error> {
@@ -436,6 +444,101 @@ impl<'a> Walk<'a> {
 }
 
 impl Liquibase {
+    fn new_changeset(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let editor = ctx.editor().ok_or("Open a changelog first.")?;
+        let doc = editor.document()?;
+        let path = editor.path();
+        let log = changelog::parse(&path, &doc.text).ok_or("The open file isn't a Liquibase changelog.")?;
+        let Some(id) = host::input("Changeset id", Some(&generate::next_id(&log)))? else { return Ok(None) };
+        let id = id.trim();
+        if id.is_empty() || id.contains(['"', '<', '>', ':', '\n']) {
+            return Err("Enter an id without quotes, colons or angle brackets.".into());
+        }
+
+        let author = self.author().unwrap_or_else(|| "author".to_owned());
+        let Some((at, text)) = generate::changeset_insertion(log.format, &doc.text, id, &author) else {
+            host::notify(NotificationLevel::Info, TITLE, "Adding a changeset is not supported for this changelog; use New › Liquibase Changelog.");
+            return Ok(None);
+        };
+
+        let point = openidea_plugin::text::position(&doc.text, at);
+        let edit = openidea_plugin::TextEdit { range: Range { start: point, end: point }, text };
+        match editor.apply_edits(doc.version, &[edit]) {
+            Ok(_) => host::notify(NotificationLevel::Info, TITLE, &format!("Changeset {id} added.")),
+            Err(Error::Denied(_)) => host::notify(NotificationLevel::Warning, TITLE, "Allow editor changes for Liquibase Changelogs in Settings › Plugins to add a changeset."),
+            Err(e) => return Err(e),
+        }
+        Ok(None)
+    }
+
+    fn new_changelog(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let project = ctx.project().ok_or("Open a project first.")?;
+        let root = project.root()?;
+        let formats = [Format::Xml, Format::Yaml, Format::Sql, Format::Json];
+        let items: Vec<PickItem> = formats.iter().map(|f| PickItem::new(generate::extension(*f), generate::extension(*f).to_uppercase().as_str())).collect();
+        let Some(chosen) = host::pick("Changelog format", &items)? else { return Ok(None) };
+        let Some(format) = formats.into_iter().find(|f| generate::extension(*f) == chosen) else { return Ok(None) };
+
+        let editor = ctx.editor();
+        let current = editor.as_ref().map(|e| e.path());
+        let directory = current
+            .as_deref()
+            .and_then(|p| p.rsplit_once('/'))
+            .map(|(dir, _)| root_relative(dir, &root).to_owned())
+            .unwrap_or_else(|| "db/changelog".to_owned());
+        let suggestion = format!("{directory}/changelog-1.{}", generate::extension(format));
+        let Some(answer) = host::input("Changelog path (relative to the project)", Some(&suggestion))? else { return Ok(None) };
+        let mut relative = answer.trim().trim_start_matches('/').to_owned();
+        if relative.is_empty() || relative.split('/').any(|part| part == "..") {
+            return Err("Enter a path inside the project.".into());
+        }
+        if !relative.ends_with(&format!(".{}", generate::extension(format))) {
+            relative = format!("{relative}.{}", generate::extension(format));
+        }
+        if project.read_file(&relative).is_ok() {
+            return Err(format!("{relative} already exists.").into());
+        }
+
+        let author = self.author().unwrap_or_else(|| "author".to_owned());
+        let source = generate::changelog_source(format, &author).ok_or("Unsupported format.")?;
+        let path = format!("{}/{relative}", root.trim_end_matches('/'));
+        let written = host::run_process("tee", &[path.clone()], Some(&source))
+            .and_then(|out| if out.status == Some(0) { Ok(()) } else { Err(Error::Invalid(out.stderr)) });
+        match written {
+            Ok(()) => {}
+            Err(Error::Denied(_)) => {
+                let _ = host::copy_to_clipboard(&source);
+                host::notify(
+                    NotificationLevel::Warning,
+                    TITLE,
+                    &format!("Create {relative} yourself (the content is copied if the clipboard is allowed). Allow running tee for Liquibase Changelogs in Settings › Plugins to create it here."),
+                );
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        }
+
+        if let (Some(editor), Some(current)) = (editor, current) {
+            self.include_in(&editor, &current, &path);
+        }
+        host::open_location(&path, 0, 0)?;
+        Ok(None)
+    }
+
+    fn include_in(&self, editor: &openidea_plugin::TextEditor, current: &str, created: &str) {
+        let Some((dir, _)) = current.rsplit_once('/') else { return };
+        let Some(file) = created.strip_prefix(&format!("{dir}/")) else { return };
+        let Ok(doc) = editor.document() else { return };
+        let Some(log) = changelog::parse(current, &doc.text) else { return };
+        let Some((at, text)) = generate::include_insertion(log.format, &doc.text, file) else { return };
+
+        let point = openidea_plugin::text::position(&doc.text, at);
+        let edit = openidea_plugin::TextEdit { range: Range { start: point, end: point }, text };
+        if editor.apply_edits(doc.version, &[edit]).is_ok() {
+            host::notify(NotificationLevel::Info, TITLE, &format!("Included {file} in the open changelog."));
+        }
+    }
+
     fn author(&mut self) -> Option<String> {
         let configured = host::setting_string("author").filter(|a| !a.trim().is_empty());
         if configured.is_some() {
@@ -1417,5 +1520,82 @@ mod tests {
             assert!(markers[0].target.as_ref().is_some_and(|t| t.path.starts_with("/project/db/a.")), "{path}");
         }
         assert!(Liquibase::default().line_markers(&doc("/project/db/a.sql", "--liquibase formatted sql\n")).is_empty());
+    }
+
+    fn editing_host(path: &str, language: &str, text: &str) -> MockHost {
+        let host = MockHost::install().with_capabilities(&["project.read", "editor.read", "editor.write", "process:tee", "clipboard"]);
+        host.set_setting("author", "\"ann\"");
+        host.open_editor(path, language, text, &[(0, 0, 0, 0)]);
+        host
+    }
+
+    #[test]
+    fn new_changeset_appends_before_the_closing_xml_tag() {
+        let xml = "<databaseChangeLog>\n    <changeSet id=\"4\" author=\"bob\"/>\n</databaseChangeLog>\n";
+        let host = editing_host("/project/db/a.xml", "xml", xml);
+        host.answer_next_prompt(Some(&["5"]));
+        Liquibase::default().run_command("new-changeset", &host.invocation(), None).unwrap();
+        assert_eq!(
+            host.editor_text(),
+            "<databaseChangeLog>\n    <changeSet id=\"4\" author=\"bob\"/>\n    <changeSet id=\"5\" author=\"ann\">\n        \n    </changeSet>\n</databaseChangeLog>\n"
+        );
+    }
+
+    #[test]
+    fn new_changeset_defaults_to_the_next_numeric_id_in_yaml_and_sql() {
+        let yaml = "databaseChangeLog:\n  - changeSet:\n      id: 2\n      author: bob\n      changes:\n        - x\n";
+        let host = editing_host("/project/db/a.yaml", "yaml", yaml);
+        host.answer_next_prompt(Some(&["3"]));
+        Liquibase::default().run_command("new-changeset", &host.invocation(), None).unwrap();
+        assert!(host.editor_text().ends_with("  - changeSet:\n      id: 3\n      author: ann\n      changes:\n        - \n"));
+
+        let host = editing_host("/project/db/a.sql", "sql", "--liquibase formatted sql\n\n--changeset bob:7\nselect 1;");
+        host.answer_next_prompt(Some(&["8"]));
+        Liquibase::default().run_command("new-changeset", &host.invocation(), None).unwrap();
+        assert!(host.editor_text().ends_with("select 1;\n\n--changeset ann:8\n"));
+    }
+
+    #[test]
+    fn new_changeset_rejects_a_bad_id_and_ignores_other_files() {
+        let host = editing_host("/project/db/a.sql", "sql", "--liquibase formatted sql\n");
+        host.answer_next_prompt(Some(&["a:b"]));
+        assert!(Liquibase::default().run_command("new-changeset", &host.invocation(), None).is_err());
+
+        let host = editing_host("/project/readme.md", "markdown", "hello");
+        assert!(Liquibase::default().run_command("new-changeset", &host.invocation(), None).is_err());
+    }
+
+    #[test]
+    fn new_changelog_writes_with_tee_includes_it_and_opens_it() {
+        let xml = "<databaseChangeLog>\n</databaseChangeLog>\n";
+        let host = editing_host("/project/db/master.xml", "xml", xml);
+        let written = Rc::new(RefCell::new(String::new()));
+        let sink = written.clone();
+        host.on_process("tee", move |_, stdin| {
+            *sink.borrow_mut() = stdin.unwrap_or_default().to_owned();
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+        });
+        host.answer_next_prompt(Some(&["yaml"]));
+        host.answer_next_prompt(Some(&["db/changes/two"]));
+        Liquibase::default().run_command("new-changelog", &host.invocation(), None).unwrap();
+        let run = host.process_runs().into_iter().find(|r| r.program == "tee").unwrap();
+        assert_eq!(run.args, ["/project/db/changes/two.yaml"]);
+        assert!(written.borrow().starts_with("databaseChangeLog:\n  - changeSet:"));
+        assert!(host.editor_text().contains("<include file=\"changes/two.yaml\" relativeToChangelogFile=\"true\"/>"));
+        assert_eq!(host.opened_locations(), [("/project/db/changes/two.yaml".to_owned(), 0, 0)]);
+    }
+
+    #[test]
+    fn new_changelog_copies_the_content_when_tee_is_denied_and_refuses_escapes() {
+        let host = editing_host("/project/db/master.xml", "xml", "<databaseChangeLog/>").with_capabilities(&["project.read", "editor.read", "clipboard"]);
+        host.answer_next_prompt(Some(&["sql"]));
+        host.answer_next_prompt(Some(&["db/x.sql"]));
+        Liquibase::default().run_command("new-changelog", &host.invocation(), None).unwrap();
+        assert!(host.clipboard().unwrap().starts_with("--liquibase formatted sql"));
+        assert!(host.opened_locations().is_empty());
+
+        host.answer_next_prompt(Some(&["sql"]));
+        host.answer_next_prompt(Some(&["../x.sql"]));
+        assert!(Liquibase::default().run_command("new-changelog", &host.invocation(), None).is_err());
     }
 }

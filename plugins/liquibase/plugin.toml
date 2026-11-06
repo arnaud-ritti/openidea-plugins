@@ -4,7 +4,7 @@ version = "0.1.0" # x-release-please-version
 description = "Liquibase changelog support for XML, YAML and formatted SQL. Flags duplicate and incomplete changesets, unknown change types, missing includes and missing formatted SQL headers while you type; completes change types and their attributes in YAML and changeset comments in SQL; Go to Definition on include; New › Liquibase Changelog templates; status, validate, update-sql and update run configurations for projects with a liquibase.properties. Independent implementation, not affiliated with Liquibase Inc. or JetBrains."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "Unreleased: gutter link on each include to its changelog file; Liquibase icon on db.changelog-* files. JSON changelogs (checks, changesets view, Go to Definition on include, project index). completion of include file paths (XML, YAML), changeSet author names (setting or git user.name) and, in XML changesets without a declared schema, change type elements and attributes. Project-wide Go to Declaration from the document index: include to the changelog file, rollback changeSetId to its changeSet, table names to createTable. Liquibase: Update (Asks First)… and Liquibase: Rollback Count… commands, with confirmation and a changeset count. 0.1.0: first release. Live checks (duplicate and incomplete changesets, unknown change types in YAML, unresolved include and includeAll, formatted SQL header), YAML and formatted SQL completion, Go to Definition on include, changelog templates and Liquibase CLI run configurations. Change type and attribute names from the Liquibase 4.29 XSD (Apache-2.0)."
+change-notes = "Unreleased: Liquibase: New Changeset adds a changeset (next numeric id, configured author) to the open XML, YAML or SQL changelog; Liquibase: New Changelog creates a changelog file in a chosen format (needs the optional tee permission, otherwise the content is copied) and adds an include for it to the open changelog when it sits in a subfolder. gutter link on each include to its changelog file; Liquibase icon on db.changelog-* files. JSON changelogs (checks, changesets view, Go to Definition on include, project index). completion of include file paths (XML, YAML), changeSet author names (setting or git user.name) and, in XML changesets without a declared schema, change type elements and attributes. Project-wide Go to Declaration from the document index: include to the changelog file, rollback changeSetId to its changeSet, table names to createTable. Liquibase: Update (Asks First)… and Liquibase: Rollback Count… commands, with confirmation and a changeset count. 0.1.0: first release. Live checks (duplicate and incomplete changesets, unknown change types in YAML, unresolved include and includeAll, formatted SQL header), YAML and formatted SQL completion, Go to Definition on include, changelog templates and Liquibase CLI run configurations. Change type and attribute names from the Liquibase 4.29 XSD (Apache-2.0)."
 categories = ["tools", "linters"]
 icon = "icon.svg"
 engines.openidea = "^1.2"
@@ -14,11 +14,21 @@ activation = ["on-language:xml", "on-language:yaml", "on-language:json", "on-lan
 [capabilities]
 required = ["project.read"]
 # process: Update and Rollback Count commands (a terminal); git: the author name offered in changesets.
-optional = ["process:liquibase", "process:git"]
+optional = ["process:liquibase", "process:git", "process:tee", "editor.write"]
 
 [[contributes.commands]]
 id = "update-confirmed"
 title = "Liquibase: Update (Asks First)…"
+category = "Liquibase"
+
+[[contributes.commands]]
+id = "new-changeset"
+title = "Liquibase: New Changeset"
+category = "Liquibase"
+
+[[contributes.commands]]
+id = "new-changelog"
+title = "Liquibase: New Changelog…"
 category = "Liquibase"
 
 [[contributes.commands]]

@@ -104,6 +104,19 @@ includes that resolve). `includeAll` directories have no single target.
 New › Liquibase Changelog (XML), (YAML) and (Formatted SQL). Files named
 `db.changelog-*` and `liquibase.properties` get the Liquibase icon.
 
+## Generators
+
+- **Liquibase: New Changeset** adds a changeset with the next numeric id and the
+  configured author (or `git config user.name`) at the end of the open XML,
+  YAML or formatted SQL changelog. It needs the optional editor-write
+  permission. JSON changelogs are not edited.
+- **Liquibase: New Changelog…** asks for a format and a project-relative path,
+  writes the file with the optional `tee` permission (without it the content is
+  copied) and opens it. If the open changelog is XML or YAML and the new file is
+  in the same folder or below, an include is added to it.
+- Changelogs generated from a database or from JPA entities are not possible:
+  plugins have no database access.
+
 ## Run configurations
 
 Four configurations appear for a project with a `liquibase.properties` at its
