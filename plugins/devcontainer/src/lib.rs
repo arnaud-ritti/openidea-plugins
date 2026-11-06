@@ -1,7 +1,18 @@
 //! Dev Container CLI: drives the project's development container with the
 //! `devcontainer` CLI (https://containers.dev).
 
-use openidea_plugin::{Error, Invocation, NotificationLevel, Plugin, Project, host, register_plugin};
+mod checks;
+
+use std::path::Path;
+
+use openidea_plugin::text::position;
+use openidea_plugin::{
+    Context, Diagnostic, Error, Event, EventKind, Invocation, LogLevel, NotificationLevel, Plugin, Project, Range, host, register_plugin,
+};
+
+use checks::{FEATURES_MALFORMED, UNKNOWN_PROPERTY};
+
+const MAX_BYTES: usize = 256 * 1024;
 
 /// Where the CLI looks for a configuration, in order. The host's `find_files`
 /// skips hidden directories, so these are probed with `read_file`; configs in
@@ -14,6 +25,25 @@ const LOGIN_SHELL: &str = "command -v bash >/dev/null && exec bash -l; exec sh -
 pub struct Main;
 
 impl Plugin for Main {
+    fn activate(&mut self, _ctx: &Context) -> Result<(), Error> {
+        for kind in [EventKind::FileOpened, EventKind::FileSaved] {
+            if let Err(error) = host::subscribe(kind) {
+                host::log(LogLevel::Warn, &format!("Dev Container inspections need the {} event: {error}", kind.name()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_events(&mut self, events: &[Event], _ctx: &Invocation) {
+        for event in events {
+            let (Event::FileOpened(path) | Event::FileSaved(path)) = event else { continue };
+            if is_devcontainer_file(path) {
+                inspect(path);
+            }
+        }
+    }
+
     fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
         let project = ctx.project().ok_or("No project is open.")?;
         let root = project.root()?;
@@ -41,6 +71,54 @@ impl Plugin for Main {
 
         Ok(None)
     }
+}
+
+fn is_devcontainer_file(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+
+    path.ends_with("/.devcontainer.json") || (path.ends_with("/devcontainer.json") && path.contains("/.devcontainer/"))
+}
+
+fn inspect(path: &str) {
+    let Some(project) = host::projects()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| Some((p.root().ok()?, p)))
+        .filter(|(root, _)| Path::new(path).starts_with(root))
+        .max_by_key(|(root, _)| root.len())
+        .map(|(_, project)| project)
+    else {
+        return;
+    };
+
+    let Ok(text) = project.read_file(path) else { return };
+    let findings = match text.len() > MAX_BYTES {
+        true => vec![],
+        false => enabled_findings(&text),
+    };
+    let diagnostics: Vec<Diagnostic> = findings
+        .iter()
+        .map(|f| Diagnostic {
+            code: Some(f.code.into()),
+            ..Diagnostic::new(Range::new(position(&text, f.start), position(&text, f.end)), f.severity, &f.message)
+        })
+        .collect();
+
+    let _ = host::publish_diagnostics(path, &diagnostics);
+}
+
+fn enabled_findings(text: &str) -> Vec<checks::Finding> {
+    let properties = host::setting_bool("checkProperties").unwrap_or(true);
+    let features = host::setting_bool("checkFeatures").unwrap_or(true);
+
+    checks::check(text)
+        .into_iter()
+        .filter(|f| match f.code {
+            UNKNOWN_PROPERTY => properties,
+            FEATURES_MALFORMED => features,
+            _ => true,
+        })
+        .collect()
 }
 
 fn config_file(project: &Project) -> Result<String, Error> {
@@ -250,6 +328,149 @@ mod tests {
 
     fn strip_line_comments(text: &str) -> String {
         text.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
+    }
+
+    fn open(host: &MockHost, path: &str, text: &str) {
+        host.add_file(path, text);
+        Main.handle_events(&[Event::FileOpened(format!("/work/app/{path}"))], &host.invocation());
+    }
+
+    fn published(host: &MockHost, path: &str) -> Vec<Diagnostic> {
+        host.diagnostics().get(&format!("/work/app/{path}")).cloned().unwrap_or_default()
+    }
+
+    fn codes(diagnostics: &[Diagnostic]) -> Vec<&str> {
+        diagnostics.iter().map(|d| d.code.as_deref().unwrap()).collect()
+    }
+
+    const FILE: &str = ".devcontainer/devcontainer.json";
+
+    #[test]
+    fn unknown_top_level_property_warns() {
+        let host = host();
+        open(&host, FILE, "{\n  \"image\": \"x\",\n  \"postCreateCommnad\": \"ls\"\n}\n");
+
+        let found = published(&host, FILE);
+
+        assert_eq!(codes(&found), ["unknown-property"]);
+        assert_eq!(found[0].range, Range::new(openidea_plugin::Position::new(2, 2), openidea_plugin::Position::new(2, 21)));
+        assert!(found[0].message.contains("postCreateCommand"));
+    }
+
+    #[test]
+    fn unknown_property_is_quiet_for_vendor_and_unrelated_names() {
+        let host = host();
+        open(&host, FILE, "{\"$schema\": \"s\", \"x-vendor\": 1, \"completelyDifferent\": 2, \"image\": \"i\", \"customizations\": {\"vscode\": {\"extensons\": []}}}");
+
+        assert!(published(&host, FILE).is_empty());
+    }
+
+    #[test]
+    fn features_must_be_an_object() {
+        let host = host();
+        open(&host, FILE, "{\"features\": [\"a\"]}");
+
+        assert_eq!(codes(&published(&host, FILE)), ["features-malformed"]);
+    }
+
+    #[test]
+    fn feature_id_with_whitespace_warns() {
+        let host = host();
+        open(&host, FILE, "{\"features\": {\"ghcr.io/x/y node:1\": {}, \"\": {}, \"ok:1\": \"latest\", \"b\": true, \"c\": 3}}");
+
+        assert_eq!(codes(&published(&host, FILE)), ["features-malformed"; 3]);
+    }
+
+    #[test]
+    fn jsonc_comments_and_trailing_commas_are_read() {
+        let host = host();
+        open(
+            &host,
+            FILE,
+            "{\n // \"fake\": 1,\n /* \"imagee\": */ \"features\": { \"a b\": {}, /* c */ },\n \"imge\": \"x\", // end\n}",
+        );
+
+        let found = published(&host, FILE);
+
+        assert_eq!(codes(&found), ["features-malformed", "unknown-property"]);
+        assert_eq!(found[1].range.start.line, 3);
+    }
+
+    #[test]
+    fn ranges_use_utf16_columns_with_multibyte_text() {
+        let host = host();
+        open(&host, FILE, "{\"name\": \"é😀\", \"imge\": 1}");
+
+        let found = published(&host, FILE);
+
+        assert_eq!(found[0].range.start.character, 16);
+        assert_eq!(found[0].range.end.character, 22);
+    }
+
+    #[test]
+    fn crlf_files_report_correct_lines() {
+        let host = host();
+        open(&host, FILE, "{\r\n  \"image\": \"x\",\r\n  \"imge\": 1\r\n}\r\n");
+
+        let found = published(&host, FILE);
+
+        assert_eq!(found[0].range.start.line, 2);
+        assert_eq!(found[0].range.start.character, 2);
+    }
+
+    #[test]
+    fn fixed_file_publishes_empty_list() {
+        let host = host();
+        open(&host, ".devcontainer.json", "{\"imge\": 1}");
+        assert_eq!(host.diagnostics().len(), 1);
+
+        open(&host, ".devcontainer.json", "{\"image\": \"x\"}");
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn oversized_file_publishes_empty_list() {
+        let host = host();
+        open(&host, FILE, &format!("{{\"imge\": \"{}\"}}", "x".repeat(MAX_BYTES)));
+
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn non_devcontainer_json_is_ignored() {
+        let host = host();
+        open(&host, "package.json", "{\"imge\": 1}");
+        open(&host, "other/devcontainer.json", "{\"imge\": 1}");
+
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn nested_folder_config_is_checked() {
+        let host = host();
+        open(&host, ".devcontainer/python/devcontainer.json", "{\"imge\": 1}");
+
+        assert_eq!(host.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn each_group_can_be_switched_off() {
+        let host = host();
+        host.set_setting("checkProperties", "false");
+        open(&host, FILE, "{\"imge\": 1, \"features\": 3}");
+        assert_eq!(codes(&published(&host, FILE)), ["features-malformed"]);
+
+        host.set_setting("checkFeatures", "false");
+        open(&host, FILE, "{\"imge\": 1, \"features\": 3}");
+        assert!(host.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn denied_events_log_a_warning_and_still_activate() {
+        let host = MockHost::install().with_capabilities(&["project.read"]);
+
+        assert!(Main.activate(&host.context("aritti.devcontainer")).is_ok());
+        assert!(host.logs().iter().any(|(level, _)| *level == LogLevel::Warn));
     }
 
     #[test]

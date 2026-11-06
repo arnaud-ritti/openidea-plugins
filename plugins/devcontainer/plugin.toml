@@ -11,7 +11,8 @@ wasm = "dist/plugin.wasm"
 
 [capabilities]
 required = ["project.read", "process:devcontainer"]
-optional = ["process:docker"]
+# events: the inspections run when a devcontainer.json is opened or saved.
+optional = ["process:docker", "events"]
 
 [[contributes.commands]]
 id = "up"
