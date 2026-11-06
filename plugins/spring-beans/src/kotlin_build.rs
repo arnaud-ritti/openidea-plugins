@@ -14,8 +14,13 @@ const PLUGIN_MARKERS: [&str; 4] = ["kotlin-spring", "kotlin.spring", "plugin.spr
 const KTS_JVM_MARKERS: [&str; 2] = ["kotlin(\"jvm\")", "\"org.jetbrains.kotlin.jvm\""];
 const GROOVY_JVM_MARKER: &str = "org.jetbrains.kotlin.jvm";
 
+/// The final classes Spring must proxy or subclass.
+pub fn candidates(file: &JavaFile) -> Vec<&TypeDecl> {
+    file.types.iter().filter(|t| t.kind == "class" && needs_plugin(file, t)).collect()
+}
+
 pub fn missing_spring_plugin(path: &str, file: &JavaFile) -> Vec<Finding> {
-    let candidates: Vec<&TypeDecl> = file.types.iter().filter(|t| t.kind == "class" && needs_plugin(file, t)).collect();
+    let candidates = candidates(file);
     if candidates.is_empty() {
         return Vec::new();
     }

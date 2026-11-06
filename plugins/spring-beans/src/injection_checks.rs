@@ -50,11 +50,12 @@ fn static_members(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
             continue;
         }
         let what = if member.kind == MemberKind::Field { "field" } else { "method" };
+        let outcome = if annotation.name == "Resource" { "Spring fails when it creates the bean" } else { "this is ignored" };
         out.push(Finding::new(
             start,
             end,
             "static-injection",
-            format!("@{} is not supported on a static {what}: Spring injects instance members of a bean only, so this is ignored.", annotation.name),
+            format!("@{} is not supported on a static {what}: Spring injects instance members of a bean only, so {outcome}.", annotation.name),
         ));
     }
 }

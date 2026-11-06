@@ -1,16 +1,17 @@
 //! Checks on Spring XML configuration files. Quiet on anything that is not a
 //! beans file, on other namespaces and on `${...}` placeholders.
 
-use crate::World;
 use crate::aop;
-use crate::checks::{Groups, capitalised, profiles_overlap, same_scope, weaving_plugin_in_build};
-use crate::model::is_xml_ref;
+use crate::checks::{Groups, capitalised, names_of, profiles_overlap, same_scope, weaving_plugin_in_build};
+use crate::model::{is_xml_ref, name_tokens};
+use crate::{Found, World};
 use openidea_plugin::TextEdit;
 use openidea_plugin::text::offset;
 use openidea_plugin::{Position, Severity};
 use spring_text::finding::Finding;
 use spring_text::range;
 use spring_text::xml;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const BEANS_NS: &str = "http://www.springframework.org/schema/beans";
 const AOP_NS: &str = "http://www.springframework.org/schema/aop";
@@ -23,6 +24,8 @@ pub fn check_xml(path: &str, text: &str, world: &World, groups: Groups) -> Vec<F
         return Vec::new();
     }
     let mut out = Vec::new();
+    let by_name = if groups.duplicate_names || groups.xml { beans_by_name(world) } else { ByName::new() };
+    let children = children_of(&els);
     if groups.aop {
         aop_structure(&els, &mut out);
         pointcut_designators(path, &els, &mut out);
@@ -31,16 +34,41 @@ pub fn check_xml(path: &str, text: &str, world: &World, groups: Groups) -> Vec<F
         name_conventions(&els, &mut out);
     }
     if groups.duplicate_names {
-        duplicate_names(path, &els, world, &mut out);
+        duplicate_names(path, &els, &by_name, &mut out);
     }
     if groups.xml {
-        abstract_references(&els, world, &mut out);
+        abstract_references(&els, &by_name, &mut out);
         bean_attributes(&els, &mut out);
-        injection_values(&els, &mut out);
+        injection_values(&els, &children, &mut out);
         bean_scopes(&els, &mut out);
-        value_style(text, &els, &mut out);
+        value_style(text, &els, &children, &mut out);
     }
     out
+}
+
+/// The project's beans under every name they answer to, as `World::named` finds them.
+type ByName<'a> = BTreeMap<&'a str, Vec<Found<'a>>>;
+
+fn beans_by_name<'a>(world: &World<'a>) -> ByName<'a> {
+    let mut map = ByName::new();
+    for (path, bean) in world.beans() {
+        let keys: BTreeSet<&str> = names_of(bean).chain(bean.qualifiers.iter().map(String::as_str)).collect();
+        for key in keys {
+            map.entry(key).or_default().push((path, bean));
+        }
+    }
+    map
+}
+
+/// The child indices of each element, in document order.
+fn children_of(els: &[xml::Element]) -> Vec<Vec<usize>> {
+    let mut children = vec![Vec::new(); els.len()];
+    for (i, e) in els.iter().enumerate() {
+        if let Some(p) = e.parent {
+            children[p].push(i);
+        }
+    }
+    children
 }
 
 pub(crate) fn is_beans_file(els: &[xml::Element]) -> bool {
@@ -132,14 +160,9 @@ fn bean_names(e: &xml::Element) -> Vec<(&str, usize, usize)> {
         if dynamic(&attr.value) {
             continue;
         }
-        let mut from = 0;
-        for token in attr.value.split_inclusive([',', ';', ' ']) {
-            let name = token.trim_end_matches([',', ';', ' ']);
-            let start = attr.value_at + from;
-            from += token.len();
-            if !name.is_empty() && !name.contains('#') {
-                found.push((name, start, start + name.len()));
-            }
+        for (at, name) in name_tokens(&attr.value).filter(|(_, n)| !n.contains('#')) {
+            let start = attr.value_at + at;
+            found.push((name, start, start + name.len()));
         }
     }
     found
@@ -162,7 +185,7 @@ fn profiles_of(els: &[xml::Element], i: usize) -> Vec<String> {
     let mut up = els[i].parent;
     while let Some(p) = up {
         if let Some(profile) = els[p].value("profile") {
-            profiles.extend(profile.split([',', ' ']).filter(|s| !s.is_empty()).map(str::to_owned));
+            profiles.extend(name_tokens(profile).map(|(_, p)| p.to_owned()));
         }
         up = els[p].parent;
     }
@@ -170,25 +193,26 @@ fn profiles_of(els: &[xml::Element], i: usize) -> Vec<String> {
 }
 
 /// Same-file clashes inside one `<beans>` element, and clashes with beans declared in code.
-fn duplicate_names(path: &str, els: &[xml::Element], world: &World, out: &mut Vec<Finding>) {
+fn duplicate_names(path: &str, els: &[xml::Element], by_name: &ByName, out: &mut Vec<Finding>) {
     let mut seen: Vec<(Option<usize>, &str)> = Vec::new();
     for (i, e) in beans_elements(els, "bean").filter(|(_, e)| e.parent.is_some_and(|p| els[p].local() == "beans")) {
         let profiles = profiles_of(els, i);
-        for (name, from, to) in bean_names(e) {
+        let mut own = BTreeSet::new();
+        for (name, from, to) in bean_names(e).into_iter().filter(|(n, _, _)| own.insert(*n)) {
             if seen.contains(&(e.parent, name)) {
                 let message = format!("Another bean in this file is already named \"{name}\": a second definition in one beans element is rejected.");
                 out.push(Finding::new(from, to, "duplicate-bean-name", message));
                 continue;
             }
             seen.push((e.parent, name));
-            let clash = world.named(name).into_iter().find(|(other_path, other)| {
+            let clash = by_name.get(name).into_iter().flatten().find(|(other_path, other)| {
                 !other.kind.starts_with('<')
                     && !other.conditional
-                    && crate::checks::names_of(other).any(|n| n == name)
+                    && names_of(other).any(|n| n == name)
                     && profiles_overlap(&profiles, &other.profiles)
                     && same_scope(path, other_path)
             });
-            if let Some((other_path, _)) = clash {
+            if let Some(&(other_path, _)) = clash {
                 let message = format!(
                     "Another bean named \"{name}\" is defined in {}: two beans with one name make the context fail or silently replace one.",
                     crate::file_name(other_path)
@@ -199,16 +223,13 @@ fn duplicate_names(path: &str, els: &[xml::Element], world: &World, out: &mut Ve
     }
 }
 
-fn abstract_references(els: &[xml::Element], world: &World, out: &mut Vec<Finding>) {
+fn abstract_references(els: &[xml::Element], by_name: &ByName, out: &mut Vec<Finding>) {
     for (i, e) in els.iter().enumerate() {
         for a in e.attrs.iter().filter(|a| a.local() != "parent" && !dynamic(&a.value) && is_xml_ref(els, i, a)) {
-            let mut from = a.value_at;
-            for token in a.value.split_inclusive([',', ';', ' ']) {
-                let name = token.trim_end_matches([',', ';', ' ']);
-                let start = from;
-                from += token.len();
-                let defined = world.named(name);
-                if name.is_empty() || defined.is_empty() || !defined.iter().all(|(_, b)| b.is_abstract) {
+            for (at, name) in name_tokens(&a.value) {
+                let start = a.value_at + at;
+                let Some(defined) = by_name.get(name) else { continue };
+                if !defined.iter().all(|(_, b)| b.is_abstract) {
                     continue;
                 }
                 let message = format!("\"{name}\" is an abstract bean and cannot be injected or depended on; reference it as a parent instead.");
@@ -225,7 +246,8 @@ fn bean_attributes(els: &[xml::Element], out: &mut Vec<Finding>) {
         }
         let factory_bean = e.attr("factory-bean");
         if let (Some(_), Some(factory)) = (e.attr("class"), factory_bean) {
-            out.push(error(factory.at, factory.at + factory.name.len(), "xml-bean-attributes", "A bean takes either a class or a factory-bean, not both."));
+            let message = "A bean with a factory-bean should leave class out: Spring ignores it and takes the type from the factory method.";
+            out.push(Finding::new(factory.at, factory.at + factory.name.len(), "xml-bean-attributes", message).with_severity(Severity::Warning));
         } else if let (Some(factory), None) = (factory_bean, e.attr("factory-method")) {
             out.push(error(factory.at, factory.at + factory.name.len(), "xml-bean-attributes", "A factory-bean needs a factory-method naming the method to call."));
         }
@@ -236,14 +258,14 @@ fn bean_attributes(els: &[xml::Element], out: &mut Vec<Finding>) {
     }
 }
 
-fn injection_values(els: &[xml::Element], out: &mut Vec<Finding>) {
+fn injection_values(els: &[xml::Element], children: &[Vec<usize>], out: &mut Vec<Finding>) {
     for name in ["property", "constructor-arg"] {
         for (i, e) in beans_elements(els, name) {
             let (reference, value) = (e.attr("ref"), e.attr("value"));
             if [reference, value].iter().flatten().any(|a| dynamic(&a.value)) {
                 continue;
             }
-            let has_child = els.iter().any(|c| c.parent == Some(i) && !matches!(c.local(), "description" | "meta"));
+            let has_child = children[i].iter().any(|&c| !matches!(els[c].local(), "description" | "meta"));
             let problem = match (reference.is_some(), value.is_some(), has_child) {
                 (true, true, _) => "Give either a ref or a value, not both.",
                 (true, false, true) | (false, true, true) => "A ref or value attribute cannot be combined with a nested element.",
@@ -284,8 +306,8 @@ fn one_edit_apart(a: &str, b: &str) -> bool {
     short.get(short_rest..).unwrap_or_default() == long.get(prefix + 1..).unwrap_or_default()
 }
 
-fn value_style(text: &str, els: &[xml::Element], out: &mut Vec<Finding>) {
-    for (parent, child) in style_candidates(text, els) {
+fn value_style(text: &str, els: &[xml::Element], children: &[Vec<usize>], out: &mut Vec<Finding>) {
+    for (parent, child) in style_candidates(text, els, children) {
         let c = &els[child];
         let hint = format!("This nested {} can be written as an attribute of the {}.", c.local(), els[parent].local());
         out.push(Finding::new(c.at, c.at + c.name.len(), "xml-value-style", hint).with_severity(Severity::Hint));
@@ -293,15 +315,14 @@ fn value_style(text: &str, els: &[xml::Element], out: &mut Vec<Finding>) {
 }
 
 /// `(parent, child)` pairs where the only child holds a plain literal or bean name.
-fn style_candidates(text: &str, els: &[xml::Element]) -> Vec<(usize, usize)> {
+fn style_candidates(text: &str, els: &[xml::Element], children: &[Vec<usize>]) -> Vec<(usize, usize)> {
     let mut found = Vec::new();
     for name in ["property", "constructor-arg"] {
         for (i, parent) in beans_elements(els, name) {
             if parent.attr("value").is_some() || parent.attr("ref").is_some() || text[..parent.tag_end].ends_with("/>") {
                 continue;
             }
-            let mut children = els.iter().enumerate().filter(|(_, c)| c.parent == Some(i));
-            let (Some((child, _)), None) = (children.next(), children.next()) else { continue };
+            let &[child] = children[i].as_slice() else { continue };
             if style_attribute(text, els, child, parent).is_some() {
                 found.push((i, child));
             }
@@ -335,12 +356,18 @@ fn style_attribute(text: &str, els: &[xml::Element], child: usize, parent: &xml:
 }
 
 /// The edit turning the single `<value>` or `<ref>` child of `property` into an attribute.
+#[cfg(test)]
 pub fn attribute_style_edit(text: &str, property: &xml::Element, els: &[xml::Element]) -> Option<TextEdit> {
+    let parent = els.iter().position(|e| e.start == property.start)?;
+    let (_, child) = style_candidates(text, els, &children_of(els)).into_iter().find(|(p, _)| *p == parent)?;
+    style_edit(text, els, parent, child)
+}
+
+fn style_edit(text: &str, els: &[xml::Element], parent: usize, child: usize) -> Option<TextEdit> {
+    let property = &els[parent];
     if text.as_bytes().get(property.tag_end.checked_sub(1)?) != Some(&b'>') {
         return None;
     }
-    let parent = els.iter().position(|e| e.start == property.start)?;
-    let (_, child) = style_candidates(text, els).into_iter().find(|(p, _)| *p == parent)?;
     let replacement = style_attribute(text, els, child, property)?;
     Some(TextEdit { range: range(text, property.tag_end - 1, property.end), text: replacement })
 }
@@ -352,9 +379,10 @@ pub fn style_fix(text: &str, cursor: Position) -> Option<(&'static str, TextEdit
     if !is_beans_file(&els) {
         return None;
     }
-    let (parent, child) = style_candidates(text, &els)
+    let children = children_of(&els);
+    let (parent, child) = style_candidates(text, &els, &children)
         .into_iter()
         .find(|(_, c)| els[*c].at <= at && at <= els[*c].at + els[*c].name.len())?;
     let title = if els[child].local() == "value" { "Use the value attribute" } else { "Use the ref attribute" };
-    Some((title, attribute_style_edit(text, &els[parent], &els)?))
+    Some((title, style_edit(text, &els, parent, child)?))
 }

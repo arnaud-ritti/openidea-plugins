@@ -2,8 +2,10 @@
 //! schema declaration. Edits are listed last position first, so they apply the
 //! same one after another or all against the original text.
 
+use crate::model::name_tokens;
 use crate::xml_checks::{BEANS_NS, dynamic, in_namespace, is_beans_file};
 use openidea_plugin::TextEdit;
+use std::collections::BTreeSet;
 use spring_text::{decapitalize, range, xml};
 
 const P_NS: &str = "http://www.springframework.org/schema/p";
@@ -102,12 +104,13 @@ pub fn use_p_namespace(text: &str, caret: usize) -> Option<Vec<TextEdit>> {
 fn taken_names(els: &[xml::Element]) -> Vec<String> {
     let mut taken = Vec::new();
     for attr in xml::bean_ids(els) {
-        taken.extend(attr.value.split([',', ';', ' ']).filter(|n| !n.is_empty()).map(str::to_owned));
+        taken.extend(name_tokens(&attr.value).map(|(_, n)| n.to_owned()));
     }
     taken
 }
 
-pub fn introduce_bean(text: &str, caret: usize) -> Option<Vec<TextEdit>> {
+/// `project_names` gives the bean names taken elsewhere in the project; it is only called once the caret sits on an inner bean.
+pub fn introduce_bean(text: &str, caret: usize, project_names: impl FnOnce() -> BTreeSet<String>) -> Option<Vec<TextEdit>> {
     let els = xml::elements(text);
     if !is_beans_file(&els) {
         return None;
@@ -134,7 +137,8 @@ pub fn introduce_bean(text: &str, caret: usize) -> Option<Vec<TextEdit>> {
         return None;
     }
     let simple = decapitalize(class.rsplit(['.', '$']).next()?);
-    let taken = taken_names(&els);
+    let mut taken = project_names();
+    taken.extend(taken_names(&els));
     let id = std::iter::once(simple.clone())
         .chain((2..).map(|n| format!("{simple}{n}")))
         .find(|candidate| !taken.contains(candidate))?;

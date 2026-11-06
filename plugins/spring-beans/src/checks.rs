@@ -4,6 +4,7 @@
 
 use crate::{annotation_checks, aop, injection_checks};
 use crate::model::{Bean, class_bean, method_bean, short_name};
+use crate::xml_checks::dynamic;
 use crate::{World, file_name};
 use openidea_plugin::{Severity, host};
 use spring_text::finding::Finding;
@@ -250,7 +251,11 @@ pub(crate) fn names_of(bean: &Bean) -> impl Iterator<Item = &str> {
     std::iter::once(bean.name.as_str()).chain(bean.aliases.iter().map(String::as_str))
 }
 
+/// Whether two beans can be active together; a `${...}` or `#{...}` profile is unknown, so never.
 pub(crate) fn profiles_overlap(a: &[String], b: &[String]) -> bool {
+    if a.iter().chain(b).any(|p| dynamic(p)) {
+        return false;
+    }
     if a.is_empty() || b.is_empty() {
         return true;
     }
@@ -268,6 +273,7 @@ fn is_test_source(path: &str) -> bool {
 pub(crate) fn build_module(path: &str) -> Option<String> {
     let project = spring_text::index::project_of(path)?;
     let root = project.root().ok()?;
+    let root = root.trim_end_matches('/');
     if path.split('/').any(|part| part == ".." || part == ".") {
         return None;
     }
@@ -284,14 +290,31 @@ pub(crate) fn build_module(path: &str) -> Option<String> {
     None
 }
 
-/// Whether the module's build file names an AspectJ weaving plugin, which makes every designator valid.
+/// Whether AspectJ weaves the module, which makes every designator valid: its `META-INF/aop.xml`
+/// (load-time weaving), or a weaving plugin named by its build file or one above it in the project.
 pub fn weaving_plugin_in_build(path: &str) -> bool {
     let Some(module) = build_module(path) else { return false };
     let Some(project) = spring_text::index::project_of(path) else { return false };
-    BUILD_FILES
-        .iter()
-        .filter_map(|f| project.read_file(&format!("{module}/{f}")).ok())
-        .any(|build| ASPECTJ_WEAVING.iter().any(|marker| build.contains(marker)))
+    let Ok(root) = project.root() else { return false };
+    let root = root.trim_end_matches('/');
+    if project.read_file(&format!("{module}/src/main/resources/META-INF/aop.xml")).is_ok() {
+        return true;
+    }
+    let mut dir = module.as_str();
+    loop {
+        let weaves = BUILD_FILES
+            .iter()
+            .filter_map(|f| project.read_file(&format!("{dir}/{f}")).ok())
+            .any(|build| ASPECTJ_WEAVING.iter().any(|marker| build.contains(marker)));
+        if weaves {
+            return true;
+        }
+        let Some((parent, _)) = dir.rsplit_once('/') else { return false };
+        if dir == root || !parent.starts_with(root) {
+            return false;
+        }
+        dir = parent;
+    }
 }
 
 /// The AspectJ annotation `name` unless the file imports another one of that name.

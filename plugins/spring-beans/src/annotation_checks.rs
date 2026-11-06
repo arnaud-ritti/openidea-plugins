@@ -2,6 +2,7 @@
 //! types. Quiet for foreign annotations and non-literal arguments.
 
 use crate::checks::spring;
+use crate::model::is_repository;
 use openidea_plugin::Severity;
 use spring_text::finding::Finding;
 use spring_text::java::{Annotation, JavaFile, TypeDecl};
@@ -162,6 +163,9 @@ fn cache_annotations<'a>(file: &JavaFile, annotations: &'a [Annotation]) -> Vec<
 
 pub fn check_cache(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     if ty.kind == "interface" {
+        if is_repository(&ty.kind, ty.supers().map(|s| s.name.as_str())) {
+            return;
+        }
         let on_type = cache_annotations(file, &ty.annotations);
         let on_methods = ty.methods().flat_map(|m| cache_annotations(file, &m.annotations));
         for annotation in on_type.into_iter().chain(on_methods) {
@@ -169,13 +173,14 @@ pub fn check_cache(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
                 annotation.at,
                 annotation.end,
                 "cache-annotation-on-interface",
-                "Spring recommends putting cache annotations on concrete classes: on an interface they only take effect with interface-based proxies, not with class-based ones.",
-            ));
+                "Cache annotations on an interface only take effect with interface-based (JDK) proxies; class-based proxies and AspectJ mode miss them. Annotate the concrete class instead.",
+            ).with_severity(Severity::Hint));
         }
         return;
     }
 
-    let names_supplied_by_class = spring(file, &ty.annotations, "CacheConfig").is_some();
+    // A supertype may carry the @CacheConfig: Spring looks it up through the hierarchy.
+    let names_supplied_by_class = spring(file, &ty.annotations, "CacheConfig").is_some() || ty.supers().next().is_some();
     for method in ty.methods() {
         if spring(file, &method.annotations, "Caching").is_some() {
             continue;

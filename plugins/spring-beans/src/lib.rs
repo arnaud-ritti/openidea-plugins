@@ -348,7 +348,8 @@ impl Navigator {
     fn diagnose(&mut self, path: &str, language: &str, text: &str) {
         if language == "xml" {
             let mut problems = Vec::new();
-            if let Some(index) = self.indexes.for_document(path, text, PROVIDER_BUDGET) {
+            let beans_file = xml_checks::is_beans_file(&spring_text::xml::elements(text));
+            if let Some(index) = beans_file.then(|| self.indexes.for_document(path, text, PROVIDER_BUDGET)).flatten() {
                 let findings = xml_checks::check_xml(path, text, &World::new(index), checks::Groups::from_settings());
                 problems.extend(findings.iter().map(|f| f.diagnostic(text)));
             }
@@ -549,7 +550,8 @@ impl Providers for Navigator {
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         if doc.language == "xml" {
-            return xml_code_actions(doc, selection);
+            let project_names = || self.with_doc(doc, |world, _| world.beans().flat_map(|(_, b)| checks::names_of(b)).map(str::to_owned).collect());
+            return xml_code_actions(doc, selection, project_names);
         }
         if doc.language == "kotlin" {
             return kotlin_code_actions(doc, selection);
@@ -573,7 +575,12 @@ fn kotlin_code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
     if !checks::Groups::from_settings().kotlin_plugin {
         return Vec::new();
     }
-    let findings = kotlin_build::missing_spring_plugin(&doc.path, &spring_text::kotlin::parse(&doc.text));
+    let file = spring_text::kotlin::parse(&doc.text);
+    let on_candidate = kotlin_build::candidates(&file).iter().any(|ty| (ty.at..=ty.at + ty.name.len()).contains(&caret));
+    if !on_candidate {
+        return Vec::new();
+    }
+    let findings = kotlin_build::missing_spring_plugin(&doc.path, &file);
     if !findings.iter().any(|f| (f.start..=f.end).contains(&caret)) {
         return Vec::new();
     }
@@ -587,7 +594,7 @@ fn kotlin_code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
     }]
 }
 
-fn xml_code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
+fn xml_code_actions(doc: &Document, selection: Range, project_names: impl FnOnce() -> BTreeSet<String>) -> Vec<CodeAction> {
     let Some(caret) = offset(&doc.text, selection.start) else { return Vec::new() };
     let text = &doc.text;
     let mut actions = Vec::new();
@@ -606,7 +613,7 @@ fn xml_code_actions(doc: &Document, selection: Range) -> Vec<CodeAction> {
     if let Some(edits) = xml_actions::use_p_namespace(text, caret) {
         offer("Use p-namespace", "refactor", false, edits);
     }
-    if let Some(edits) = xml_actions::introduce_bean(text, caret) {
+    if let Some(edits) = xml_actions::introduce_bean(text, caret, project_names) {
         offer("Introduce bean", "refactor", false, edits);
     }
     if let Some(edits) = xml_actions::update_schema(text) {
