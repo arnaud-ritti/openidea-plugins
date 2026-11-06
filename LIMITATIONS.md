@@ -83,7 +83,7 @@ The provider kinds are `completion`, `inline-completion`, `code-actions`, `defin
 
 - **Blocks:**
   - bundle templates (`@Twig/…`, `@EasyAdmin/…`, any `@Namespace/` from `vendor/`);
-  - Twig `paths:` namespaces outside `templates/`;
+  - Twig `paths:` namespaces that point into `vendor/` (directories of the project listed in `config/packages/twig.yaml` resolve);
   - vendor translations (`validators`, `security`);
   - vendor service and route XML;
   - Twig functions and filters of vendor extensions;
@@ -197,13 +197,19 @@ The provider kinds are `completion`, `inline-completion`, `code-actions`, `defin
   - Editor providers receive a `document`, not an `Invocation`. To read a parent template (blocks, overriding markers) or resolve a quick fix, the plugin calls `host::projects()` and matches roots on every call, inside the 50 ms budget.
 - **Would need:** `subscribe(kind, glob)` or `on-event:file-saved:<glob>`, and the document's project passed to editor providers.
 
+### Added on 2026-11-06 with the current API
+
+- **Twig `paths:` namespaces:** `@ns/…` templates resolve and complete from `config/packages/twig.yaml` (map form, quoted or unquoted keys, `%kernel.project_dir%`, an empty namespace is the main one). Limits: only that one file is read (not `when@` overrides or other `packages/` files); names starting with `@` are still never reported as missing.
+- **Symfony Profiler view:** `symfony-profiler` lists the latest 100 requests from `var/cache/dev/profiler/index.csv` (sub-requests hidden, times in UTC). Limits: rows can't be opened (no panels); the command `show-profiler` refreshes the view but a command can't open it; the view reads the file when rendered.
+- **Twig completion and checks:** tags (with their `end` forms), filters, functions and tests are completed from static lists taken from Twig's documentation, and an unclosed block tag is reported (`unclosed-tag`; verbatim and comment bodies, inline `{% block t 'x' %}` and the tags `block if for macro embed apply autoescape with verbatim cache sandbox` are handled). These come from `aritti.symfony` for the `twig` language, not from `aritti.twig` (adding providers to the language plugin needs the hand-written registration described in "Twig needed its own language plugin"). Limits: the lists are static, so filters, functions and tests of the project's own Twig extensions and of bundles are not offered; completion and the check only run in projects `aritti.symfony` recognises as Symfony (`symfony/framework-bundle` in `composer.json`); a stray `{% endx %}` with no opener is not reported; the function list is offered at every expression position; the `{% set x %}…{% endset %}` capture form is not checked. Template-path completion (`extends`, `include`, `embed`, `import`, `from`, `use`) was already there.
+- **Duplicate XML service ids:** a second `<service id>` with the same id in one `config` XML file is a warning (`duplicate-service`). Ids defined in different files are not reported, because Symfony lets later files such as `services_dev.xml` override an id.
+- **Unquoted YAML values:** a plain scalar starting with `@` or `%` in YAML under `/config/` and `/translations/` (block values, `- ` items and flow collections) is reported (`unquoted-yaml-scalar`) with a quick fix that wraps it in single quotes.
+
 ### Not ported, but possible with the current API
 
 These aren't API limits; they were left out for size:
-- the Symfony profiler (it reads `var/cache/dev/profiler/index.csv`);
-- Twig `paths:` namespaces from `config/packages/twig.yaml`;
-- Twig function and filter completion from a static list;
-- the rest of the text-only inspections (duplicate XML service keys, YAML quoting).
+- Twig macro completion and navigation (`{% import 'x.twig' as m %}`, then `m.name(`), and navigation to filters and functions that the project's own extension classes declare;
+- Twig `paths:` read from other config files, including `when@` overrides.
 
 ## Laravel (`aritti.laravel`) and Blade (`aritti.blade`)
 
@@ -310,10 +316,10 @@ Port of `de.espend.idea.laravel` 0.15.4 (the free Laravel plugin, MIT) plus feat
 
 ### Implementation limits (could be done with the current API)
 
-- Kotlin: SpEL, pointcut and bean-name string sites are only handled in Java files; `@Bean fun x() = …` without a declared return type has no type.
+- Kotlin: SpEL, pointcut and bean-name string sites are only handled in Java files. `@Bean fun x() = …` without a declared return type is typed only for a bare `Foo(…)` constructor call (`someCall()`, `foo.bar()`, `Foo().with()` and `com.acme.Foo()` stay untyped); `val x = Foo()` has no type.
 - No "ambiguous candidates" or "no bean of this type" warnings: without library and auto-configuration beans they would be mostly false positives.
-- "Use constructor injection" is offered only for classes without a constructor; it doesn't merge into an existing one.
-- XML: only `<beans>` files; custom namespaces (`<int:channel id>`) are seen as named beans without a type; `p:`/`c:` namespace references are not followed.
+- "Use constructor injection" adds a parameter and `this.name = name;` to a single existing Java constructor, or creates one when there is none. It refuses several constructors, `@Autowired`/`@Inject` setters, `this(...)` delegation, a field that is already assigned, a parameter name clash and files whose braces don't balance (braces in strings and comments count, so such a file just loses the fix). There is no Kotlin quick fix.
+- XML: only `<beans>` files; custom namespaces (`<int:channel id>`) are seen as named beans without a type. `p:name-ref` and `c:name-ref` attributes are followed when the prefix is bound to the Spring `p` or `c` namespace on the element or an ancestor; `p:name="literal"` and other namespaces' `x:thing-ref` are ignored.
 
 ## Spring plugins (aritti.spring-*: ports of com.intellij.spring.*)
 
@@ -329,7 +335,7 @@ section above, with its plugin-specific details.
 | Limitation | Effect on the Spring plugins | API that would remove it |
 |---|---|---|
 | No access to the Java/Kotlin semantic model. The IDE runs JDT LS, but plugins can't query it: no type resolution, type hierarchy, symbol search, classpath or annotation meta-model | Everything is text-based. Types match by simple name as written, supertypes are known only for project sources, and meta-annotations (custom `@Service`-like stereotypes, composed `@GetMapping`) are invisible. Beans from libraries and auto-configuration can't be seen. "Could not autowire", "no bean of type X" and ambiguity checks are left out because they would mostly be false positives; other checks stay silent unless every type involved is a project class | `lsp.request(language, method, params)` to the IDE's language servers, or a `java` interface: `resolve-type(path, offset) -> fqn`, `supertypes(fqn)`, `annotations(fqn)`, `find-types(query)` |
-| Dependency jars and the classpath can't be read. `read_file` takes UTF-8 project files only, and jars are binary and outside the root | `META-INF/spring-configuration-metadata.json` of dependencies is unreachable, so `spring-boot` bundles Spring Boot 3.5.x metadata, which is version-pinned. Keys of other starters (Spring Cloud, third-party) get no completion or validation. Library XSDs, `spring.factories` and `AutoConfiguration.imports` can't be read either | `project.classpath() -> list<string>` plus `read-archive-entry(archive, entry) -> result<list<u8>>` (or `read-file-bytes`), gated by `project.read` |
+| Dependency jars and the classpath can't be read. `read_file` takes UTF-8 project files only, and jars are binary and outside the root | `META-INF/spring-configuration-metadata.json` of dependencies is unreachable, so `spring-boot` bundles Spring Boot 3.5.16 and Spring Cloud 2025.0.3 metadata, which is version-pinned. Keys of other starters (third-party, Cloud modules outside the train list) get no completion or validation. Library XSDs, `spring.factories` and `AutoConfiguration.imports` can't be read either | `project.classpath() -> list<string>` plus `read-archive-entry(archive, entry) -> result<list<u8>>` (or `read-file-bytes`), gated by `project.read` |
 | No language injection | No SpEL, JPQL/HQL/SQL, AOP pointcut, cron or security-expression *language* inside Java strings and XML attributes: no highlighting, parsing, brace matching or formatting. Only completion, go-to-definition and diagnostics computed by hand inside the literal are possible | An `injections` contribution or provider: `(host language, range) -> injected language id`, so the injected range gets the injected language's grammar and providers |
 | No hover / documentation provider | Property descriptions, defaults and deprecation notes, bean details, resolved queries and runtime values can't be shown on hover. Only line-marker tooltips (one line per marker) and completion documentation are available | A `hover` provider kind: `hover(doc, at) -> option<markdown>` |
 | No inlay hints or editor decorations | Spring Debugger-style inline values (effective property value next to `@Value`, resolved bean next to an injection point) and query previews can't be drawn in the text. Line-marker tooltips are used instead | An `inlay-hints` provider kind: `inlay-hints(doc, range) -> list<(position, label, tooltip)>` |
@@ -343,9 +349,9 @@ section above, with its plugin-specific details.
 | The built-in Endpoints tool window and HTTP client aren't extensible | GraphQL operations, STOMP destinations, Feign clients and messaging destinations can't be listed in Endpoints, and there is no "generate request" for GraphQL. Plugin tool windows are used instead | An `endpoints` provider contribution (kind, URL/destination, location) feeding the Endpoints view and the HTTP client |
 | No diagram API | Bean dependency, Web Flow, Integration, Batch job and Modulith graphs are drawn as inline SVG in an `Html` tool-window body (`spring_text::diagram`): a fixed layered layout, no zoom/pan beyond scrolling, no export, no editing, node click → `open_location` | A graph view body (`Body::Graph { nodes, edges }`) rendered by the IDE with layout, zoom and export |
 | No debugger API | Spring Debugger cannot be ported: no bean context or watches during a debug session, no evaluating bean methods or properties at a breakpoint, no transaction or DB-connection state | Debug-session events (`debug-paused`, frames), `debug.evaluate(expression)` and a variables/watches contribution |
-| `net:` hosts are fixed in the manifest, and plain HTTP is allowed to `localhost` only | `spring-runtime` reads Spring Boot Actuator only from `localhost` (`net:localhost`, optional `net:127.0.0.1`). An app in a container on another host, on a remote dev machine or behind HTTPS with a custom host can't be read | A capability for user-entered hosts (`net:user`, approved per host on first use) |
+| `net:` hosts are fixed in the manifest, and plain HTTP is allowed to `localhost` only | `spring-runtime` reads Spring Boot Actuator only from `localhost` (`net:localhost`, optional `net:127.0.0.1`), with a bearer or Basic token when the `actuatorAuth` setting asks for one. An app in a container on another host, on a remote dev machine or behind HTTPS with a custom host can't be read | A capability for user-entered hosts (`net:user`, approved per host on first use) |
 | No database API | Spring Boot's datasource → database connection, JDBC driver checks and the schema behind Spring Data entities aren't available | `database.add-connection(url, user, driver)` / `database.schema(connection)` |
-| No new-project or open-project API | `spring-initializr` can only open start.spring.io (`/starter.zip` downloads in the browser); the project must be unzipped and opened by hand | A new-project-wizard contribution, or `workspace.open-project(path)` plus file creation |
+| No new-project or open-project API | `spring-initializr` can only open start.spring.io (`/starter.zip` downloads in the browser) or run the Spring Boot CLI in a terminal; the project must be unzipped (browser) or found in the directory the CLI wrote, and opened by hand | A new-project-wizard contribution, or `workspace.open-project(path)` plus file creation |
 | Run configurations: `runDetectors` have a fixed command and arguments | Profile-, environment- or main-class-specific Spring Boot runs can't be offered by a plugin. The IDE's built-in Spring Boot run configurations are used | Run configurations computed by code (`run-configurations(project) -> list<…>`) or arguments taken from settings |
 | No change events for files that aren't open in an editor (only `file-opened`, `file-saved`, `editor-focused`, `vcs-changed`, `action-performed`) and no persistent index | Each plugin rescans its globs at most every 120 s (`spring_text::index`) and applies the open document on top. A checkout, a generated file or a change made outside the IDE shows up late. Cross-file warnings are held back until the first full pass is done | A `files-changed` event with paths (created, changed, deleted), and per-project index storage |
 | `find_files` skips hidden directories and `.gitignore`d paths such as `target/` and `build/`; the mock host doesn't, so tests pass anyway (see memory: find-files-skips-hidden) | Build-output metadata such as `target/classes/META-INF/spring-configuration-metadata.json` (generated by the configuration processor) isn't found by globbing. Known paths have to be probed with `read_file` | An `include-ignored` option on `find_files` |
@@ -359,37 +365,33 @@ section above, with its plugin-specific details.
 
 | Feature of the original | Workaround | Limitation |
 |---|---|---|
-| Spring Debugger and the Spring Boot run dashboard's live data | `spring-runtime` fetches `/actuator/beans`, `/env`, `/conditions`, `/health`, `/mappings`, `/configprops` and `/scheduledtasks` over `net:localhost` (command or view Refresh only, never inside an editor provider). Results show in a tool window and as line-marker tooltips | The app needs `spring-boot-starter-actuator`, the endpoints exposed and, in Boot 3, `management.endpoint.env.show-values=ALWAYS` for unmasked values (development only). The data is a snapshot, not live debugger state |
-| Spring Boot property completion and validation | Bundled Spring Boot 3.5.x metadata (Apache-2.0) plus the project's own metadata files and `@ConfigurationProperties` classes | Pinned to one Boot version. No starter metadata from jars. "Unknown key" is only reported inside groups known to that metadata |
+| Spring Debugger and the Spring Boot run dashboard's live data | `spring-runtime` fetches `/actuator/beans`, `/env`, `/conditions`, `/health`, `/mappings`, `/configprops`, `/scheduledtasks`, `/loggers` (ROOT and loggers with a configured level) and `/caches` over `net:localhost` (command or view Refresh only, never inside an editor provider). Results show in a tool window (groups include Loggers and Caches) and as line-marker tooltips. Endpoints behind a bearer or Basic token work through the `actuator-token` secret and the `actuatorAuth` setting (`none`, `bearer`, `basic`); the plugin never reads the token. A 401/403 adds "check actuatorAuth and the actuator-token secret" to the status line, and a denied `secrets` capability says so | The app needs `spring-boot-starter-actuator`, the endpoints exposed and, in Boot 3, `management.endpoint.env.show-values=ALWAYS` for unmasked values (development only). The data is a snapshot, not live debugger state. OAuth flows and client certificates are not supported. Loggers and caches are kept in memory only: the stored trimmed snapshot keeps beans and environment, so they come back after a restart only when the whole snapshot fits in 900 KiB. Cache items open nothing. Secret substitution was only exercised against the mock host |
+| Spring Boot property completion and validation | Bundled Spring Boot 3.5.16 and Spring Cloud 2025.0.3 metadata (Apache-2.0; about 3,800 keys, 1,290 of them Cloud) plus the project's own metadata files and `@ConfigurationProperties` classes | Pinned to one Boot and one Cloud train. No starter metadata from jars, and starters that ship none (Kafka, AMQP, Session, OAuth2) rely on Boot's own auto-configuration metadata. "Unknown key" is only reported inside groups known to that metadata, which now includes a typo such as `spring.cloud.gateway.<typo>`. Map properties complete with a trailing dot (`eureka.client.service-url.`) |
 | SpEL, security expressions, JPQL, AOP pointcuts and cron | Completion, go-to-definition and diagnostics computed in the string literal by the plugin | No highlighting or real parsing. Concatenated strings and constants are skipped |
-| Bean, flow, integration, batch and module diagrams | Inline SVG in an `Html` tool-window body | See "No diagram API" above |
-| Spring Initializr new-project wizard | A `Form` tool window that builds a start.spring.io URL and opens it in the browser | No project creation or import in the IDE |
+| Bean, flow, integration, batch and module diagrams | Inline SVG in an `Html` tool-window body. Web Flow's existed first; `spring-integration` (Integration Channels: channels and endpoints, input channel to endpoint to output channel; endpoints of one kind are told apart as `(in -> out)`), `spring-batch` (Batch Jobs: jobs, steps, flows, splits and decisions with `next`, `on=`/`to=` and restart transitions) and `spring-modulith` (Module Diagram: modules, dependencies, violations as warning edges, and the command Copy Module Diagram (PlantUML) to the clipboard, optional) gained theirs on 2026-11-06. Clicking a node opens its location | See "No diagram API" above. Integration: Java DSL chains (`IntegrationFlow.from("a").channel("b")`) show channels without endpoint nodes; Kotlin DSL is not read. Batch: transitions are drawn from XML only, Java `.next()` chains are not, and edges resolve only to states in the same file and scope. Modulith: no C4 or module canvas, no Documenter file export, no event publication registry, no import cycle detection. While the index is incomplete the views refresh themselves; that branch was not exercised by a test (the mock's budget always finishes the scan) |
+| Spring Initializr new-project wizard | A `Form` tool window that builds a start.spring.io URL and opens it in the browser (default and fallback). A second button, Generate with Spring Boot CLI, runs `spring init … --extract ./<artifactId>` in an IDE terminal through the optional `process:spring`; every value is passed as its own argument and validated (no leading `-`, coordinates and versions limited to letters, digits, `_`, `.`, `-`, a dot-only artifact refused); without the capability a warning names `process:spring` and the browser fallback | No project creation or import in the IDE. The plugin can't see the CLI's result or open the generated project. The `spring` CLI must be on `PATH`, and the extract directory is relative to the terminal's directory. Whether the UI joins the arguments into a shell line was not verified |
 | Bean navigation everywhere (injection points, XML `ref`, `@Qualifier`, SpEL `@bean`) | A per-project text index of Java/Kotlin stereotypes, `@Bean` methods and XML `<bean>`s | Library and auto-configured beans, `@Import`/`@ComponentScan` filters, profiles and conditions aren't evaluated |
-| Kotlin | `spring_text::kotlin` scans Kotlin into the same declaration model as Java | Text-based only: no type inference, so `val x = Foo()` has no declared type, and DSL lambdas (`beans { }`, `coRouter { }`, `http { }`) are only partly understood |
+| Kotlin | `spring_text::kotlin` scans Kotlin into the same declaration model as Java. `spring-beans`, `spring-data`, `spring-web`, `spring-security`, `spring-graphql`, `spring-cloud`, `spring-shell`, `spring-ws`, `spring-messaging` and `spring-websocket` index `*.kt`; Kotlin strings with a `$name` or `${…}` template are not treated as plain literals (a `\$` or a `$` before a digit, a space or the end stays plain) | Text-based only: no type inference, so `val x = Foo()` has no declared type, and DSL lambdas (`beans { }`, `http { }`) are only partly understood (`coRouter { }` is read by `spring-web`). Nested annotations in `spring-messaging` (`queuesToDeclare`, `bindings`) are Java-only, `spring-ws` still reads `namespace = "$x"` as a literal, and constants (`@RabbitListener(queues = [QUEUE])`) are unresolved. Indexing time with `**/*.kt` added was not measured on a large mixed project |
+| JPQL entity and alias-property checks in `@Query` (`spring-data`) | Entity names after `from`/`join`/`update` and alias properties (`u.address.city`, joins and nested paths resolved) are completed. Checks run only once the project index is complete: an entity name warns only as a likely typo (at least 5 characters and 1 edit, or at least 8 and 2) of a project entity or class, and `alias.property` warns only when the whole type chain is project classes. Kotlin repositories, entities and `@Query` (raw strings too) are supported | Library entities, native queries (`nativeQuery = true`, `@NativeQuery`), SpEL, concatenated or multi-literal values, qualified names and function `from` (`extract`, `trim`) stay quiet. Subquery scoping is partial (an alias declared twice with different types is dropped) and `select new` aliases are not covered. An entity from a library or `orm.xml` can still give a false typo warning when the domain class is a project class. Not done: query language injection and highlighting, query preview, Mongo JSON checks |
+| WebFlux functional routes and test URL links (`spring-web`) | Functional routes (`route().GET("/x", h)`, `RequestPredicates`, `.andRoute`, `.path`/`.nest` with a plain path prefix; Kotlin `router {}` / `coRouter {}` including `"/a".nest`, infix `nest` and `path("/a").nest`) are indexed as endpoints with the annotated mappings. Handler references (`this::list`, `Handler::list`, Kotlin `::list`) get a gutter arrow and Go to Definition. In files under `/src/test/`, MockMvc calls (`get("/u")`, `mockMvc.get`), `webTestClient.get().uri("/u")` (also `WebClient`, `RestClient`) and RestTemplate calls link to the mappings that serve them by verb and URI template (`{id}`, `{id:regex}`, `*`, `**`, `{*rest}`); Go to Definition lists every match and the marker targets the first and says "(+N more)"; HEAD falls back to GET | Routes under a `nest` whose predicate isn't a plain `path(...)` are skipped. `h::create` on a variable isn't resolved. Only literal paths count (a mapping with a constant path isn't an endpoint); absolute URLs are skipped and regex constraints ignored; RestTemplate calls need a receiver whose name contains `template` or `rest`; links appear only when a full index pass has completed. URL completion in tests is still not ported, and annotated mappings get no gutter marker of their own |
+| XML namespace and Kotlin DSL checks (`spring-security`) | The security XML namespace is checked on `.xml` files (prefix-agnostic): unbalanced quotes or parentheses and `hasRole`/`hasAnyRole`/`hasAuthority`/`hasAnyAuthority`/`hasIpAddress` without an argument are errors; an unknown `has*`/`is*` function, a redundant `ROLE_`, a duplicate `(pattern, method, servlet-path)` within one `<http>`, a `/**` catch-all placed before another pattern, `use-expressions="false"` and `global-method-security` are warnings. Kotlin sources get the Java checks, plus the trailing-lambda `authorizeRequests {` with a rename fix; comments, strings, raw strings and char literals are blanked first | The unknown-function warning can be a false positive with a custom `SecurityExpressionRoot` or handler that adds its own `has*`/`is*` methods. The catch-all check is skipped when the catch-all has a method or servlet path, when `request-matcher` isn't `ant` or `mvc`, or when `request-matcher-ref` is set; `access` isn't checked when `use-expressions="false"`. The Kotlin `authorizeRequests` scan is textual and gated on an `org.springframework.security` import. Completion is Java-only and there are no quick fixes for the XML checks. No SpEL highlighting or navigation, no OAuth2 or SAML assistance |
+| JavaScript and TypeScript STOMP clients (`spring-websocket`) | `.js`, `.jsx`, `.ts`, `.tsx` and `.vue` files are scanned for `subscribe`, `publish` and `send` with a plain literal destination starting with `/` (`node_modules`, `dist` and `build` paths are skipped). A client subscription links to `@SendTo`, `@SendToUser`, `convertAndSend` and `@SubscribeMapping`; a client send links to `@MessageMapping` (with the app prefix from the config). The Java marker's tooltip adds "also used at file:line" and its target is the first related use | The receiver must be named like `stomp` (the name contains `stomp`) or be assigned from `new Client(`, `new StompJs.Client(`, `Stomp.over(` or `Stomp.client(` in the same file (typed declarations `const client: Client = new Client(` and generics work); a client created in another file than the call is not recognised. Destinations built at run time (`${}`, concatenation) are skipped. One navigation target per marker, the tooltip lists the rest, and completion inside client literals offers only same-kind destinations. Large JS projects may hit the file cap or the 50 ms budget |
+| `${…}` placeholders and XML listeners (`spring-messaging`) | `${k}`, `${k:default}` and nested placeholders (depth 2) in `@KafkaListener`, `@RabbitListener`, `@JmsListener` and `@SendTo` (Rabbit `@SendTo` excepted) resolve from `application*`/`bootstrap*` `.properties`/`.yml`/`.yaml` with relaxed keys. `<jms:listener destination>` and `<rabbit:listener queue-names>` (namespace checked, comma lists split) become consumers and link by destination | `application.*` beats profile files and there is no active-profile knowledge; an unresolvable or comma-list result is dropped. Only `queue-names` is read for Rabbit (`queues` holds bean refs), and `ref`/`method` are not linked to beans. Still not ported: SpEL, constants, `BindingBuilder`, Spring Cloud Stream. XML markers need the host to send `xml` documents to the plugin's providers, which was not verified |
+| GraphQL client documents and Kotlin controllers (`spring-graphql`) | Go to Definition on a field in `.graphql`/`.gql` files under `graphql-documents/` and in `.document("…")` literals (Java and Kotlin, text blocks too) resolves the root field through the schema's root types (including `schema { query: X }`), nested fields by declared type, and adds the controller method for root fields; aliases, fragments (`fragment X on T`), mutations and subscriptions are handled. Kotlin controllers are indexed | No diagnostics and no completion inside client documents; an unknown field is quiet. Only documents under `graphql-documents/` count (other `.graphql` client files are not treated as documents); inline documents with backslash escapes are skipped; the `.document(` receiver is not checked |
 
 ### Not API limits: left out or not finished yet
 
 These could be done with the current API; they are listed so they aren't mistaken for API gaps.
 
-- Kotlin support is in `crates/spring-text`, but not every plugin indexes `**/*.kt` yet (each plugin README says which).
-- Phase-2 items that were planned and not finished when the work stopped:
-  - JPQL entity/property completion and checks in `@Query` (`spring-data`);
-  - the XML security namespace (`spring-security`);
-  - WebFlux functional routes (`spring-web`);
-  - JavaScript STOMP clients (`spring-websocket`);
-  - XML listener containers and `${…}` placeholder resolution from config files (`spring-messaging`);
-  - GraphQL client documents (`spring-graphql`);
-  - bundled Spring Cloud metadata (`spring-boot`);
-  - Spring Boot CLI generation through an optional `process:spring` (`spring-initializr`);
-  - diagrams in `spring-webflow`, `spring-integration`, `spring-batch` and `spring-modulith`;
-  - Modulith documentation export to the clipboard.
+- Kotlin support is in `crates/spring-text`. The plugins listed in the *Kotlin* row above index `**/*.kt`; each plugin README says what its Kotlin support covers, and `spring-osgi` (XML only) and the plugins not listed there were not part of the 2026-11-06 sweep.
+- The phase-2 items that were planned and unfinished on 2026-11-05 are done (see the rows above): JPQL checks in `@Query`, the security XML namespace, WebFlux functional routes, JavaScript STOMP clients, messaging XML listeners and placeholders, GraphQL client documents, bundled Spring Cloud metadata, Spring Boot CLI generation, the Integration, Batch and Modulith diagrams (Web Flow's existed) and the Modulith PlantUML copy. They are checked against the mock host only, not in the IDE.
 - Deliberately skipped because they would mostly be false positives without a semantic model: unresolved-autowiring checks, "missing view" warnings, unmapped GraphQL fields above `Hint`, and messaging destinations nobody produces or consumes.
 - Spring OSGi (source port): its checks that need real type resolution fall under the first gap above. `OsgiSpringBeanGenerateProvider` has no Generate-menu API.
 
 ## aritti.devcontainer (clean-room, inspired by org.jetbrains.plugins.docker.gateway)
 
-Drives the devcontainer CLI (`@devcontainers/cli`) and Docker: Start, Rebuild, Open Shell and Stop
-commands, and a `devcontainer.json` template. Checked against `l0ng-ai/openidea` `main` at
+Drives the devcontainer CLI (`@devcontainers/cli`) and Docker: Start, Rebuild, Open Shell, Stop and
+Show Configuration commands, and `devcontainer.json` templates (base, Node, Python, Java, PHP, Rust, Docker Compose). Checked against `l0ng-ai/openidea` `main` at
 `f665beb1` (plugin API 1.1) on 2026-11-05. The original's main feature, running the IDE backend
 inside the container, needs work in OpenIDEA itself: see _Upstream work_.
 
@@ -414,6 +416,8 @@ inside the container, needs work in OpenIDEA itself: see _Upstream work_.
 | Container management (list, start, stop, remove, logs, shell) | The IDE's built-in Docker support in the Services view lists dev containers like any other. The plugin only adds **Stop Container** (`docker ps` by the `devcontainer.local_folder` label, then `docker stop`) | Nothing groups containers by dev container in the Services view. Might close when merged: `l0ng-ai/openidea` #1760 (plugin `services` views with tabs, text and process bodies), if the plugin moves to one |
 | Picking the configuration | A `configFile` setting; empty probes `.devcontainer/devcontainer.json`, then `.devcontainer.json`, with `read_file` | Configurations in subfolders must be typed in by hand |
 | Building and starting the container | `devcontainer up` (with `--remove-existing-container` for Rebuild) in an IDE terminal | No progress, result or "ready" notification in the IDE, see above |
+| Reading the resolved configuration | **Dev Container: Show Configuration** runs `devcontainer read-configuration --workspace-folder <root> --config <file>` through `run_process` inside a task (60 s cap) and summarises image or compose file, remote user, forwarded ports, number of features and whether there is a `postCreateCommand` in a notification | A CLI start slower than 60 s fails, and failures (non-zero exit, no JSON, CLI not found, denied) show no notification. The result is a notification, not a view. The real output shape (`{"configuration":…}`) was not run against a live CLI |
+| New menu templates for `devcontainer.json` | `[[contributes.fileTemplates]]`: base, Node, Python, Java, PHP, Rust and Docker Compose, each with a `$schema` | One fixed starter per language; the image tags (`javascript-node:22`, `python:3.12`, `java:21`, `php:8.3`, `rust:1`) come from the public reference images, not from a tool, and the Compose template assumes the user supplies `docker-compose.yml` (a plugin can't create it) |
 
 ### Upstream work (OpenIDEA core, prepared locally, not submitted)
 
@@ -425,7 +429,7 @@ inside the container, needs work in OpenIDEA itself: see _Upstream work_.
 ### Not ported
 
 - Creating a dev container from a Git repository URL (clone, then open in the container): no API clones or opens a project.
-- Browsing and adding Dev Container Features or templates: no picker. The New menu template is one fixed starter configuration.
+- Browsing and adding Dev Container Features or templates: no picker. The New menu offers fixed starter configurations (see the templates row above).
 - Applying the configuration's IDE customisations (extensions, settings) inside the container: nothing in OpenIDEA maps them.
 
 ## JPA Assist (`aritti.jpa-assist`)
@@ -553,13 +557,13 @@ The plugin API is the same in both.
 ### Menus and tree views can't depend on plugin state
 
 - **Blocks:**
-  - context-menu items for *Copy DDL* and *Copy DTO* only in entity files, and *Copy Entity for CREATE TABLE* only on a `CREATE TABLE`;
+  - context-menu items for *Copy DDL* and *Copy DTO* only in entity files, and *Copy Entity for CREATE TABLE* only on a `CREATE TABLE` (they are limited by language only);
   - right-click actions on an entity in JPA Structure.
 - **Why:**
   - `when` clauses use the IDE's context keys (`editorLangId`, `editorPath`, `editorFocus`…; `src/platform/context.ts`), so items can be limited to Java, Kotlin or SQL files. A plugin can't set its own keys, such as "this file is an entity".
   - Tree items only send `select`, `activate`, `expand` and `collapse`. View buttons belong to the toolbar.
 - **Workaround:**
-  - There are no context-menu items; the commands report when the open file doesn't fit.
+  - *Copy DDL* and *Copy DTO* are editor context-menu items shown for `editorLangId == java || editorLangId == kotlin`, and *Copy Entity for CREATE TABLE* for `editorLangId == sql` (`when` takes `||`, verified in the host source). They show in every Java, Kotlin or SQL file, entity or not, so the commands still report when the open file doesn't fit; *Copy Entity* relies on the language id `sql`.
   - In JPA Structure, double-clicking an item opens its declaration.
 - **Would need:** `ui.set-context(key, value)` for keys prefixed with the plugin id, and context actions on tree items.
 - **Closes when merged:** `l0ng-ai/openidea` #1762 (`set-context`, keys `plugin.<id>.<key>` for `when` clauses) and #1746 (`view.item.context` menu on tree and list items).
@@ -574,11 +578,13 @@ The plugin API is the same in both.
   - `read_file` only reads UTF-8 text up to 16 MiB, so `.class` files and jars can't be read.
 - **Would need:** a `find_files` option to include ignored files, and classpath symbols through a code model API.
 
+### Added on 2026-11-06
+
+- **Entity to repositories gutter arrow:** on an `@Entity` class line the marker (icon `navigate`, tooltip "Repositories: A, B") targets the first repository. Repository to entity is `spring-data`'s. A `RepositoryIndex` lists `*Repository.java|kt` once and reads at most 30 ms of unread files per provider call (partial results until done); saving or opening a repository file refreshes it. Limits: repositories not named `*Repository` are not found; a deleted or renamed repository file stays indexed until the instance is reclaimed; on a very large project the first calls return partial results.
+
 ### Possible with the current API, not done yet
 
-- gutter icons linking an entity and its repositories (`line-markers`);
-- ⌘B from a part of a derived query to the field (`definition`);
-- context-menu items limited by `editorLangId == java` / `kotlin` / `sql`.
+- Go to Definition from a part of a derived query to the field is in `spring-data`; from a JPQL alias path (`u.address.zip`) it is not done, because `jpa-assist` doesn't parse `@Query` (`spring-data` checks and completes entity and alias properties there).
 
 ## aritti.kube-explorer (clean-room, inspired by JetBrains Kubernetes 263.7307.101)
 
@@ -589,12 +595,12 @@ Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plug
 
 | Feature of the original | Why | API that would unlock it |
 |---|---|---|
-| Right-click actions on cluster resources | `view-event` has no menu event; the IDE opens a context menu only on editable `Table` bodies (insert/delete row, `PluginView.tsx`) | `tree-item.actions: list<button>` shown as a context menu, with `view-event::item-action(key, id)`. Closes when merged: `l0ng-ai/openidea` #1746 (`view.item.context` menu, declared in `plugin.toml`) |
+| Right-click actions on cluster resources | `view-event` has no menu event; the IDE opens a context menu only on editable `Table` bodies (insert/delete row, `PluginView.tsx`). The pinned SDK (v0.1.37, `wit/views.wit`) has no `tree-item.actions` field and no item-action view event, so nothing was built | `tree-item.actions: list<button>` shown as a context menu, with `view-event::item-action(key, id)`. Closes when merged: `l0ng-ai/openidea` #1746 (`view.item.context` menu, declared in `plugin.toml`) |
 | Path to `kubectl` (and `helm`) as a setting | A `process:<program>` grant pins the program named in the manifest, resolved on `PATH` when granted | A program path taken from a setting and approved when it is set |
 | Clusters using exec credential plugins (`gke-gcloud-auth-plugin`, `aws`, `kubelogin`) from a GUI-started IDE | `process.run` has no environment parameter; the child gets the IDE's environment, often without the shell's `PATH` | `env: list<tuple<string, string>>` on `process.run` / `open-terminal` |
 | Quick documentation, find usages and rename of labels, selectors and ConfigMap/Secret keys | Providers are `completion`, `inline-completion`, `code-actions`, `definition`, `line-markers` only | `hover`, `references` and `rename` provider kinds |
 | Completion of ConfigMap/Secret names and keys, label selectors and Docker images from the cluster | Providers must answer within 50 ms and can't wait for `kubectl`; prefetching on `file-opened` is lost when the idle instance is reclaimed (5 min) | Asynchronous providers, or background work (`host::schedule`, a task that outlives the call) feeding a cache |
-| Schemas of custom resources from the active cluster (`/openapi/v3`) | No way to register schemas with the built-in `yaml-language-server`, and no file write to point a modeline at a generated schema | Schema associations for built-in language servers (`[[contributes.jsonSchemas]]` with file patterns or content matchers, or language-server settings for built-in languages) |
+| Schemas of custom resources from the active cluster (`/openapi/v3`) (the resources themselves are listed, see "Custom resources" below) | No way to register schemas with the built-in `yaml-language-server`, and no file write to point a modeline at a generated schema | Schema associations for built-in language servers (`[[contributes.jsonSchemas]]` with file patterns or content matchers, or language-server settings for built-in languages) |
 | Helm templates: Go template syntax, values and named-template completion, navigation and inspections; Werf | Go templates live inside YAML; a plugin can't inject a language into a built-in one or own `yaml` (built-in ids and extensions win) | Language injection / template data languages for built-in languages |
 | Browsing a chart's `.tgz` dependencies in the project tree | No project-view contribution or virtual file system | Project-view node provider, or an archive file system |
 | Cluster-wide log streaming with pattern matching, and watching resources (tree updates as the cluster changes) | `process.run` blocks until exit (5 s, 60 s inside a task, 4 MiB); no streaming spawn; `on-schedule` is at least 60 s; terminal output can't be read | `process.spawn(program, args) -> handle` with output events and `kill`, plus a log/console view body with filtering |
@@ -603,6 +609,7 @@ Checked against `l0ng-ai/openidea` `main` at `1186cdce` (plugin API 1.1, no plug
 
 | Feature | Workaround | Limitation | API that would remove it |
 |---|---|---|---|
+| Custom resources | A "Custom Resources" root node, then API group, then kind (plural and group), then instances. Names come from one `kubectl api-resources -o name --verbs=list --request-timeout=4s` call; core resources and the built-in groups (`apps`, `batch`, `autoscaling`, `policy`, `networking.k8s.io`, `events`, `storage`, `storagemigration`, `rbac`, `coordination`, `discovery`, `apiextensions`, `metrics`, `scheduling`, `node`, `certificates`, `admissionregistration`, `flowcontrol`, `apiregistration`, `internal`, `resource`, `authentication`, `authorization`) are dropped, while `gateway.networking.k8s.io`, `snapshot.storage.k8s.io` and `*.x-k8s.io` stay. Instances take Describe, YAML and Delete (with confirmation); logs and shell are off. A failing call shows an error node and an empty list a placeholder | The group list is a fixed allowlist, so a built-in group added by a newer Kubernetes shows up as custom; `metrics.k8s.io` is excluded on purpose. Right-click actions are still missing (see above). Tested against the mock host only | `tree-item.actions` (see above) |
 | Edit a resource's YAML in an editor, apply on save (IntelliJ: `LightVirtualFile`) | `process:tee` writes `/tmp/kube-explorer-<kind>-<name>-<random>.yaml`, `open_location` opens it, the `file-saved` event runs `kubectl replace -f` with the context and namespace it was opened from | No file-write or virtual-document API, so a high-risk capability writes one file; Unix only; one storage entry per file, never pruned. **`open_location` refuses paths outside the project (`resolve_in_root`, `wit_host.rs`), so in the IDE this falls back to the panel editor below**; writing into the project instead would leave files in the user's tree | `views.open-document(name, language, text) -> id` with a `document-saved(id, text)` event; or `workspace.write-temp-file(name, text) -> path` that `open_location` accepts |
 | Fallback YAML editor, describe, diff, Kustomize/Helm output | An `Html` body: a textarea over a highlighted copy; Apply (⌘S) posts the text back, `kubectl replace -f -` | Not a real editor (no undo history shared with the IDE, no YAML language server, no search); shows blank in the IDE for a still-unknown reason while it renders in WebKit with the IDE's frame wrapper | Same as above, plus a read-only virtual document for command output |
 | Saving the edited YAML more than once | `metadata.resourceVersion` is removed before editing | Each save overwrites changes made in the cluster meanwhile. Keeping it fails every save after the first: the plugin can't refresh the open editor with the new version without making it unsaved (`apply_edits` only targets the invocation's editor) | A document the plugin owns and can reset after a save (part of `open-document`), or `TextEditor::set_saved_text` |
@@ -623,6 +630,7 @@ since v0.1.37) on 2026-11-05.
 
 | Feature of the original | Why | API that would unlock it |
 |---|---|---|
+| Legacy YouTrack InCloud hosts (`*.myjetbrains.com`) | The manifest declares `net:*.youtrack.cloud` and `net:*.atlassian.net` only; `*.myjetbrains.com` was left out | Add the host to the manifest and rebuild |
 | Switch Task (⌥⇧T) and Go to Task (⌥⇧N) popups, searching tasks and tracker issues | No popup, quick pick or input API (`wit/host.wit`, `ui`: notifications, status items, clipboard, `open-url` only), and a command can't open or focus a view | `ui.show-quick-pick(items, placeholder) -> option<string>` and `ui.show-input(prompt, value) -> option<string>`; or `views.reveal(view)` so a command can open the Tasks view |
 | Self-hosted trackers: Jira Server/Data Center, YouTrack Standalone, self-managed GitLab, Forgejo/Gitea, Redmine, Mantis, Bugzilla, Trac, FogBugz, the generic tracker | `net:<host>` is fixed in the manifest and `net:*` is rejected (`crates/ide-extension/src/capability.rs`, `FromStr`: only exact hosts or `*.domain`), so a server URL from settings can't be reached | A capability for hosts the user enters, e.g. `net:user` approved per host at first use, or hosts taken from a `string` setting and approved when it is set |
 | Clearing the context on task switch (closing the editors of the task being left) | No API to list or close open editors, and no `file-closed` event (`EVENT_KINDS` in `crates/ide-extension/src/manifest.rs`: file-opened, file-saved, editor-focused, action-performed, vcs-changed) | `workspace.open-editors() -> list<string>`, `workspace.close-editor(path)` and a `file-closed` event. Closes when merged: `workspace.open-editors` only, in `l0ng-ai/openidea` #1754 (needs #1752 first); `close-editor` and `file-closed` stay open |
@@ -777,14 +785,16 @@ Port of `org.jetbrains.plugins.gitlab` 263.7307.200 (intellij-community tag
 - **Workaround in the port:** the original's five quick filters, cycled with one button.
 - **Would need:** toolbar controls (search field, choice, toggle) that report `view-event::field`.
 
+### Added on 2026-11-06
+
+- **Apply suggestion:** *GitLab: Apply suggestion* is a quick fix (`code-actions`) when the selection covers a commented line that has a ```` ```suggestion[:-N+M] ```` block in an unresolved thread already loaded for the editor; it replaces lines `[line-N, line+M]` (CRLF documents get CRLF text, a last line without newline is handled, a suggestion reaching outside the file isn't offered). Limits: when the Changes view's diff is cached, every line of the replaced range that appears in it must still equal the open file, otherwise the action isn't offered; with no cached diff (Changes view never opened) it is offered without that check, so a wrong-line apply is possible; it doesn't mark the suggestion applied on GitLab; threads show only while the branch isn't behind the merge request.
+- **Paging:** merge requests (50 per page), threads and member projects (100) and diffs are fetched page by page, up to 10 pages (500 merge requests, 1,000 threads, projects or diff files), with one 35 s budget shared by all the lists of a command, refresh or event. Lists after the budget are partial or empty, with a warning in the log (not in a status line); two long lists in one task can still pass the 60 s task limit by one fetch.
+- **Viewed state:** a file stays viewed until a later commit touches it (one `git log --name-only` per render or mark through `process:git`). Without the merge request's commits in the local checkout, or without git, it falls back to the head commit. Marks stored by the previous version read as unviewed for files whose last commit isn't the head. Marking a file viewed needs page scripts, which the desktop IDE blocks (see *Scripts in `Html` view bodies*), so it is mainly reachable once scripts work.
+
 ### Not ported, but possible with the current API
 
-- Applying suggestions. The Marketplace text mentions it, but 263.7307.200 has no code for it; it could be a `code-actions` quick fix.
+- Fork merge requests are fetched from `refs/merge-requests/<iid>/head` of the target remote. A fork remote was judged not worth it: it needs the fork's URL (an extra call, maybe to a private project) and edits the user's git config for no gain.
 - Markdown rendering of notes. Left out to keep the wasm small; a host `markdown-to-html` would make it free for every plugin.
-- These shortcuts are marked `ponytail:` in the source:
-  - only the first page of results: 50 merge requests, 100 threads, 100 member projects;
-  - fork checkout through `refs/merge-requests/<iid>/head` instead of a fork remote;
-  - a file counts as viewed if it was marked at the current head commit (the original compares with the last commit that touched it).
 - Usage statistics aren't ported, on purpose.
 
 ## Ideolog (`aritti.ideolog`)
@@ -794,6 +804,15 @@ Source port of `com.intellij.ideolog` 263.7307.101 (MIT, tag
 errors and warnings, custom Ideolog formats, Jump to Source, error and entry
 navigation, links on stack frames. Checked against the WIT, SDK and host of
 v0.1.37 and `main` (`f665beb`) on 2026-11-05.
+
+Built-in format detection covers IDEA, TeamCity, Logcat, Loguru, pipe, Docker/ISO
+(`2026-11-06T12:00:00Z ERROR`), Python `logging`, nginx error logs, syslog (level
+guessed from keywords), Laravel/Monolog (`[date] channel.LEVEL:`, with `[stacktrace]`
+and `#0 …` lines continuing the event) and Serilog text, plus custom formats; a
+custom format wins ties over the built-ins. Level rules also match `err`, `fatal`,
+`ftl`, `crit`, `alert`, `emerg`, `inf` and `wrn`. Jump to Source reads frames of
+Java, Python, .NET, PHP, Ruby, Go, Node, Dart (`file://`, `package:`) and Swift
+(`file X, line N`). Tested against the mock host only.
 
 ### The built-in `log` language can't get a plugin's syntax
 
@@ -863,10 +882,10 @@ v0.1.37 and `main` (`f665beb`) on 2026-11-05.
 ### The caret can't be moved
 
 - **Blocks:**
-  - extend selection (event → column → line, `ExtendsSelection`);
-  - Go to Next Error and Previous / Next Entry in logs outside the project.
+  - extend selection (event → column → line, `ExtendsSelection`), time-gap highlighting and the heat map;
+  - Go to Next Error, Next Warning, Next Exception and Previous / Next Entry in logs outside the project.
 - **Why:** `text-editor` has no `set-selections` (see the JPA Assist section). `open_location` moves the caret but `resolve_in_root` refuses files outside the window's project, even the file of the invoking editor.
-- **Workaround:** the navigation commands call `host::open_location` on the current file, so they work only for logs inside the project.
+- **Workaround:** the navigation commands (Next Error, **Next Warning** and **Next Exception**, which have no default shortcut) call `host::open_location` on the current file, so they work only for logs inside the project. Next Exception picks the next event with an exception name (`FooException:`, `FooError(`), `Caused by:`, a `Traceback (most recent call last)` line, or a stack frame on a continuation line (on the first line only when the event is an error); the detection is heuristic, so a plain error message with a frame-like first line can still count.
 - **Would need:** `text-editor.set-selections(ranges)` and `reveal(range)`, or `open_location` allowed for the invoking editor's file.
 
 ### Intentions need edits
@@ -951,6 +970,15 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 - **Why:** same as *Problems aren't re-checked while typing* in the Symfony section.
 - **Workaround:** for a rename done outside the IDE, run Flyway: Check Migrations.
 
+### Flyway Migrations view
+
+The `migrations` view (bottom, icon `database`) is a read-only tree of migrations with their state, from `flyway info` as JSON (`-outputType=json`, or `mvn flyway:info -Dflyway.outputType=json`).
+
+- **Needs:** Flyway 10 or newer and a reachable database. It runs on refresh only (no live updates) inside a task, so a slow database blocks the instance meanwhile; it has no clean or migrate buttons and no database browser.
+- **Rows:** Success, Pending, Failed, Missing, Out of order, Ignored, Undone, Baseline and others, matched by substring (an unknown state shows as Unknown), with icons from the host's allowlist (`ci-pending`, `ci-skipped`, …). Double-click opens the migration file found by version (versioned, `B` then `V` for a baseline), by description (repeatable) or by Flyway's `filepath`; a relative `filepath` joins the project root and is used only if readable; Flyway's synthetic `<< Flyway Baseline >>` row has no target; a failed open warns "Could not open <path>: <error>". The status line reads "N migrations, M pending".
+- **Failures:** a denied capability, a spawn error, a non-zero exit, bad JSON or an empty list show a message with a Refresh button. Log lines around the JSON (`mvn` output) are tolerated.
+- **Not verified:** the exact JSON state spellings for the Missing and Out of order variants against a live Flyway, and the view in the IDE (mock host only). `serde_json` was added as a dependency of the plugin to parse the output.
+
 ## Liquibase Changelogs (aritti.liquibase, clean-room)
 
 Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
@@ -979,6 +1007,16 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 - **Why:** they are resolved against `src/main/resources` and `src/test/resources` by path heuristics.
 - **Would need:** `project.source-roots()`.
 
+### Liquibase Changesets view
+
+The `changesets` view (bottom, icon `database`) shows changesets in execution order across includes. It reads text only; no `liquibase` process runs.
+
+- **Discovery:** changelogs are found with `find_files` (xml, yaml, yml and sql, 2,000 in total, 3 s cap), per render (the plugin has no `events` capability, so no cache). Hidden or gitignored files aren't listed, though a file reached by an include is read by path. A cut at 2,000 changelogs or 3 s is reported as `partial` in the status line.
+- **No master changelog concept:** roots are the changelogs nobody includes, so `changeLogFile` in `liquibase.properties` isn't consulted; changelogs in pure cycles are shown after the roots.
+- **Includes:** `includeAll` expands recursively in path order and ignores `maxDepth`, `filter` and `resourceComparator`. Includes with `${property}` are flagged unresolved; missing includes and cycles are flagged nodes. A changelog reached a second time is shown once as a leaf with the detail `already run`.
+- **Rows:** each changeset is described by its comment, else its first change type or first SQL words; a click opens the file at the changeset's line. XML descriptions come from string scanning, not the element parser.
+- **Not verified:** the view in the IDE (the open line is 0-based per the host docs; mock host only).
+
 ### Shared with other plugins
 
 - Diagnostics come only from the `line-markers` provider, and there is no database API: see the Spring plugins rows "Diagnostics have no provider of their own" and "No database API".
@@ -992,17 +1030,18 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 | Feature of the original | Why | API that would unlock it |
 |---|---|---|
 | Preview opened automatically for any OpenAPI file | `customEditors.patterns` match file names only; an OpenAPI file is a generic `.yaml`/`.json`. Other names need Open With | A content matcher on custom editors (first-line regex or top-level key), as languages have `first-line` |
-| Schema validation for JSON specs, and without editing the file | No way to register a schema with the built-in `yaml-language-server` / `vscode-json-language-server`, so the plugin inserts a modeline into the YAML file (same gap as kube-explorer) | Schema associations for built-in language servers |
+| Schema validation by the language server, and without editing the file | No way to register a schema with the built-in `yaml-language-server` / `vscode-json-language-server`, so the plugin inserts a modeline into the YAML file (same gap as kube-explorer); JSON files get no modeline, only the plugin's own `$ref` checks | Schema associations for built-in language servers |
 | Rename of a component everywhere, find usages of a schema, hover with the target's definition | No `rename`, `references` or `hover` provider kinds | Those provider kinds |
 | Structure view of a spec | `syntax-provider` outline only runs for plugin-owned languages; `yaml` is built in | An outline provider for any language |
 | Problems while typing | No `document-changed` event or diagnostics provider (see Symfony section) | Same |
-| Multi-file specs in the preview | Web views have no network and can't read project files | A read-only project file API for web views (or posting files from code, possible today, not done) |
+| Transitive `$ref` files in the preview | The page can't read project files itself; the plugin posts the files the open document references directly, one level deep, at most 50 files and 512 KiB (extra files are skipped and counted) | A read-only project file API for web views |
 
 ### Implementation limits
 
-- Editing features cover YAML only (no JSON scanner).
+- JSON specs (a text starting with `{` or `[`, and mentioning `openapi` or `swagger`) get `$ref` completion, navigation and the same problems as YAML, through a small scanner (`src/json.rs`, no `serde_json`). `package.json`, `tsconfig.json` and other non-spec JSON are ignored; a JSON file whose root is an array is treated as unreadable; string escapes beyond `\"`, `\\`, `\/`, `\uXXXX` and the common ones are not decoded. The endpoints view and the schema modeline code action stay YAML-only.
 - Flow-style mappings are only seen for `$ref`.
-- No file-name completion in `$ref`: `find_files` is too slow for the 50 ms budget.
+- `$ref` file-name completion (`./x.yaml`, `../y.json`, relative to the spec) reads a file list cached on open and save of a yaml/yml/json file (`find_files`, 3 patterns, 500 files each; the host skips hidden and gitignored paths), because `find_files` is too slow for the 50 ms budget. The list is stale until the next open or save, and it is offered only when the typed value has no `#`.
+- The preview resolves relative `$ref` files one level deep (see the preview row above). The page sends a hash and a random id (`crypto.getRandomValues`, `Math.random` fallback) with its request, the plugin answers only when the hash changed, and the page ignores replies whose id isn't its own, because `post_view_message` reaches every preview of the view. Files are re-read on every (300 ms debounced) edit. **Not verified in a live IDE:** the whole web side (the `fetch` override answering from the posted files, the postMessage round trip, the id filter) and `swagger-client` calling the global `fetch` at request time; only the Rust half is tested.
 - The endpoints view re-scans the project on each render.
 - The dark theme is a colour inversion.
 - A missing `$ref` file is told apart from an unreadable one by treating `NotFound` and `Invalid` as missing: see "Missing files are reported as `Invalid`" in the Liquibase section.
@@ -1043,7 +1082,7 @@ Checks Maven, Gradle (incl. version catalogs), npm (package-lock, yarn, pnpm), C
 
 ### Not done, but possible with the current API
 
-- Go modules and other lockfiles.
+- Go modules and other lockfiles (pnpm v5, and catalog entries in `libs.versions.toml` that span several lines, are not read).
 - CVSS scoring (severity comes from the advisory's labels).
 
 ## aritti.quarkus (port of com.redhat.devtools.intellij.quarkus)
@@ -1064,13 +1103,30 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 
 ### No metadata from libraries
 
-- **Blocks:** keys of Quarkus extensions beyond the bundled ones (42 extensions) and of dependency jars.
+- **Blocks:** keys of Quarkus extensions beyond the bundled ones (about 170 of the most-used `io.quarkus` extensions, of which 86 contribute their own keys: 2,797 properties; Quarkus 3.40.1 metadata) and of dependency jars. Quarkiverse and third-party extensions stay unknown.
 - **Why:** same as the row *Dependency jars and the classpath can't be read* under *Gaps that affect every Spring plugin* in the Spring plugins section. The bundled catalog covers a curated set, and the generator takes extra artifact ids.
 
 ### No project wizard
 
 - **Blocks:** creating a Quarkus project in the IDE.
 - **Why:** same as *Code actions can't create, rename or delete files* in the Symfony section (a plugin can't create files). The command opens code.quarkus.io in the browser instead.
+
+## aritti.ignore (port of mobi.hsz.idea.gitignore)
+
+Source port (`.ignore`, Marketplace 7495). Audited on 2026-11-06 from the Marketplace page and the project's README (task 0 audit); our side from the repo, feasibility from this file. Not run side by side with the original.
+
+| Not implemented | Why | API that would unlock it |
+|---|---|---|
+| Add to or unignore from the Project view or editor context menu (a menu command per selected path) | `run_command(id, ctx, arg)` gets only the focused editor: no selected paths and no edit of a file other than the focused one (only code actions return edits for other files). Workaround: the code action "Add to .gitignore" / unignore in any open file | Selected paths in the invocation and a workspace-edit or write-file call |
+| Highlighting of the built-in `ignore` language (`.gitignore`, `.dockerignore`) | Built-in language ids can't take a plugin's syntax; the plugin's own `dotignore` language covers `.ignore` | `syntax-for = ["ignore"]` (see the dotenv section) |
+| Bracket matching | The language format has no brackets rules | `brackets` rules in the language format (see the Twig editing section) |
+| Show ignored files for an ignore file; close open ignored editors; rename entries | No Project view hooks, no editor-close API, no rename provider | Project view extension, `workspace.close-editor`, `rename` provider |
+| Import and export of user templates | Needs a file picker and popups | A file picker and popups |
+| Template filter by name or content in the Ignore Templates tool window | Not built (the tree view has no filter yet) | — |
+| "Unused entry" inspection | Not done: `find_files` skips ignored and hidden paths, so an entry that matches only ignored files would be a false positive | `find_files` option to include ignored files |
+| New › Ignore File creating `.gitignore` | The New menu builds the file name from the typed name and the template's extension, so it creates `<name>.ignore` (the extension the plugin recognises); dot-named files are recognised when opened, not created. Whether the host accepts an empty name was not tested in the app | — |
+
+Implemented since: the redundant-entry check also flags a glob with literal leading directories when another entry matches that directory (`build/*.o` under `build/`, `/x/**/y` under `/x/`; `["*.log", "debug.log"]` flags `debug.log`, `["!debug.log", "*.log"]` flags nothing). It is deliberately conservative: unanchored globs (`x*` against `*.log`) are never flagged, and `.hgignore` files (`syntax: glob`) don't get the covered check. The New menu entry "Ignore File" ships a starter body.
 
 ## aritti.properties (port of com.intellij.properties)
 
