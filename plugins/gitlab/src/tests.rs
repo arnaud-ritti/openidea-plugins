@@ -956,6 +956,21 @@ mod ci_tests {
     }
 
     #[test]
+    fn failed_read_clears_stale_ci_problems() {
+        let host = MockHost::install();
+        let mut plugin = GitLab::default();
+        let path = "/project/gone.gitlab-ci.yml";
+        let stale = openidea_plugin::Diagnostic::new(Range::new(Position::new(0, 0), Position::new(0, 1)), openidea_plugin::Severity::Warning, "old");
+        plugin.ci_problems.insert(path.into(), vec![stale]);
+        plugin.publish_review(path);
+        assert_eq!(host.diagnostics()[path].len(), 1);
+
+        plugin.handle_events(&[Event::FileSaved(path.into())], &host.invocation());
+
+        assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
+    }
+
+    #[test]
     fn needs_unknown_job_warns() {
         let yaml = "build:\n  script: [make]\ntest:\n  needs:\n    - build\n    - biuld\n  script: [make test]\n";
         let found = findings(yaml);
@@ -1292,7 +1307,21 @@ mod worktree_tests {
         let posted = writes(&host);
         assert_eq!(posted[0].0, "PUT");
         assert!(posted[0].1.ends_with("/projects/g%2Fp/merge_requests/7/rebase"));
-        assert_eq!(message.as_deref(), Some("Rebase of !7 started."));
+        assert_eq!(message.as_deref(), Some("Rebase of !7 requested."));
+    }
+
+    #[test]
+    fn leftover_merge_error_is_not_reported_as_a_new_failure() {
+        let host = setup();
+        host.on_fetch(|req| match (req.method.as_str(), req.url.contains("include_rebase_in_progress")) {
+            ("GET", true) => ok(r#"{"rebase_in_progress": true, "merge_error": "Rebase failed. Please rebase locally"}"#),
+            _ => gitlab(req),
+        });
+        let _plugin = selected(&host);
+
+        let message = GitLab::default().run_command("update-merge-request-branch", &host.invocation(), None).unwrap();
+
+        assert_eq!(message.as_deref(), Some("Rebase of !7 requested."));
     }
 
     #[test]

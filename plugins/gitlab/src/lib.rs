@@ -969,12 +969,13 @@ impl GitLab {
         let api = api::Project(&repo.path);
         api.rebase(iid)?;
 
-        let error = api.rebase_state(iid)?.merge_error;
+        let state = api.rebase_state(iid)?;
+        let error = state.merge_error.filter(|_| !state.rebase_in_progress);
         if let Some(error) = error.filter(|e| !e.is_empty()) {
             return Err(Error::Failed(format!("Rebase of !{iid} failed: {error}")));
         }
 
-        Ok(Some(format!("Rebase of !{iid} started.")))
+        Ok(Some(format!("Rebase of !{iid} requested.")))
     }
 
     fn check_ci_files(&mut self, events: &[Event], ctx: &Invocation) {
@@ -986,7 +987,12 @@ impl GitLab {
                 continue;
             }
 
-            let Ok(source) = project.read_file(path) else { continue };
+            let Ok(source) = project.read_file(path) else {
+                if self.ci_problems.remove(path).is_some() {
+                    self.publish_review(path);
+                }
+                continue;
+            };
             let problems = ci::check(&ci::parse(&source))
                 .into_iter()
                 .filter(|f| ci_group_enabled(f.code))
