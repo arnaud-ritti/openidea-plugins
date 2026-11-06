@@ -6,7 +6,8 @@ use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineM
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Range, host, register_plugin};
-use spring_text::index::{COMMAND_BUDGET, Indexes, PROVIDER_BUDGET};
+use spring_text::index::{COMMAND_BUDGET, Indexes, PROVIDER_BUDGET, project_of};
+use spring_text::{config, xml};
 use spring_text::java::{self, Annotation, Arg, Call, CallArg, JavaFile, Str, Tok};
 use spring_text::range;
 use spring_text::tree::Expansion;
@@ -139,7 +140,7 @@ struct Collector<'a> {
 impl Collector<'_> {
     fn add(&mut self, broker: Broker, space: &'static str, role: Role, via: &str, s: &Str) {
         let v = &s.value;
-        if v.is_empty() || v.contains("${") || v.contains("#{") || v.starts_with("!{") {
+        if v.is_empty() || v.contains("#{") || v.starts_with("!{") {
             return;
         }
         let range = range(self.text, s.at, s.end);
@@ -187,6 +188,9 @@ impl Collector<'_> {
 
     /// `@SendTo` on a listener method: a reply destination of its broker.
     fn reply(&mut self, broker: Broker, s: &Str) {
+        if broker == Broker::Rabbit && s.value.contains("${") {
+            return;
+        }
         if broker != Broker::Rabbit {
             return self.add(broker, space(broker), Role::Producer, "@SendTo", s);
         }
@@ -268,7 +272,43 @@ fn declared_type<'f>(file: &'f JavaFile, name: &str) -> Option<&'f str> {
     })
 }
 
-pub fn parse(_path: &str, text: &str) -> Option<Vec<Endpoint>> {
+/// `<jms:listener destination>` and `<rabbit:listener queue-names>` of a Spring XML file.
+fn xml_listeners(text: &str, collector: &mut Collector) {
+    let elements = xml::elements(text);
+    for (i, e) in elements.iter().enumerate() {
+        if e.local() != "listener" {
+            continue;
+        }
+        let Some(namespace) = xml::namespace(&elements, i) else { continue };
+        let (broker, attr) = if namespace.ends_with("/schema/jms") {
+            (Broker::Jms, "destination")
+        } else if namespace.ends_with("/schema/rabbit") {
+            (Broker::Rabbit, "queue-names")
+        } else {
+            continue;
+        };
+        let Some(a) = e.attr(attr) else { continue };
+        let via = format!("<{}>", e.name);
+        let mut at = a.value_at;
+        for part in a.value.split(',') {
+            let lead = part.len() - part.trim_start().len();
+            let value = part.trim().to_owned();
+            let (start, end) = (at + lead, at + lead + value.len());
+            at += part.len() + 1;
+            collector.add(broker, space(broker), Role::Consumer, &via, &Str { value, at: start, end });
+        }
+    }
+}
+
+pub fn parse(path: &str, text: &str) -> Option<Vec<Endpoint>> {
+    if path.ends_with(".xml") {
+        if !text.contains("listener") {
+            return None;
+        }
+        let mut collector = Collector { text, out: Vec::new() };
+        xml_listeners(text, &mut collector);
+        return (!collector.out.is_empty()).then_some(collector.out);
+    }
     const HINTS: [&str; 7] = ["Listener", "send", "Send", "Topic", "Queue", "Exchange", "ProducerRecord"];
     if !HINTS.iter().any(|h| text.contains(h)) {
         return None;
@@ -299,6 +339,78 @@ pub fn parse(_path: &str, text: &str) -> Option<Vec<Endpoint>> {
     (!out.is_empty()).then_some(out)
 }
 
+/// Configuration values by relaxed key: `application.*` files win over profile and bootstrap ones.
+type Props = BTreeMap<String, String>;
+
+fn parse_config(path: &str, text: &str) -> Option<Vec<(String, String)>> {
+    let keys: Vec<_> = config::keys(path, text)
+        .into_iter()
+        .filter(|k| !k.value.is_empty())
+        .map(|k| (config::canonical(&k.key), k.value))
+        .collect();
+    (!keys.is_empty()).then_some(keys)
+}
+
+fn props_of<'a>(files: impl Iterator<Item = (&'a str, &'a Vec<(String, String)>)>) -> Props {
+    let (mut primary, mut others) = (Vec::new(), Vec::new());
+    for (path, keys) in files {
+        let stem = file_name(path).split('.').next().unwrap_or_default();
+        if stem == "application" { primary.push(keys) } else { others.push(keys) }
+    }
+    let mut props = Props::new();
+    for (key, value) in primary.into_iter().chain(others).flatten() {
+        props.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    props
+}
+
+/// Replaces every `${key}` and `${key:default}`, a value or default holding
+/// placeholders itself down to `depth` levels. `None` when one can't be told.
+fn expand(text: &str, props: &Props, depth: u8) -> Option<String> {
+    let Some(start) = text.find("${") else { return Some(text.to_owned()) };
+    if depth == 0 {
+        return None;
+    }
+    let mut level = 0;
+    let mut close = None;
+    for (i, c) in text[start..].char_indices() {
+        match c {
+            '$' if text[start + i..].starts_with("${") => level += 1,
+            '}' => {
+                level -= 1;
+                if level == 0 {
+                    close = Some(start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let body = &text[start + 2..close];
+    let (key, default) = match body.split_once(':') {
+        Some((key, default)) if !key.contains("${") => (key, Some(default)),
+        _ => (body, None),
+    };
+    let value = match props.get(&config::canonical(key.trim())) {
+        Some(value) => expand(value, props, depth - 1)?,
+        None => expand(default?, props, depth - 1)?,
+    };
+    let rest = expand(&text[close + 1..], props, depth)?;
+    Some(format!("{}{value}{rest}", &text[..start]))
+}
+
+/// The endpoint with its placeholders resolved; `None` when they can't be, or the name isn't one destination.
+fn resolved(mut e: Endpoint, props: &Props) -> Option<Endpoint> {
+    if e.name.contains("${") {
+        e.name = expand(&e.name, props, 2)?;
+        if e.name.is_empty() || e.name.contains([',', ' ', '$', '#']) {
+            return None;
+        }
+    }
+    Some(e)
+}
+
 fn location(path: &str, e: &Endpoint) -> Location {
     Location { path: path.to_owned(), range: e.range }
 }
@@ -320,20 +432,38 @@ type Destinations<'a> = BTreeMap<(&'a str, &'static str), Vec<(&'a str, &'a Endp
 
 pub struct Messaging {
     index: Indexes<Vec<Endpoint>>,
+    config: Indexes<Vec<(String, String)>>,
     expansion: Expansion,
 }
 
+const CONFIG_GLOBS: [&str; 6] = [
+    "**/application*.properties",
+    "**/application*.yml",
+    "**/application*.yaml",
+    "**/bootstrap*.properties",
+    "**/bootstrap*.yml",
+    "**/bootstrap*.yaml",
+];
+
 impl Default for Messaging {
     fn default() -> Self {
-        Self { index: Indexes::new(&["**/*.java"], parse), expansion: Expansion::default() }
+        Self {
+            index: Indexes::new(&["**/*.java", "**/*.xml"], parse),
+            config: Indexes::new(&CONFIG_GLOBS, parse_config),
+            expansion: Expansion::default() }
     }
 }
 
 impl Messaging {
     /// Every endpoint of the document's project, by file.
     fn endpoints(&mut self, doc: &Document) -> Vec<(String, Endpoint)> {
+        let Some(project) = project_of(&doc.path) else { return Vec::new() };
+        let props = props_of(self.config.get(&project, PROVIDER_BUDGET).iter());
         let Some(index) = self.index.for_document(&doc.path, &doc.text, PROVIDER_BUDGET) else { return Vec::new() };
-        index.iter().flat_map(|(p, es)| es.iter().map(move |e| (p.to_owned(), e.clone()))).collect()
+        index
+            .iter()
+            .flat_map(|(p, es)| es.iter().filter_map(|e| resolved(e.clone(), &props)).map(move |e| (p.to_owned(), e)))
+            .collect()
     }
 }
 
@@ -416,6 +546,7 @@ impl Views for Messaging {
         let Some(project) = ctx.project() else {
             return Ok(View::message("Open a project to see its messaging destinations."));
         };
+        let props = props_of(self.config.get(&project, COMMAND_BUDGET).iter());
         let index = self.index.get(&project, COMMAND_BUDGET);
         let complete = index.complete();
         if !complete {
@@ -423,10 +554,12 @@ impl Views for Messaging {
         }
         let refresh = Button::new("refresh", "Refresh").icon("refresh");
         let mut tree: BTreeMap<Broker, Destinations> = BTreeMap::new();
-        for (path, endpoints) in index.iter() {
-            for e in endpoints {
-                tree.entry(e.broker).or_default().entry((e.name.as_str(), e.space)).or_default().push((path, e));
-            }
+        let all: Vec<(&str, Endpoint)> = index
+            .iter()
+            .flat_map(|(path, es)| es.iter().filter_map(|e| resolved(e.clone(), &props)).map(move |e| (path, e)))
+            .collect();
+        for (path, e) in &all {
+            tree.entry(e.broker).or_default().entry((e.name.as_str(), e.space)).or_default().push((*path, e));
         }
         if tree.is_empty() {
             let text = if complete { "No Kafka, RabbitMQ or JMS destinations found." } else { "Scanning…" };
@@ -480,6 +613,7 @@ impl Views for Messaging {
                     && self.index.get(&project, Duration::ZERO).complete()
                 {
                     self.index.reset();
+                    self.config.reset();
                 }
                 host::refresh_view(view);
             }
@@ -561,7 +695,12 @@ class Mailer {
 "#;
 
     fn names(text: &str) -> Vec<(Broker, &'static str, String, Role, String)> {
-        parse("", text).unwrap().into_iter().map(|e| (e.broker, e.space, e.name, e.role, e.via)).collect()
+        parse("A.java", text)
+            .unwrap()
+            .into_iter()
+            .filter(|e| !e.name.contains("${"))
+            .map(|e| (e.broker, e.space, e.name, e.role, e.via))
+            .collect()
     }
 
     #[test]
@@ -697,5 +836,125 @@ class Mailer {
         m.index.get(&project, COMMAND_BUDGET);
         m.handle(VIEW, ViewEvent::Button("refresh".into()), &host.invocation()).unwrap();
         assert!(m.index.get(&project, Duration::ZERO).files().is_empty(), "a complete index starts over");
+    }
+
+    #[test]
+    fn expands_placeholders_to_depth_two() {
+        let props: Props = [("a.b", "x"), ("deep", "${a.b}"), ("deeper", "${deep}")]
+            .into_iter()
+            .map(|(k, v)| (config::canonical(k), v.to_owned()))
+            .collect();
+        let at = |t: &str| expand(t, &props, 2);
+        assert_eq!(at("${a.b}"), Some("x".into()));
+        assert_eq!(at("p-${A.B}-s"), Some("p-x-s".into()));
+        assert_eq!(at("${missing:dflt}"), Some("dflt".into()));
+        assert_eq!(at("${missing:${a.b}}"), Some("x".into()));
+        assert_eq!(at("${deep}"), Some("x".into()));
+        assert_eq!(at("${deeper}"), None, "three levels");
+        assert_eq!(at("${missing}"), None);
+    }
+
+    #[test]
+    fn listener_topic_placeholder_resolves_from_application_properties() {
+        let host = MockHost::install();
+        let listeners = r#"class L {
+    @KafkaListener(topics = "${app.topic-name}") void a(String s) {}
+    @RabbitListener(queues = "${app.queue:fallback-q}") void b(String s) {}
+    @JmsListener(destination = "${app.dest}") @SendTo("${app.reply}") String c(String s) { return s; }
+    @KafkaListener(topics = "${app.nope}") void d(String s) {}
+    @KafkaListener(topics = "${app.nope:${app.other}}") void e(String s) {}
+}
+"#;
+        let producers = r#"class P {
+    void go() {
+        kafkaTemplate.send("orders", "x");
+        rabbitTemplate.convertAndSend("fallback-q", "x");
+        jmsTemplate.convertAndSend("audit", "x");
+        kafkaTemplate.send("other-topic", "x");
+        kafkaTemplate.send("${app.nope}", "x");
+    }
+    @JmsListener(destination = "invoices") void inv(String s) {}
+}
+"#;
+        host.add_file("src/main/java/L.java", listeners);
+        host.add_file("src/main/java/P.java", producers);
+        host.add_file("src/main/resources/application-dev.properties", "app.topic-name=dev-orders\napp.dest=dev-audit\n");
+        host.add_file(
+            "src/main/resources/application.yml",
+            "app:\n  topicName: orders\n  dest: audit\n  reply: invoices\n  other: other-topic\n",
+        );
+        let mut m = Messaging::default();
+        let l = Document {
+            path: "/project/src/main/java/L.java".into(),
+            language: "java".into(),
+            version: 1,
+            text: listeners.into(),
+        };
+        let lines: Vec<_> = m.line_markers(&l).iter().map(|k| (k.line, k.tooltip.clone())).collect();
+        assert_eq!(
+            lines,
+            [
+                (1, "Kafka topic orders: P.java:3 (send)".to_owned()),
+                (2, "RabbitMQ queue fallback-q: P.java:4 (convertAndSend)".to_owned()),
+                (3, "JMS destination audit: P.java:5 (convertAndSend)".to_owned()),
+                (3, "JMS destination invoices: P.java:9 (@JmsListener)".to_owned()),
+                (5, "Kafka topic other-topic: P.java:6 (send)".to_owned()),
+            ],
+            "the unresolvable `${{app.nope}}` has no marker; application.yml beats the dev profile"
+        );
+        let p = Document {
+            path: "/project/src/main/java/P.java".into(),
+            language: "java".into(),
+            version: 1,
+            text: producers.into(),
+        };
+        let reply: Vec<_> = m.line_markers(&p).iter().map(|k| k.line).collect();
+        assert_eq!(reply, [2, 3, 4, 5, 8], "producers to resolved consumers; `invoices` meets the resolved @SendTo");
+    }
+
+    #[test]
+    fn xml_listener_container_links_to_bean() {
+        let host = MockHost::install();
+        let xml = r#"<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:jms="http://www.springframework.org/schema/jms"
+       xmlns:rabbit="http://www.springframework.org/schema/rabbit">
+    <jms:listener-container connection-factory="cf">
+        <jms:listener destination="audit" ref="auditBean" method="handle"/>
+    </jms:listener-container>
+    <rabbit:listener-container connection-factory="rcf">
+        <rabbit:listener queue-names="mails, other-q" ref="mailBean" method="onMail"/>
+    </rabbit:listener-container>
+</beans>
+"#;
+        let java = r#"class P {
+    void go() {
+        jmsTemplate.convertAndSend("audit", "x");
+        rabbitTemplate.convertAndSend("mails", "x");
+    }
+}
+"#
+        .to_owned();
+        host.add_file("src/main/resources/beans.xml", xml);
+        host.add_file("src/main/java/P.java", &java);
+        let mut m = Messaging::default();
+        let x = Document {
+            path: "/project/src/main/resources/beans.xml".into(),
+            language: "xml".into(),
+            version: 1,
+            text: xml.into(),
+        };
+        let markers = m.line_markers(&x);
+        let found: Vec<_> = markers.iter().map(|k| (k.line, k.tooltip.clone())).collect();
+        assert_eq!(
+            found,
+            [
+                (4, "JMS destination audit: P.java:3 (convertAndSend)".to_owned()),
+                (7, "RabbitMQ queue mails: P.java:4 (convertAndSend)".to_owned()),
+            ]
+        );
+        let j = Document { path: "/project/src/main/java/P.java".into(), language: "java".into(), version: 1, text: java };
+        let back: Vec<_> = m.line_markers(&j).iter().map(|k| (k.line, k.tooltip.clone())).collect();
+        assert_eq!(back[0].1, "JMS destination audit: beans.xml:5 (<jms:listener>)");
+        assert_eq!(back[1].1, "RabbitMQ queue mails: beans.xml:8 (<rabbit:listener>)");
     }
 }

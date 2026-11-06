@@ -15,7 +15,7 @@ required = ["project.read"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers"]
-languages = ["java"]
+languages = ["java", "xml"]
 
 [[contributes.views]]
 id = "messaging"
