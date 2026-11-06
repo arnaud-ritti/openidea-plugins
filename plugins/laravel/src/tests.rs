@@ -1651,7 +1651,7 @@ fn rewrites_applied_twice_do_not_duplicate_imports() {
     let once = apply_titled(&mut plugin, NEW_RULES, "php", text, "in:a", "Convert to Rule::in(['a', 'b'])");
     let twice = apply_titled(&mut plugin, NEW_RULES, "php", &once, "not_in:c", "Convert to Rule::notIn(['c'])");
     assert_eq!(twice.matches("use Illuminate\\Validation\\Rule;").count(), 1);
-    assert!(twice.contains("Rule::in(['a', 'b'], ") || twice.contains("Rule::in(['a', 'b'])"));
+    assert!(twice.contains("Rule::in(['a', 'b'])"));
     assert!(twice.contains("Rule::notIn(['c'])"));
 
     let facade = apply_titled(&mut plugin, NEW_RULES, "php", "<?php\nnamespace App;\n\nRoute::get('/');\nRoute::post('/');\n", "Route::get", "Import Illuminate\\Support\\Facades\\Route");
@@ -1677,4 +1677,36 @@ fn new_rewrites_survive_multibyte_text_and_crlf() {
     let rules = "<?php\r\n$request->validate(['é' => 'a|b', 'x' => 'c|d']);\r\n";
     let result = apply_titled(&mut plugin, NEW_RULES, "php", rules, "a|b", "Convert all validation rules in this array to arrays");
     assert_eq!(result, "<?php\r\n$request->validate(['é' => ['a', 'b'], 'x' => ['c', 'd']]);\r\n");
+}
+
+#[test]
+fn context_facade_imports_from_the_facades_namespace() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App;\n\nContext::add('a', 1);\n";
+    let result = apply_titled(&mut plugin, NEW_RULES, "php", text, "Context::", "Import Illuminate\\Support\\Facades\\Context");
+    assert!(result.contains("use Illuminate\\Support\\Facades\\Context;"));
+}
+
+#[test]
+fn root_facade_ignores_longer_class_names_but_not_a_declared_one() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    for (declared, call) in [("AppServiceProvider", "App"), ("RouteServiceProvider", "Route"), ("Authenticate", "Auth"), ("LogController", "Log")] {
+        let text = format!("<?php\nnamespace App;\n\nclass {declared}\n{{\n    function f() {{ return {call}::x(); }}\n}}\n");
+        let marker = format!("{call}::x");
+        assert_eq!(rewrite_titles(&mut plugin, NEW_RULES, "php", &text, &marker).len(), 1, "{declared}");
+    }
+    for keyword in ["class", "interface", "trait", "enum"] {
+        let text = format!("<?php\nnamespace App;\n\n{keyword} Route {{}}\nRoute::x();\n");
+        assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", &text, "Route::x").is_empty(), "{keyword}");
+    }
+}
+
+#[test]
+fn rule_object_is_quiet_when_a_rule_class_is_declared_in_the_file() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nnamespace App;\n\nclass Rule {}\n$request->validate(['f' => ['required', 'in:a,b']]);\n";
+    assert!(rewrite_titles(&mut plugin, NEW_RULES, "php", text, "in:a").iter().all(|t| !t.starts_with("Convert to Rule::")));
 }

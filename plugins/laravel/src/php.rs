@@ -281,7 +281,7 @@ pub fn insert_use(text: &str, fqcn: &str) -> Option<UseEdit> {
         return Some(UseEdit { offset: 0, text: String::new(), short_name: import.alias.clone() });
     }
 
-    if header.imports.iter().any(|(import, _)| import.alias == short) {
+    if header.imports.iter().any(|(import, _)| import.alias.eq_ignore_ascii_case(short)) {
         return None;
     }
 

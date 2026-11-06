@@ -12,12 +12,12 @@ pub struct Rewrite {
 }
 
 const FACADES: &[&str] = &[
-    "App", "Artisan", "Auth", "Blade", "Broadcast", "Bus", "Cache", "Config", "Cookie", "Crypt", "Date", "DB", "Event", "File", "Gate", "Hash", "Http", "Lang",
+    "App", "Artisan", "Auth", "Blade", "Broadcast", "Bus", "Cache", "Config", "Context", "Cookie", "Crypt", "Date", "DB", "Event", "File", "Gate", "Hash", "Http", "Lang",
     "Log", "Mail", "Notification", "Password", "Process", "Queue", "RateLimiter", "Redirect", "Request", "Response", "Route", "Schema", "Session", "Storage",
     "URL", "Validator", "View", "Vite",
 ];
 
-const SUPPORT_HELPERS: &[&str] = &["Str", "Arr", "Number", "Js", "Uri", "Context"];
+const SUPPORT_HELPERS: &[&str] = &["Str", "Arr", "Number", "Js", "Uri"];
 
 pub fn rewrites(path: &str, language: &str, text: &str, at: usize, controllers_namespace: &str) -> Vec<Rewrite> {
     let mut found = Vec::new();
@@ -33,14 +33,19 @@ pub fn rewrites(path: &str, language: &str, text: &str, at: usize, controllers_n
                 found.extend(rules_array(text, literal.clone()));
                 found.extend(rules_all_arrays(text, literal));
             }
-            Kind::Action => found.extend(controller_array(text, literal, controllers_namespace)),
-            Kind::Controller => found.extend(controller_class(text, literal, controllers_namespace)),
+            Kind::Action => {
+                found.extend(controller_array(text, literal, controllers_namespace));
+                found.extend(controller_calls_all(language, text, at, controllers_namespace));
+            }
+            Kind::Controller => {
+                found.extend(controller_class(text, literal, controllers_namespace));
+                found.extend(controller_calls_all(language, text, at, controllers_namespace));
+            }
             _ => {}
         }
     }
 
     if language == "php" {
-        found.extend(controller_calls_all(language, text, at, controllers_namespace));
         found.extend(rule_object(language, text, at));
         found.extend(root_facade(text, at));
     }
@@ -207,6 +212,10 @@ fn rule_object(language: &str, text: &str, at: usize) -> Option<Rewrite> {
         return None;
     }
 
+    if declares_class(&php::mask_comments(text), "Rule") {
+        return None;
+    }
+
     let import = php::insert_use(text, "Illuminate\\Validation\\Rule")?;
     let rule = &import.short_name;
     let quoted = |arguments: &[&str]| arguments.iter().map(|argument| format!("'{argument}'")).collect::<Vec<_>>().join(", ");
@@ -223,6 +232,24 @@ fn rule_object(language: &str, text: &str, at: usize) -> Option<Rewrite> {
     }
 
     Some(Rewrite { title: format!("Convert to {call}"), kind: "refactor.rewrite", edits })
+}
+
+fn declares_class(masked: &str, name: &str) -> bool {
+    let words: Vec<(usize, &str)> = masked
+        .match_indices(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        .fold(Vec::<(usize, &str)>::new(), |mut words, (at, _)| {
+            match words.last_mut() {
+                Some((start, word)) if *start + word.len() == at => *word = &masked[*start..at + 1],
+                _ => words.push((at, &masked[at..at + 1])),
+            }
+            words
+        });
+
+    words.windows(2).any(|pair| {
+        let (at, keyword) = pair[0];
+        let declares = matches!(keyword, "class" | "interface" | "trait" | "enum") && !masked[..at].trim_end().ends_with("::");
+        declares && pair[1].1 == name
+    })
 }
 
 fn root_facade(text: &str, at: usize) -> Option<Rewrite> {
@@ -246,7 +273,7 @@ fn root_facade(text: &str, at: usize) -> Option<Rewrite> {
     };
 
     let declares_namespace = masked.lines().any(|line| line.trim_start().starts_with("namespace "));
-    if !declares_namespace || masked.contains(&format!("class {name}")) {
+    if !declares_namespace || declares_class(&masked, name) {
         return None;
     }
 
