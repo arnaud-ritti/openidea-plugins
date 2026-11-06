@@ -4,9 +4,9 @@ version = "0.1.0" # x-release-please-version
 description = "Flyway database migrations in OpenIDEA. Checks migration file names (V, U, R and B prefixes, version, separator, suffix, as configured in flyway.toml, flyway.conf or spring.flyway.*) and reports duplicate versions across migration locations. Copies the next migration version, runs Flyway info, validate, migrate, repair and clean (CLI or Maven) in a terminal, and completes ${…} placeholders in SQL and keys in flyway.conf and flyway.toml. Independent implementation, not affiliated with JetBrains or Redgate."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0: first release. Migration name and duplicate version checks on open and save and with Flyway: Check Migrations; Copy Next Migration Version; info, validate, migrate, repair and clean in a terminal (flyway or mvn); completion of placeholders in SQL and of keys in flyway.conf and flyway.toml."
+change-notes = "Project-wide Go to Declaration and gutter markers from the document index: entity and migration tables (@Entity, @Table(name), CREATE TABLE in V/U/R migrations) and ${placeholder} to its flyway.conf or flyway.toml entry. Flyway: Clean asks for confirmation in a dialog (older hosts: run it twice within 30 seconds). 0.1.0: first release. Migration name and duplicate version checks on open and save and with Flyway: Check Migrations; Copy Next Migration Version; info, validate, migrate, repair and clean in a terminal (flyway or mvn); completion of placeholders in SQL and of keys in flyway.conf and flyway.toml."
 categories = ["frameworks", "linters"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved", "on-view:migrations"]
 
@@ -78,10 +78,13 @@ files = ["flyway.toml", "flyway.conf"]
 command = "flyway"
 args = ["migrate"]
 
+[[contributes.documentIndexers]]
+extensions = ["sql", "conf", "toml", "java", "kt"]
+
 [[contributes.views]]
 id = "migrations"
 title = "Flyway Migrations"
-icon = "database"
+icon = "icons/flyway.svg"
 location = "bottom"
 
 [contributes.settings]

@@ -6,6 +6,7 @@
 mod checks;
 mod complete;
 mod config;
+mod indexer;
 mod info;
 mod naming;
 
@@ -16,7 +17,7 @@ use openidea_plugin::host;
 use openidea_plugin::providers::{CompletionItem, Document, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project, register_plugin};
+use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project};
 use spring_text::config::is_config_file;
 use spring_text::index::project_of;
 
@@ -156,18 +157,33 @@ impl Flyway {
         Ok(())
     }
 
+    fn clean_confirmed(&mut self) -> Result<bool, Error> {
+        match host::confirm(
+            "Flyway: Clean",
+            "Clean drops every object in the schemas Flyway manages. Run it?",
+        ) {
+            Ok(confirmed) => Ok(confirmed),
+            Err(Error::Invalid(_)) => Ok(self.confirmed_by_rerun()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn confirmed_by_rerun(&mut self) -> bool {
+        let confirmed = self.clean_asked.take().is_some_and(|asked| asked.elapsed() < Duration::from_secs(30));
+        if !confirmed {
+            self.clean_asked = Some(Instant::now());
+            host::notify(
+                NotificationLevel::Warning,
+                TITLE,
+                "Clean drops every object in the schemas Flyway manages. Run Flyway: Clean (Drops All Objects)… again within 30 seconds to confirm.",
+            );
+        }
+        confirmed
+    }
+
     fn run_flyway(&mut self, goal: &str) -> Result<Option<String>, Error> {
-        if goal == "clean" {
-            let confirmed = self.clean_asked.take().is_some_and(|asked| asked.elapsed() < Duration::from_secs(30));
-            if !confirmed {
-                self.clean_asked = Some(Instant::now());
-                host::notify(
-                    NotificationLevel::Warning,
-                    TITLE,
-                    "Clean drops every object in the schemas Flyway manages. Run Flyway: Clean (Drops All Objects)… again within 30 seconds to confirm.",
-                );
-                return Ok(None);
-            }
+        if goal == "clean" && !self.clean_confirmed()? {
+            return Ok(None);
         }
 
         let (program, args) = runner_args(goal, false);
@@ -343,7 +359,18 @@ impl Views for Flyway {
     }
 }
 
-register_plugin!(Flyway, providers, views);
+// `register_plugin!` has no arm for providers, views and indexing together.
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn() -> Flyway = <Flyway as Default>::default;
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    struct Component;
+    openidea_plugin::__plugin_exports!(Flyway, Component, openidea_plugin::bindings);
+    openidea_plugin::__providers_exports!(Flyway, Component);
+    openidea_plugin::__views_exports!(Flyway, Component);
+    openidea_plugin::__indexing_exports!(Flyway, Component);
+    openidea_plugin::bindings::__export_plugin_world!(Component with_types_in openidea_plugin::bindings);
+};
 
 #[cfg(test)]
 mod tests {
@@ -496,19 +523,25 @@ mod tests {
     fn clean_runs_only_when_confirmed() {
         let host = host();
         let mut flyway = Flyway::default();
+
+        host.answer_next_prompt(None);
         flyway.run_command("clean", &host.invocation(), None).unwrap();
         assert!(host.terminals().is_empty());
-        assert_eq!(host.notifications()[0].level, NotificationLevel::Warning);
-        assert_eq!(
-            host.notifications()[0].body,
-            "Clean drops every object in the schemas Flyway manages. Run Flyway: Clean (Drops All Objects)… again within 30 seconds to confirm."
-        );
 
+        host.answer_next_prompt(Some(&[]));
         flyway.run_command("clean", &host.invocation(), None).unwrap();
         assert_eq!(host.terminals()[0].args, ["clean"]);
+    }
 
-        flyway.run_command("clean", &host.invocation(), None).unwrap();
-        assert_eq!(host.terminals().len(), 1, "confirmation is used up");
+    #[test]
+    fn clean_asks_twice_when_the_host_cannot_confirm() {
+        let host = host();
+        let mut flyway = Flyway::default();
+
+        assert!(!flyway.confirmed_by_rerun());
+        assert_eq!(host.notifications()[0].level, NotificationLevel::Warning);
+        assert!(flyway.confirmed_by_rerun());
+        assert!(!flyway.confirmed_by_rerun(), "confirmation is used up");
     }
 
     #[test]
