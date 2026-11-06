@@ -7,6 +7,7 @@
 
 mod checks;
 mod config_checks;
+mod doctrine;
 mod index;
 mod intentions;
 mod php_checks;
@@ -369,7 +370,6 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
 
 /// Which groups of the text inspections in `checks.rs` are switched on.
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // the groups added after this foundation are read by their checks
 struct Groups {
     controllers: bool,
     services: bool,
@@ -457,6 +457,10 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
 
     if groups.deprecations && language == "php" {
         findings.extend(php_checks::deprecations(&ctx, text));
+    }
+
+    if groups.doctrine {
+        findings.extend(doctrine::check(path, language, text));
     }
 
     findings

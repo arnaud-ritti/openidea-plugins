@@ -118,6 +118,23 @@ extensions). Template paths after `extends`, `include`, `embed`, `import`,
     `#[AsTaggedItem]`); `from-callable-option`, `alias`, `parent`,
     `synthetic`, `file`, `arguments`, `properties`, `configurator` or `calls`
     next to `from_callable` in one PHP-array service (YAML is not checked).
+  - _Doctrine_ (`doctrineChecks`, PHP attributes, `*.orm.xml`, `*.orm.yml|yaml`;
+    written from the Doctrine ORM documentation, not from the Symfony Plugin's
+    source). PHP files count only when they import `Doctrine\ORM\Mapping` (or
+    a member of it, aliases followed): `orm-empty-table` (hint), `#[Table]`
+    with no arguments or `name: ''`; `orm-table-deprecated-property`
+    (warning), `indexes:` or `uniqueConstraints:` in `#[Table(...)]`
+    (deprecated since ORM 3.2, use `#[Index]` / `#[UniqueConstraint]`);
+    `orm-lifecycle-callbacks-missing` (warning), a lifecycle attribute
+    (`PrePersist`, `PostPersist`, `PreUpdate`, `PostUpdate`, `PreRemove`,
+    `PostRemove`, `PostLoad`, `PreFlush`) in an `#[Entity]` or
+    `#[MappedSuperclass]` class without `#[HasLifecycleCallbacks]`;
+    `orm-one-to-many-mapped-by` (warning), `#[OneToMany]` without `mappedBy`
+    and without a `#[JoinTable]` on the property; `orm-inverse-side-join-column`
+    (hint), `#[JoinColumn]` next to `#[OneToOne(mappedBy: ...)]`;
+    `orm-join-column-nullable` (hint), an explicit `nullable: true` (the
+    default) on a join column in PHP, XML (`<join-column>`) or YAML
+    (`joinColumn` / `joinColumns`).
 - Quick fixes (⌥⏎): on a missing translation key, add it to one of the domain's
   YAML files; on an unquoted `@` / `%` YAML value, quote it; on an unescaped backslash in a
   double-quoted YAML string, double it. Quick fixes follow the check settings.

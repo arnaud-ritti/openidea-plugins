@@ -37,7 +37,6 @@ impl Finding {
         Finding::with_severity(range, code, message, Severity::Hint)
     }
 
-    #[allow(dead_code)] // used by the checks added after this foundation
     pub(crate) fn error(range: Range<usize>, code: &'static str, message: String) -> Finding {
         Finding::with_severity(range, code, message, Severity::Error)
     }

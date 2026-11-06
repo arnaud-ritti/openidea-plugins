@@ -25,7 +25,7 @@ fn reached(index: &Index, gate: (u32, u32)) -> bool {
 }
 
 /// Offsets of the top-level arguments of the call whose `(` is at `open`.
-fn arguments(masked: &str, open: usize) -> Vec<Range<usize>> {
+pub(crate) fn arguments(masked: &str, open: usize) -> Vec<Range<usize>> {
     let Some(close) = matching_close(masked, open) else { return Vec::new() };
     let mut found = Vec::new();
     let mut depth = 0usize;
@@ -51,14 +51,14 @@ fn arguments(masked: &str, open: usize) -> Vec<Range<usize>> {
     found
 }
 
-fn trimmed(text: &str, range: Range<usize>) -> Range<usize> {
+pub(crate) fn trimmed(text: &str, range: Range<usize>) -> Range<usize> {
     let slice = &text[range.clone()];
     let start = range.start + (slice.len() - slice.trim_start().len());
     start..start + slice.trim().len()
 }
 
 /// The argument written as `name: value`: the ranges of the name and the value.
-fn named(masked: &str, argument: Range<usize>) -> Option<(Range<usize>, Range<usize>)> {
+pub(crate) fn named(masked: &str, argument: Range<usize>) -> Option<(Range<usize>, Range<usize>)> {
     let range = trimmed(masked, argument);
     let name = read_word(masked, range.start);
     let after = skip_whitespace(masked, name.end);
