@@ -1203,3 +1203,35 @@ fn inertia_page_extensions_vue_jsx_tsx_svelte() {
     let names = js_complete(&mut plugin, "/project/app/Http/Controllers/X.php", "php", "<?php inertia('|');");
     assert_eq!(names, ["A", "B", "C", "D"]);
 }
+
+fn route_names(marked: &str) -> Vec<String> {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    js_complete(&mut plugin, "/project/resources/js/a.js", "javascript", marked)
+}
+
+#[test]
+fn glob_line_above_a_route_call_does_not_disable_completion() {
+    let marked = "const pages = import.meta.glob('./Pages/**/*.vue');\nroute('|')";
+    assert_eq!(route_names(marked), ROUTES);
+}
+
+#[test]
+fn url_with_double_slash_in_a_string_does_not_make_a_comment() {
+    assert_eq!(route_names("const u = 'https://example.test'; route('|')"), ROUTES);
+}
+
+#[test]
+fn real_block_comment_still_silences() {
+    assert!(route_names("/* note\n route('|') */").is_empty());
+}
+
+#[test]
+fn real_line_comment_still_silences() {
+    assert!(route_names("// route('|')").is_empty());
+}
+
+#[test]
+fn template_literal_interpolation_is_quiet() {
+    assert!(route_names("route(`a${x}|`)").is_empty());
+}

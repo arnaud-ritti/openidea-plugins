@@ -538,6 +538,10 @@ fn directive_items(index: &Index, replace: Range) -> Vec<CompletionItem> {
 
 impl Main {
     fn script_completion(&self, doc: &Document, at: Position) -> Vec<CompletionItem> {
+        if !js::mentions_route(&doc.text) {
+            return Vec::new();
+        }
+
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
         let Some(name) = js::route_name_at(&doc.text, offset) else { return Vec::new() };
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
@@ -556,6 +560,10 @@ impl Main {
     }
 
     fn script_definition(&self, doc: &Document, at: Position) -> Vec<Location> {
+        if !js::mentions_route(&doc.text) {
+            return Vec::new();
+        }
+
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
         let Some(name) = js::route_name_at(&doc.text, offset) else { return Vec::new() };
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
