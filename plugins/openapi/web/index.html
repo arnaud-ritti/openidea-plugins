@@ -8,9 +8,11 @@
       body { margin: 0; background: #fff; }
       /* ponytail: Swagger UI has no dark theme; inverted colours until a real one is worth the CSS. */
       :root[data-theme="dark"] body { filter: invert(0.9) hue-rotate(180deg); }
+      #reload { position: fixed; top: 8px; right: 16px; z-index: 10; }
     </style>
   </head>
   <body>
+    <button id="reload" type="button">Reload</button>
     <div id="swagger"></div>
     <script src="./vendor/swagger-ui-bundle.js"></script>
     <script src="./main.js"></script>

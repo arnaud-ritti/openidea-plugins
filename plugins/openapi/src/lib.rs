@@ -248,6 +248,53 @@ impl Plugin for OpenApi {
     }
 }
 
+fn is_spec_name(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if !matches!(extension, "yaml" | "yml" | "json") {
+        return false;
+    }
+
+    ["openapi", "swagger"].iter().any(|word| stem == *word || stem.ends_with(&format!(".{word}")))
+}
+
+const SKELETONS: [(&str, &str, &str, &str); 3] = [
+    (
+        "openapi-path",
+        "A path item with a get operation and a 200 response",
+        "/${1:path}:\n  get:\n    summary: ${2:Summary}\n    responses:\n      '200':\n        description: ${3:OK}\n$0",
+        "\"/${1:path}\": {\n  \"get\": {\n    \"summary\": \"${2:Summary}\",\n    \"responses\": {\n      \"200\": {\n        \"description\": \"${3:OK}\"\n      }\n    }\n  }\n}$0",
+    ),
+    (
+        "openapi-operation",
+        "An operation with summary, operationId, parameters and responses",
+        "${1:get}:\n  summary: ${2:Summary}\n  operationId: ${3:operationId}\n  parameters:\n    - name: ${4:id}\n      in: ${5:query}\n      schema:\n        type: string\n  responses:\n    '200':\n      description: ${6:OK}\n$0",
+        "\"${1:get}\": {\n  \"summary\": \"${2:Summary}\",\n  \"operationId\": \"${3:operationId}\",\n  \"parameters\": [\n    {\n      \"name\": \"${4:id}\",\n      \"in\": \"${5:query}\",\n      \"schema\": {\n        \"type\": \"string\"\n      }\n    }\n  ],\n  \"responses\": {\n    \"200\": {\n      \"description\": \"${6:OK}\"\n    }\n  }\n}$0",
+    ),
+    (
+        "swagger2-root",
+        "A Swagger 2.0 root with info and paths",
+        "swagger: \"2.0\"\ninfo:\n  title: ${1:API}\n  version: ${2:1.0.0}\npaths:\n  $0",
+        "{\n  \"swagger\": \"2.0\",\n  \"info\": {\n    \"title\": \"${1:API}\",\n    \"version\": \"${2:1.0.0}\"\n  },\n  \"paths\": {\n    $0\n  }\n}",
+    ),
+];
+
+fn skeleton_items(doc: &Document) -> Vec<CompletionItem> {
+    let json = doc.path.ends_with(".json") || spec::is_json(&doc.text);
+    SKELETONS
+        .iter()
+        .map(|(label, detail, yaml_body, json_body)| {
+            let mut item = CompletionItem::new(label, CompletionKind::Snippet);
+            item.detail = Some((*detail).to_owned());
+            item.insert_text = (if json { json_body } else { yaml_body }).to_string();
+            item.snippet = true;
+            item
+        })
+        .collect()
+}
+
 fn ref_at(text: &str, at: Position) -> Option<spec::Ref> {
     let at = offset(text, at)?;
     spec::refs(text).into_iter().find(|r| r.at <= at && at <= r.end)
@@ -259,12 +306,12 @@ fn read_sibling(doc: &Document, file: &str) -> Option<String> {
 
 impl Providers for OpenApi {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
-        if !spec::maybe_spec(&doc.text) {
+        if !spec::maybe_spec(&doc.text) && !is_spec_name(&doc.path) {
             return Vec::new();
         }
 
         let Some(typed) = ref_at(&doc.text, at) else {
-            return Vec::new();
+            return skeleton_items(doc);
         };
         let Some((file, _)) = spec::split_ref(&typed.target) else {
             return Vec::new();
@@ -544,7 +591,8 @@ mod tests {
         let plain = "kind: Pod\nx:\n  $ref: '#/\n";
         assert!(OpenApi::default().completion(&doc(plain), at(plain, "#/", 2), None).is_empty());
         assert!(OpenApi::default().code_actions(&doc(plain), Range::default()).is_empty());
-        assert!(OpenApi::default().completion(&doc(PETSTORE), at(PETSTORE, "title", 0), None).is_empty());
+        let outside_a_ref = OpenApi::default().completion(&doc(PETSTORE), at(PETSTORE, "title", 0), None);
+        assert!(outside_a_ref.iter().all(|i| i.kind == Some(CompletionKind::Snippet)));
     }
 
     #[test]
@@ -1004,5 +1052,83 @@ mod tests {
         for error in [Error::NotFound("x".into()), Error::Invalid("/project/x.yaml: no such file".into())] {
             assert!(matches!(fetch(Err(error)), Fetched::Missing));
         }
+    }
+
+    fn named(path: &str, text: &str) -> Document {
+        Document { path: path.into(), language: "yaml".into(), version: 1, text: text.into() }
+    }
+
+    fn skeletons(path: &str, text: &str) -> Vec<CompletionItem> {
+        OpenApi::default().completion(&named(path, text), position(text, text.len()), None)
+    }
+
+    #[test]
+    fn skeleton_items_are_offered_in_a_spec_yaml_and_json() {
+        let _host = MockHost::install();
+        let yaml = skeletons("/project/openapi.yaml", "openapi: 3.0.0\n");
+        let labels: Vec<_> = yaml.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["openapi-path", "openapi-operation", "swagger2-root"]);
+        assert!(yaml.iter().all(|i| i.kind == Some(CompletionKind::Snippet) && i.snippet && i.insert_text.contains("$0")));
+        assert!(yaml[0].insert_text.contains("\n  get:\n") && yaml[0].insert_text.contains("'200':"));
+        assert!(yaml[1].insert_text.contains("operationId: ${") && yaml[1].insert_text.contains("parameters:"));
+        assert!(yaml[2].insert_text.starts_with("swagger: \"2.0\"\ninfo:\n"));
+
+        let json_text = "{\"openapi\": \"3.0.0\"}";
+        let json = skeletons("/project/openapi.json", json_text);
+        for item in &json {
+            let body = item.insert_text.replace("$0", "").replace("${1:", "").replace("${2:", "").replace("${3:", "");
+            let body = body.replace("}\"", "\"");
+            assert!(item.insert_text.contains("$0"), "{}", item.label);
+            assert!(!body.trim_start().starts_with("swagger:"), "{}", item.label);
+        }
+        let swagger = json.iter().find(|i| i.label == "swagger2-root").unwrap();
+        let plain = swagger.insert_text.replace("$0", "").replace("${1:API}", "API").replace("${2:1.0.0}", "1.0.0");
+        let paths: Vec<_> = crate::json::keys(&plain).into_iter().map(|k| k.key).collect();
+        assert!(["swagger", "info", "info.title", "info.version", "paths"].iter().all(|k| paths.iter().any(|p| p == k)), "{paths:?}");
+        assert!(json.iter().find(|i| i.label == "openapi-path").unwrap().insert_text.contains("\"get\": {"));
+    }
+
+    #[test]
+    fn skeletons_are_offered_in_an_empty_openapi_named_file() {
+        let _host = MockHost::install();
+        for path in ["/p/openapi.yaml", "/p/swagger.json", "/p/pets.openapi.yml", "/p/pets.swagger.json"] {
+            assert_eq!(skeletons(path, "").len(), 3, "{path}");
+        }
+    }
+
+    #[test]
+    fn skeletons_are_quiet_in_unrelated_yaml_and_json() {
+        let _host = MockHost::install();
+        assert!(skeletons("/p/docker-compose.yml", "services:\n  web:\n    image: nginx\n").is_empty());
+        assert!(skeletons("/p/package.json", "{\"name\": \"x\"}").is_empty());
+        assert!(skeletons("/p/docker-compose.yml", "").is_empty());
+    }
+
+    #[test]
+    fn skeletons_do_not_hide_ref_completion() {
+        let _host = MockHost::install();
+        let text = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: {}\nx:\n  $ref: '#/comp";
+        let items = skeletons("/project/openapi.yaml", text);
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|i| i.kind == Some(CompletionKind::Reference)));
+    }
+
+    #[test]
+    fn skeletons_ignore_the_trigger_character() {
+        let _host = MockHost::install();
+        let text = "openapi: 3.0.0\n";
+        let d = named("/project/openapi.yaml", text);
+        let with = OpenApi::default().completion(&d, position(text, text.len()), Some("/"));
+        assert_eq!(with, skeletons("/project/openapi.yaml", text));
+    }
+
+    #[test]
+    fn preview_page_has_a_reload_button() {
+        let html = include_str!("../web/index.html");
+        let js = include_str!("../web/main.js");
+        assert!(html.contains("id=\"reload\""));
+        assert!(js.contains("getElementById(\"reload\")"));
+        assert!(js.contains("known = \"\""));
+        assert!(js.contains("document.get().then((doc) => render(doc.text))"));
     }
 }
