@@ -6,7 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0 (first release): XML job navigation, completion and transition/bean checks, spring.batch.job.name navigation, Spring Batch 5 builder factory and @EnableBatchProcessing hints."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [
     "on-language:java",
@@ -31,7 +31,7 @@ languages = ["java"]
 [[contributes.views]]
 id = "diagram"
 title = "Batch Jobs"
-icon = "hierarchy"
+icon = "icons/spring.svg"
 location = "bottom"
 
 [contributes.settings]
