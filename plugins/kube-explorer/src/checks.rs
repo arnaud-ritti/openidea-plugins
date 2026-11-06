@@ -265,11 +265,11 @@ pub fn chart_schema(text: &str) -> Vec<Finding> {
                 found.push(Finding::new(range.start, range.end, CHART_UNKNOWN_KEY, message));
                 continue;
             }
-            let Some(value) = value.as_ref().filter(|value| !value.text.is_empty()) else { continue };
+            let Some(value) = value.as_ref().filter(|value| !is_null(&value.text)) else { continue };
             let message = match key.as_str() {
                 "apiVersion" if !["v1", "v2"].contains(&value.text.as_str()) => "Chart `apiVersion` must be `v1` or `v2`.",
                 "type" if !["application", "library"].contains(&value.text.as_str()) => "Chart `type` must be `application` or `library`.",
-                "deprecated" if !["true", "false"].contains(&value.text.as_str()) => "Chart `deprecated` must be `true` or `false`.",
+                "deprecated" if !is_yaml_bool(&value.text) => "Chart `deprecated` must be `true` or `false`.",
                 "version" if !value.text.strip_prefix('v').unwrap_or(&value.text).starts_with(|c: char| c.is_ascii_digit()) => {
                     "Chart `version` must be a semantic version such as `1.2.3`."
                 }
@@ -279,6 +279,15 @@ pub fn chart_schema(text: &str) -> Vec<Finding> {
         }
     }
     found
+}
+
+fn is_null(text: &str) -> bool {
+    text.is_empty() || text == "~" || text.eq_ignore_ascii_case("null")
+}
+
+/// YAML 1.1 booleans, which Helm's parser accepts.
+fn is_yaml_bool(text: &str) -> bool {
+    ["true", "false", "yes", "no", "on", "off"].iter().any(|word| text.eq_ignore_ascii_case(word))
 }
 
 fn is_output_action(body: &str) -> bool {
@@ -673,9 +682,32 @@ mod tests {
 
     #[test]
     fn chart_deprecated_must_be_boolean() {
-        assert_eq!(chart_highlighted(&format!("{CHART}deprecated: yes\n"), CHART_INVALID_VALUE), ["yes"]);
-        assert!(chart_codes(&format!("{CHART}deprecated: true\n")).is_empty());
-        assert!(chart_codes(&format!("{CHART}deprecated: false\n")).is_empty());
+        assert_eq!(chart_highlighted(&format!("{CHART}deprecated: maybe\n"), CHART_INVALID_VALUE), ["maybe"]);
+        for ok in ["true", "false", "yes", "no", "on", "off", "True", "FALSE", "Yes", "NO", "On", "oFF"] {
+            assert!(chart_codes(&format!("{CHART}deprecated: {ok}\n")).is_empty(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn chart_null_version_is_treated_as_empty() {
+        for empty in ["~", "null"] {
+            assert!(chart_codes(&format!("apiVersion: v2\nname: a\nversion: {empty}\n")).is_empty(), "{empty}");
+        }
+    }
+
+    #[test]
+    fn chart_lines_with_tabs_or_spaced_quoted_keys_keep_utf16_columns() {
+        for (line, code, columns) in [
+            ("\té😀: red", CHART_UNKNOWN_KEY, (1, 4)),
+            ("\" é😀\": red", CHART_UNKNOWN_KEY, (2, 5)),
+            ("\tversion: é😀", CHART_INVALID_VALUE, (10, 13)),
+        ] {
+            let text = format!("apiVersion: v2\nname: web\n{line}\n");
+            let found: Vec<_> = for_file("/p/Chart.yaml", &text, false, false).into_iter().filter(|f| f.code == code).collect();
+            assert_eq!(found.len(), 1, "{line:?}");
+            let range = found[0].diagnostic(&text).range;
+            assert_eq!((range.start.line, range.start.character, range.end.character), (2, columns.0, columns.1), "{line:?}");
+        }
     }
 
     #[test]

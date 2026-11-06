@@ -59,6 +59,11 @@ impl Line<'_> {
         self.text.trim_start()
     }
 
+    /// Byte offset of `content()`, past any leading whitespace (tabs included).
+    fn content_start(&self) -> usize {
+        self.start + self.text.len() - self.content().len()
+    }
+
     fn skip(&self) -> bool {
         let content = self.content();
         content.is_empty() || content.starts_with('#')
@@ -100,27 +105,29 @@ pub fn documents(text: &str) -> Vec<Doc> {
     docs
 }
 
-/// The key of a `key: value` line and its value; `None` for list items, comments and flow lines.
-fn key_value(content: &str, at: usize) -> Option<(String, Option<Value>)> {
+/// The key of a `key: value` line, the byte offset of its trimmed name, and its value;
+/// `None` for list items, comments and flow lines.
+fn key_value(content: &str, at: usize) -> Option<(String, usize, Option<Value>)> {
     if content.starts_with(['-', '#', '[', '{', '?']) {
         return None;
     }
-    let (key, after) = match content.chars().next()? {
+    let (key, key_at, after) = match content.chars().next()? {
         quote @ ('"' | '\'') => {
             let close = content[1..].find(quote)? + 1;
-            (&content[1..close], close + 1)
+            (&content[1..close], 1, close + 1)
         }
         _ => {
             let colon = content.char_indices().find_map(|(i, c)| {
                 let ends = c == ':' && (content[i + 1..].is_empty() || content[i + 1..].starts_with([' ', '\t']));
                 ends.then_some(i)
             })?;
-            (&content[..colon], colon)
+            (&content[..colon], 0, colon)
         }
     };
     let rest = content[after..].strip_prefix(':')?;
     let base = at + after + 1;
-    Some((key.trim().to_owned(), value(rest, base)))
+    let key_start = at + key_at + key.len() - key.trim_start().len();
+    Some((key.trim().to_owned(), key_start, value(rest, base)))
 }
 
 fn value(rest: &str, base: usize) -> Option<Value> {
@@ -154,8 +161,8 @@ fn scalar_mask(lines: &[Line]) -> Vec<bool> {
         }
         let column = line.indent() + line.content().len() - content.len();
         let header = match key_value(content, 0) {
-            Some((_, Some(v))) => v.text,
-            Some((_, None)) => continue,
+            Some((_, _, Some(v))) => v.text,
+            Some((_, _, None)) => continue,
             None => content.to_owned(),
         };
         if !header.starts_with(['|', '>']) {
@@ -195,12 +202,10 @@ fn scan(lines: &[Line]) -> Doc {
         if mask[i] || line.skip() {
             continue;
         }
-        let Some((key, value)) = key_value(line.content(), line.start + line.indent()) else { continue };
+        let Some((key, key_start, value)) = key_value(line.content(), line.content_start()) else { continue };
         let has_value = value.is_some();
         if line.indent() == 0 {
             doc.top_keys.push(key.clone());
-            let quoted = usize::from(line.content().starts_with(['"', '\'']));
-            let key_start = line.start + line.indent() + quoted;
             doc.top_entries.push((key.clone(), key_start..key_start + key.len(), value.clone()));
             match key.as_str() {
                 "apiVersion" => doc.api_version = value,
@@ -226,7 +231,7 @@ fn scan_section(doc: &mut Doc, lines: &[Line], mask: &[bool], at: usize, section
         doc.has_template = true;
     }
     for j in children(lines, mask, at) {
-        let Some((key, value)) = key_value(lines[j].content(), lines[j].start + lines[j].indent()) else { continue };
+        let Some((key, _, value)) = key_value(lines[j].content(), lines[j].content_start()) else { continue };
         match (section, key.as_str()) {
             ("metadata", "name") => doc.name = value,
             ("metadata", "generateName") => doc.has_generate_name = true,
@@ -264,7 +269,7 @@ fn env_names(lines: &[Line], mask: &[bool], at: usize) -> Vec<Value> {
             }
             let lead = content.len() - inner.len();
             key_column = Some(indent + lead);
-            (inner, line.start + indent + lead)
+            (inner, line.content_start() + lead)
         } else {
             if awaiting_column {
                 (key_column, awaiting_column) = (Some(indent), false);
@@ -272,9 +277,9 @@ fn env_names(lines: &[Line], mask: &[bool], at: usize) -> Vec<Value> {
             if key_column != Some(indent) {
                 continue;
             }
-            (content, line.start + indent)
+            (content, line.content_start())
         };
-        if let Some((key, Some(value))) = key_value(key_text, key_at) {
+        if let Some((key, _, Some(value))) = key_value(key_text, key_at) {
             if key == "name" {
                 names.push(value);
             }

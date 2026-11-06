@@ -242,16 +242,17 @@ impl KubeExplorer {
         Ok(())
     }
 
-    /// A Secret needs one namespace: all namespaces would create it in the kubeconfig's.
-    fn secret_namespace_gate(&self) -> Result<(), Error> {
+    /// Writes without a row's own namespace (Create Secret, manifest apply and delete) need one
+    /// namespace: in all namespaces kubectl would send them to the kubeconfig's.
+    fn single_namespace_gate(&self, action: &str) -> Result<(), Error> {
         if self.all_namespaces() {
-            return Err("Create Secret works in one namespace: pick a namespace first.".into());
+            return Err(format!("{action} works in one namespace: pick a namespace first.").into());
         }
         Ok(())
     }
 
     fn create_secret(&mut self) -> Result<(), Error> {
-        self.secret_namespace_gate()?;
+        self.single_namespace_gate("Create Secret")?;
         let Some(draft) = &self.draft else {
             return Ok(());
         };
@@ -763,7 +764,7 @@ impl KubeExplorer {
                 return Ok(());
             }
             "create-secret" => {
-                self.secret_namespace_gate()?;
+                self.single_namespace_gate("Create Secret")?;
                 self.draft = Some(Draft::default());
                 host::refresh_view(TREE);
                 return Ok(());
@@ -791,6 +792,7 @@ impl KubeExplorer {
                 return host::open_terminal(&format!("Port Forward: {target}"), KUBECTL, &self.args_in(namespace.as_deref(), &args));
             }
             "confirm-delete-manifest" => {
+                self.single_namespace_gate("Delete Manifest Resources")?;
                 let Some(manifest) = self.pending_delete.take() else {
                     return Ok(());
                 };
@@ -1176,6 +1178,12 @@ impl Plugin for KubeExplorer {
 
 impl KubeExplorer {
     fn command(&mut self, id: &str, ctx: &Invocation) -> Result<String, Error> {
+        match id {
+            "apply" => self.single_namespace_gate("Apply Manifest")?,
+            "kustomize-apply" => self.single_namespace_gate("Apply Kustomization")?,
+            "delete-manifest" => self.single_namespace_gate("Delete Manifest Resources")?,
+            _ => {}
+        }
         let editor = ctx.editor().ok_or("No manifest is open.")?;
         let manifest = editor.document()?.text;
         let path = editor.path();
@@ -2466,6 +2474,67 @@ mod tests {
         assert!(kubectl_calls(&host).is_empty());
         let view = kube.actions(View::new(Body::Message(String::new())));
         assert!(!view.toolbar.iter().find(|b| b.id == "create-secret").unwrap().enabled);
+    }
+
+    #[test]
+    fn manifest_writes_are_refused_in_all_namespaces_mode() {
+        for command in ["apply", "kustomize-apply", "delete-manifest"] {
+            let host = host();
+            host.open_editor("/project/k/web.yaml", "yaml", "kind: Deployment", &[]);
+            let mut kube = all_mode();
+
+            let error = kube.run_command(command, &host.invocation(), None).unwrap_err().to_string();
+
+            assert!(error.contains("pick a namespace first"), "{command}: {error}");
+            assert!(kubectl_calls(&host).is_empty(), "{command}");
+        }
+    }
+
+    #[test]
+    fn confirm_delete_manifest_is_refused_in_all_namespaces_mode() {
+        let host = host();
+        let mut kube = all_mode();
+        kube.pending_delete = Some("kind: Deployment".into());
+
+        let error = kube.button("confirm-delete-manifest").unwrap_err().to_string();
+
+        assert!(error.contains("pick a namespace first"), "{error}");
+        assert!(kubectl_calls(&host).is_empty());
+    }
+
+    #[test]
+    fn manifest_reads_still_run_in_all_namespaces_mode() {
+        for command in ["dry-run", "diff", "kustomize-render"] {
+            let host = host();
+            host.open_editor("/project/k/web.yaml", "yaml", "kind: Deployment", &[]);
+
+            all_mode().run_command(command, &host.invocation(), None).unwrap();
+
+            let calls = kubectl_calls(&host);
+            assert_eq!(calls.len(), 1, "{command}");
+            assert!(!calls[0].iter().any(|a| a.starts_with("--namespace")), "{command}: {calls:?}");
+        }
+    }
+
+    #[test]
+    fn manifest_writes_name_the_namespace_in_single_namespace_mode() {
+        for (command, expected) in [
+            ("apply", &["--namespace=shop", "apply", "-f", "-"][..]),
+            ("kustomize-apply", &["--namespace=shop", "apply", "-k", "/project/k"]),
+            ("delete-manifest", &["--namespace=shop", "delete", "--dry-run=server", "-f", "-"]),
+        ] {
+            let host = host();
+            host.open_editor("/project/k/web.yaml", "yaml", "kind: Deployment", &[]);
+            let mut kube = KubeExplorer { namespace: Some("shop".into()), current_context: Some("minikube".into()), ..Default::default() };
+
+            kube.run_command(command, &host.invocation(), None).unwrap();
+
+            assert_eq!(kubectl_calls(&host)[0], expected, "{command}");
+            if command == "delete-manifest" {
+                kube.button("confirm-delete-manifest").unwrap();
+                assert_eq!(kubectl_calls(&host).last().unwrap(), &["--namespace=shop", "delete", "-f", "-"]);
+            }
+        }
     }
 
     #[test]
