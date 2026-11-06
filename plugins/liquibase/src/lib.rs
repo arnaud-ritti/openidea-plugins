@@ -78,34 +78,74 @@ fn target(project: &Project, root: &str, changelog: &str, include: &Include) -> 
     if unsure { Target::Unknown } else { Target::Missing }
 }
 
-const MAX_PROPERTY_FILES: usize = 20;
+const MAX_LISTED_FILES: usize = 1000;
+const MAX_CHANGELOGS: usize = 200;
+const MAX_CHANGELOG_BYTES: usize = 256 * 1024;
+const MAX_CONFIG_FILES: usize = 20;
 
-/// The property names `path` (parsed as `log`) and the changelogs it includes declare; `None` when that cannot be told
-/// (an `includeAll`, an include the host cannot resolve, a `property` loaded from a file, too many files).
-fn included_properties(project: &Project, root: &str, path: &str, log: &Changelog) -> Option<BTreeSet<String>> {
+fn directory(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// Whether a changelog at `candidate` is worth reading for property declarations: it sits beside the open file or in one of
+/// its ancestor directories, or under a `db`, `changelog`, `liquibase` or `migrations` path.
+fn likely_changelog(candidate: &str, open: &str) -> bool {
+    let dir = directory(candidate);
+    let open_dir = directory(open);
+    dir == open_dir
+        || open_dir.starts_with(&format!("{dir}/"))
+        || ["/db/", "/changelog", "/liquibase", "/migrations"].iter().any(|part| candidate.contains(part))
+}
+
+/// Every property any changelog of the project declares: Liquibase properties are global unless declared otherwise, so a
+/// master or a sibling may declare what the open file uses. `None` when that cannot be told: a scan cap was hit, a file is
+/// too big or unreadable, a JSON changelog is around, or some changelog has an `includeAll`, an include the host cannot
+/// resolve or a `property` loaded from a file.
+// ponytail: lists and reads every likely changelog on each check that finds an unknown placeholder; cache per project if it misses the 50 ms budget
+fn project_properties(project: &Project, root: &str, path: &str, open: &Changelog) -> Option<BTreeSet<String>> {
+    let mut paths = BTreeSet::new();
+    for glob in ["**/*.xml", "**/*.yaml", "**/*.yml", "**/*.sql", "**/*.json"] {
+        let listed = project.find_files(glob, MAX_LISTED_FILES as u32).ok()?;
+        if listed.len() >= MAX_LISTED_FILES {
+            return None;
+        }
+        paths.extend(listed.into_iter().filter(|candidate| likely_changelog(candidate, path)));
+    }
+    paths.remove(path);
+    if paths.len() > MAX_CHANGELOGS {
+        return None;
+    }
     let mut names = BTreeSet::new();
-    let mut seen = BTreeSet::from([path.to_owned()]);
-    let mut queue = vec![(path.to_owned(), log.clone())];
-    while let Some((at, log)) = queue.pop() {
+    let mut absorb = |at: &str, log: &Changelog| -> Option<()> {
         if log.opaque_properties {
             return None;
         }
         names.extend(log.properties.iter().cloned());
         for include in &log.includes {
-            if include.dir {
+            if include.dir || target(project, root, at, include) == Target::Unknown {
                 return None;
             }
-            match target(project, root, &at, include) {
-                Target::Found(file) if seen.insert(file.clone()) => {
-                    if seen.len() > MAX_PROPERTY_FILES {
-                        return None;
-                    }
-                    let text = project.read_file(&file).ok()?;
-                    queue.extend(changelog::parse(&file, &text).map(|parsed| (file, parsed)));
-                }
-                Target::Found(_) | Target::Missing => {}
-                Target::Unknown => return None,
+        }
+        Some(())
+    };
+    absorb(path, open)?;
+    for file in paths {
+        let text = match project.read_file(&file) {
+            Ok(text) => text,
+            Err(Error::NotFound(_) | Error::Invalid(_)) => continue,
+            Err(_) => return None,
+        };
+        if text.len() > MAX_CHANGELOG_BYTES {
+            return None;
+        }
+        if file.ends_with(".json") {
+            if text.contains("databaseChangeLog") {
+                return None;
             }
+            continue;
+        }
+        if let Some(log) = changelog::parse(&file, &text) {
+            absorb(&file, &log)?;
         }
     }
     Some(names)
@@ -119,22 +159,47 @@ fn parameter_name(key: &str) -> Option<&str> {
     })
 }
 
-/// The parameters the project's own `liquibase.properties` and Spring configuration set; `None` when none of those files can be read.
+/// Configuration that points at more configuration (or at profiles) this check cannot follow.
+fn follows_other_config(key: &str) -> bool {
+    let plain = key.replace(['-', '_'], "").to_lowercase();
+    plain.ends_with("defaultsfile")
+        || ["spring.config.import", "spring.config.location", "spring.config.additionallocation", "spring.config.activate"]
+            .iter()
+            .any(|prefix| plain.starts_with(&prefix.replace('_', "")))
+}
+
+/// The parameters the project's `liquibase.properties` and Spring configuration files (profile and module files included) set;
+/// `None` when none of those files can be read or the configuration cannot be followed completely.
 fn project_parameters(project: &Project, root: &str) -> Option<BTreeSet<String>> {
+    let mut files: BTreeSet<String> = ["liquibase.properties", "src/main/resources/liquibase.properties"]
+        .iter()
+        .map(|file| format!("{root}/{file}"))
+        .collect();
+    for ext in ["properties", "yaml", "yml"] {
+        files.insert(format!("{root}/src/main/resources/application.{ext}"));
+    }
+    for glob in ["**/liquibase.properties", "**/application*.properties", "**/application*.yaml", "**/application*.yml"] {
+        let listed = project.find_files(glob, MAX_CONFIG_FILES as u32 + 1).ok()?;
+        files.extend(listed.into_iter().filter(|file| {
+            let name = file.rsplit('/').next().unwrap_or(file);
+            name == "liquibase.properties" || spring_text::config::is_config_file(file)
+        }));
+    }
+    if files.len() > MAX_CONFIG_FILES + 5 {
+        return None;
+    }
     let mut names = BTreeSet::new();
     let mut readable = false;
-    for file in [
-        "liquibase.properties",
-        "src/main/resources/liquibase.properties",
-        "src/main/resources/application.properties",
-        "src/main/resources/application.yaml",
-        "src/main/resources/application.yml",
-    ] {
-        let path = format!("{root}/{file}");
+    for path in files {
         match project.read_file(&path) {
             Ok(text) => {
                 readable = true;
-                names.extend(spring_text::config::keys(&path, &text).iter().filter_map(|k| parameter_name(&k.key)).map(str::to_owned));
+                for key in spring_text::config::keys(&path, &text) {
+                    if follows_other_config(&key.key) {
+                        return None;
+                    }
+                    names.extend(parameter_name(&key.key).map(str::to_owned));
+                }
             }
             Err(Error::NotFound(_) | Error::Invalid(_)) => {}
             Err(_) => return None,
@@ -353,17 +418,21 @@ impl Providers for Liquibase {
                     Some((project, root)) => target(project, root, &doc.path, include),
                     None => Target::Unknown,
                 };
-                let included = OnceCell::new();
+                let declared = OnceCell::new();
                 let from_project = OnceCell::new();
                 let defined = |name: &str| {
                     let Some((project, root)) = context().as_ref() else {
                         return true;
                     };
-                    let included = included.get_or_init(|| included_properties(project, root, &doc.path, &log));
-                    let from_project = from_project.get_or_init(|| project_parameters(project, root));
-                    match (included, from_project) {
-                        (Some(included), Some(configured)) => included.contains(name) || configured.contains(name),
-                        _ => true,
+                    let Some(configured) = from_project.get_or_init(|| project_parameters(project, root)) else {
+                        return true;
+                    };
+                    if configured.contains(name) {
+                        return true;
+                    }
+                    match declared.get_or_init(|| project_properties(project, root, &doc.path, &log)) {
+                        Some(declared) => declared.contains(name),
+                        None => true,
                     }
                 };
                 let check = host::setting_bool("checkProperties").unwrap_or(true);
@@ -932,5 +1001,116 @@ mod tests {
         host.add_file("liquibase.properties", "url=x\n");
         host.set_setting("checkProperties", "false");
         assert!(property_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    const CHILD: &str = "/project/db/changes/child.xml";
+    const MASTER_WITH_PROPERTY: &str = "<databaseChangeLog>\n    <property name=\"prefix\" value=\"t_\"/>\n    <include file=\"changes/child.xml\" relativeToChangelogFile=\"true\"/>\n</databaseChangeLog>\n";
+
+    fn child_codes(host: &MockHost, text: &str) -> Vec<String> {
+        checked(host, CHILD, text).into_iter().map(|(code, _)| code).filter(|code| code == "unresolved-property").collect()
+    }
+
+    #[test]
+    fn property_declared_in_the_master_is_quiet_in_a_child_changelog() {
+        let host = host();
+        host.add_file("liquibase.properties", "url=x\n");
+        host.add_file("db/changes/child.xml", PLACEHOLDER_XML);
+        assert_eq!(child_codes(&host, PLACEHOLDER_XML), ["unresolved-property"]);
+        host.add_file("db/master.xml", MASTER_WITH_PROPERTY);
+        assert!(child_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    #[test]
+    fn property_declared_in_a_sibling_included_by_the_master_is_quiet() {
+        let host = host();
+        host.add_file("liquibase.properties", "url=x\n");
+        host.add_file("db/changes/child.xml", PLACEHOLDER_XML);
+        host.add_file("db/changes/props.xml", "<databaseChangeLog><property name=\"prefix\" value=\"t_\"/></databaseChangeLog>");
+        host.add_file(
+            "db/master.xml",
+            "<databaseChangeLog>\n<include file=\"changes/props.xml\" relativeToChangelogFile=\"true\"/>\n<include file=\"changes/child.xml\" relativeToChangelogFile=\"true\"/>\n</databaseChangeLog>",
+        );
+        assert!(child_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    #[test]
+    fn scan_cap_makes_the_check_quiet() {
+        let host = host();
+        host.add_file("liquibase.properties", "url=x\n");
+        for n in 0..=MAX_CHANGELOGS {
+            host.add_file(&format!("db/many/{n}.yaml"), "databaseChangeLog: []\n");
+        }
+        assert!(child_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    #[test]
+    fn include_all_anywhere_makes_the_check_quiet() {
+        let host = host();
+        host.add_file("liquibase.properties", "url=x\n");
+        host.add_file("db/master.xml", "<databaseChangeLog><includeAll path=\"changes/\"/></databaseChangeLog>");
+        assert!(child_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    #[test]
+    fn parameter_in_a_profile_file_is_quiet() {
+        let host = host();
+        host.add_file("src/main/resources/application.yaml", "spring:\n  application:\n    name: x\n");
+        assert_eq!(child_codes(&host, PLACEHOLDER_XML), ["unresolved-property"]);
+        host.add_file("src/main/resources/application-dev.yaml", "spring:\n  liquibase:\n    parameters:\n      prefix: t_\n");
+        assert!(child_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    #[test]
+    fn parameter_in_a_module_application_yaml_is_quiet() {
+        let host = host();
+        host.add_file("src/main/resources/application.yaml", "spring:\n  application:\n    name: x\n");
+        host.add_file("api/src/main/resources/application.yaml", "spring:\n  liquibase:\n    parameters:\n      prefix: t_\n");
+        assert!(child_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    #[test]
+    fn config_that_cannot_be_followed_makes_the_check_quiet() {
+        let host = host();
+        host.add_file("liquibase.properties", "url=x\ndefaultsFile=../shared.properties\n");
+        assert!(child_codes(&host, PLACEHOLDER_XML).is_empty());
+        let host = MockHost::install();
+        host.add_file("src/main/resources/application.properties", "spring.config.import=optional:file:./extra.properties\n");
+        assert!(child_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    fn placeholder_in(path: &str, text: &str) -> Vec<String> {
+        let host = host();
+        host.add_file("liquibase.properties", "url=x\n");
+        checked(&host, path, text).into_iter().map(|(code, _)| code).filter(|code| code == "unresolved-property").collect()
+    }
+
+    #[test]
+    fn doubled_dollar_is_quiet() {
+        assert!(placeholder_in(PROPERTY_PATH, &PLACEHOLDER_XML.replace("${prefix}", "$${prefix}")).is_empty());
+    }
+
+    #[test]
+    fn backslash_escaped_placeholder_is_quiet() {
+        assert!(placeholder_in(PROPERTY_PATH, &PLACEHOLDER_XML.replace("${prefix}", "\\${prefix}")).is_empty());
+    }
+
+    #[test]
+    fn placeholder_in_xml_comment_is_quiet() {
+        let text = "<databaseChangeLog>\n<!-- uses ${prefix}\n and more -->\n</databaseChangeLog>";
+        assert!(placeholder_in(PROPERTY_PATH, text).is_empty());
+        assert_eq!(placeholder_in(PROPERTY_PATH, &format!("{text}<!-- x --><a b=\"${{late}}\"/>")).len(), 0);
+    }
+
+    #[test]
+    fn placeholder_in_sql_line_comment_is_quiet() {
+        let text = "--liquibase formatted sql\n-- run ${prefix}\n--changeset a:1\nselect 1;\n";
+        assert!(placeholder_in("/project/db/a.sql", text).is_empty());
+        let live = "--liquibase formatted sql\n--changeset a:1\nselect ${prefix};\n";
+        assert_eq!(placeholder_in("/project/db/a.sql", live), ["unresolved-property"]);
+    }
+
+    #[test]
+    fn numeric_reference_is_quiet() {
+        assert!(placeholder_in(PROPERTY_PATH, &PLACEHOLDER_XML.replace("${prefix}", "${1}")).is_empty());
     }
 }
