@@ -946,6 +946,31 @@ fn eloquent_checks_publish_and_clear_when_the_file_is_fixed() {
     assert!(host.diagnostics().get(path).is_none_or(Vec::is_empty));
 }
 
+fn guarded_mass_assignment_in(relative: &str) -> Vec<Diagnostic> {
+    let host = MockHost::install();
+    let body = "<?php\nnamespace Database;\nuse App\\Models\\Post;\nPost::create($request->all());\n";
+    let mut plugin = activated_with(&host, &[("app/Models/Post.php", UNGUARDED_POST.1), (relative, body)]);
+    let path = format!("/project/{relative}");
+
+    plugin.handle_events(&[Event::FileOpened(path.clone())], &host.invocation());
+    host.diagnostics().get(&path).cloned().unwrap_or_default()
+}
+
+#[test]
+fn seeder_mass_assignment_is_quiet() {
+    assert!(guarded_mass_assignment_in("database/seeders/PostSeeder.php").is_empty());
+}
+
+#[test]
+fn factory_mass_assignment_is_quiet() {
+    assert!(guarded_mass_assignment_in("database/factories/PostFactory.php").is_empty());
+}
+
+#[test]
+fn app_file_mass_assignment_still_warns() {
+    assert_eq!(guarded_mass_assignment_in("app/Http/Controllers/PostController.php").len(), 1);
+}
+
 #[test]
 fn eloquent_findings_use_utf16_columns_and_crlf() {
     let host = MockHost::install();

@@ -266,8 +266,11 @@ pub fn problems(index: &Index, language: &str, text: &str, check_routes: bool) -
     found
 }
 
+/// `db:seed` runs inside `Model::unguarded()`, so mass assignment there is not discarded.
+const UNGUARDED_DIRECTORIES: &[&str] = &["/database/seeders/", "/database/seeds/", "/database/factories/"];
+
 /// Mass assignment, prunable and `orderBy` problems of a PHP file.
-fn eloquent_problems(project: &Project, language: &str, text: &str) -> Vec<Diagnostic> {
+fn eloquent_problems(project: &Project, path: &str, language: &str, text: &str) -> Vec<Diagnostic> {
     if language != "php" || !enabled("checkEloquent") {
         return Vec::new();
     }
@@ -275,8 +278,11 @@ fn eloquent_problems(project: &Project, language: &str, text: &str) -> Vec<Diagn
     let Ok(root) = project.root() else { return Vec::new() };
     let read = |relative: &str| project.read_file(&format!("{root}/{relative}")).ok();
 
+    let unguarded_run = UNGUARDED_DIRECTORIES.iter().any(|directory| path.contains(directory));
+
     eloquent_checks::findings(text, &read)
         .into_iter()
+        .filter(|finding| !(unguarded_run && finding.code == "guarded-attribute-assignment"))
         .map(|finding| problem(text, finding.start..finding.end, finding.code, finding.severity, finding.message))
         .collect()
 }
@@ -378,7 +384,7 @@ impl Main {
         let found = match project.read_file(path) {
             Ok(text) if enabled && !index.partial => {
                 let mut found = problems(index, language, &text, check_routes);
-                found.extend(eloquent_problems(project, language, &text));
+                found.extend(eloquent_problems(project, path, language, &text));
                 found.sort_by_key(|d| (d.range.start.line, d.range.start.character));
                 found
             }
