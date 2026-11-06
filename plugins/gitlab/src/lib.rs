@@ -34,6 +34,7 @@ const PROJECTS: &str = "gitlab-projects";
 const NEW_MR: &str = "new-merge-request";
 const NEW_SNIPPET: &str = "new-snippet";
 const SHARE: &str = "share-project-form";
+const FILES: &str = "merge-request-files";
 const COMMITS: &str = "merge-request-commits";
 const PIPELINES: &str = "merge-request-pipeline";
 
@@ -520,6 +521,7 @@ impl GitLab {
         self.pipeline_status = None;
         self.pipeline_open.clear();
         host::refresh_view(CHANGES);
+        host::refresh_view(FILES);
         host::refresh_view(COMMITS);
         host::refresh_view(PIPELINES);
 
@@ -1269,10 +1271,34 @@ fn focused_snippet(ctx: &Invocation) -> Result<(String, String), Error> {
     snippet_content(ctx)
 }
 
+fn more_snippet_files(form: &forms::SnippetForm, ctx: &Invocation) -> Result<Vec<(String, String)>, Error> {
+    let paths = form.extra_paths()?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let project = ctx.project().ok_or("Open a project first.")?;
+    let root = project.root()?;
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let content = project.read_file(&format!("{root}/{path}")).map_err(|_| Error::from(format!("Cannot read {path}.")))?;
+
+            Ok((path.to_owned(), content))
+        })
+        .collect()
+}
+
 /// Posts and returns `None`, or returns why it waits or refused. A public snippet posts only on a confirm
 /// of the same file and content its warning named, so a focus change between the clicks publishes nothing.
 fn snippet_click(form: &mut forms::SnippetForm, confirming: Option<(String, String)>, ctx: &Invocation) -> Result<Option<String>, Error> {
-    let focused = focused_snippet(ctx)?;
+    let mut files = vec![focused_snippet(ctx)?];
+    files.extend(more_snippet_files(form, ctx)?);
+    let focused = (
+        files.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>().join(", "),
+        files.iter().map(|(_, content)| content.as_str()).collect::<Vec<_>>().join("\0"),
+    );
     if form.visibility == "public" {
         match confirming {
             None => {
@@ -1287,8 +1313,7 @@ fn snippet_click(form: &mut forms::SnippetForm, confirming: Option<(String, Stri
         }
     }
 
-    let (path, content) = focused;
-    post_snippet(&form.draft(path, content, &snippet_scopes(ctx))?)?;
+    post_snippet(&form.draft(files, &snippet_scopes(ctx))?)?;
 
     Ok(None)
 }
@@ -1913,7 +1938,7 @@ fn resolve_local_includes(file: &mut ci::CiFile, project: &host::Project) {
 
 fn ci_group_enabled(code: &str) -> bool {
     let key = match code {
-        "undefined-job" => "ciJobReferences",
+        "undefined-job" | "undefined-reference" => "ciJobReferences",
         "undefined-stage" => "ciStages",
         "duplicate-job-usage" => "ciDuplicateJobUsage",
         _ => "ciSingleQuotedVariables",
@@ -1978,6 +2003,7 @@ impl Views for GitLab {
             NEW_SNIPPET => Ok(self.new_snippet.render(&snippet_scopes(ctx))),
             SHARE if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
             SHARE => self.render_share(),
+            FILES => self.render_files(ctx),
             COMMITS => self.render_commits(ctx),
             PIPELINES => self.render_pipelines(ctx),
             _ => return Err(Error::NotFound(format!("view {view}"))),
@@ -2002,6 +2028,7 @@ impl Views for GitLab {
             NEW_MR if forms_enabled() => self.handle_new_merge_request(event, ctx),
             NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
             SHARE if forms_enabled() => self.handle_share(event, ctx),
+            FILES => self.handle_files(event, ctx),
             COMMITS => self.handle_commits(event),
             PIPELINES => self.handle_pipelines(event, ctx),
             _ => Ok(()),

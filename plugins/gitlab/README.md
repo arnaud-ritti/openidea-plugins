@@ -93,7 +93,12 @@ the last two, and `noteActions` the comment actions.
   GitLab: Edit Merge Request picks labels, people and milestone from lists.
 - **Create Snippet**: title, description, visibility and personal or project.
   It uses the focused file, or its selection. A public snippet needs a second
-  click, which posts only the file and content the warning named.
+  click, which posts only the file and content the warning named. *More files*
+  takes project paths, one per line, added next to the focused file.
+- **Merge Request Files**: the changed files as a tree or a list (Tree/List
+  button). Double-click a file to toggle Viewed, or use Mark All Viewed and
+  Clear Viewed; it works without page scripts and shares the marks of the
+  Changes view.
 - **Share Project on GitLab**: namespace, remote name, visibility, description,
   an optional `git init` (runs on the first click) and an optional initial
   commit. The commit waits for a second click bound to the listed files, and
@@ -190,7 +195,12 @@ with `project:` or `pipeline:`, and for names built from variables. The reader
 is a line scanner, not a YAML parser: unusual shapes are skipped.
 
 Completion in these files: top-level keywords, job keywords one level inside a
-job or `default`, and the predefined `CI_*` variables after `$` or `${`. The
+job or `default`, the predefined `CI_*` variables after `$` or `${`, values for
+`when`, `stage` (from `stages`), `allow_failure`, `interruptible`, job names for
+`extends`, `needs` and `dependencies` (inline, flow or list items), and the job
+then the key inside `!reference [`. A `!reference` naming a job that is not in
+the file is reported with `needs` (setting `ciJobReferences`) and Go to
+Definition jumps to that job. The
 lists are typed from the GitLab docs as of November 2026 and may miss newer
 names; the popup opens on letters, not on `$`.
 
@@ -210,17 +220,18 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
   editor gutter. Per-commit diffs are read-only.
 - Line comments, replies, resolving and Viewed in the Changes view need
   scripts, which the desktop IDE currently blocks in plugin pages; comment from
-  the Merge Request view or on GitLab instead.
+  the Merge Request view or on GitLab instead. Viewed also works in the Merge
+  Request Files view.
 - Threads in the editor don't move with unsaved edits.
 - Notes are plain text: no markdown rendering, `@mention` completion or
   attachments.
 - Filtering: the five quick filters plus author, reviewer, label and text
   filters from the Filter button.
 - The form views have no pickers (users, labels, milestone), no file chooser
-  and no file-selection tree; a form snippet holds one file.
+  and no file-selection tree; extra snippet files are typed as paths.
 - A file counts as viewed until a later merge request commit touches it; that
   needs the commits in the local checkout, else the head commit is used.
-- Not ported: usage statistics, `.gitlab-ci.yml` schema validation, completion and inspections beyond the four listed under CI files; included files are not followed. Applying a suggestion doesn't mark it as applied on GitLab.
+- Not ported: usage statistics, `.gitlab-ci.yml` schema validation, completion and inspections beyond the four listed under CI files; `include: local:` files are followed, remote, project, template and component includes are not. Applying a suggestion doesn't mark it as applied on GitLab.
 
 See the `aritti.gitlab` section of `LIMITATIONS.md` at the repository root
 for the missing APIs behind each limit.

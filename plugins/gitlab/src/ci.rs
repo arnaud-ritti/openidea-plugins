@@ -49,6 +49,8 @@ pub struct CiFile {
     pub local_includes: Vec<String>,
     pub included_jobs: HashSet<String>,
     pub included_stages: Option<Vec<String>>,
+    /// The job named in each `!reference [job, key]`.
+    pub references: Vec<Ref>,
 }
 
 #[derive(Clone, Debug)]
@@ -381,7 +383,34 @@ pub fn parse(text: &str) -> CiFile {
         i = end;
     }
 
+    file.references = reference_jobs(text);
+
     file
+}
+
+/// The first element of each `!reference [job, key]` flow sequence on one line.
+fn reference_jobs(text: &str) -> Vec<Ref> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+
+        let Some(at) = line.find("!reference") else { continue };
+        let Some(open) = line[at..].find('[').map(|i| at + i + 1) else { continue };
+        let inside = &line[open..];
+        let first = &inside[..inside.find([',', ']']).unwrap_or(inside.len())];
+        let name = first.trim().trim_matches(['"', '\'']);
+        if name.is_empty() {
+            continue;
+        }
+
+        let from = start + open + (first.len() - first.trim_start().len()) + (first.trim().len() - name.len()) / 2;
+        out.push(Ref { name: name.to_owned(), range: from..from + name.len() });
+    }
+
+    out
 }
 
 fn read_includes(text: &str, file: &mut CiFile, entries: Vec<Item>) {
@@ -457,6 +486,13 @@ pub fn check(file: &CiFile) -> Vec<Finding> {
             None => Some(DEFAULT_STAGES.into()),
         },
     };
+
+    for entry in &file.references {
+        if !unread && !defined.contains(entry.name.as_str()) {
+            let message = format!("`!reference` names `{}`, which is not a job in this file", entry.name);
+            out.push(finding(&entry.range, "undefined-reference", message, Severity::Warning));
+        }
+    }
 
     for job in &file.jobs {
         for (list, keyword) in [(&job.needs, "needs"), (&job.dependencies, "dependencies"), (&job.extends, "extends")] {
@@ -547,6 +583,10 @@ fn single_quoted_variable(line: &str) -> Option<Range<usize>> {
 pub fn target_at(file: &CiFile, offset: usize) -> Option<Range<usize>> {
     let contains = |r: &Ref| r.range.start <= offset && offset <= r.range.end;
 
+    if let Some(entry) = file.references.iter().find(|r| contains(r)) {
+        return file.jobs.iter().find(|j| j.name == entry.name).map(|j| j.name_range.clone());
+    }
+
     for job in &file.jobs {
         let referenced = job.needs.iter().chain(&job.dependencies).chain(&job.extends).find(|r| contains(r));
         if let Some(entry) = referenced {
@@ -590,6 +630,10 @@ pub fn completions(text: &str, offset: Option<usize>) -> Vec<Candidate> {
             .collect();
     }
 
+    if let Some(values) = value_completions(text, before, line_start, offset) {
+        return values;
+    }
+
     if !word(typed) {
         return Vec::new();
     }
@@ -607,6 +651,94 @@ pub fn completions(text: &str, offset: Option<usize>) -> Vec<Candidate> {
         .filter(|name| name.starts_with(typed))
         .map(|name| Candidate { label: (*name).into(), insert: format!("{name}:"), from, variable: false })
         .collect()
+}
+
+const JOB_REFERENCE_KEYS: [&str; 3] = ["needs", "dependencies", "extends"];
+
+fn candidates(names: impl IntoIterator<Item = String>, prefix: &str, from: usize) -> Vec<Candidate> {
+    names
+        .into_iter()
+        .filter(|name| name.starts_with(prefix))
+        .map(|name| Candidate { label: name.clone(), insert: name, from, variable: false })
+        .collect()
+}
+
+fn fixed(values: &[&str]) -> Vec<String> {
+    values.iter().map(|v| (*v).to_owned()).collect()
+}
+
+/// Values for `when`, `stage`, `extends`, `needs`, `dependencies` and booleans, and the job and key of `!reference [`.
+/// `None` when the cursor is not at such a value.
+fn value_completions(text: &str, before: &str, line_start: usize, offset: usize) -> Option<Vec<Candidate>> {
+    let file = || parse(text);
+    let jobs = |file: &CiFile| file.jobs.iter().map(|j| j.name.clone()).chain(file.included_jobs.iter().cloned()).collect::<Vec<_>>();
+    fn prefix_of(s: &str, offset: usize) -> (usize, &str) {
+        let len = s.len() - s.trim_end_matches(|c: char| c.is_ascii_alphanumeric() || "_.-".contains(c)).len();
+
+        (offset - len, &s[s.len() - len..])
+    }
+
+    if let Some(open) = before.rfind("!reference [") {
+        let inside = &before[open + "!reference [".len()..];
+        if inside.contains(']') {
+            return None;
+        }
+
+        let (at, typed) = prefix_of(inside, offset);
+        return Some(match inside.contains(',') {
+            true => candidates(ci_data::JOB_KEYWORDS.iter().map(|k| (*k).to_owned()), typed, at),
+            false => candidates(jobs(&file()), typed, at),
+        });
+    }
+
+    let body = before.trim_start_matches(' ');
+    let item = body.strip_prefix("- ").map(str::trim_start);
+    let (key, rest) = match item.unwrap_or(body).split_once(':') {
+        Some((key, rest)) if rest.starts_with(' ') && !key.contains(' ') => (key, rest),
+        _ => {
+            let parent = item.filter(|i| i.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)))?;
+            let key = list_parent_key(&text[..line_start], before.len() - body.len())?;
+            let (at, typed) = prefix_of(parent, offset);
+            return match key.as_str() {
+                k if JOB_REFERENCE_KEYS.contains(&k) => Some(candidates(jobs(&file()), typed, at)),
+                _ => None,
+            };
+        }
+    };
+
+    let (at, typed) = prefix_of(rest, offset);
+    let before_value = &rest[..rest.len() - typed.len()];
+    let in_flow_list = JOB_REFERENCE_KEYS.contains(&key) && before_value.trim_end().ends_with(['[', ',']);
+    if !before_value.trim().is_empty() && !in_flow_list {
+        return None;
+    }
+
+    Some(match key {
+        "when" => candidates(fixed(&["on_success", "on_failure", "always", "manual", "delayed", "never"]), typed, at),
+        "allow_failure" | "interruptible" => candidates(fixed(&["true", "false"]), typed, at),
+        "stage" => {
+            let file = file();
+            let stages: Vec<String> = match &file.stages {
+                Some(listed) => listed.iter().map(|s| s.name.clone()).collect(),
+                None => file.included_stages.clone().unwrap_or_else(|| DEFAULT_STAGES.map(str::to_owned).to_vec()),
+            };
+
+            candidates(stages, typed, at)
+        }
+        k if JOB_REFERENCE_KEYS.contains(&k) => candidates(jobs(&file()), typed, at),
+        _ => return None,
+    })
+}
+
+/// The key owning the `- ` list item on the next line, `indent` deep.
+fn list_parent_key(above: &str, indent: usize) -> Option<String> {
+    let line = above.lines().rev().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).find(|l| {
+        let own = l.len() - l.trim_start_matches(' ').len();
+
+        own < indent || (own == indent && !l.trim_start().starts_with("- "))
+    })?;
+
+    line.trim().strip_suffix(':').map(str::to_owned)
 }
 
 fn parent_is_job(above: &str, indent: usize) -> bool {

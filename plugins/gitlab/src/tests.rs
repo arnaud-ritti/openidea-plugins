@@ -971,6 +971,41 @@ fn viewed_compares_file_last_commit() {
 }
 
 #[test]
+fn files_view_toggles_viewed_without_page_scripts_and_switches_layout() {
+    let host = setup();
+    host.on_process("git", |_, _| Ok(ProcessOutput { status: Some(128), stdout: String::new(), stderr: "bad object".into() }));
+    let mut plugin = selected(&host);
+    let items = |plugin: &mut GitLab| {
+        let view = plugin.render(FILES, None, &host.invocation()).unwrap();
+        let Body::Tree(items) = view.body else { panic!("{view:?}") };
+
+        items
+    };
+
+    let tree = items(&mut plugin);
+    assert_eq!(tree.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["dir:src", "file:src/a.rs"]);
+    assert_eq!(tree[1].parent.as_deref(), Some("dir:src"));
+    assert!(tree[1].icon.is_none());
+
+    plugin.handle(FILES, ViewEvent::Activate("file:src/a.rs".into()), &host.invocation()).unwrap();
+
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
+    assert_eq!(items(&mut plugin)[1].icon.as_deref(), Some("check"));
+    assert!(changes_html(&mut plugin, &host).contains(" checked"));
+
+    plugin.handle(FILES, ViewEvent::Button("layout".into()), &host.invocation()).unwrap();
+    let list = items(&mut plugin);
+    assert_eq!((list.len(), list[0].label.as_str(), list[0].parent.as_deref()), (1, "src/a.rs", None));
+
+    plugin.handle(FILES, ViewEvent::Activate("file:nope".into()), &host.invocation()).unwrap();
+    plugin.handle(FILES, ViewEvent::Button("clear".into()), &host.invocation()).unwrap();
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), "{}");
+
+    plugin.handle(FILES, ViewEvent::Button("mark-all".into()), &host.invocation()).unwrap();
+    assert_eq!(storage::get("viewed:g/p:7").unwrap().unwrap(), r#"{"src/a.rs":"abcdef1"}"#);
+}
+
+#[test]
 fn viewed_falls_back_to_the_head_without_local_history() {
     let host = setup();
     host.on_process("git", |_, _| Ok(ProcessOutput { status: Some(128), stdout: String::new(), stderr: "bad object".into() }));
@@ -1218,7 +1253,7 @@ mod ci_tests {
 
     #[test]
     fn undefined_job_is_quiet_for_library_or_dynamic_name() {
-        let yaml = "a:\n  needs:\n    - project: g/p\n      job: other\n      ref: main\n    - pipeline: $PARENT\n      job: x\n    - $DYNAMIC\n    - job: \"${NAME}\"\n    - *alias\n  extends: !reference [.x]\n  script: [x]\n";
+        let yaml = "a:\n  needs:\n    - project: g/p\n      job: other\n      ref: main\n    - pipeline: $PARENT\n      job: x\n    - $DYNAMIC\n    - job: \"${NAME}\"\n    - *alias\n  extends: !reference [.x]\n  script: [x]\n.x:\n  script: [y]\n";
 
         assert!(codes(yaml).is_empty(), "{:?}", findings(yaml));
     }
@@ -1342,7 +1377,7 @@ mod ci_tests {
 
     #[test]
     fn tagged_stages_is_quiet() {
-        assert!(codes("stages: !reference [.s]\njob:\n  stage: a\n").is_empty());
+        assert!(codes(".s:\n  script: x\nstages: !reference [.s]\njob:\n  stage: a\n").is_empty());
     }
 
     #[test]
@@ -1352,7 +1387,7 @@ mod ci_tests {
 
     #[test]
     fn tagged_job_counts_as_defined() {
-        assert!(codes("build: !reference [.x, y]\ntest:\n  needs: [build]\n").is_empty());
+        assert!(codes(".x:\n  y: 1\nbuild: !reference [.x, y]\ntest:\n  needs: [build]\n").is_empty());
     }
 
     #[test]
@@ -1845,6 +1880,21 @@ mod snippet_form_tests {
         );
         assert_eq!(host.clipboard().as_deref(), Some("https://gitlab.com/-/snippets/9"));
         assert_eq!(host.notifications()[0].title, "Snippet created");
+    }
+
+    #[test]
+    fn form_adds_more_project_files_to_the_snippet() {
+        let host = with_file("x\n", (0, 0, 0, 0));
+        host.add_file("docs/b.md", "second\n");
+        let (mut plugin, _) = open(&host);
+        fill(&mut plugin, &host, &[("more-files", "docs/b.md\n")]);
+
+        click(&mut plugin, &host, "create");
+
+        let posted = posted(&host);
+        assert_eq!(posted[0].1["files"][0]["file_path"], "src/a.rs");
+        assert_eq!(posted[0].1["files"][1]["file_path"], "docs/b.md");
+        assert_eq!(posted[0].1["files"][1]["content"], "second\n");
     }
 
     #[test]
@@ -3290,6 +3340,37 @@ mod ci_aid_tests {
     }
 
     #[test]
+    fn values_complete_for_when_stage_and_job_references() {
+        assert_eq!(labels("a:\n  when: man|"), ["manual"]);
+        assert_eq!(labels("a:\n  rules:\n    - when: ne|"), ["never"]);
+        assert_eq!(labels("a:\n  allow_failure: t|"), ["true"]);
+        assert_eq!(labels("stages: [lint, ship]\na:\n  stage: sh|"), ["ship"]);
+        assert_eq!(labels("a:\n  stage: |").len(), 5);
+        assert_eq!(labels(".base:\n  script: x\nb:\n  extends: .ba|"), [".base"]);
+        assert_eq!(labels("a:\n  script: x\nb:\n  needs: [a, |"), ["a", "b"]);
+        assert_eq!(labels("a:\n  script: x\nb:\n  needs:\n    - a|"), ["a"]);
+        assert!(labels("a:\n  script:\n    - a|").is_empty());
+        assert!(labels("a:\n  script: echo when: m|").is_empty());
+    }
+
+    #[test]
+    fn reference_completes_the_job_then_the_key() {
+        assert_eq!(labels(".setup:\n  script: x\nb:\n  script:\n    - !reference [.se|"), [".setup"]);
+        assert_eq!(labels(".setup:\n  script: x\nb:\n  script:\n    - !reference [.setup, scr|"), ["script"]);
+    }
+
+    #[test]
+    fn reference_to_a_missing_job_warns_and_resolves_to_the_job() {
+        let yaml = ".setup:\n  script: x\nb:\n  script:\n    - !reference [.setup, script]\n    - !reference [.gone, script]\n";
+        assert_eq!(codes(&setup(), yaml), ["undefined-reference"]);
+
+        let file = ci::parse(yaml);
+        let at = yaml.find("[.setup").unwrap() + 3;
+        let target = ci::target_at(&file, at).unwrap();
+        assert_eq!(&yaml[target], ".setup");
+    }
+
+    #[test]
     fn ci_variables_complete_after_dollar_and_braces() {
         assert_eq!(labels("build:\n  script:\n    - echo $CI_COMMIT_SHORT|"), ["CI_COMMIT_SHORT_SHA"]);
         assert!(labels("a: ${CI_PROJECT_P|").contains(&"CI_PROJECT_PATH".to_owned()));
@@ -3310,7 +3391,7 @@ mod ci_aid_tests {
     #[test]
     fn reference_tags_in_scripts_give_no_findings() {
         let host = MockHost::install();
-        let yaml = "build:\n  script:\n    - !reference [.setup, script]\n    - echo hi\n";
+        let yaml = ".setup:\n  script: x\nbuild:\n  script:\n    - !reference [.setup, script]\n    - echo hi\n";
 
         assert!(codes(&host, yaml).is_empty());
     }

@@ -114,6 +114,8 @@ pub struct SnippetForm {
     /// `Personal` or `Project <group/name>`, one of the listed scopes.
     pub scope: String,
     pub file_path: String,
+    /// Project files, one repository path per line, added to the snippet beside the focused file.
+    pub more_files: String,
     /// The `(path, content)` a public create warned about; only `confirm-public` posts it, and only unchanged.
     pub confirm_public: Option<(String, String)>,
     pub status: Option<String>,
@@ -127,6 +129,7 @@ impl Default for SnippetForm {
             visibility: "private".into(),
             scope: PERSONAL.into(),
             file_path: String::new(),
+            more_files: String::new(),
             confirm_public: None,
             status: None,
         }
@@ -142,6 +145,7 @@ impl SnippetForm {
             Field::new("visibility", "Visibility", FieldValue::Choice(visibilities, self.visibility.clone())),
             Field::new("scope", "Snippet of", FieldValue::Choice(scopes.to_vec(), self.scope.clone())),
             Field::new("file-path", "File name (empty: the focused file's path)", FieldValue::Text(self.file_path.clone())),
+            Field::new("more-files", "More files (paths from the project root, one per line)", FieldValue::Multiline(self.more_files.clone())),
         ];
 
         let create = match self.confirm_public.is_some() {
@@ -164,22 +168,28 @@ impl SnippetForm {
             "visibility" if api::VISIBILITIES.contains(&value) => self.visibility = value.to_owned(),
             "scope" => self.scope = value.to_owned(),
             "file-path" => self.file_path = value.to_owned(),
+            "more-files" => self.more_files = value.to_owned(),
             _ => return,
         }
 
         self.confirm_public = None;
     }
 
-    /// `path` is the focused file's repository path, or its name outside the repository.
-    pub fn draft(&self, path: String, content: String, scopes: &[String]) -> Result<SnippetDraft, Error> {
+    pub fn extra_paths(&self) -> Result<Vec<&str>, Error> {
+        self.more_files.lines().map(str::trim).filter(|l| !l.is_empty()).map(safe::repo_file_path).collect()
+    }
+
+    /// The first file is the focused one: its path is its repository path, or its name outside the repository.
+    pub fn draft(&self, mut files: Vec<(String, String)>, scopes: &[String]) -> Result<SnippetDraft, Error> {
         if !scopes.contains(&self.scope) {
             return Err("Choose what the snippet belongs to.".into());
         }
 
-        let file_path = match self.file_path.trim() {
-            "" => path,
-            typed => safe::repo_file_path(typed)?.to_owned(),
-        };
+        let focused = files.first_mut().ok_or("Nothing to put in the snippet.")?;
+        if !self.file_path.trim().is_empty() {
+            focused.0 = safe::repo_file_path(self.file_path.trim())?.to_owned();
+        }
+        let file_path = focused.0.clone();
         let title = match self.title.trim() {
             "" => file_path.rsplit('/').next().unwrap_or(&file_path).to_owned(),
             typed => typed.to_owned(),
@@ -189,7 +199,7 @@ impl SnippetForm {
             title,
             description: self.description.clone(),
             visibility: self.visibility.clone(),
-            files: vec![(file_path, content)],
+            files,
             project: self.scope.strip_prefix("Project ").map(str::to_owned),
         })
     }
