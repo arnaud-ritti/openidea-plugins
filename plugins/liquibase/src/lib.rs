@@ -1098,7 +1098,7 @@ mod tests {
     fn placeholder_in_xml_comment_is_quiet() {
         let text = "<databaseChangeLog>\n<!-- uses ${prefix}\n and more -->\n</databaseChangeLog>";
         assert!(placeholder_in(PROPERTY_PATH, text).is_empty());
-        assert_eq!(placeholder_in(PROPERTY_PATH, &format!("{text}<!-- x --><a b=\"${{late}}\"/>")).len(), 0);
+        assert_eq!(placeholder_in(PROPERTY_PATH, &format!("{text}<!-- x --><a b=\"${{late}}\"/>")).len(), 1);
     }
 
     #[test]
