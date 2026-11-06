@@ -67,7 +67,7 @@ pub fn rows(text: &str) -> Vec<Request> {
         })
         .collect();
 
-    requests.sort_by(|a, b| b.time.cmp(&a.time));
+    requests.sort_by_key(|r| std::cmp::Reverse(r.time));
     requests.truncate(MAX_ROWS);
     requests
 }
