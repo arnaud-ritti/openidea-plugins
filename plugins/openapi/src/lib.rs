@@ -150,6 +150,10 @@ fn spec_candidate_hint(text: &str) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
+    if text.len() > MAX_SCANNED_FILE_BYTES {
+        return Vec::new();
+    }
+
     checks::spec_candidate(text)
 }
 
@@ -403,7 +407,7 @@ impl Providers for OpenApi {
     }
 }
 
-const MAX_ENDPOINT_FILE_BYTES: usize = 1 << 20;
+const MAX_SCANNED_FILE_BYTES: usize = 1 << 20;
 
 pub const ENDPOINTS: &str = "endpoints";
 
@@ -419,7 +423,7 @@ fn endpoint_items(project: &Project) -> Result<(Vec<ListItem>, usize), Error> {
         let Ok(text) = project.read_file(&path) else {
             continue;
         };
-        if text.len() > MAX_ENDPOINT_FILE_BYTES {
+        if text.len() > MAX_SCANNED_FILE_BYTES {
             continue;
         }
 
@@ -984,6 +988,14 @@ mod tests {
 
         let nested_paths = "wrapper:\n  paths:\n    /x:\n      get: {}\n";
         assert!(published(&host, "/project/w.yaml", nested_paths).is_empty());
+    }
+
+    #[test]
+    fn candidate_hint_skips_files_over_the_size_cap() {
+        let host = MockHost::install();
+        let padding = format!("# {}\n", "x".repeat(MAX_SCANNED_FILE_BYTES));
+        assert!(published(&host, "/project/big.yaml", &format!("{FRAGMENT}{padding}")).is_empty());
+        assert_eq!(published(&host, "/project/small.yaml", FRAGMENT).len(), 1);
     }
 
     #[test]
