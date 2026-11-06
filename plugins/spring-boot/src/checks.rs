@@ -184,7 +184,7 @@ fn valid_prefix(prefix: &str) -> bool {
     })
 }
 
-/// A `@ConfigurationProperties` prefix is binding-safe when each dot-separated segment is lower case, kebab-separated; a missing prefix is only a hint. Constants, placeholders and concatenations are not read.
+/// A `@ConfigurationProperties` prefix is binding-safe when each dot-separated segment is lower case, kebab-separated; a missing or empty prefix is only a hint. Constants, placeholders and concatenations are not read.
 fn configuration_properties_prefix(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
     if !file.from_spring("ConfigurationProperties") {
         return;
@@ -193,7 +193,7 @@ fn configuration_properties_prefix(file: &JavaFile, ty: &TypeDecl, out: &mut Vec
         ty.methods().filter(|m| m.annotation("Bean").is_some()).filter_map(|m| m.annotation("ConfigurationProperties")),
     );
     for annotation in annotated {
-        let prefix = annotation.arg("prefix").or_else(|| annotation.arg("value"));
+        let prefix = annotation.arg("prefix").or_else(|| annotation.arg("value")).filter(|p| p.text.trim() != "\"\"");
         let Some(prefix) = prefix else {
             out.push(
                 Finding::new(annotation.name_at, annotation.name_at + annotation.name.len(), "config-properties-prefix", "@ConfigurationProperties has no prefix, so it binds properties at the top level. Give it a prefix such as `app.mail`.")
@@ -374,6 +374,14 @@ mod tests {
         assert_eq!(codes(&text), [("config-properties-prefix", "ConfigurationProperties".to_owned())]);
         assert_eq!(severities(&text), [Severity::Hint]);
         assert_eq!(severities(&PROPS.replace("prefix = \"app.mail\"", "ignoreUnknownFields = false")), [Severity::Hint]);
+    }
+
+    #[test]
+    fn empty_prefix_hints() {
+        let text = PROPS.replace("prefix = \"app.mail\"", "\"\"");
+        assert_eq!(codes(&text), [("config-properties-prefix", "ConfigurationProperties".to_owned())]);
+        assert_eq!(severities(&text), [Severity::Hint]);
+        assert_eq!(severities(&PROPS.replace("app.mail", "")), [Severity::Hint]);
     }
 
     #[test]
