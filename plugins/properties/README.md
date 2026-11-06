@@ -23,7 +23,16 @@ from JetBrains' [Properties plugin](https://plugins.jetbrains.com/plugin/11594-p
   file's values, and insert or delete rows. Other locales are read-only.
 - Go to Declaration on a key: the same key in the parent locale
   (`messages_fr_CA` → `messages_fr` → `messages`); on a Java/Kotlin string:
-  every declaration of that key.
+  every declaration of that key; also on `#{a.b}` in `.html` (Thymeleaf),
+  `.xhtml` and JSP, and on `<spring:message code>` / `<fmt:message key>`.
+- Problems in code: a literal key in `messageSource.getMessage("a.b", …)`,
+  `ResourceBundle.getBundle("messages").getString("a.b")`, `#{a.b}` in `.html`,
+  `<spring:message>` and `<fmt:message>` that no `.properties` file declares.
+  Reported only when the project has exactly one MessageSource-style bundle
+  (`messages`, `ValidationMessages` or anything under `i18n/`); dynamic keys,
+  default messages, `{0}` patterns and bundles outside the project stay quiet.
+  Turn off with `reportMissingKeysInCode`. The check runs when a file is opened
+  or saved, not when a `.properties` file changes.
 - Key completion in `simplelogger.properties` (slf4j) and in the key argument
   of Java/Kotlin i18n calls (`getString`, `getMessage`, `message`…).
 - Properties: Copy Property Key / Copy Property Value copy the key or value

@@ -14,7 +14,7 @@ Path: **Source** = ported from an open-source repo, licence files kept. **Clean-
 |---|---|---|---|---|
 | `dotenv` | .env files support (`ru.adelf.idea.dotenv`) | Source | High | Hide values, `$` auto-popup, Find Usages/Rename UI, plugin extension points; compose anchors and multi-line flow collections |
 | `ignore` | .ignore (`mobi.hsz.idea.gitignore`) | Source | High | Not reviewed in LIMITATIONS.md: check against the original's rename/generate actions |
-| `properties` | Properties (`com.intellij.properties`) | Source | Medium | No references/rename between bundles, no structure view for built-in `properties` language beyond the plugin's own |
+| `properties` | Properties (`com.intellij.properties`) | Source | Medium-High | No references/rename between bundles; key navigation and missing-key warnings cover Java/Kotlin, Thymeleaf `.html`, JSP and `.xhtml` but not FreeMarker (no language id) |
 | `tasks` | Tasks & Contexts (`com.intellij.tasks`) | Source | Medium | Switch/Go-to-Task popups, self-hosted trackers (fixed `net:` hosts), changelists, context clearing, bookmarks/breakpoints, commit dialog |
 | `gitlab` | GitLab (`org.jetbrains.plugins.gitlab`) | Source | Medium | Fixed hosts (gitlab.com only), no clone/push/commit API, no IDE diff viewer, no inline comment decorations, no secret writes |
 | `ideolog` | Ideolog (log viewer) | Source | Medium | Log language can't take a plugin syntax, no line hiding, no scrollbar marks, caret can't move, no banners |

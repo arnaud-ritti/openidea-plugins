@@ -22,6 +22,10 @@ languages = ["properties"]
 kinds = ["definition", "completion"]
 languages = ["java", "kotlin"]
 
+[[contributes.providers]]
+kinds = ["definition"]
+languages = ["html", "jsp"]
+
 [[contributes.views]]
 id = "structure"
 title = "Properties Structure"

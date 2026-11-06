@@ -1072,6 +1072,19 @@ Checked against the SDK, WIT and host of v0.1.37 on 2026-11-05.
 - **Blocks:** creating a Quarkus project in the IDE.
 - **Why:** same as *Code actions can't create, rename or delete files* in the Symfony section (a plugin can't create files). The command opens code.quarkus.io in the browser instead.
 
+## aritti.properties (port of com.intellij.properties)
+
+Key navigation and the missing-key warning are text scans, not type resolution. Source port (Apache-2.0); the HTML/JSP sites and the missing-key warning are clean-room from the Spring and Thymeleaf documentation.
+
+| Not implemented | Why | Workaround |
+|---|---|---|
+| Go to Definition and warnings in FreeMarker (`.ftl`) | the host has no language id for `.ftl`, so a provider can't attach to it | none; use Search Everywhere on the key |
+| Warnings for `#{key}` in `.xhtml` and JSP | there `#{...}` is Java EL (JSF beans), not a message; navigation still works | none needed |
+| Warnings with several candidate bundles (more than one of `messages`, `ValidationMessages`, `i18n/*`, or the same name in two folders) | without types the plugin can't tell which bundle a call reads | turn on one bundle layout, or ignore: the check stays quiet |
+| Warnings for `bundle.getString("k")` on a variable, or `message("k")` | the receiver's bundle is unknown | use `ResourceBundle.getBundle("name").getString("k")` inline |
+| Rename of a key across bundles and code, references (Find Usages) | no rename or references API for plugins | Find Unused Properties, and Remove from every locale |
+| Warnings refreshed when a `.properties` file changes | diagnostics are published on open and save of the code file | reopen or save the file |
+
 ## All plugins
 
 Checked against the host and frontend source of v0.1.37 on 2026-11-05.

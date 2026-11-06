@@ -24,7 +24,7 @@ use props::{
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::Range as Span;
-use usages::{KeyIndex, implicitly_used, is_i18n_argument, literal_at, mark_used};
+use usages::{KeyIndex, implicitly_used, is_i18n_argument, literal_at, mark_used, markup_uses, source_uses};
 use views::{BUNDLE, BundleFiles, STRUCTURE};
 
 fn project_for(path: &str) -> Result<Project, Error> {
@@ -128,6 +128,10 @@ fn is_source_file(path: &str) -> bool {
     path.ends_with(".java") || path.ends_with(".kt")
 }
 
+fn is_template_file(path: &str) -> bool {
+    [".html", ".htm", ".xhtml", ".jsp", ".jspx"].iter().any(|ext| path.ends_with(ext))
+}
+
 #[derive(Default)]
 pub struct Properties {
     /// Missing translations of the last inspection per file, for their quick fixes.
@@ -138,6 +142,8 @@ pub struct Properties {
     unused: HashMap<String, HashSet<String>>,
     /// Keys of the project's `.properties` files, for Java/Kotlin strings.
     index: Option<KeyIndex>,
+    /// Files with missing-key warnings published, to clear them when the setting is turned off.
+    code_diagnostics: HashSet<String>,
     bundle: Option<BundleFiles>,
     structure_flat: bool,
     structure_sorted: bool,
@@ -183,6 +189,34 @@ impl Properties {
         host::publish_diagnostics(path, &diagnostics)?;
         self.missing.insert(path.to_owned(), missing);
         self.locales.insert(path.to_owned(), siblings.len() + 1);
+        Ok(())
+    }
+
+    /// `PropertyKeyUsage` of the i18n calls and templates of `path`: keys no bundle declares.
+    fn inspect_code(&mut self, path: &str) -> Result<(), Error> {
+        let enabled = host::setting_bool("reportMissingKeysInCode").unwrap_or(true);
+        if !enabled && !self.code_diagnostics.remove(path) {
+            return Ok(());
+        }
+
+        let mut diagnostics = Vec::new();
+        if enabled {
+            let text = project_for(path)?.read_file(path)?;
+            let uses = if is_source_file(path) { source_uses(&text) } else { markup_uses(&text, path) };
+            let Some(index) = self.key_index(path) else { return Ok(()) };
+
+            for u in index.undeclared(&uses, &text) {
+                let message = format!("Property '{}' isn't declared in any resource bundle.", &text[u.span.clone()]);
+                let mut d = Diagnostic::new(range_of(&text, &u.span), Severity::Warning, message);
+                d.code = Some("MissingPropertyKey".into());
+                diagnostics.push(d);
+            }
+        }
+
+        host::publish_diagnostics(path, &diagnostics)?;
+        if !diagnostics.is_empty() {
+            self.code_diagnostics.insert(path.to_owned());
+        }
         Ok(())
     }
 
@@ -380,6 +414,7 @@ impl Plugin for Properties {
         let mut saved = false;
         let mut refresh = false;
         let mut source_opened = None;
+        let mut code: Vec<&str> = Vec::new();
 
         for event in events {
             match event {
@@ -388,7 +423,11 @@ impl Plugin for Properties {
                     inspect.push(p);
                     saved = true;
                 }
-                Event::FileOpened(p) if is_source_file(p) => source_opened = Some(p.as_str()),
+                Event::FileOpened(p) if is_source_file(p) => {
+                    source_opened = Some(p.as_str());
+                    code.push(p);
+                }
+                Event::FileOpened(p) | Event::FileSaved(p) if is_template_file(p) || is_source_file(p) => code.push(p),
                 Event::EditorFocused(_) => refresh = true,
                 _ => {}
             }
@@ -405,6 +444,14 @@ impl Plugin for Properties {
         for path in &inspect {
             if let Err(e) = self.inspect(path) {
                 host::log(LogLevel::Warn, &format!("inspecting {path}: {e}"));
+            }
+        }
+
+        code.sort();
+        code.dedup();
+        for path in &code {
+            if let Err(e) = self.inspect_code(path) {
+                host::log(LogLevel::Warn, &format!("checking keys in {path}: {e}"));
             }
         }
 
@@ -448,8 +495,15 @@ impl Providers for Properties {
         let Some(at) = offset(text, at) else { return Vec::new() };
 
         if doc.language != "properties" {
-            let Some(literal) = literal_at(text, at) else { return Vec::new() };
-            let key = &text[literal];
+            let key = if matches!(doc.language.as_str(), "html" | "jsp") {
+                let Some(u) = markup_uses(text, &doc.path).into_iter().find(|u| (u.span.start..=u.span.end).contains(&at)) else {
+                    return Vec::new();
+                };
+                &text[u.span]
+            } else {
+                let Some(literal) = literal_at(text, at) else { return Vec::new() };
+                &text[literal]
+            };
             let Some(index) = self.key_index(&doc.path) else { return Vec::new() };
             return index.keys.get(key).into_iter().flatten().map(|d| d.location.clone()).collect();
         }
@@ -643,6 +697,113 @@ mod tests {
 
         let java = doc("/project/src/App.java", "java", "x = \"app.title\";\n");
         assert_eq!(plugin.definition(&java, Position::new(0, 7)).len(), 2);
+    }
+
+    #[test]
+    fn go_to_definition_from_message_source_getmessage() {
+        let host = MockHost::install();
+        host.add_file("/project/src/messages.properties", "a.b=Value\n");
+        host.add_file("/project/src/messages_fr.properties", "a.b=Valeur\n");
+        let mut plugin = Properties::default();
+
+        let cases = [
+            ("java", "/project/A.java", "s = messageSource.getMessage(\"a.b\", null, locale);\n"),
+            ("java", "/project/A.java", "s = messageSource.getMessage(\"a.b\", null, \"dflt\", locale);\n"),
+            ("java", "/project/A.java", "s = ResourceBundle.getBundle(\"messages\").getString(\"a.b\");\n"),
+            ("kotlin", "/project/A.kt", "val s = messageSource.getMessage(\"a.b\", null, locale)\n"),
+            ("html", "/project/t.html", "<p th:text=\"#{a.b}\"></p>\n"),
+            ("html", "/project/t.html", "<input th:placeholder=\"#{a.b(${x})}\"/>\n"),
+            ("html", "/project/t.html", "<p th:title=\"${x} + #{a.b}\"></p>\n"),
+            ("html", "/project/t.xhtml", "<h:outputText value=\"#{a.b}\"/>\n"),
+            ("jsp", "/project/t.jsp", "<spring:message code=\"a.b\"/>\n"),
+            ("jsp", "/project/t.jsp", "<spring:message code='a.b' text='x'/>\n"),
+            ("jsp", "/project/t.jsp", "<fmt:message key=\"a.b\"/>\n"),
+            ("jsp", "/project/t.jsp", "<p>#{a.b}</p>\n"),
+        ];
+
+        for (language, path, text) in cases {
+            let character = text.rfind("a.b").unwrap() as u32 + 1;
+            let found = plugin.definition(&doc(path, language, text), Position::new(0, character));
+            assert_eq!(found.len(), 2, "{text}");
+        }
+
+        let off = doc("/project/t.html", "html", "<p th:text=\"#{a.b}\">x</p>\n");
+        assert!(plugin.definition(&off, Position::new(0, 22)).is_empty());
+    }
+
+    fn diagnostics_for(host: &MockHost, path: &str, text: &str) -> Vec<String> {
+        host.add_file(path, text);
+        let mut plugin = Properties::default();
+        plugin.handle_events(&[Event::FileOpened(path.into())], &host.invocation());
+        host.diagnostics().get(path).map(|d| d.iter().map(|d| d.message.clone()).collect()).unwrap_or_default()
+    }
+
+    #[test]
+    fn missing_key_in_code_warns() {
+        let host = MockHost::install();
+        host.add_file("/project/src/messages.properties", "a.b=Value\n");
+        host.add_file("/project/src/messages_fr.properties", "a.b=Valeur\n");
+
+        let java = "x = messageSource.getMessage(\"a.b\", null, l);\ny = messageSource.getMessage(\"no.such\", null, l);\n";
+        let found = diagnostics_for(&host, "/project/A.java", java);
+        assert_eq!(found, ["Property 'no.such' isn't declared in any resource bundle."]);
+
+        let html = "<p th:text=\"#{a.b}\"></p><p th:text=\"#{gone.key}\"></p>";
+        assert_eq!(diagnostics_for(&host, "/project/t.html", html).len(), 1);
+
+        let jsp = "<spring:message code=\"a.b\"/><spring:message code=\"gone\"/><fmt:message key=\"gone2\"/>";
+        assert_eq!(diagnostics_for(&host, "/project/t.jsp", jsp).len(), 2);
+
+        let bundle = "ResourceBundle.getBundle(\"messages\").getString(\"missing.k\");";
+        assert_eq!(diagnostics_for(&host, "/project/B.java", bundle).len(), 1);
+    }
+
+    #[test]
+    fn missing_key_in_code_stays_quiet_when_unsure() {
+        let host = MockHost::install();
+        host.add_file("/project/src/messages.properties", "a.b=Value\n");
+
+        let quiet = [
+            "m.getMessage(\"prefix.\" + kind, null, l);",
+            "m.getMessage(prefix, null, l);",
+            "m.getMessage(\"{0} items\", null, l);",
+            "m.getMessage(\"Hello world\", null, l);",
+            "m.getMessage(\"no.such\", null, \"default text\", l);",
+            "m.getMessage(\"no.such\", null, \"default text\");",
+            "ResourceBundle.getBundle(\"com.lib.Messages\").getString(\"no.such\");",
+            "bundle.getString(\"no.such\");",
+            "// m.getMessage(\"no.such\", null, l);",
+            "message(\"no.such\");",
+        ];
+        for text in quiet {
+            assert!(diagnostics_for(&host, "/project/Q.java", text).is_empty(), "{text}");
+        }
+
+        let html = ["<p th:text=\"#{${key}}\"></p>", "<spring:message code=\"no.such\" text=\"d\"/>", "<fmt:message key=\"no.such\" bundle=\"${b}\"/>"];
+        for text in html {
+            assert!(diagnostics_for(&host, "/project/q.html", text).is_empty(), "{text}");
+        }
+        assert!(diagnostics_for(&host, "/project/q.xhtml", "<h:outputText value=\"#{msg.no}\"/>").is_empty());
+        assert!(diagnostics_for(&host, "/project/q.jsp", "<fmt:message key=\"no.such\"/><fmt:setBundle basename=\"com.lib.Other\"/>").is_empty());
+    }
+
+    #[test]
+    fn missing_key_in_code_stays_quiet_when_bundle_is_ambiguous() {
+        let call = "m.getMessage(\"no.such\", null, l);";
+
+        let host = MockHost::install();
+        host.add_file("/project/src/application.properties", "a=1\n");
+        assert!(diagnostics_for(&host, "/project/A.java", call).is_empty());
+
+        let host = MockHost::install();
+        host.add_file("/project/a/messages.properties", "a=1\n");
+        host.add_file("/project/b/messages.properties", "b=1\n");
+        assert!(diagnostics_for(&host, "/project/A.java", call).is_empty());
+
+        let host = MockHost::install();
+        host.add_file("/project/src/messages.properties", "a=1\n");
+        host.add_file("/project/src/ValidationMessages.properties", "b=1\n");
+        assert!(diagnostics_for(&host, "/project/A.java", call).is_empty());
     }
 
     #[test]
