@@ -26,7 +26,7 @@ kinds = ["completion", "code-actions", "line-markers"]
 languages = ["properties", "yaml"]
 
 [[contributes.providers]]
-kinds = ["line-markers"]
+kinds = ["code-actions", "line-markers"]
 languages = ["java"]
 
 [contributes.settings]
