@@ -168,9 +168,33 @@ fn follows_other_config(key: &str) -> bool {
             .any(|prefix| plain.starts_with(&prefix.replace('_', "")))
 }
 
+const BUILD_PARAMETER_MARKERS: [&str; 6] =
+    ["expressionVariables", "expressionVars", "changelogParameters", "changeLogParameters", "liquibaseProperties", "propertyFile"];
+
+/// Whether a build file between the changelog and the project root passes parameters to the Liquibase Maven or Gradle plugin.
+fn build_passes_parameters(project: &Project, root: &str, changelog: &str) -> bool {
+    let mut dir = changelog;
+    while let Some((parent, _)) = dir.rsplit_once('/') {
+        if !parent.starts_with(root) {
+            break;
+        }
+        for file in ["pom.xml", "build.gradle", "build.gradle.kts"] {
+            let Ok(text) = project.read_file(&format!("{parent}/{file}")) else { continue };
+            if BUILD_PARAMETER_MARKERS.iter().any(|marker| text.contains(marker)) {
+                return true;
+            }
+        }
+        dir = parent;
+    }
+    false
+}
+
 /// The parameters the project's `liquibase.properties` and Spring configuration files (profile and module files included) set;
 /// `None` when none of those files can be read or the configuration cannot be followed completely.
-fn project_parameters(project: &Project, root: &str) -> Option<BTreeSet<String>> {
+fn project_parameters(project: &Project, root: &str, changelog: &str) -> Option<BTreeSet<String>> {
+    if build_passes_parameters(project, root, changelog) {
+        return None;
+    }
     let mut files: BTreeSet<String> = ["liquibase.properties", "src/main/resources/liquibase.properties"]
         .iter()
         .map(|file| format!("{root}/{file}"))
@@ -424,7 +448,7 @@ impl Providers for Liquibase {
                     let Some((project, root)) = context().as_ref() else {
                         return true;
                     };
-                    let Some(configured) = from_project.get_or_init(|| project_parameters(project, root)) else {
+                    let Some(configured) = from_project.get_or_init(|| project_parameters(project, root, &doc.path)) else {
                         return true;
                     };
                     if configured.contains(name) {
@@ -939,6 +963,23 @@ mod tests {
         let host = MockHost::install();
         host.add_file("src/main/resources/application.properties", "spring.liquibase.parameters.other=1\n");
         assert_eq!(property_codes(&host, PLACEHOLDER_XML), ["unresolved-property"]);
+    }
+
+    #[test]
+    fn maven_plugin_expression_variables_make_the_check_quiet() {
+        let host = host();
+        host.add_file("liquibase.properties", "url=x\n");
+        assert_eq!(property_codes(&host, PLACEHOLDER_XML), ["unresolved-property"]);
+        host.add_file("pom.xml", "<project><build><plugins><plugin><configuration><expressionVariables><prefix>t_</prefix></expressionVariables></configuration></plugin></plugins></build></project>");
+        assert!(property_codes(&host, PLACEHOLDER_XML).is_empty());
+    }
+
+    #[test]
+    fn gradle_changelog_parameters_make_the_check_quiet() {
+        let host = host();
+        host.add_file("liquibase.properties", "url=x\n");
+        host.add_file("build.gradle.kts", "liquibase { activities.register(\"main\") { arguments = mapOf(\"changelogParameters\" to \"prefix=t_\") } }");
+        assert!(property_codes(&host, PLACEHOLDER_XML).is_empty());
     }
 
     #[test]
