@@ -1,13 +1,13 @@
 id = "aritti.ignore"
 name = ".ignore"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Support for ignore files (.gitignore, .dockerignore, .npmignore, .hgignore and 30 more). Reports duplicate, redundant, relative and malformed entries and invalid `syntax:` values, with quick fixes. Completes `syntax:` in .hgignore, opens the file an entry names on Ctrl-click and highlights ignore files the IDE does not recognise. A tool window adds github/gitignore and user templates. The status bar shows Ignored while you edit an ignored file, a notification warns about a Git project without a .gitignore, and any file gets an Add to .gitignore quick fix. Port of the .ignore plugin by Jakub Chrzanowski and JetBrains (mobi.hsz.idea.gitignore 4.5.7, Apache-2.0). Templates from github/gitignore (CC0-1.0)."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "Jakub Chrzanowski (original .ignore plugin)", "JetBrains s.r.o. (original .ignore plugin)"]
 homepage = "https://github.com/JetBrains/idea-gitignore"
 license = "Apache-2.0"
-change-notes = "0.1.0: first release, ported from .ignore 4.5.7 (JetBrains/idea-gitignore commit 860a6855) with github/gitignore templates at 53cf2971. Not ported because the plugin API has no equivalent: directory gutter markers, path completion, Close Ignored Editors, hiding ignored files in the Project view."
+change-notes = "Unreleased: Add Selected Paths asks which ignore file (the open one or a root .gitignore, .dockerignore…) to add to; a file that is not open is opened first and the command run again. 0.2.0: Add Selected Paths to the Open Ignore File in the Project view menu. Needs OpenIDEA API 1.2. 0.1.0: first release, ported from .ignore 4.5.7 (JetBrains/idea-gitignore commit 860a6855) with github/gitignore templates at 53cf2971. Not ported because the plugin API has no equivalent: directory gutter markers, path completion, Close Ignored Editors, hiding ignored files in the Project view."
 categories = ["vcs", "linters"]
-engines.openidea = "^1.0"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved", "on-event:editor-focused"]
 
@@ -27,6 +27,15 @@ languages = ["ignore", "dotignore"]
 [[contributes.providers]]
 kinds = ["code-actions"]
 languages = ["*"]
+
+[[contributes.commands]]
+id = "add-selected"
+title = "Add Selected Paths to the Open Ignore File"
+category = "Ignore"
+
+[[contributes.menus]]
+menu = "projectView.context"
+command = "add-selected"
 
 [[contributes.views]]
 id = "templates"

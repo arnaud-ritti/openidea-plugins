@@ -4,7 +4,7 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::syntax::{SyntaxProvider, Token};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, Position, Project, Range, Severity,
+    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, PickItem, Position, Project, Range, Severity,
     StatusItem, TextEdit, host, text,
 };
 use std::collections::HashSet;
@@ -104,6 +104,74 @@ fn gitignore_actions(path: &str) -> Vec<CodeAction> {
             data: None,
         })
         .collect()
+}
+
+const ROOT_IGNORE_FILES: [&str; 5] = [".gitignore", ".dockerignore", ".npmignore", ".prettierignore", ".eslintignore"];
+
+/// The focused ignore file and the ignore files at the project root; asks which one when there are several.
+fn pick_target(ctx: &Invocation, focused: Option<&str>) -> Result<Option<String>, Error> {
+    let mut candidates: Vec<String> = focused.map(str::to_owned).into_iter().collect();
+
+    if let Some(project) = ctx.project() {
+        let root = project.root()?;
+        for name in ROOT_IGNORE_FILES {
+            let path = format!("{root}/{name}");
+            if !candidates.contains(&path) && project.read_file(&path).is_ok() {
+                candidates.push(path);
+            }
+        }
+    }
+
+    match candidates.len() {
+        0 => Err("Open the ignore file to add the selected paths to.".into()),
+        1 => Ok(candidates.pop()),
+        _ => {
+            let items: Vec<PickItem> = candidates.iter().map(|path| PickItem::new(path, path.rsplit('/').next().unwrap_or(path))).collect();
+
+            match host::pick("Add to ignore file", &items) {
+                Err(Error::Invalid(_)) => Ok(candidates.into_iter().next()),
+                picked => picked,
+            }
+        }
+    }
+}
+
+fn add_selected(ctx: &Invocation) -> Result<Option<String>, Error> {
+    let focused = ctx.editor().filter(|e| dialect(&e.path()).is_some());
+    let Some(file) = pick_target(ctx, focused.as_ref().map(|e| e.path()).as_deref())? else {
+        return Ok(None);
+    };
+
+    let editor = match focused.filter(|e| e.path() == file) {
+        Some(editor) => editor,
+        None => {
+            host::open_location(&file, 0, 0)?;
+            let Some(opened) = ctx.editor().filter(|e| e.path() == file) else {
+                return Ok(Some(format!("Opened {file}. Run the command again to add the selected paths to it.")));
+            };
+            opened
+        }
+    };
+
+    let base = file.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let doc = editor.document()?;
+    let listed: HashSet<&str> = doc.text.lines().map(str::trim).collect();
+    let mut entries: Vec<String> = Vec::new();
+    for path in ctx.selected_paths() {
+        let Some(relative) = path.strip_prefix(base).and_then(|r| r.strip_prefix('/')) else { continue };
+        let entry = format!("/{}", relative.replace('[', "\\[").replace(']', "\\]"));
+        if !listed.contains(entry.as_str()) && !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    if entries.is_empty() {
+        return Err("The selected paths are already listed or are outside the open ignore file's folder.".into());
+    }
+
+    let addition: String = entries.iter().map(|e| format!("{e}\n")).collect();
+    editor.apply_edits(doc.version, &[append(&doc.text, &addition, false)])?;
+
+    Ok(Some(format!("Added {} to the open ignore file.", entries.len())))
 }
 
 /// The ignore files that apply to `relative`: `.git/info/exclude`, then the
@@ -328,8 +396,11 @@ impl IgnorePlugin {
 }
 
 impl openidea_plugin::Plugin for IgnorePlugin {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        match id {
+            "add-selected" => add_selected(ctx),
+            _ => Err(Error::NotFound(format!("command {id}"))),
+        }
     }
 
     fn handle_events(&mut self, events: &[Event], ctx: &Invocation) {
