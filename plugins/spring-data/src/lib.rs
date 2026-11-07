@@ -1077,9 +1077,15 @@ impl Plugin for DataTools {
             return Err(Error::NotFound(format!("command {id}")));
         }
         let editor = ctx.editor().ok_or("Open a repository interface first.")?;
-        let doc = editor.document()?;
+        let (doc, selections) = match (editor.document(), editor.selections()) {
+            (Ok(doc), Ok(selections)) => (doc, selections),
+            (Err(Error::Denied(_)), _) | (_, Err(Error::Denied(_))) => {
+                return Err("Grant the editor.read capability to show inherited members.".into());
+            }
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+        };
         let file = parse_source(&editor.path(), &doc.text);
-        let caret = editor.selections()?.first().and_then(|r| offset(&doc.text, r.start)).unwrap_or(0);
+        let caret = selections.first().and_then(|r| offset(&doc.text, r.start)).unwrap_or(0);
         let (repository, _) = repository_at(&file, caret).ok_or("Put the caret in a Spring Data repository interface.")?;
         let parents: Vec<&str> = repository.extends.iter().map(|t| t.name.as_str()).collect();
         let found = members::inherited(&parents);

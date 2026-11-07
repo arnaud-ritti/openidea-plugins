@@ -13,6 +13,7 @@ activation = ["on-language:java", "on-language:kotlin"]
 
 [capabilities]
 required = ["project.read"]
+optional = ["editor.read"]
 
 [[contributes.providers]]
 kinds = ["completion", "definition", "line-markers", "code-actions"]
