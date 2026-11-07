@@ -1,6 +1,6 @@
 id = "aritti.twig"
 name = "Twig"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Twig support for .twig files: highlighting of Twig and the HTML around it, blocks and macros in the structure view, folding of tag pairs and multi-line comments, completion of tags, filters, functions, tests and imported macros, Go to Declaration for macros and templates, thirteen snippets (blk, mcr, esc, emb, ext, for, from, if, imp, inc, sbx, spl, verb), and inspections for unclosed tags, unexpected end tags and unterminated delimiters."
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"
