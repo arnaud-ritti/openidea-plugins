@@ -409,6 +409,7 @@ impl KubeExplorer {
     }
 
     /// The YAML in an editor on a temp file (saving applies it), else in the panel.
+    /// A Secret never goes to a file: `tee` creates it readable by every local user.
     fn edit_yaml(&mut self, kind: &str, row: &str) -> Result<(), Error> {
         if !Self::secret_gate(kind) {
             return Ok(());
@@ -416,6 +417,11 @@ impl KubeExplorer {
         let (namespace, name) = self.split_scope(kind, row)?;
         let _task = host::begin_task(&format!("Loading {kind}/{row}"), false);
         let text = self.kubectl_in(namespace.as_deref(), &["get", kind, &name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
+        if kind == "secrets" {
+            self.show_yaml(kind, row, text, None);
+            return Ok(());
+        }
+
         let yaml = without_resource_version(&text);
         let yaml = format!("{}{yaml}", schema::modeline(&yaml).unwrap_or_default());
         if let Err(e) = self.open_temp_file(namespace.as_deref(), kind, &name, &yaml) {
@@ -1551,6 +1557,21 @@ mod tests {
         kube.handle(TREE, ViewEvent::Select("res:pods/web-1".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
         host.opened_locations()[0].0.clone()
+    }
+
+    #[test]
+    fn secret_yaml_never_goes_to_a_temp_file() {
+        let (host, written) = host_with_tee();
+        host.set_setting("allowRevealSecrets", "true");
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("res:secrets/web-1".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
+
+        assert!(host.process_runs().iter().all(|r| r.program != "tee"), "tee must not run for a Secret");
+        assert!(written.borrow().is_empty());
+        assert!(host.opened_locations().is_empty());
+        assert!(kube.details.as_ref().is_some_and(|d| d.text.contains("name: web-1")), "the YAML is shown in the panel instead");
     }
 
     #[test]

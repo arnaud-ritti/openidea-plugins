@@ -24,8 +24,9 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   shows them only in the panel. It is off until you turn on `allowRevealSecrets` in
   the settings; while it is off, YAML on a secret is refused too (that YAML holds the
   base64 data), and Describe, which prints no values, still works. With it on, YAML
-  on a secret is allowed and is not stripped: it opens in a temp file or the panel
-  like any resource. Show Secret itself never sends values to notifications, logs,
+  on a secret is allowed and is not stripped: it opens in the panel, read-only, and is
+  never written to a temp file (`tee` would create it readable by every local user).
+  Show Secret itself never sends values to notifications, logs,
   storage, the clipboard, temp files or command arguments; a value that is not UTF-8
   is shown as base64. The SDK has no view-close event, so revealed values clear on Back
   only (and when the setting is turned off). Create Secret builds an Opaque Secret from
@@ -81,7 +82,7 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   CronJob, Service, Ingress, ConfigMap, Secret (`stringData` placeholder), Namespace,
   Role, RoleBinding, ClusterRole, ClusterRoleBinding and CertificateSigningRequest, on current stable
   apiVersions.
-- **YAML** opens in a regular editor on `/tmp/kube-explorer-<kind>-<name>-<random>.yaml`,
+- **YAML** (not for secrets, which open in the panel) opens in a regular editor on `/tmp/kube-explorer-<kind>-<name>-<random>.yaml`,
   with a `yaml-language-server` schema modeline (completion, validation and
   docs from the Kubernetes JSON schemas). Every save runs `kubectl replace -f`
   in the context and namespace the file was opened from. The file leaves out
