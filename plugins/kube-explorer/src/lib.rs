@@ -215,6 +215,11 @@ impl KubeExplorer {
         host::setting_bool("allowRevealSecrets") == Some(true)
     }
 
+    /// Off by default: `tee` creates the temp file readable by every local user.
+    fn yaml_in_editor() -> bool {
+        host::setting_bool("yamlInEditor") == Some(true)
+    }
+
     /// True when the secret's data may be read; otherwise tells the user how to allow it.
     fn secret_gate(kind: &str) -> bool {
         if kind != "secrets" || Self::reveal_allowed() {
@@ -390,6 +395,7 @@ impl KubeExplorer {
     }
 
     /// The YAML in an editor on a temp file (saving applies it), else in the panel.
+    /// A Secret never goes to a file: `tee` creates it readable by every local user.
     fn edit_yaml(&mut self, kind: &str, row: &str) -> Result<(), Error> {
         if !Self::secret_gate(kind) {
             return Ok(());
@@ -397,6 +403,11 @@ impl KubeExplorer {
         let (namespace, name) = self.split_scope(kind, row)?;
         let _task = host::begin_task(&format!("Loading {kind}/{row}"), false);
         let text = self.kubectl_in(namespace.as_deref(), &["get", kind, &name, "-o", "yaml", REQUEST_TIMEOUT], None)?;
+        if kind == "secrets" || !Self::yaml_in_editor() {
+            self.show_yaml(kind, row, text, None);
+            return Ok(());
+        }
+
         let yaml = without_resource_version(&text);
         let yaml = format!("{}{yaml}", schema::modeline(&yaml).unwrap_or_default());
         if let Err(e) = self.open_temp_file(namespace.as_deref(), kind, &name, &yaml) {
@@ -1423,6 +1434,7 @@ mod tests {
 
     fn host_with_tee() -> (MockHost, std::rc::Rc<std::cell::RefCell<String>>) {
         let host = host().with_capabilities(&["process:kubectl", "process:tee", "editor.read", "storage", "events", "project.read"]);
+        host.set_setting("yamlInEditor", "true");
         let written = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
         let sink = written.clone();
         host.on_process("tee", move |_, stdin| {
@@ -1436,6 +1448,35 @@ mod tests {
         kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
         kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
         host.opened_locations()[0].0.clone()
+    }
+
+    #[test]
+    fn secret_yaml_never_goes_to_a_temp_file() {
+        let (host, written) = host_with_tee();
+        host.set_setting("allowRevealSecrets", "true");
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("kind:secrets/web-1".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
+
+        assert!(host.process_runs().iter().all(|r| r.program != "tee"), "tee must not run for a Secret");
+        assert!(written.borrow().is_empty());
+        assert!(host.opened_locations().is_empty());
+        assert!(page(&mut kube, &host).contains("name: web-1"), "the YAML is shown in the panel instead");
+    }
+
+    #[test]
+    fn yaml_stays_in_the_panel_unless_the_editor_option_is_on() {
+        let (host, written) = host_with_tee();
+        host.set_setting("yamlInEditor", "false");
+        let mut kube = KubeExplorer::default();
+        kube.handle(TREE, ViewEvent::Select("kind:pods/web-1".into()), &host.invocation()).unwrap();
+
+        kube.handle(TREE, ViewEvent::Button("yaml".into()), &host.invocation()).unwrap();
+
+        assert!(host.process_runs().iter().all(|r| r.program != "tee"));
+        assert!(written.borrow().is_empty());
+        assert!(page(&mut kube, &host).contains("name: web-1"));
     }
 
     #[test]
@@ -2234,6 +2275,7 @@ mod tests {
     fn all_host() -> MockHost {
         let host = MockHost::install().with_capabilities(CAPS);
         host.set_setting("allowRevealSecrets", "true");
+        host.set_setting("yamlInEditor", "true");
         host.on_process("tee", |_, _| ok(""));
         host.on_process(KUBECTL, |args, _| {
             let has = |a: &str| args.iter().any(|x| x == a);
