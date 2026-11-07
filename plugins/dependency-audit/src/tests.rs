@@ -632,6 +632,29 @@ fn quick_fix_upgrades_version_catalog_entries() {
     }
 }
 
+const SHARED_CATALOG: &str = r#"[versions]
+jackson = "2.12.3"
+
+[libraries]
+annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
+databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+"#;
+
+#[test]
+fn quick_fix_audits_every_library_sharing_the_selected_version() {
+    let host = MockHost::install().with_capabilities(CAPS);
+    host.on_fetch(osv);
+    host.add_file("gradle/libs.versions.toml", SHARED_CATALOG);
+
+    opened(&host, "/project/gradle/libs.versions.toml");
+    let catalog = document("/project/gradle/libs.versions.toml", "toml", SHARED_CATALOG);
+
+    let actions = DependencyAudit::default().code_actions(&catalog, line(4));
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "Upgrade jackson-databind to 2.12.7.1");
+}
+
 #[test]
 fn requirements_versions_are_replaceable() {
     let text = "flask==2.0.0 # web\n";
