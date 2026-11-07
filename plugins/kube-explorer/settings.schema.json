@@ -15,6 +15,11 @@
       "title": "Allow Show Secret and YAML on a secret (off: secret data is never read; on: YAML of a secret is shown unstripped)",
       "default": false
     },
+    "yamlInEditor": {
+      "type": "boolean",
+      "title": "Open YAML in an editor on a temp file in /tmp (off: YAML opens in the panel; on: the file is readable by other users of this machine, never used for secrets)",
+      "default": false
+    },
     "checkDeprecatedApiVersions": {
       "type": "boolean",
       "title": "Report removed or deprecated apiVersions (extensions/v1beta1, batch/v1beta1, ...)",

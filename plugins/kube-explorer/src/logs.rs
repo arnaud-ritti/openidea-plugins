@@ -174,14 +174,20 @@ impl LogView {
     }
 }
 
+/// Inside the project only: a shared directory such as /tmp would make the file readable by every local user.
+fn suggested_path(root: Option<&str>, file: &str) -> Option<String> {
+    root.map(|root| format!("{}/{file}", root.trim_end_matches('/')))
+}
+
 impl KubeExplorer {
     fn download_log(&self) -> Result<(), Error> {
         let Some(view) = &self.log_view else { return Ok(()) };
         let shown = view.shown();
         let root = host::projects().ok().and_then(|projects| projects.first().and_then(|project| project.root().ok()));
         let file = format!("{}.log", file_safe(&format!("{}-{}", view.kind, view.row)));
-        let suggestion = root.map_or(format!("/tmp/{file}"), |root| format!("{}/{file}", root.trim_end_matches('/')));
-        let Some(path) = host::input("Write the shown lines to (absolute path, overwritten)", Some(&suggestion))? else { return Ok(()) };
+        let suggestion = suggested_path(root.as_deref(), &file);
+        let prompt = "Write the shown lines to (absolute path, overwritten; logs can hold sensitive data, so choose a folder only you can read)";
+        let Some(path) = host::input(prompt, suggestion.as_deref())? else { return Ok(()) };
         let path = path.trim();
         if !path.starts_with('/') {
             return Err("Enter an absolute path.".into());
@@ -467,6 +473,12 @@ mod tests {
         assert_eq!(host.view_messages(), [("kube".to_owned(), "end".to_owned())]);
         kube.log_button("log-clear").unwrap();
         assert!(kube.log_view.as_ref().unwrap().lines.is_empty());
+    }
+
+    #[test]
+    fn download_suggests_a_path_inside_the_project_and_never_in_tmp() {
+        assert_eq!(suggested_path(Some("/work/app/"), "web.log").as_deref(), Some("/work/app/web.log"));
+        assert_eq!(suggested_path(None, "web.log"), None);
     }
 
     #[test]

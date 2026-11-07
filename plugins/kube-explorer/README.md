@@ -51,8 +51,9 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   or hide the timestamp and the `[pod/container]` prefix of each line), Scroll to end,
   Clear (empties the view; Refresh reads the log again), Refresh, Copy (the shown lines
   on the clipboard, optional `clipboard`) and Download… (writes the shown lines, as
-  displayed, to an absolute path you confirm, by default `<project>/<kind>-<name>.log`;
-  optional `process:tee`, overwrites the file). Scroll to end relies on the page's
+  displayed, to an absolute path you confirm, by default `<project>/<kind>-<name>.log` (no default
+  without a project, never `/tmp`: `tee` creates the file readable by every local user
+  and logs can hold sensitive data); optional `process:tee`, overwrites the file). Scroll to end relies on the page's
   script, which the IDE may block. Following a log stays in the terminal (Logs, Select
   Log Sources).
 - **Completion in YAML**: in an empty document `kpod`, `kdeploy`, `ksts`, `kds`, `kjob`,
@@ -82,13 +83,14 @@ Browse a Kubernetes cluster from OpenIDEA through `kubectl`.
   CronJob, Service, Ingress, ConfigMap, Secret (`stringData` placeholder), Namespace,
   Role, RoleBinding, ClusterRole, ClusterRoleBinding and CertificateSigningRequest, on current stable
   apiVersions.
-- **YAML** (not for secrets, which open in the panel) opens in a regular editor on `/tmp/kube-explorer-<kind>-<name>-<random>.yaml`,
+- **YAML** opens in the panel, which applies your edits. With `yamlInEditor` on (off by default; never for secrets) it opens in a regular editor on `/tmp/kube-explorer-<kind>-<name>-<random>.yaml`,
   with a `yaml-language-server` schema modeline (completion, validation and
   docs from the Kubernetes JSON schemas). Every save runs `kubectl replace -f`
   in the context and namespace the file was opened from. The file leaves out
   `metadata.resourceVersion`, so a save overwrites any change made in the
   cluster since. `tee` writes the file (`process:tee`, optional) because the
-  plugin API can't write files. Without `tee`, `events` or `project.read`, or on
+  plugin API can't write files and `tee` creates it readable by every local user of the
+  machine (hence the option). Without `tee`, `events` or `project.read`, or on
   Windows, you edit the YAML in the panel instead.
 - **⌥⏎ on a manifest**: *Add Kubernetes schema* (one-document files of a
   built-in kind); *Convert List to separate documents* (caret inside a
