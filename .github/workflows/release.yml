@@ -53,7 +53,7 @@ jobs:
           subjects=$(git log --no-merges --format=%s "$previous..$GITHUB_REF_NAME" -- "plugins/$NAME" \
             | sed -E 's/^[a-z]+(\([^)]*\))?!?: //' | paste -sd ';' - | sed 's/;/; /g; s/\\/\\\\/g; s/"/\\"/g')
           [ -n "$subjects" ] || exit 0
-          LINE="change-notes = \"$VERSION: $subjects\"" awk '/^change-notes = /{print ENVIRON["LINE"]; next} {print}' \
+          LINE="change-notes = \"$VERSION: $subjects\"" awk '/^change-notes = /{print ENVIRON["LINE"]; skip = ($0 ~ /\"\"\"/ && $0 !~ /\"\"\".*\"\"\"/); next} skip{if ($0 ~ /\"\"\"/) skip = 0; next} {print}' \
             "plugins/$NAME/plugin.toml" > "$RUNNER_TEMP/plugin.toml"
           mv "$RUNNER_TEMP/plugin.toml" "plugins/$NAME/plugin.toml"
 
