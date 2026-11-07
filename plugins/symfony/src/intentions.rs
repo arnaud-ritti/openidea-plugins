@@ -15,7 +15,7 @@ pub struct Action {
     pub edits: Vec<(Range<usize>, String)>,
 }
 
-type Edit = (Range<usize>, String);
+pub(crate) type Edit = (Range<usize>, String);
 
 const ROUTE_ATTRIBUTE: &str = "Symfony\\Component\\Routing\\Attribute\\Route";
 const ROUTE_ANNOTATION: &str = "Symfony\\Component\\Routing\\Annotation\\Route";
@@ -29,22 +29,22 @@ const COMMAND_TYPES: &[(&str, &str, &str)] = &[
 ];
 const MODIFIERS: &[&str] = &["public", "protected", "private", "static", "final", "abstract", "readonly"];
 
-struct Class {
-    name: String,
-    extends: Option<String>,
-    body: Range<usize>,
+pub(crate) struct Class {
+    pub name: String,
+    pub extends: Option<String>,
+    pub body: Range<usize>,
 }
 
-struct Method {
-    name: String,
-    visibility: Visibility,
-    is_static: bool,
-    name_range: Range<usize>,
-    span: Range<usize>,
-    parameters: Range<usize>,
+pub(crate) struct Method {
+    pub name: String,
+    pub visibility: Visibility,
+    pub is_static: bool,
+    pub name_range: Range<usize>,
+    pub span: Range<usize>,
+    pub parameters: Range<usize>,
 }
 
-fn eol_of(text: &str) -> &'static str {
+pub(crate) fn eol_of(text: &str) -> &'static str {
     if text.contains("\r\n") { "\r\n" } else { "\n" }
 }
 
@@ -56,17 +56,17 @@ fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
 }
 
-fn line_start(text: &str, at: usize) -> usize {
+pub(crate) fn line_start(text: &str, at: usize) -> usize {
     text[..at].rfind('\n').map_or(0, |found| found + 1)
 }
 
-fn indent_at(text: &str, at: usize) -> &str {
+pub(crate) fn indent_at(text: &str, at: usize) -> &str {
     let line = &text[line_start(text, at)..at];
     let width = line.len() - line.trim_start_matches([' ', '\t']).len();
     &line[..width]
 }
 
-fn find_class(masked: &str) -> Option<Class> {
+pub(crate) fn find_class(masked: &str) -> Option<Class> {
     let bytes = masked.as_bytes();
 
     for (at, _) in masked.match_indices("class") {
@@ -155,7 +155,7 @@ fn member_start(text: &str, masked: &str, keyword: usize) -> (usize, Visibility,
     (start, visibility, is_static)
 }
 
-fn methods_of(text: &str, masked: &str, class: &Class) -> Vec<Method> {
+pub(crate) fn methods_of(text: &str, masked: &str, class: &Class) -> Vec<Method> {
     let bytes = masked.as_bytes();
     let mut methods = Vec::new();
     let mut depth = 0usize;
@@ -207,7 +207,7 @@ fn method_at(text: &str, masked: &str, keyword: usize, limit: usize) -> Option<M
     Some(Method { name: masked[name_range.clone()].to_owned(), visibility, is_static, name_range, span: start..end, parameters: open + 1..close })
 }
 
-fn import_for(text: &str, fqcn: &str) -> Option<(Option<Edit>, String)> {
+pub(crate) fn import_for(text: &str, fqcn: &str) -> Option<(Option<Edit>, String)> {
     let edit = php_text::insert_use(text, fqcn)?;
     let import = (!edit.text.is_empty()).then(|| (edit.offset..edit.offset, edit.text));
     Some((import, edit.short_name))

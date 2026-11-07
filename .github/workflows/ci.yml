@@ -21,6 +21,44 @@ jobs:
           plugins=$(for f in plugins/*/Cargo.toml; do basename "$(dirname "$f")"; done | jq -R . | jq -sc .)
           echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
 
+  crates:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [spring-text, ui-kit]
+    defaults:
+      run:
+        working-directory: crates/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/${{ matrix.name }}
+
+      - run: cargo test
+
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: plugin.toml versions match the release-please manifest
+        run: |
+          status=0
+          for dir in $(jq -r 'keys[]' .release-please-manifest.json); do
+            expected=$(jq -r --arg d "$dir" '.[$d]' .release-please-manifest.json)
+            actual=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$dir/plugin.toml" | head -1)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error file=$dir/plugin.toml::version $actual differs from the release-please manifest ($expected); release-please bumps it, do not edit it by hand"
+              status=1
+            fi
+          done
+          exit $status
+
   plugin:
     needs: list
     runs-on: ubuntu-latest

@@ -3,13 +3,16 @@
 //! annotations, the Java DSL and integration XML), then links producers,
 //! channels and consumers. Text-based: channels match by name as written.
 
+mod structure;
+
 use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
-use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
+use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host};
 use spring_text::diagram::{self, Edge, Node};
 use spring_text::index::{COMMAND_BUDGET, Index, Indexes, PROVIDER_BUDGET};
 use spring_text::java::{Annotation, Str};
 use spring_text::{beans, contains, range, xml};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 const NAMESPACE: &str = "http://www.springframework.org/schema/integration";
@@ -292,7 +295,7 @@ impl Providers for Integration {
 
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let Some(index) = self.index(doc) else { return Vec::new() };
-        let _ = host::publish_diagnostics(&doc.path, &problems(index, doc));
+        publish(&doc.path, &problems(index, doc));
         let mut markers = Vec::new();
         for r in here(index, doc).iter().filter(|r| !r.name.is_empty()) {
             let (found, title) = match r.role {
@@ -372,7 +375,7 @@ impl Views for Integration {
         let index = self.indexes.get(&project, COMMAND_BUDGET);
         let complete = index.complete();
         if !complete {
-            host::refresh_view(VIEW);
+            self::refresh(&id(VIEW));
         }
         let (nodes, edges) = diagram_of(index);
         let status = format!("{} nodes · {} links{}", nodes.len(), edges.len(), if complete { "" } else { " · scanning…" });
@@ -388,7 +391,7 @@ impl Views for Integration {
                 {
                     self.indexes.reset();
                 }
-                host::refresh_view(view);
+                refresh(view);
                 return Ok(());
             }
             ViewEvent::Activate(key) | ViewEvent::Message(key) => key,
@@ -408,7 +411,44 @@ impl Plugin for Integration {
     }
 }
 
-register_plugin!(Integration, providers, views);
+pub const WINDOW_SECTION: &str = "integration";
+
+pub const OWNER_WINDOW: &str = "structure";
+
+fn id(name: &str) -> String {
+    format!("{WINDOW_SECTION}.{name}")
+}
+
+pub(crate) fn refresh(_view: &str) {
+    host::refresh_view(OWNER_WINDOW);
+}
+
+thread_local! {
+    static PROBLEMS: RefCell<Vec<Diagnostic>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The diagnostics belong to the owner plugin, which publishes every module's together: a publish replaces the whole file.
+fn publish(_path: &str, problems: &[Diagnostic]) {
+    PROBLEMS.set(problems.to_vec());
+}
+
+pub fn take_problems() -> Vec<Diagnostic> {
+    PROBLEMS.take()
+}
+
+const BUILD_FILES: [&str; 3] = ["pom.xml", "build.gradle", "build.gradle.kts"];
+const DEPENDENCY_MARKERS: [&str; 8] = ["spring-integration", "starter-integration", "<module>", "include(", "include '", "include \"", "(libs.", " libs."];
+
+/// True when unsure: a multi-module build or a version catalog hides the dependency from the root build file.
+pub fn applies(project: &Project) -> bool {
+    let Ok(root) = project.root() else { return true };
+    BUILD_FILES
+        .iter()
+        .filter_map(|file| project.read_file(&format!("{root}/{file}")).ok())
+        .any(|build| DEPENDENCY_MARKERS.iter().any(|marker| build.contains(marker)))
+}
+
+openidea_plugin::register_plugin!(structure::Structure, providers, views);
 
 #[cfg(test)]
 mod tests {
@@ -567,17 +607,17 @@ interface OrderGateway {
 
     #[test]
     fn warns_about_lost_messages_and_unknown_beans() {
-        let host = setup();
+        let _host = setup();
         let mut p = Integration::default();
-        p.line_markers(&doc(BILLING_PATH, ENDPOINTS_SRC));
-        p.line_markers(&doc(XML_PATH, XML));
-        let diagnostics = host.diagnostics();
-        let codes = |path: &str| -> Vec<(u32, String)> {
-            diagnostics[path].iter().map(|d| (d.range.start.line, d.code.clone().unwrap())).collect()
+        let codes = |problems: &[Diagnostic]| -> Vec<(u32, String)> {
+            problems.iter().map(|d| (d.range.start.line, d.code.clone().unwrap())).collect()
         };
-        assert_eq!(codes(BILLING_PATH), [(9, "unconsumed-channel".into())]);
-        assert_eq!(codes(XML_PATH), [(5, "unconsumed-channel".into()), (6, "unknown-bean".into()), (7, "unconsumed-channel".into())]);
-        assert!(diagnostics[XML_PATH][1].message.contains("'mailer'"));
+        p.line_markers(&doc(BILLING_PATH, ENDPOINTS_SRC));
+        assert_eq!(codes(&take_problems()), [(9, "unconsumed-channel".into())]);
+        p.line_markers(&doc(XML_PATH, XML));
+        let xml_problems = take_problems();
+        assert_eq!(codes(&xml_problems), [(5, "unconsumed-channel".into()), (6, "unknown-bean".into()), (7, "unconsumed-channel".into())]);
+        assert!(xml_problems[1].message.contains("'mailer'"));
     }
 
     #[test]
@@ -652,9 +692,8 @@ interface OrderGateway {
     }
 
     #[test]
-    fn manifest_activates_on_the_diagram_view() {
-        let line = include_str!("../plugin.toml").lines().find(|l| l.starts_with("activation")).unwrap();
-        assert!(line.contains("\"on-view:diagram\""), "{line}");
+    fn manifest_activates_on_the_structure_view() {
+        assert!(include_str!("../plugin.toml").contains("\"on-view:structure\""));
     }
 
     #[test]
@@ -673,4 +712,34 @@ interface OrderGateway {
         assert!(p.line_markers(&doc("/project/src/main/resources/plain.xml", plain)).is_empty());
         assert!(p.completion(&doc("/project/src/main/resources/plain.xml", plain), Position::new(0, 70), None).is_empty());
     }
+
+    #[test]
+    fn applies_follows_the_root_build_file() {
+        let host = MockHost::install();
+        let project = &host::projects().unwrap()[0];
+        assert!(!applies(project), "no build file");
+        host.add_file("pom.xml", "<project><artifactId>spring-boot-starter-web</artifactId></project>");
+        assert!(!applies(project));
+        host.add_file("pom.xml", "<project><artifactId>spring-boot-starter-integration</artifactId></project>");
+        assert!(applies(project));
+        host.add_file("pom.xml", "<project><modules><module>app</module></modules></project>");
+        assert!(applies(project), "multi-module is unsure");
+        host.add_file("pom.xml", "<project><build><plugins><include>**/*Test.java</include></plugins></build></project>");
+        assert!(!applies(project), "surefire include is not a module");
+        host.add_file("pom.xml", "");
+        host.add_file("build.gradle.kts", "includeBuild(\"tools\")\ndependencies { implementation(\"org.slf4j:slf4j-api\") }");
+        assert!(!applies(project), "gradle without the dependency");
+        host.add_file("build.gradle.kts", "dependencies { implementation(libs.spring.thing) }");
+        assert!(applies(project), "version catalog is unsure");
+        host.add_file("build.gradle.kts", "include(\"app\")");
+        assert!(applies(project), "gradle multi-module is unsure");
+    }
+
+    #[test]
+    fn refresh_goes_to_the_owner_window_when_embedded() {
+        let host = MockHost::install();
+        refresh("diagram");
+        assert_eq!(host.refreshed_views(), ["structure"]);
+    }
+
 }

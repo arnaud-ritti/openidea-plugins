@@ -209,6 +209,15 @@ const TEMPLATE_METHODS: [(&str, &str); 9] = [
 /// The URL literals of MockMvc, WebTestClient/WebClient/RestClient and
 /// RestTemplate calls in a test source.
 pub fn requests(path: &str, text: &str) -> Vec<Request> {
+    scan_requests(path, text, false)
+}
+
+/// Like [`requests`], plus URLs still being typed (empty or not starting with `/`).
+pub fn typed_requests(path: &str, text: &str) -> Vec<Request> {
+    scan_requests(path, text, true)
+}
+
+fn scan_requests(path: &str, text: &str, typing: bool) -> Vec<Request> {
     if !path.contains("/src/test/") {
         return Vec::new();
     }
@@ -258,7 +267,7 @@ pub fn requests(path: &str, text: &str) -> Vec<Request> {
             continue;
         };
         let path = url.value.split(['?', '#']).next().unwrap_or("");
-        if path.starts_with('/') {
+        if path.starts_with('/') || (typing && !url.value.contains("://")) {
             out.push(Request { verb, path: path.to_owned(), at: url.at, end: url.end });
         }
     }

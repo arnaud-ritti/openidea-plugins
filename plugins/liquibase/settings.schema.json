@@ -1,5 +1,10 @@
 {
   "properties": {
+    "author": {
+      "type": "string",
+      "title": "Author offered when completing a changeSet author (empty: git config user.name)",
+      "default": ""
+    },
     "checkProperties": {
       "type": "boolean",
       "title": "Warn about ${property} placeholders that no changelog or project configuration declares",

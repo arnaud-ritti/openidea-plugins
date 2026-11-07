@@ -4,19 +4,43 @@ version = "0.1.0" # x-release-please-version
 description = "Spring Data repositories in Java and Kotlin: checks derived query method names (findByAddressZipCodeOrderByAgeDesc…) against the domain class and the method's parameter count, completes them with the entity's properties and operator keywords, links repositories to their entity and custom implementation, opens the entity field from a method name with Go to Definition, checks @Query named parameters and @Modifying without @Query, and completes and checks entity names and alias properties in JPQL queries. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0 (first release): derived query validation and completion, repository → entity navigation, @Query parameter and @Modifying checks."
+change-notes = "Unreleased: parameter and return type checks for derived queries, MongoDB @Query field check, JDBC entity shared by two aggregate roots, derived query tooltips, a Show Repository Inherited Members command (Java and Kotlin), a `repository` snippet, a Sort the query fields action for MongoDB @Query and a Spring Data Repository file template. 0.1.0 0.1.0 (first release): derived query validation and completion, repository → entity navigation, @Query parameter and @Modifying checks."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:java", "on-language:kotlin"]
 
 [capabilities]
 required = ["project.read"]
+optional = ["editor.read"]
 
 [[contributes.providers]]
-kinds = ["completion", "definition", "line-markers"]
+kinds = ["completion", "definition", "line-markers", "code-actions"]
 languages = ["java", "kotlin"]
 
 [contributes.settings]
 schema = "settings.schema.json"
 title = "Spring Data"
+
+[[contributes.fileTemplates]]
+id = "spring-data-repository-java"
+name = "Spring Data Repository"
+extension = "java"
+path = "templates/Repository.java"
+
+[[contributes.fileTemplates]]
+id = "spring-data-repository-kotlin"
+name = "Spring Data Repository (Kotlin)"
+extension = "kt"
+path = "templates/Repository.kt"
+
+[[contributes.commands]]
+id = "show-repository-members"
+title = "Show Repository Inherited Members"
+category = "Spring Data"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "show-repository-members"
+when = "editorLangId == java || editorLangId == kotlin"

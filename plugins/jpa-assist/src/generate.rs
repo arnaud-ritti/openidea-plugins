@@ -327,9 +327,8 @@ pub fn ddl(entities: &[&Class], known: Known, dialect: Dialect) -> String {
     [sequences, tables, constraints].concat().join("\n")
 }
 
-/// A record (Java) or data class (Kotlin) with the entity's basic attributes and the ids of its to-one associations.
-pub fn dto(class: &Class, known: Known) -> String {
-    let mut imports = Vec::new();
+/// Name and type of each field `dto` can carry: basic attributes and the ids of to-one associations.
+pub fn dto_fields(class: &Class, known: Known) -> Vec<(String, String)> {
     let mut fields = Vec::new();
 
     for a in inherited(class, known) {
@@ -343,10 +342,17 @@ pub fn dto(class: &Class, known: Known) -> String {
             _ => continue,
         };
 
-        let ty = convert_type(&ty, class.kotlin);
-        imports.extend(class.qualified(base_type(&ty)));
-        fields.push((name, ty));
+        fields.push((name, convert_type(&ty, class.kotlin)));
     }
+
+    fields
+}
+
+/// A record (Java) or data class (Kotlin) with the chosen fields of `dto_fields`, all when `only` is `None`.
+pub fn dto(class: &Class, known: Known, only: Option<&[String]>) -> String {
+    let fields: Vec<(String, String)> =
+        dto_fields(class, known).into_iter().filter(|(name, _)| only.is_none_or(|names| names.contains(name))).collect();
+    let mut imports: Vec<String> = fields.iter().filter_map(|(_, ty)| class.qualified(base_type(ty))).collect();
 
     imports.sort();
     imports.dedup();
@@ -720,10 +726,10 @@ public class Order {
         let classes = classes();
         let known = |n: &str| classes.iter().find(|c| c.name == n);
         assert_eq!(
-            dto(&classes[0], &known),
+            dto(&classes[0], &known, None),
             "package shop;\n\nimport java.math.BigDecimal;\n\npublic record OrderDto(\n        Long id,\n        String number,\n        BigDecimal total,\n        Integer customerCode\n) {\n}\n"
         );
-        assert_eq!(dto(&classes[1], &known), "package shop\n\ndata class CustomerDto(\n    val code: Int? = null,\n    val name: String? = null,\n)\n");
+        assert_eq!(dto(&classes[1], &known, None), "package shop\n\ndata class CustomerDto(\n    val code: Int? = null,\n    val name: String? = null,\n)\n");
     }
 
     const SQL: &str = "-- schema

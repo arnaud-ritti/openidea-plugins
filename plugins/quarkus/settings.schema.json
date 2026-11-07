@@ -14,6 +14,26 @@
       "type": "boolean",
       "title": "Warn about ${...} expressions naming nothing defined in the file, the environment or the system properties",
       "default": true
+    },
+    "quarkus.checkRequired": {
+      "type": "boolean",
+      "title": "Note required keys (no default, not Optional) that no application file or .env sets while a sibling key is set",
+      "default": false
+    },
+    "quarkus.checkUnassigned": {
+      "type": "boolean",
+      "title": "Warn about @ConfigProperty keys without a default that no application file or .env sets",
+      "default": false
+    },
+    "quarkus.checkHealthMetrics": {
+      "type": "boolean",
+      "title": "Check health checks (@Liveness/@Readiness without HealthCheck and the reverse) and @Gauge beans",
+      "default": true
+    },
+    "quarkus.checkAnnotations": {
+      "type": "boolean",
+      "title": "Check @RestClient injections against @RegisterRestClient and @Scheduled cron and every expressions",
+      "default": true
     }
   }
 }

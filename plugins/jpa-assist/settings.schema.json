@@ -32,9 +32,34 @@
       "title": "Warn about entities that are inner classes, interfaces or enums, or also embeddable or mapped superclasses",
       "default": true
     },
+    "jpaAssist.checkAttributeSignatures": {
+      "type": "boolean",
+      "title": "Warn about attributes with two associations, an association on the wrong type, @Id with @EmbeddedId, or getter and field annotations mixed",
+      "default": true
+    },
+    "jpaAssist.checkMappingNames": {
+      "type": "boolean",
+      "title": "Warn about attribute names in @AttributeOverride, @MapsId, @MapKey and @NamedAttributeNode that the target class does not have",
+      "default": true
+    },
+    "jpaAssist.checkQueryReferences": {
+      "type": "boolean",
+      "title": "Warn about @Query :parameters the method does not declare, and named queries that do not exist",
+      "default": true
+    },
+    "jpaAssist.checkEntityGraphs": {
+      "type": "boolean",
+      "title": "Warn about @EntityGraph names that no @NamedEntityGraph declares and attributePaths the repository entity does not have",
+      "default": true
+    },
+    "jpaAssist.checkPersistenceXml": {
+      "type": "boolean",
+      "title": "Check persistence.xml and JPA mapping files for invalid values and classes that are not in the project",
+      "default": true
+    },
     "jpaAssist.checkListenerUsage": {
       "type": "boolean",
-      "title": "Warn about entity listeners that declare no lifecycle callback",
+      "title": "Warn about entity listeners that declare no lifecycle callback or no public constructor without arguments",
       "default": true
     },
     "jpaAssist.checkListenerSignatures": {

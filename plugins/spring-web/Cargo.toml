@@ -11,8 +11,14 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.37" }
+openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.38" }
 spring-text = { path = "../../crates/spring-text" }
+ui-kit = { path = "../../crates/ui-kit" }
+websocket = { package = "openidea-plugin-aritti-spring-websocket", path = "modules/websocket", features = ["embedded"] }
+messaging = { package = "openidea-plugin-aritti-spring-messaging", path = "modules/messaging", features = ["embedded"] }
+graphql = { package = "openidea-plugin-aritti-spring-graphql", path = "modules/graphql", features = ["embedded"] }
+webflow = { package = "openidea-plugin-aritti-spring-webflow", path = "modules/webflow", features = ["embedded"] }
+cloud = { package = "openidea-plugin-aritti-spring-cloud", path = "modules/cloud", features = ["embedded"] }
 
 [profile.release]
 opt-level = "s"

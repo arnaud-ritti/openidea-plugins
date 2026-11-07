@@ -3,6 +3,8 @@
 //! YouTrackRepository, JiraRestApiCloud3, TrelloRepository). Each is used
 //! once the user has entered its token.
 
+use std::collections::BTreeMap;
+
 use openidea_plugin::{Error, HttpRequest, host};
 use serde_json::{Value, json};
 
@@ -12,12 +14,19 @@ const LIMIT: u32 = 50;
 
 type Remotes = [(String, String)];
 
+/// What a fetch looks at: `query` turns the listing into a search, `repositories` (by tracker id) override the settings.
+pub struct Scope<'a> {
+    pub remotes: &'a Remotes,
+    pub query: Option<&'a str>,
+    pub repositories: &'a BTreeMap<String, Vec<String>>,
+}
+
 pub struct Tracker {
     pub id: &'static str,
     pub name: &'static str,
     secrets: &'static [&'static str],
     headers: &'static [(&'static str, &'static str)],
-    fetch: fn(&Tracker, &Remotes) -> Result<Vec<Task>, Error>,
+    fetch: fn(&Tracker, &Scope) -> Result<Vec<Task>, Error>,
 }
 
 const TRACKERS: [Tracker; 6] = [
@@ -79,8 +88,8 @@ pub struct Fetched {
     pub trackers: usize,
 }
 
-/// Open issues of every configured tracker; one failing doesn't stop the others.
-pub fn fetch_all(remotes: &Remotes) -> Fetched {
+/// Open issues (or the search hits) of every configured tracker; one failing doesn't stop the others.
+pub fn fetch_all(scope: &Scope) -> Fetched {
     let mut fetched = Fetched::default();
 
     for tracker in &TRACKERS {
@@ -90,13 +99,21 @@ pub fn fetch_all(remotes: &Remotes) -> Fetched {
 
         fetched.trackers += 1;
 
-        match (tracker.fetch)(tracker, remotes) {
+        match (tracker.fetch)(tracker, scope) {
             Ok(issues) => fetched.issues.extend(issues),
             Err(e) => fetched.errors.push(format!("{}: {e}", tracker.name)),
         }
     }
 
     fetched
+}
+
+pub fn is_repository_tracker(id: &str) -> bool {
+    matches!(id, "github" | "gitlab" | "forgejo")
+}
+
+pub fn tracker_name(id: &str) -> &str {
+    TRACKERS.iter().find(|t| t.id == id).map_or(id, |t| t.name)
 }
 
 pub fn name(task: &Task) -> &str {
@@ -162,13 +179,25 @@ fn issue_api(task: &Task) -> Result<(&'static Tracker, &str), Error> {
     Ok((tracker, api))
 }
 
-fn github(tracker: &Tracker, remotes: &Remotes) -> Result<Vec<Task>, Error> {
-    let repo = setting("githubRepository")
-        .or_else(|| remote_path(remotes, "github.com"))
-        .ok_or("No github.com remote. Set the repository in Settings › Plugins › Tasks.")?;
-    let repo_name = repo.rsplit('/').next().unwrap_or(&repo).to_owned();
+/// The repositories added in the Tasks view, else the setting, else the remote's.
+fn repositories(scope: &Scope, tracker: &str, setting_key: &str, remote_host: &str) -> Vec<String> {
+    let added = scope.repositories.get(tracker).cloned().unwrap_or_default();
 
-    let mut query = format!("repo:{repo} is:issue is:open");
+    if !added.is_empty() {
+        return added;
+    }
+
+    setting(setting_key).or_else(|| remote_path(scope.remotes, remote_host)).into_iter().collect()
+}
+
+fn github(tracker: &Tracker, scope: &Scope) -> Result<Vec<Task>, Error> {
+    let repos = repositories(scope, "github", "githubRepository", "github.com");
+
+    if repos.is_empty() {
+        return Err("No github.com remote. Set the repository in Settings › Plugins › Tasks.".into());
+    }
+
+    let mut query = format!("{} is:issue is:open", repos.iter().map(|r| format!("repo:{r}")).collect::<Vec<_>>().join(" "));
 
     if host::setting_bool("githubAssignedOnly") == Some(true) {
         query.push_str(" assignee:@me");
@@ -178,9 +207,16 @@ fn github(tracker: &Tracker, remotes: &Remotes) -> Result<Vec<Task>, Error> {
         query = format!("{query} {extra}");
     }
 
+    if let Some(text) = scope.query {
+        query = format!("{query} {text}");
+    }
+
     let url = format!("https://api.github.com/search/issues?q={}&sort=updated&per_page={LIMIT}", encode(&query));
+    let first_name = repos[0].rsplit('/').next().unwrap_or(&repos[0]).to_owned();
 
     Ok(items(&send(tracker, "GET", &url, None)?["items"], |issue| {
+        let repo_name = issue["repository_url"].as_str().and_then(|u| u.rsplit('/').next()).unwrap_or(&first_name);
+
         Some(Task::issue(
             "github",
             &format!("{repo_name}-{}", issue["number"].as_u64()?),
@@ -191,44 +227,63 @@ fn github(tracker: &Tracker, remotes: &Remotes) -> Result<Vec<Task>, Error> {
     }))
 }
 
-fn gitlab(tracker: &Tracker, remotes: &Remotes) -> Result<Vec<Task>, Error> {
-    let project = setting("gitlabProject").or_else(|| remote_path(remotes, "gitlab.com"));
-    let base = match &project {
-        Some(project) => format!("https://gitlab.com/api/v4/projects/{}/issues", encode(project)),
-        None => "https://gitlab.com/api/v4/issues".to_owned(),
+fn gitlab(tracker: &Tracker, scope: &Scope) -> Result<Vec<Task>, Error> {
+    let projects = repositories(scope, "gitlab", "gitlabProject", "gitlab.com");
+    let search = scope.query.map(|q| format!("&search={}", encode(q))).unwrap_or_default();
+    let bases = match projects.is_empty() {
+        true => vec!["https://gitlab.com/api/v4/issues".to_owned()],
+        false => projects.iter().map(|p| format!("https://gitlab.com/api/v4/projects/{}/issues", encode(p))).collect(),
     };
-    let url = format!("{base}?state=opened&order_by=updated_at&per_page={LIMIT}");
+    let single = projects.len() == 1;
+    let mut found = Vec::new();
 
-    Ok(items(&send(tracker, "GET", &url, None)?, |issue| {
-        let id = match project {
-            Some(_) => format!("#{}", issue["iid"].as_u64()?),
-            None => issue["references"]["full"].as_str()?.to_owned(),
-        };
+    for base in bases {
+        let url = format!("{base}?state=opened&order_by=updated_at&per_page={LIMIT}{search}");
 
-        Some(Task::issue("gitlab", &id, issue["title"].as_str()?, issue["web_url"].as_str()?, issue["_links"]["self"].as_str()?))
-    }))
+        found.extend(items(&send(tracker, "GET", &url, None)?, |issue| {
+            let id = match single {
+                true => format!("#{}", issue["iid"].as_u64()?),
+                false => issue["references"]["full"].as_str()?.to_owned(),
+            };
+
+            Some(Task::issue("gitlab", &id, issue["title"].as_str()?, issue["web_url"].as_str()?, issue["_links"]["self"].as_str()?))
+        }));
+    }
+
+    Ok(found)
 }
 
-fn forgejo(tracker: &Tracker, remotes: &Remotes) -> Result<Vec<Task>, Error> {
-    let repo = setting("forgejoRepository")
-        .or_else(|| remote_path(remotes, "codeberg.org"))
-        .ok_or("No codeberg.org remote. Set the repository in Settings › Plugins › Tasks.")?;
-    let url = format!("https://codeberg.org/api/v1/repos/{repo}/issues?type=issues&state=open&sort=updated&limit={LIMIT}");
+fn forgejo(tracker: &Tracker, scope: &Scope) -> Result<Vec<Task>, Error> {
+    let repos = repositories(scope, "forgejo", "forgejoRepository", "codeberg.org");
 
-    Ok(items(&send(tracker, "GET", &url, None)?, |issue| {
-        Some(Task::issue(
-            "forgejo",
-            &format!("#{}", issue["number"].as_u64()?),
-            issue["title"].as_str()?,
-            issue["html_url"].as_str()?,
-            issue["url"].as_str()?,
-        ))
-    }))
+    if repos.is_empty() {
+        return Err("No codeberg.org remote. Set the repository in Settings › Plugins › Tasks.".into());
+    }
+
+    let search = scope.query.map(|q| format!("&q={}", encode(q))).unwrap_or_default();
+    let mut found = Vec::new();
+
+    for repo in &repos {
+        let url = format!("https://codeberg.org/api/v1/repos/{repo}/issues?type=issues&state=open&sort=updated&limit={LIMIT}{search}");
+        let prefix = if repos.len() > 1 { repo.as_str() } else { "" };
+
+        found.extend(items(&send(tracker, "GET", &url, None)?, |issue| {
+            Some(Task::issue(
+                "forgejo",
+                &format!("{prefix}#{}", issue["number"].as_u64()?),
+                issue["title"].as_str()?,
+                issue["html_url"].as_str()?,
+                issue["url"].as_str()?,
+            ))
+        }));
+    }
+
+    Ok(found)
 }
 
-fn youtrack(tracker: &Tracker, _: &Remotes) -> Result<Vec<Task>, Error> {
+fn youtrack(tracker: &Tracker, scope: &Scope) -> Result<Vec<Task>, Error> {
     let site = site("youtrackHost", "YouTrack")?;
-    let query = setting("youtrackQuery").unwrap_or_default();
+    let query = scope.query.map(str::to_owned).or_else(|| setting("youtrackQuery")).unwrap_or_default();
     let url = format!(
         "https://{site}/api/issues?query={}&fields=idReadable,summary&$top={LIMIT}",
         encode(&query)
@@ -247,9 +302,12 @@ fn youtrack(tracker: &Tracker, _: &Remotes) -> Result<Vec<Task>, Error> {
     }))
 }
 
-fn jira(tracker: &Tracker, _: &Remotes) -> Result<Vec<Task>, Error> {
+fn jira(tracker: &Tracker, scope: &Scope) -> Result<Vec<Task>, Error> {
     let site = site("jiraHost", "Jira")?;
-    let jql = setting("jiraQuery").unwrap_or_default();
+    let jql = match scope.query {
+        Some(text) => format!("text ~ \"{}\" order by updated DESC", text.replace('\\', "\\\\").replace('"', "\\\"")),
+        None => setting("jiraQuery").unwrap_or_default(),
+    };
     let url = format!(
         "https://{site}/rest/api/3/search/jql?jql={}&maxResults={LIMIT}&fields=summary",
         encode(&jql)
@@ -268,11 +326,19 @@ fn jira(tracker: &Tracker, _: &Remotes) -> Result<Vec<Task>, Error> {
     }))
 }
 
-/// The cards the user is a member of (TrelloRepository without a board).
-fn trello(tracker: &Tracker, _: &Remotes) -> Result<Vec<Task>, Error> {
-    let url = "https://api.trello.com/1/members/me/cards?filter=visible&fields=name,url";
+/// The cards the user is a member of (TrelloRepository without a board), or the cards matching a search.
+fn trello(tracker: &Tracker, scope: &Scope) -> Result<Vec<Task>, Error> {
+    let (url, cards_at) = match scope.query {
+        Some(text) => (
+            format!("https://api.trello.com/1/search?query={}&modelTypes=cards&cards_limit={LIMIT}&card_fields=name,url", encode(text)),
+            "cards",
+        ),
+        None => ("https://api.trello.com/1/members/me/cards?filter=visible&fields=name,url".to_owned(), ""),
+    };
+    let response = send(tracker, "GET", &url, None)?;
+    let cards = if cards_at.is_empty() { &response } else { &response[cards_at] };
 
-    Ok(items(&send(tracker, "GET", url, None)?, |card| {
+    Ok(items(cards, |card| {
         let id = card["id"].as_str()?;
 
         Some(Task::issue(
@@ -426,7 +492,7 @@ mod tests {
         host.set_secret("trello-token", "t");
         respond(&host, r#"[{"id":"5f3a","name":"Ship it","url":"https://trello.com/c/abc"}]"#);
 
-        let fetched = fetch_all(&[]);
+        let fetched = fetch_all(&Scope { remotes: &[], query: None, repositories: &BTreeMap::new() });
 
         assert_eq!(fetched.trackers, 1);
         assert_eq!(fetched.issues[0].label(), "5f3a: Ship it");

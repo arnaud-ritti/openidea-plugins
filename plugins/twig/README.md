@@ -7,8 +7,43 @@ attributes around them. The contents of `verbatim` and `raw` are not read as Twi
 The structure view lists `block`s and `macro`s, and `{% x %}…{% endx %}` pairs
 and multi-line comments fold.
 
-Route, template and translation completion in Twig files comes from the
-`aritti.symfony` plugin.
+Completion offers Twig's tags, filters, functions and tests by position
+(after `{%`, `|`, `is`, or a bare name), and in HTML text thirteen snippets
+that expand after typing a prefix: `blk` block, `mcr` macro, `esc`
+autoescape, `emb` embed, `ext` extends, `for`, `from`, `if`, `imp` import,
+`inc` include, `sbx` sandbox, `spl` spaceless, `verb` verbatim.
+
+Macros: after `{% import 'forms.html.twig' as forms %}` typing `forms.` lists the
+macros that template defines (with their arguments), `{% from 'x' import ` lists
+them too, and `_self` works for the current file. Go to Declaration on
+`forms.input`, on a name imported with `from … import`, and on the template
+name in `extends`, `include`, `embed`, `import`, `from`, `use`, `include()`
+and `source()` opens the file (`templates/<name>` first, then any file whose
+path ends with the name; `@namespace/` names are not resolved). Template
+navigation stays with `aritti.symfony` in Symfony projects.
+
+Outside Symfony projects, filters, functions and tests registered in the
+project's PHP (`new TwigFilter('x'`, `new TwigFunction('x'`, `new TwigTest('x'`
+under `src/`, `app/` and `lib/`) join the completion lists, and Go to
+Declaration on them opens the registration (setting `projectExtensions`).
+Extensions from `vendor/` are not read.
+
+Inspections (on open and save, setting `diagnostics`) report block tags
+without their `{% end… %}` (`unclosed-tag`), `{% end… %}` without an opening
+tag (`unexpected-end-tag`) and a `{{`, `{%` or `{#` never closed
+(`unterminated-delimiter`). A stray `}}` is not reported: it is common in
+inline JavaScript and CSS. Off by default (setting `expressionErrors`): brackets
+that do not pair inside `{{ }}` and `{% %}` (`unbalanced-bracket`); strings,
+comments and `verbatim` blocks are skipped. Other expression errors (unknown
+operators, wrong argument counts) are not detected.
+
+In a Symfony project (`symfony.lock`, or `symfony/framework-bundle` in
+`composer.json`) the `aritti.symfony` plugin owns name completion, so this
+plugin leaves it out there. Route, template and translation completion also
+comes from `aritti.symfony`.
+
+There is no formatter: OpenIDEA only runs Prettier and Ruff from a language
+definition, and neither understands Twig.
 
 ```sh
 cargo test

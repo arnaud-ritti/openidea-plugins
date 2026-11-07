@@ -4,7 +4,7 @@ use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Doc
 use openidea_plugin::syntax::{SyntaxProvider, Token};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, Position, Project, Range, Severity,
+    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, PickItem, Position, Project, Range, Severity,
     StatusItem, TextEdit, host, text,
 };
 use std::collections::HashSet;
@@ -106,6 +106,128 @@ fn gitignore_actions(path: &str) -> Vec<CodeAction> {
         .collect()
 }
 
+const ROOT_IGNORE_FILES: [&str; 5] = [".gitignore", ".dockerignore", ".npmignore", ".prettierignore", ".eslintignore"];
+
+/// The focused ignore file and the ignore files at the project root; asks which one when there are several.
+fn pick_target(ctx: &Invocation, focused: Option<&str>) -> Result<Option<String>, Error> {
+    let mut candidates: Vec<String> = focused.map(str::to_owned).into_iter().collect();
+
+    if let Some(project) = ctx.project() {
+        let root = project.root()?;
+        for name in ROOT_IGNORE_FILES {
+            let path = format!("{root}/{name}");
+            if !candidates.contains(&path) && project.read_file(&path).is_ok() {
+                candidates.push(path);
+            }
+        }
+    }
+
+    match candidates.len() {
+        0 => Err("Open the ignore file to add the selected paths to.".into()),
+        1 => Ok(candidates.pop()),
+        _ => {
+            let items: Vec<PickItem> = candidates.iter().map(|path| PickItem::new(path, path.rsplit('/').next().unwrap_or(path))).collect();
+
+            match host::pick("Add to ignore file", &items) {
+                Err(Error::Invalid(_)) => Ok(candidates.into_iter().next()),
+                picked => picked,
+            }
+        }
+    }
+}
+
+fn selected_or_focused(ctx: &Invocation) -> Vec<String> {
+    let selected = ctx.selected_paths();
+    if !selected.is_empty() {
+        return selected;
+    }
+
+    ctx.editor().filter(|e| dialect(&e.path()).is_none()).map(|e| e.path()).into_iter().collect()
+}
+
+fn add_selected(ctx: &Invocation, unignore: bool) -> Result<(), Error> {
+    let focused = ctx.editor().filter(|e| dialect(&e.path()).is_some());
+    let Some(file) = pick_target(ctx, focused.as_ref().map(|e| e.path()).as_deref())? else {
+        return Ok(());
+    };
+
+    let editor = match focused.filter(|e| e.path() == file) {
+        Some(editor) => editor,
+        None => {
+            host::open_location(&file, 0, 0)?;
+            let Some(opened) = ctx.editor().filter(|e| e.path() == file) else {
+                host::notify(NotificationLevel::Info, ".ignore", &format!("Opened {file}. Run the command again to add the selected paths to it."));
+                return Ok(());
+            };
+            opened
+        }
+    };
+
+    let base = file.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let doc = editor.document()?;
+    let listed: HashSet<&str> = doc.text.lines().map(str::trim).collect();
+    let negation = if unignore { "!" } else { "" };
+    let mut entries: Vec<String> = Vec::new();
+    for path in selected_or_focused(ctx) {
+        let Some(relative) = path.strip_prefix(base).and_then(|r| r.strip_prefix('/')) else { continue };
+        let entry = format!("{negation}/{}", relative.replace('[', "\\[").replace(']', "\\]"));
+        if !listed.contains(entry.as_str()) && !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    if entries.is_empty() {
+        return Err("The selected paths are already listed or are outside the open ignore file's folder.".into());
+    }
+
+    let addition: String = entries.iter().map(|e| format!("{e}\n")).collect();
+    editor.apply_edits(doc.version, &[append(&doc.text, &addition, false)])?;
+
+    host::notify(NotificationLevel::Info, ".ignore", &format!("Added {} to the open ignore file.", entries.len()));
+    Ok(())
+}
+
+const IGNORE_FILE_NAMES: [&str; 20] = [
+    ".gitignore", ".dockerignore", ".npmignore", ".hgignore", ".prettierignore", ".eslintignore", ".stylelintignore", ".gcloudignore",
+    ".slugignore", ".helmignore", ".vercelignore", ".terraformignore", ".yarnignore", ".nodemonignore", ".jshintignore", ".cfignore",
+    ".bzrignore", ".cvsignore", ".p4ignore", ".chefignore",
+];
+
+fn new_ignore_file(ctx: &Invocation) -> Result<(), Error> {
+    let project = ctx.project().ok_or("Open a project to create the ignore file in.")?;
+    let root = project.root()?.trim_end_matches('/').to_owned();
+
+    let items: Vec<PickItem> = IGNORE_FILE_NAMES.iter().map(|name| PickItem::new(name, name)).collect();
+    let Some(name) = host::pick("New ignore file", &items)? else { return Ok(()) };
+
+    let directory = ctx
+        .selected_paths()
+        .into_iter()
+        .next()
+        .filter(|p| p.starts_with(&format!("{root}/")))
+        .map(|p| if project.read_file(&p).is_ok() { p.rsplit_once('/').map_or(root.clone(), |(dir, _)| dir.to_owned()) } else { p })
+        .unwrap_or(root);
+    let path = format!("{directory}/{name}");
+    if project.read_file(&path).is_ok() {
+        return Err(format!("{name} already exists in {directory}.").into());
+    }
+
+    let written = host::run_process("tee", &[path.clone()], Some(""))
+        .and_then(|out| if out.status == Some(0) { Ok(()) } else { Err(Error::Invalid(out.stderr)) });
+    match written {
+        Ok(()) => host::open_location(&path, 0, 0),
+        Err(Error::Denied(_)) => {
+            let _ = host::copy_to_clipboard(name.as_str());
+            host::notify(
+                NotificationLevel::Warning,
+                ".ignore",
+                &format!("Create {name} in {directory} yourself (name copied if the clipboard is allowed). Allow running tee for .ignore in Settings › Plugins to create it here."),
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// The ignore files that apply to `relative`: `.git/info/exclude`, then the
 /// `.gitignore` of the root and of every directory down to the file's.
 fn ignore_sources(project: &Project, root: &str, relative: &str) -> Sources {
@@ -182,6 +304,50 @@ fn entry_target(doc: &Document, at: Position) -> Option<Location> {
     let (project, _, _) = project_of(&path)?;
     project.read_file(&path).ok()?;
     Some(Location { path, range: Range::default() })
+}
+
+/// Entries named from the files below the ignore file's folder. The host
+/// hides dot paths and ignored files from `find_files`, so those are never offered.
+fn path_completions(doc: &Document, offset: usize, line: &str) -> Vec<CompletionItem> {
+    let body = line.strip_prefix('!').unwrap_or(line);
+    if body.starts_with(|c: char| c.is_whitespace() || c == '#') || body.contains(['*', '?', '[', '\\']) {
+        return Vec::new();
+    }
+    let Some((project, root, relative)) = project_of(&doc.path) else { return Vec::new() };
+
+    let path = body.strip_prefix('/').unwrap_or(body);
+    let (typed_dir, partial) = path.rsplit_once('/').map_or(("", path), |(dir, rest)| (dir, rest));
+    if typed_dir.split('/').any(|part| part == "..") {
+        return Vec::new();
+    }
+
+    let own_dir = relative.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let base = [own_dir, typed_dir].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/");
+    let (glob, prefix) = if base.is_empty() {
+        ("**/*".to_owned(), format!("{root}/"))
+    } else {
+        (format!("{base}/**/*"), format!("{root}/{base}/"))
+    };
+    let Ok(files) = project.find_files(&glob, 2000) else { return Vec::new() };
+
+    let mut names: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
+    for file in &files {
+        let Some(rest) = file.strip_prefix(&prefix) else { continue };
+        let (name, is_dir) = rest.split_once('/').map_or((rest, false), |(name, _)| (name, true));
+        if name.starts_with(partial) {
+            *names.entry(name).or_default() |= is_dir;
+        }
+    }
+
+    let replace = Range::new(text::position(&doc.text, offset - partial.len()), text::position(&doc.text, offset));
+    names
+        .into_iter()
+        .map(|(name, is_dir)| {
+            let mut item = CompletionItem::new(&if is_dir { format!("{name}/") } else { name.to_owned() }, if is_dir { CompletionKind::Folder } else { CompletionKind::File });
+            item.replace = Some(replace);
+            item
+        })
+        .collect()
 }
 
 fn template_label(name: &str) -> (&str, Option<&str>) {
@@ -328,8 +494,13 @@ impl IgnorePlugin {
 }
 
 impl openidea_plugin::Plugin for IgnorePlugin {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        match id {
+            "add-selected" => add_selected(ctx, false).map(|()| None),
+            "unignore-selected" => add_selected(ctx, true).map(|()| None),
+            "new-file" => new_ignore_file(ctx).map(|()| None),
+            _ => Err(Error::NotFound(format!("command {id}"))),
+        }
     }
 
     fn handle_events(&mut self, events: &[Event], ctx: &Invocation) {
@@ -357,17 +528,22 @@ impl openidea_plugin::Plugin for IgnorePlugin {
 
 impl Providers for IgnorePlugin {
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
-        if !dialect(&doc.path).is_some_and(|d| d.switchable) {
-            return Vec::new();
-        }
+        let Some(dialect) = dialect(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
         let line = &doc.text[doc.text[..offset].rfind('\n').map_or(0, |i| i + 1)..offset];
-        let Some(value) = line.trim_start().strip_prefix("syntax:") else { return Vec::new() };
-        if !value.trim_start().chars().all(|c| c.is_ascii_alphabetic()) {
-            return Vec::new();
+
+        if dialect.switchable {
+            let Some(value) = line.trim_start().strip_prefix("syntax:") else { return Vec::new() };
+            if !value.trim_start().chars().all(|c| c.is_ascii_alphabetic()) {
+                return Vec::new();
+            }
+            return ["glob", "regexp", "rootglob"].map(|s| CompletionItem::new(s, CompletionKind::Keyword)).into();
         }
 
-        ["glob", "regexp", "rootglob"].map(|s| CompletionItem::new(s, CompletionKind::Keyword)).into()
+        if dialect.syntax != check::Syntax::Glob {
+            return Vec::new();
+        }
+        path_completions(doc, offset, line)
     }
 
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {

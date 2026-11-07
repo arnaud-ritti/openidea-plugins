@@ -1,0 +1,19 @@
+{
+  "properties": {
+    "expressionErrors": {
+      "type": "boolean",
+      "title": "Also report brackets that do not pair inside {{ }} and {% %} (off by default)",
+      "default": false
+    },
+    "projectExtensions": {
+      "type": "boolean",
+      "title": "Complete and navigate to the filters, functions and tests the project registers in src/, app/ and lib/ (outside Symfony projects)",
+      "default": true
+    },
+    "diagnostics": {
+      "type": "boolean",
+      "title": "Report unclosed tags, unexpected end tags and unterminated delimiters",
+      "default": true
+    }
+  }
+}

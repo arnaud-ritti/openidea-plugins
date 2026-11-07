@@ -14,6 +14,11 @@
       "type": "boolean",
       "title": "Check Spring Data JDBC mappings (@Sequence, @MappedCollection)",
       "default": true
+    },
+    "springData.checkQueryTypes": {
+      "type": "boolean",
+      "title": "Check derived query parameter types against the entity's property types and the return type against the query verb",
+      "default": true
     }
   }
 }

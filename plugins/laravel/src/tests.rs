@@ -232,6 +232,8 @@ fn completes_columns_from_migrations() {
     assert!(complete(controller, "<?php Widget::where('|');").is_empty());
     assert!(complete(controller, "<?php Route::get('/x', 'A@b')->where('|');").is_empty());
     assert!(complete(controller, "<?php $query->where('|');").is_empty());
+    assert_eq!(complete(controller, "<?php $query = Post::query()->latest();\n$query->where('|');"), columns);
+    assert!(complete(controller, "<?php $query = collect([]);\n$query->where('|');").is_empty());
 
     let usage = doc(controller, "php", "<?php\nPost::where('title', 'x');\n");
     let migration = host_text(&host, "database/migrations/2024_01_01_create_posts_table.php");
@@ -332,6 +334,7 @@ fn shows_and_opens_names_in_the_tool_window() {
     let mut plugin = activated(&host);
     let ctx = host.invocation();
 
+    plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
     plugin.handle(VIEW, ViewEvent::Expand("group:route".into()), &ctx).unwrap();
     let View { body: Body::Tree(items), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a tree") };
     let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).take(6).collect();
@@ -687,12 +690,14 @@ fn every_template_is_registered_and_parses() {
         .filter(|rest| rest.starts_with("templates/"))
         .filter_map(|rest| rest.strip_suffix('"'))
         .collect();
-    assert_eq!(paths.len(), 16, "{paths:?}");
+    assert_eq!(paths.len(), 47, "{paths:?}");
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for path in paths {
         let body = std::fs::read_to_string(root.join(path)).unwrap_or_else(|_| panic!("missing {path}"));
-        assert!(body.starts_with("<?php") || body.starts_with("<?php\n"), "{path}");
-        assert!(!body.contains("{{"), "{path}");
+        if path.ends_with("php") && !path.ends_with("blade.php") {
+            assert!(body.starts_with("<?php"), "{path}");
+            assert!(path.ends_with("blade.php") || !body.contains("{{"), "{path}");
+        }
         let mut rest = body.as_str();
         while let Some(start) = rest.find('$') {
             let after = &rest[start + 1..];
@@ -1925,4 +1930,575 @@ fn forelse_snippet_has_an_empty_branch_before_its_closing_directive() {
     let (_, body) = crate::directives::SNIPPETS.iter().find(|(n, _)| *n == "forelse").unwrap();
 
     assert!(body.find("@empty").unwrap() < body.find("@endforelse").unwrap());
+}
+
+fn terminal_args(host: &MockHost) -> Vec<Vec<String>> {
+    host.terminals().into_iter().map(|t| t.args).collect()
+}
+
+#[test]
+fn make_asks_then_runs_artisan_in_a_terminal() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&["controller"]));
+    host.answer_next_prompt(Some(&["Admin/ReportController"]));
+    host.answer_next_prompt(Some(&["--resource", "--api"]));
+    host.answer_next_prompt(Some(&["Post"]));
+    plugin.run_command("make", &host.invocation(), None).unwrap();
+    assert_eq!(
+        terminal_args(&host),
+        [["artisan", "make:controller", "Admin/ReportController", "--model=Post", "--resource", "--api"]]
+    );
+}
+
+#[test]
+fn new_model_passes_the_flags() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&["Tag"]));
+    host.answer_next_prompt(Some(&["-m", "-f"]));
+    plugin.run_command("new-model", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:model", "Tag", "-m", "-f"]]);
+}
+
+#[test]
+fn make_rejects_unsafe_names_and_honours_dismissal() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    for bad in ["Foo; rm -rf /", "--force", "$(id)", "Foo Bar", "..\\x", ""] {
+        host.answer_next_prompt(Some(&[bad]));
+        assert!(plugin.run_command("new-model", &host.invocation(), None).is_err(), "{bad}");
+    }
+    assert!(plugin.run_command("new-model", &host.invocation(), None).unwrap().is_none());
+    host.answer_next_prompt(Some(&["Tag"]));
+    assert!(plugin.run_command("new-model", &host.invocation(), None).unwrap().is_none());
+    assert!(host.terminals().is_empty());
+}
+
+#[test]
+fn generates_for_a_model_with_a_default_name() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&["Post"]));
+    host.answer_next_prompt(Some(&["policy"]));
+    host.answer_next_prompt(Some(&["PostPolicy"]));
+    plugin.run_command("generate-for-model", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:policy", "PostPolicy", "--model=Post"]]);
+
+    host.answer_next_prompt(Some(&["Nope"]));
+    assert!(plugin.run_command("generate-for-model", &host.invocation(), None).is_err());
+}
+
+#[test]
+fn run_artisan_picks_a_listed_command_and_splits_arguments() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    host.on_process("php", |_, _| {
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "about  Display info\nmigrate:status  Show status\n".into(), stderr: String::new() })
+    });
+    host.answer_next_prompt(Some(&["migrate:status"]));
+    host.answer_next_prompt(Some(&["--pending  --no-ansi"]));
+    plugin.run_command("artisan-run", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "migrate:status", "--pending", "--no-ansi"]]);
+
+    host.answer_next_prompt(Some(&["rm"]));
+    assert!(plugin.run_command("artisan-run", &host.invocation(), None).is_err());
+    assert!(plugin.run_command("artisan-run", &host.invocation(), None).unwrap().is_none());
+}
+
+#[test]
+fn creates_the_missing_view_under_the_cursor() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    let mut plugin = activated(&host);
+    let text = "<?php\nreturn view('posts.create');\n";
+    host.open_editor("/project/app/Http/Controllers/A.php", "php", text, &[(1, 17, 1, 17)]);
+    host.answer_next_prompt(Some(&[]));
+    plugin.run_command("create-missing", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:view", "posts.create"]]);
+
+    let existing = "<?php\nreturn view('welcome');\n";
+    host.open_editor("/project/app/Http/Controllers/A.php", "php", existing, &[(1, 17, 1, 17)]);
+    assert!(plugin.run_command("create-missing", &host.invocation(), None).is_err());
+
+    host.open_editor("/project/app/Http/Controllers/A.php", "php", text, &[(1, 17, 1, 17)]);
+    plugin.run_command("create-missing", &host.invocation(), None).unwrap();
+    assert_eq!(host.terminals().len(), 1);
+}
+
+#[test]
+fn find_unused_views_opens_the_chosen_one() {
+    let host = MockHost::install();
+    host.add_file("resources/views/orphan.blade.php", "<p>x</p>\n");
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&["orphan"]));
+    plugin.run_command("unused-views", &host.invocation(), None).unwrap();
+    let opened = host.opened_locations();
+    assert_eq!(opened.len(), 1);
+    assert!(opened[0].0.ends_with("resources/views/orphan.blade.php"));
+}
+
+#[test]
+fn find_unused_views_says_so_when_all_are_used() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    plugin.run_command("unused-views", &host.invocation(), None).unwrap();
+    assert!(host.opened_locations().is_empty());
+    assert!(host.notifications().iter().any(|n| n.body.contains("Every view is used")));
+}
+
+#[test]
+fn model_phpdoc_removal_is_offered_inside_the_block() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\n\n/**\n * @property int $id\n * @mixin \\Eloquent\n */\nclass Post extends Model\n{\n}\n";
+    let titles = rewrite_titles(&mut plugin, "/project/app/Models/Post.php", "php", text, "@property");
+    assert!(titles.iter().any(|t| t.starts_with("Remove IDE helper PHPDoc")), "{titles:?}");
+    let plain = "<?php\nclass Post extends Model\n{\n}\n";
+    assert!(rewrite_titles(&mut plugin, "/project/app/Models/Post.php", "php", plain, "class").is_empty());
+}
+
+#[test]
+fn livewire_view_calling_a_missing_method_is_reported() {
+    let host = MockHost::install();
+    host.add_file("app/Livewire/Tally.php", "<?php\nnamespace App\\Livewire;\nclass Tally extends Component\n{\n    public function increment() {}\n}\n");
+    host.add_file("resources/views/livewire/tally.blade.php", "<button wire:click=\"increment\">+</button>\n<button wire:click=\"decrement\">-</button>\n");
+    let mut plugin = activated(&host);
+    let path = "/project/resources/views/livewire/tally.blade.php";
+    let text = host_text(&host, path);
+    let project = host.invocation().project().unwrap();
+    plugin.check(&project, path);
+    let found = host.diagnostics();
+    let codes: Vec<_> = found[path].iter().map(|d| (d.code.clone().unwrap(), d.range.start.line)).collect();
+    assert_eq!(codes, [("laravel.unknown-livewire-method".to_owned(), 1)]);
+    assert!(text.contains("decrement"));
+}
+
+#[test]
+fn livewire_view_of_a_component_with_a_trait_stays_silent() {
+    let host = MockHost::install();
+    host.add_file("app/Livewire/Tally.php", "<?php\nclass Tally extends Component\n{\n    use Helpers;\n}\n");
+    host.add_file("resources/views/livewire/tally.blade.php", "<button wire:click=\"anything\">+</button>\n");
+    let mut plugin = activated(&host);
+    let path = "/project/resources/views/livewire/tally.blade.php";
+    let project = host.invocation().project().unwrap();
+    plugin.check(&project, path);
+    assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()));
+}
+
+#[test]
+fn routes_naming_missing_controllers_and_methods_are_reported() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    host.add_file(
+        "routes/extra.php",
+        "<?php\nuse App\\Http\\Controllers\\PostController;\nuse App\\Http\\Controllers\\GhostController;\nuse Vendor\\Pkg\\RemoteController;\nRoute::get('/a', [PostController::class, 'index']);\nRoute::get('/b', [PostController::class, 'nope']);\nRoute::get('/c', [GhostController::class, 'index']);\nRoute::get('/d', [RemoteController::class, 'index']);\nRoute::resource('posts', PostController::class);\n",
+    );
+    let path = "/project/routes/extra.php";
+    let project = host.invocation().project().unwrap();
+    plugin.index_project(&project);
+    plugin.check(&project, path);
+    let found: Vec<_> = host.diagnostics()[path].iter().map(|d| (d.code.clone().unwrap(), d.range.start.line)).collect();
+    assert_eq!(
+        found,
+        [
+            ("laravel.unknown-route-method".to_owned(), 5),
+            ("laravel.unknown-route-controller".to_owned(), 6),
+            ("laravel.missing-resource-methods".to_owned(), 8),
+        ]
+    );
+}
+
+#[test]
+fn route_files_with_controller_groups_and_invokables_stay_silent() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    host.add_file("routes/grouped.php", "<?php\nRoute::controller(PostController::class)->group(function () {\n    Route::get('/x', 'missing');\n});\n");
+    host.add_file("routes/invoke.php", "<?php\nuse App\\Http\\Controllers\\PostController;\nRoute::get('/x', PostController::class);\n");
+    let project = host.invocation().project().unwrap();
+    plugin.index_project(&project);
+    for path in ["/project/routes/grouped.php", "/project/routes/invoke.php"] {
+        plugin.check(&project, path);
+        assert!(host.diagnostics().get(path).is_none_or(|d| d.is_empty()), "{path}");
+    }
+}
+
+#[test]
+fn indexer_links_a_model_to_the_factory_the_project_has() {
+    use openidea_plugin::indexing::{Document as IndexDocument, DocumentIndexer};
+    let host = MockHost::install();
+    host.add_file("database/factories/PostFactory.php", "<?php\nclass PostFactory extends Factory {}\n");
+    let mut plugin = activated(&host);
+    let text = host_text(&host, "/project/app/Models/Post.php");
+    let edges = plugin.index(&IndexDocument { path: "/project/app/Models/Post.php".into(), text, symbols: Vec::new() });
+    let markers: Vec<&str> = edges.markers.iter().map(|m| m.key.as_str()).collect();
+    assert!(markers.contains(&"factory#Post"), "{markers:?}");
+    assert!(markers.contains(&"policy#Post") && !markers.contains(&"observer#Post"), "{markers:?}");
+}
+
+fn selection_actions(plugin: &mut Main, path: &str, language: &str, text: &str, selected: &str) -> Vec<CodeAction> {
+    let start = text.find(selected).unwrap();
+    let range = Range::new(text::position(text, start), text::position(text, start + selected.len()));
+    plugin.code_actions(&doc(path, language, text), range)
+}
+
+#[test]
+fn selected_blade_text_is_extracted_to_the_main_locale_lang_file() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<h1>Hello there</h1>\n";
+    let actions = selection_actions(&mut plugin, "/project/resources/views/x.blade.php", "blade", text, "Hello there");
+    let action = actions.iter().find(|a| a.title.starts_with("Extract to translation key")).unwrap();
+    assert!(action.title.contains("messages.hello_there"));
+    assert_eq!(action.edits[0].1[0].text, "{{ __('messages.hello_there') }}");
+    assert_eq!(action.edits[1].0, "/project/lang/en/messages.php");
+    assert_eq!(action.edits[1].1[0].text, "    'hello_there' => 'Hello there',\n");
+
+    let in_tag = "<a title=\"Hello there\">x</a>\n";
+    let none = selection_actions(&mut plugin, "/project/resources/views/x.blade.php", "blade", in_tag, "Hello there");
+    assert!(none.iter().all(|a| !a.title.starts_with("Extract")));
+}
+
+#[test]
+fn selected_php_string_is_extracted_only_inside_its_quotes() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nreturn 'Saved it';\n";
+    let actions = selection_actions(&mut plugin, "/project/app/A.php", "php", text, "Saved it");
+    assert_eq!(actions.iter().find(|a| a.title.starts_with("Extract")).unwrap().edits[0].1[0].text, "__('messages.saved_it')");
+    let partial = selection_actions(&mut plugin, "/project/app/A.php", "php", text, "Saved");
+    assert!(partial.iter().all(|a| !a.title.starts_with("Extract")));
+}
+
+#[test]
+fn form_request_gets_rules_for_the_model_columns() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let text = "<?php\nclass StorePostRequest extends FormRequest\n{\n    public function rules(): array\n    {\n        return [\n            'title' => ['required'],\n        ];\n    }\n}\n";
+    let at = text.find("return").unwrap();
+    let position = text::position(text, at);
+    let actions = plugin.code_actions(&doc("/project/app/Http/Requests/StorePostRequest.php", "php", text), Range::new(position, position));
+    let action = actions.iter().find(|a| a.title.starts_with("Add validation rules")).unwrap();
+    let inserted = &action.edits[0].1[0].text;
+    assert!(inserted.contains("'body' => ['required', 'string']"), "{inserted}");
+    assert!(!inserted.contains("'title'") && !inserted.contains("created_at"), "{inserted}");
+}
+
+#[test]
+fn model_fillable_gets_the_missing_columns() {
+    let host = MockHost::install();
+    host.add_file("app/Models/Post.php", "<?php\nclass Post extends Model\n{\n    protected $fillable = [\n        'title',\n    ];\n}\n");
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+    laravel_project_without_post(&host);
+    plugin.index_all();
+    let path = "/project/app/Models/Post.php";
+    let text = host_text(&host, path);
+    let position = text::position(&text, text.find("$fillable").unwrap());
+    let actions = plugin.code_actions(&doc(path, "php", &text), Range::new(position, position));
+    let action = actions.iter().find(|a| a.title == "Add the missing columns to $fillable").unwrap();
+    assert_eq!(action.edits[0].1[0].text, "\n        'body',");
+}
+
+fn laravel_project_without_post(host: &MockHost) {
+    host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0"}}"#);
+    host.add_file(
+        "database/migrations/2024_01_01_create_posts_table.php",
+        "<?php\nreturn new class extends Migration {\n    public function up(): void\n    {\n        Schema::create('posts', function (Blueprint $table) {\n            $table->id();\n            $table->string('title');\n            $table->text('body');\n            $table->timestamps();\n        });\n    }\n};\n",
+    );
+}
+
+#[test]
+fn component_attributes_and_slots_complete_from_props_and_the_view() {
+    let host = MockHost::install();
+    host.add_file("resources/views/components/banner.blade.php", "@props(['tone' => 'info', 'dismissible'])\n<div>{{ $slot }}{{ $footer }}</div>\n");
+    let mut plugin = activated(&host);
+    let path = "/project/resources/views/x.blade.php";
+
+    let (text, at) = cursor("<x-banner ton|");
+    assert_eq!(labels(plugin.completion(&doc(path, "blade", &text), at, None)), ["tone", "dismissible"]);
+
+    let (text, at) = cursor("<x-banner>\n<x-slot:fo|");
+    assert_eq!(labels(plugin.completion(&doc(path, "blade", &text), at, None)), ["footer"]);
+
+    let (text, at) = cursor("<x-alert |");
+    assert!(labels(plugin.completion(&doc(path, "blade", &text), at, None)).is_empty());
+}
+
+#[test]
+fn livewire_tag_attributes_complete_from_public_properties() {
+    let host = MockHost::install();
+    host.add_file("app/Livewire/Tally.php", "<?php\nclass Tally extends Component\n{\n    public int $count = 0;\n}\n");
+    let mut plugin = activated(&host);
+    let (text, at) = cursor("<livewire:tally |");
+    assert_eq!(labels(plugin.completion(&doc("/project/resources/views/x.blade.php", "blade", &text), at, None)), ["count"]);
+}
+
+#[test]
+fn columns_complete_through_relations_and_scopes() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    host.add_file("app/Models/Thread.php", "<?php\nclass Thread extends Model\n{\n    public function replies(): HasMany\n    {\n        return $this->hasMany(Reply::class);\n    }\n\n    public function scopeActive($query) {}\n}\n");
+    host.add_file("app/Models/Reply.php", "<?php\nclass Reply extends Model {}\n");
+    host.add_file(
+        "database/migrations/2024_02_01_create_replies_table.php",
+        "<?php\nreturn new class extends Migration {\n    public function up(): void\n    {\n        Schema::create('replies', function (Blueprint $table) {\n            $table->id();\n            $table->string('author');\n        });\n    }\n};\n",
+    );
+    plugin.index_all();
+    let path = "/project/app/Http/Controllers/A.php";
+
+    for marked in [
+        "<?php\nThread::find(1)->replies()->where('au|');",
+        "<?php\nThread::active()->replies()->orderBy('au|');",
+        "<?php\nThread::query()->with('x')->replies()->latest()->where('au|');",
+    ] {
+        let (text, at) = cursor(marked);
+        assert_eq!(labels(plugin.completion(&doc(path, "php", &text), at, None)), ["author", "id"], "{marked}");
+    }
+
+    let (text, at) = cursor("<?php\nThread::find(1)->unknown()->where('au|');");
+    assert!(labels(plugin.completion(&doc(path, "php", &text), at, None)).is_empty());
+
+    let (text, at) = cursor("<?php\nPost::where('ti|');");
+    assert!(labels(plugin.completion(&doc(path, "php", &text), at, None)).contains(&"title".to_owned()));
+
+    let (text, at) = cursor("<?php\nclass Thread extends Model\n{\n    function a() { return $this->replies()->where('au|'); }\n}\n");
+    assert_eq!(labels(plugin.completion(&doc("/project/app/Models/Thread.php", "php", &text), at, None)), ["author", "id"]);
+}
+
+#[test]
+fn container_names_complete_and_navigate() {
+    let host = MockHost::install();
+    host.add_file("app/Services/Billing.php", "<?php\nnamespace App\\Services;\n\nclass Billing\n{\n}\n");
+    host.add_file("app/Providers/AppServiceProvider.php", "<?php\nnamespace App\\Providers;\n\nclass AppServiceProvider\n{\n    public function register()\n    {\n        $this->app->singleton('billing.gateway', fn () => 1);\n    }\n}\n");
+    let mut plugin = activated(&host);
+    let path = "/project/app/Http/Controllers/A.php";
+
+    let (text, at) = cursor("<?php\napp('ca|');");
+    let names = labels(plugin.completion(&doc(path, "php", &text), at, None));
+    for expected in ["cache", "billing.gateway", "App\\Services\\Billing"] {
+        assert!(names.contains(&expected.to_owned()), "{expected} in {names:?}");
+    }
+
+    let (text, at) = cursor("<?php\nApp::make('App\\\\Services\\\\Bill|ing');");
+    let found = plugin.definition(&doc(path, "php", &text), at);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].path.ends_with("app/Services/Billing.php"));
+
+    let (text, at) = cursor("@inject('b', 'App\\Services\\Bil|ling')");
+    assert_eq!(plugin.definition(&doc("/project/resources/views/x.blade.php", "blade", &text), at).len(), 1);
+}
+
+#[test]
+fn config_app_providers_complete_project_providers() {
+    let host = MockHost::install();
+    host.add_file("app/Providers/BillingServiceProvider.php", "<?php\nnamespace App\\Providers;\n\nclass BillingServiceProvider\n{\n}\n");
+    let mut plugin = activated(&host);
+    let path = "/project/config/app.php";
+
+    let (text, at) = cursor("<?php\nreturn [\n    'name' => 'x',\n    'providers' => [\n        App\\Providers\\Bil|\n    ],\n];\n");
+    let items = plugin.completion(&doc(path, "php", &text), at, None);
+    let item = items.iter().find(|i| i.label == "App\\Providers\\BillingServiceProvider").unwrap();
+    assert_eq!(item.insert_text, "App\\Providers\\BillingServiceProvider::class");
+
+    let (text, at) = cursor("<?php\nreturn [\n    'name' => 'Bil|',\n    'providers' => [\n    ],\n];\n");
+    assert!(plugin.completion(&doc(path, "php", &text), at, None).iter().all(|i| i.label != "App\\Providers\\BillingServiceProvider"));
+
+    let (text, at) = cursor("<?php\nreturn [\n    'providers' => [\n        App\\Providers\\Billing|ServiceProvider::class,\n    ],\n];\n");
+    assert_eq!(plugin.definition(&doc(path, "php", &text), at).len(), 1);
+}
+
+type Written = std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, String)>>>;
+
+fn tee_host() -> (MockHost, Written) {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "process:tee", "editor.read"]);
+    let written: Written = Written::default();
+    let sink = written.clone();
+    host.on_process("tee", move |args, stdin| {
+        sink.borrow_mut().push((args.to_vec(), stdin.unwrap_or_default().to_owned()));
+        Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() })
+    });
+    (host, written)
+}
+
+#[test]
+fn generate_for_a_selected_model_writes_a_factory_with_its_columns() {
+    let (host, written) = tee_host();
+    let mut plugin = activated(&host);
+    host.select_paths(&["/project/app/Models/Post.php"]);
+    host.answer_next_prompt(Some(&["factory"]));
+    host.answer_next_prompt(Some(&["PostFactory"]));
+    plugin.run_command("generate-for-model", &host.invocation(), None).unwrap();
+
+    let (args, body) = written.borrow()[0].clone();
+    assert_eq!(args, ["/project/database/factories/PostFactory.php"]);
+    assert!(body.contains("'title' => fake()->sentence(),") && body.contains("'body' => fake()->paragraph(),"), "{body}");
+    assert!(!body.contains("created_at"), "{body}");
+    assert!(host.terminals().is_empty());
+}
+
+#[test]
+fn resource_body_lists_columns_and_falls_back_to_artisan_without_tee() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read"]);
+    let mut plugin = activated(&host);
+    host.select_paths(&["/project/app/Models/Post.php"]);
+    host.answer_next_prompt(Some(&["resource"]));
+    host.answer_next_prompt(Some(&["PostResource"]));
+    plugin.run_command("generate-for-model", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:resource", "PostResource"]]);
+
+    let index = plugin.indexes.values().next().unwrap();
+    let source = bulk::resource_source(index, "Post", "PostResource");
+    assert!(source.contains("'title' => $this->title,") && source.contains("'created_at' => $this->created_at,"), "{source}");
+}
+
+#[test]
+fn remove_phpdocs_rewrites_every_model_that_has_helper_tags() {
+    let (host, written) = tee_host();
+    host.add_file("app/Models/Tag.php", "<?php\n/**\n * @property int $id\n */\nclass Tag extends Model {}\n");
+    let mut plugin = activated(&host);
+    host.answer_next_prompt(Some(&[]));
+    plugin.run_command("remove-phpdocs", &host.invocation(), None).unwrap();
+
+    let runs = written.borrow();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].0, ["/project/app/Models/Tag.php"]);
+    assert_eq!(runs[0].1, "<?php\nclass Tag extends Model {}\n");
+}
+
+#[test]
+fn new_generators_run_their_own_artisan_commands_when_the_package_is_installed() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read"]);
+    host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0", "laravel/nova": "^5.0"}}"#);
+    let mut plugin = activated(&host);
+    host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0", "laravel/nova": "^5.0"}}"#);
+    host.answer_next_prompt(Some(&["nova:resource"]));
+    host.answer_next_prompt(Some(&["Post"]));
+    plugin.run_command("make", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "nova:resource", "Post"]]);
+}
+
+#[test]
+fn indexing_sets_the_menu_context_and_reveal_brings_the_tool_window_forward() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    assert!(host.context_keys().contains_key("indexed"));
+    plugin.run_command("reveal", &host.invocation(), None).unwrap();
+    assert_eq!(host.revealed_views(), ["laravel"]);
+}
+
+#[test]
+fn extra_model_directories_and_the_resource_check_setting_are_honoured() {
+    let host = MockHost::install();
+    laravel_project(&host);
+    host.add_file("modules/Blog/Models/Comment.php", "<?php\nclass Comment extends Model {}\n");
+    host.set_setting("modelDirectories", "\"modules/Blog/Models, ../outside\"");
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+    let index = plugin.indexes.values().next().unwrap();
+    assert!(index.models.contains_key("Comment"));
+
+    host.add_file("routes/res.php", "<?php\nuse App\\Http\\Controllers\\PostController;\nRoute::resource('p', PostController::class);\n");
+    host.set_setting("reportMissingResourceMethods", "false");
+    let project = host.invocation().project().unwrap();
+    plugin.index_project(&project);
+    plugin.check(&project, "/project/routes/res.php");
+    assert!(host.diagnostics().get("/project/routes/res.php").is_none_or(|d| d.is_empty()));
+}
+
+#[test]
+fn create_missing_makes_the_class_named_by_new_and_refuses_existing_ones() {
+    let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
+    host.add_file("app/Jobs/ExistingJob.php", "<?php\nclass ExistingJob {}\n");
+    let mut plugin = activated(&host);
+    let text = "<?php\ndispatch(new SendReportJob());\ndispatch(new ExistingJob());\n";
+    host.open_editor("/project/app/Http/X.php", "php", text, &[(1, 18, 1, 18)]);
+    host.answer_next_prompt(Some(&[]));
+    plugin.run_command("create-missing", &host.invocation(), None).unwrap();
+    assert_eq!(terminal_args(&host), [["artisan", "make:job", "SendReportJob"]]);
+
+    host.open_editor("/project/app/Http/X.php", "php", text, &[(2, 18, 2, 18)]);
+    assert!(plugin.run_command("create-missing", &host.invocation(), None).is_err());
+}
+
+fn route_rows(view: &View) -> Vec<(String, String, String)> {
+    let Body::List(items) = &view.body else { panic!("not a list") };
+    items
+        .iter()
+        .map(|item| (item.key.clone(), item.label.clone(), item.detail.clone().unwrap_or_default()))
+        .collect()
+}
+
+#[test]
+fn laravel_window_has_routes_and_index_sections() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let ctx = host.invocation();
+
+    let view = plugin.render(VIEW, None, &ctx).unwrap();
+    assert!(matches!(view.body, Body::List(_)));
+    let labels: Vec<_> = view.toolbar.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(&labels[..2], ["\u{25cf} Routes", "Index"]);
+    assert!(labels.contains(&"Filter\u{2026}"));
+
+    plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
+    let view = plugin.render(VIEW, None, &ctx).unwrap();
+    assert!(matches!(view.body, Body::Tree(_)));
+    let labels: Vec<_> = view.toolbar.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(&labels[..2], ["Routes", "\u{25cf} Index"]);
+    assert!(!labels.contains(&"Filter\u{2026}"));
+    assert!(!labels.contains(&"Tree"));
+}
+
+#[test]
+fn routes_show_names_and_controller_methods() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let view = plugin.render(VIEW, None, &host.invocation()).unwrap();
+    let rows = route_rows(&view);
+    assert_eq!(rows[1], ("route:1".into(), "/posts".into(), "[GET] PostController \u{b7} posts.index".into()));
+    assert_eq!(rows[3], ("route:3".into(), "/admin/dashboard".into(), "[GET] PostController \u{b7} admin.dashboard".into()));
+}
+
+#[test]
+fn closure_routes_list_under_closure() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    let view = plugin.render(VIEW, None, &host.invocation()).unwrap();
+    assert_eq!(route_rows(&view)[0], ("route:0".into(), "/".into(), "[GET] Closure \u{b7} home".into()));
+}
+
+#[test]
+fn filter_by_controller() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let ctx = host.invocation();
+
+    plugin.render(VIEW, None, &ctx).unwrap();
+    host.answer_next_prompt(Some(&["Closure"]));
+    plugin.handle(VIEW, ViewEvent::Button("routes:filter".into()), &ctx).unwrap();
+    let view = plugin.render(VIEW, None, &ctx).unwrap();
+    assert_eq!(route_rows(&view).len(), 1);
+    assert_eq!(view.status.as_deref(), Some("1 endpoints \u{b7} controller: Closure"));
+}
+
+#[test]
+fn activating_a_route_row_opens_its_definition() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    let ctx = host.invocation();
+
+    plugin.handle(VIEW, ViewEvent::Activate("route:0".into()), &ctx).unwrap();
+    assert_eq!(host.opened_locations().len(), 1);
+}
+
+#[test]
+fn curl_row_action_copies_the_route() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+
+    host.answer_next_prompt(Some(&["http://localhost:8000"]));
+    plugin.run_command("route-copy-curl", &host.invocation(), Some("route:1")).unwrap();
+    assert_eq!(host.clipboard().as_deref(), Some("curl -X GET 'http://localhost:8000/posts'"));
 }

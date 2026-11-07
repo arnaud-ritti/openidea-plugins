@@ -1,24 +1,42 @@
 id = "aritti.spring-integration"
-name = "Spring Integration Tools"
+name = "Spring Structure Tools"
 version = "0.1.0" # x-release-please-version
-description = "Spring Integration message channels for Java and XML: indexes channel beans, MessageChannels and DSL flows, <int:channel> declarations and the endpoints that read from or send to them (@ServiceActivator, @Transformer, @Router, @MessagingGateway…, IntegrationFlow.from, input-channel/output-channel). Go to Definition and completion on channel names and XML bean refs, gutter arrows between producers and consumers, and a warning when messages go to a channel nothing consumes. Independent implementation, not affiliated with JetBrains or Broadcom."
+description = "Spring Structure window and editor support for Spring Integration, Spring Batch and Spring Modulith. Integration: channel index for Java and XML, navigation and completion of channel names and bean refs, producer/consumer gutter arrows, unconsumed channel warnings. Batch: XML job navigation, completion and transition/bean checks, spring.batch.job.name navigation, Spring Batch 5 migration hints. Modulith: application module checks, allowedDependencies completion, open-module quick fix. One Spring Structure tool window switches between the integration channels, batch jobs, modulith modules and the module diagram; modules whose dependency the build files do not mention stay idle. Replaces aritti.spring-batch and aritti.spring-modulith: uninstall them to avoid duplicate windows and completions. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0 (first release): channel index (Java annotations, Java DSL, XML), navigation and completion of channel names and bean refs, producer/consumer gutter arrows, unconsumed channel and unknown bean warnings."
+change-notes = "Unreleased: absorbs aritti.spring-batch and aritti.spring-modulith into one Spring Structure window with Channels, Batch, Modules and Diagram sections; uninstall aritti.spring-batch and aritti.spring-modulith, the old ids are no longer maintained and would show duplicate windows and completions. Command and storage ids of the absorbed modules are prefixed with batch. and modulith.; their old settings values are not migrated. 0.1.0 (first release): channel index (Java annotations, Java DSL, XML), navigation and completion of channel names and bean refs, producer/consumer gutter arrows, unconsumed channel and unknown bean warnings."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:java", "on-language:xml", "on-view:diagram"]
+activation = [
+    "on-language:java",
+    "on-language:xml",
+    "on-file:**/application*.properties",
+    "on-file:**/application*.yml",
+    "on-file:**/application*.yaml",
+    "on-view:structure",
+]
 
 [capabilities]
 required = ["project.read"]
+optional = ["clipboard", "storage"]
 
 [[contributes.providers]]
-kinds = ["completion", "definition", "line-markers"]
-languages = ["java", "xml"]
+kinds = ["completion", "definition", "code-actions", "line-markers"]
+languages = ["java", "xml", "properties", "yaml"]
 
 [[contributes.views]]
-id = "diagram"
-title = "Integration Channels"
-icon = "hierarchy"
-location = "bottom"
+id = "structure"
+title = "Spring Structure"
+icon = "icons/structure.svg"
+location = "right"
+
+[[contributes.commands]]
+id = "modulith.copy-docs"
+title = "Spring Modulith: Copy Module Diagram (PlantUML)"
+category = "Spring Modulith"
+
+[contributes.settings]
+schema = "settings.schema.json"
+title = "Spring Structure"

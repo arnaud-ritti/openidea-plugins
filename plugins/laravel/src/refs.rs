@@ -37,6 +37,8 @@ pub enum Kind {
     Ability,
     /// `'Posts/Index'` in `Inertia::render('Posts/Index')`.
     Inertia,
+    /// `app('cache')`, `App::make(Foo::class)` strings, the class of `@inject('x', 'App\\Foo')`.
+    Binding,
 }
 
 /// A name in the document and what kind of thing it names.
@@ -72,6 +74,12 @@ pub struct Site {
 
 const ROUTE_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "options", "any"];
 /// Classes with static calls that are not Eloquent models.
+pub const BUILDER_METHODS: &[&str] = &[
+    "query", "where", "orWhere", "whereIn", "whereNotIn", "whereNull", "whereNotNull", "whereBetween", "whereDate", "whereHas", "whereDoesntHave",
+    "has", "doesntHave", "with", "withCount", "withTrashed", "onlyTrashed", "orderBy", "orderByDesc", "latest", "oldest", "select", "addSelect",
+    "distinct", "groupBy", "having", "limit", "take", "skip", "offset", "lockForUpdate", "withoutGlobalScopes", "newQuery",
+];
+
 const NOT_MODELS: &[&str] = &[
     "Route", "Schema", "Gate", "Auth", "Cache", "Config", "Log", "Storage", "Http", "Session", "Request", "Validator", "View", "Mail",
     "Lang", "URL", "Redirect", "Hash", "File", "Str", "Arr", "Cookie", "Collection", "Carbon", "Event", "Queue", "Bus", "Artisan",
@@ -399,15 +407,99 @@ fn query_target(text: &str, site: &Site) -> Option<Option<String>> {
         return table.map(|t| Some(format!("table:{t}")));
     }
 
-    for (at, _) in statement.match_indices("::") {
-        let word_start = statement[..at].rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\')).map_or(0, |i| i + 1);
-        let word = &statement[word_start..at];
-        if word.rsplit('\\').next().is_some_and(|short| short.starts_with(|c: char| c.is_ascii_uppercase())) {
-            return class_of(word);
+    if let Some(found) = static_chain(statement, &class_of) {
+        return found;
+    }
+
+    if let Some(assigned) = assigned_chain(text, site, statement) {
+        if let Some(found) = static_chain(assigned, &class_of) {
+            return found;
+        }
+    }
+
+    if let Some(at) = statement.rfind("$this->") {
+        let hops = hops_after(&statement[at + "$this->".len()..]);
+        if !hops.is_empty() {
+            return Some(Some(with_hops("", &hops)));
         }
     }
 
     Some(None)
+}
+
+fn static_chain(statement: &str, class_of: &dyn Fn(&str) -> Option<Option<String>>) -> Option<Option<Option<String>>> {
+    for (at, _) in statement.match_indices("::") {
+        let word_start = statement[..at].rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\')).map_or(0, |i| i + 1);
+        let word = &statement[word_start..at];
+        if word.rsplit('\\').next().is_some_and(|short| short.starts_with(|c: char| c.is_ascii_uppercase())) {
+            return Some(class_of(word).map(|class| class.map(|name| with_hops(&name, &hops_after_static(&statement[at + 2..])))));
+        }
+    }
+
+    None
+}
+
+/// The right side of the nearest earlier `$variable = …;` when the call is on `$variable->`.
+fn assigned_chain<'a>(text: &'a str, site: &Site, statement: &str) -> Option<&'a str> {
+    let head = if site.callee.starts_with('$') { site.callee.as_str() } else { statement.trim_start() };
+    let variable: String = head.strip_prefix('$')?.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    if variable.is_empty() || variable == "this" || !head[1 + variable.len()..].starts_with("->") {
+        return None;
+    }
+
+    let from = text.floor_char_boundary(site.callee_start.saturating_sub(4000));
+    let before = &text[from..site.callee_start];
+    let needle = format!("${variable}");
+    let at = before.rmatch_indices(&needle).find_map(|(at, _)| {
+        let preceded = before[..at].bytes().next_back().is_none_or(|b| !is_identifier(b));
+        let rest = before[at + needle.len()..].trim_start();
+        (preceded && rest.starts_with('=') && !rest.starts_with("==") && !rest.starts_with("=>")).then_some(at)
+    })?;
+    let rhs = &before[at + needle.len()..];
+    let rhs = rhs.trim_start().strip_prefix('=')?;
+    Some(&rhs[..rhs.find(';').unwrap_or(rhs.len())])
+}
+
+fn with_hops(model: &str, hops: &[String]) -> String {
+    hops.iter().fold(model.to_owned(), |spec, hop| format!("{spec}>{hop}"))
+}
+
+/// Method names of the `->a()->b(` chain that follows the static call at the start of `rest`.
+fn hops_after_static(rest: &str) -> Vec<String> {
+    let name_length = rest.bytes().take_while(|b| is_identifier(*b)).count();
+    let after = &rest[name_length..];
+    let Some(open) = after.starts_with('(').then_some(name_length) else { return Vec::new() };
+    let Some(close) = php::closing(rest, open) else { return Vec::new() };
+    hops_after_arrow(&rest[close + 1..])
+}
+
+/// Method names of `a()->b(` where `rest` starts at `a`.
+fn hops_after(rest: &str) -> Vec<String> {
+    hops_in(rest).into_iter().filter(|hop| !BUILDER_METHODS.contains(&hop.as_str())).collect()
+}
+
+fn hops_in(rest: &str) -> Vec<String> {
+    let mut hops = Vec::new();
+    let mut remaining = rest;
+
+    loop {
+        let length = remaining.bytes().take_while(|b| is_identifier(*b)).count();
+        if length == 0 || !remaining[length..].starts_with('(') {
+            break;
+        }
+
+        hops.push(remaining[..length].to_owned());
+        let Some(close) = php::closing(remaining, length) else { break };
+        let Some(next) = remaining[close + 1..].trim_start().strip_prefix("->") else { break };
+        remaining = next.trim_start();
+    }
+
+    hops
+}
+
+fn hops_after_arrow(rest: &str) -> Vec<String> {
+    let trimmed = rest.trim_start();
+    trimmed.strip_prefix("?->").or_else(|| trimmed.strip_prefix("->")).map(|next| hops_after(next.trim_start())).unwrap_or_default()
 }
 
 /// The nearest function before `at` is called `rules`: a form request.
@@ -502,6 +594,12 @@ fn classify(text: &str, language: &str, literal: &Literal, site: &Site) -> Optio
 
     if route_resource_call && direct(1) {
         return Some((Kind::Controller, None));
+    }
+
+    if (site.is_function(&["app", "resolve"]) || site.is_static(&["App"], &["make", "makeWith", "get", "bound", "resolved", "isShared"])) && direct(0)
+        || site.is_directive(&["inject"]) && direct(1)
+    {
+        return Some((Kind::Binding, None));
     }
 
     if let Some(class) = column_target(text, literal, site) {

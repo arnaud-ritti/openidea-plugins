@@ -45,6 +45,26 @@
       "title": "Report @livewire('\u2026') components that have no class or view",
       "default": true
     },
+    "reportUnknownLivewireMethods": {
+      "type": "boolean",
+      "title": "Report wire:click and wire:submit methods that the component class of a livewire/ view does not have",
+      "default": true
+    },
+    "modelDirectories": {
+      "type": "string",
+      "title": "Extra model directories (project-relative, comma-separated), for models outside app/Models",
+      "default": ""
+    },
+    "reportMissingResourceMethods": {
+      "type": "boolean",
+      "title": "Report Route::resource() controllers that lack resource methods",
+      "default": true
+    },
+    "reportUnknownRouteControllers": {
+      "type": "boolean",
+      "title": "Report controllers and controller methods named in routes/ that the project does not have",
+      "default": true
+    },
     "reportUnknownInertiaPages": {
       "type": "boolean",
       "title": "Report Inertia pages that have no file under resources/js/Pages",

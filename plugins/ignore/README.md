@@ -8,11 +8,13 @@ commit `860a6855`, Apache-2.0) by Jakub Chrzanowski and JetBrains.
   (warning), relative and malformed entries, and invalid `syntax:` values
   (.hgignore). Quick fixes: remove the entry, remove the relative part, use
   glob or regexp syntax.
-- `syntax:` completion in .hgignore. Ctrl-click on an entry that names one
+- Path completion in glob-syntax ignore files (.gitignore, .dockerignore…): files and folders below the
+  ignore file's folder, after `/` and `!` too. The IDE hides dot-paths and ignored files from the file
+  search, so those are not offered. `syntax:` completion in .hgignore. Ctrl-click on an entry that names one
   file opens it.
 - _Add … to .gitignore_ quick fix (and an unignore variant with `!`) in any
   project file, when the project root has a .gitignore.
-- New › _Ignore File_: a starter `<name>.ignore` file (the `.ignore` file type). Dot-named files such as `.gitignore` are recognised when opened, not created from the New menu.
+- New › _Ignore File_: a starter `<name>.ignore` file (the `.ignore` file type). Dot-named files such as `.gitignore` are recognised when opened, not created from the New menu: a New menu entry needs a non-empty extension that is appended to the typed name, so a bare `.dockerignore` can't be produced.
 - _Ignore Templates_ tool window: the github/gitignore templates and your
   own (_Create User Template_ saves the focused file). Double-click a template
   to add it to the open ignore file.
@@ -27,6 +29,7 @@ commit `860a6855`, Apache-2.0) by Jakub Chrzanowski and JetBrains.
   templates (kept in storage) are listed in a _Starred_ group.
 - Settings › Plugins › .ignore: turn off the warning, the status or the unignore
   variant of the quick fix (`unignoreActions`), and insert templates at the caret.
+- _New Ignore File_ (Project view, Tools): pick .gitignore, .dockerignore… and the file is created at the project root (or the selected folder) with `tee`; needs the optional `tee` permission, otherwise the name is copied. _Unignore Selected Paths_ adds `!/path` entries. Both and _Add Selected Paths_ are also in the editor context menu (the current file when nothing is selected). Results show as notifications.
 - Adding an entry to a file with CRLF line endings keeps them CRLF.
 
 The redundant-entry check compares patterns. The original matched them against

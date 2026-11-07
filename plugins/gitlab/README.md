@@ -66,44 +66,53 @@ Optional permissions:
   - Check Out Branch, when the merge request isn't merged and isn't the
     current branch;
   - Open on GitLab, Copy Link, Refresh.
-- **Merge Request Changes** (bottom): the cumulative diff of the selected
-  merge request, one block per file with `+added −removed`, existing threads
-  and pending comments under their lines. Click a line number to comment
-  (*Add to Review* or *Comment Now*); threads have Reply and Resolve /
-  Unresolve. *Viewed* collapses a file and is remembered until the file changes again
-  (compared with the last merge request commit touching it, read from the local
-  git history; without `process:git` or the commits locally, with the head commit). Clicking a file name opens it locally; clicking the header folds it.
-  The diff stays readable without scripts, with every file expanded.
-  Binary and very large files have no diff here; open them on GitLab. Toolbar: Refresh,
-  Submit Review (n), Open on GitLab.
+  A row of section buttons switches the window between **Overview**
+  (the form above), **Changes**, **Commits**, **Files** and **Pipelines**; the
+  active one is marked with a dot and the others carry counts from cached data.
+  The choice is remembered. Selecting a merge request keeps the active section.
+  - **Changes**: the cumulative diff, one block per file with `+added −removed`,
+    existing threads and pending comments under their lines. Click a line number
+    to comment (*Add to Review* or *Comment Now*); threads have Reply and Resolve /
+    Unresolve. *Viewed* collapses a file and is remembered until the file changes
+    again (compared with the last merge request commit touching it, read from the
+    local git history; without `process:git` or the commits locally, with the head
+    commit). Clicking a file name opens it locally; clicking the header folds it.
+    Binary and very large files have no diff here; open them on GitLab.
+  - **Commits**: the merge request's commits. A double click shows that commit's
+    diff, read-only, in Changes; commit mode has no comments and no viewed marks.
+  - **Files**: the changed files as a tree or a list (Tree/List button).
+    Double-click a file to toggle Viewed, or use Mark All Viewed and Clear Viewed;
+    it works without page scripts and shares the marks of Changes.
+  - **Pipelines**: the newest 20 pipelines with their jobs by stage. Retry a job
+    or pipeline, cancel a pipeline (second click) or open it on GitLab. No job log
+    and no manual play.
+  A failing section keeps the section buttons and shows the error with Refresh.
 - **GitLab Projects** (left): the projects you're a member of (100 per page, up to
   10 pages, most recently active first). Double-clicking one runs `git clone` in a
   terminal, into the clone directory. Open the clone with File › Open when it
   finishes.
 
-## Forms and detail views
+## Prompts and details
 
-Five views open from the IDE's tool window list, not from commands. The
-`forms` setting turns the first three off, `commitsView` and `pipelineView`
-the last two, and `noteActions` the comment actions.
+Create Merge Request, Create Snippet and Share Project are prompt sequences,
+not windows. The `commitsView` and `pipelineView` settings turn the Commits and
+Pipelines sections off, and `noteActions` the comment actions.
 
-- **Create Merge Request**: title, description, target branch (up to 1000
-  branches), one assignee, reviewers by username, labels as text, and the Draft,
-  Squash and Delete source branch checkboxes. No pickers, no milestone.
-- **Create Snippet**: title, description, visibility and personal or project.
-  It uses the focused file, or its selection. A public snippet needs a second
-  click, which posts only the file and content the warning named.
-- **Share Project on GitLab**: namespace, remote name, visibility, description,
-  an optional `git init` (runs on the first click) and an optional initial
-  commit. The commit waits for a second click bound to the listed files, and
-  files that look secret (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`)
-  are refused. There is no file-selection tree.
-- **Merge Request Commits**: the commits of the selected merge request. A
-  double click shows that commit's diff, read-only, in the Changes view; commit
-  mode has no comments and no viewed marks.
-- **Merge Request Pipelines**: the newest 20 pipelines with their jobs by stage.
-  Retry a job or pipeline, cancel a pipeline (second click) or open it on
-  GitLab. No job log and no manual play.
+- **Create Merge Request** (command): asks for the source branch (local
+  branches, current first), the target branch (project branches, default
+  first), the title (prefilled with the last commit subject), a one-line
+  description and whether it is a draft. Dismissing any of the first four
+  prompts creates nothing. If GitLab refuses, a notification says so and you can
+  open the new-MR page for that branch. No assignee, reviewers, labels or
+  milestone here; GitLab: Edit Merge Request picks those from lists.
+- **Create Snippet** (command): asks for the title, the visibility (a public
+  snippet needs a confirm) and more project files, one path per prompt until
+  an empty answer. It uses the focused file or its selection, or the files
+  selected in the Project view. Dismissing any prompt creates nothing.
+- **Share Project** (command): asks for the name and the visibility. A
+  repository without a commit is initialised and committed after a confirm
+  that lists the files; files that look secret (`.env*`, `*.pem`, `*.key`,
+  `id_rsa*`, `id_ed25519*`) are refused.
 - In the Merge Request view, your own comments (not system notes) get Edit,
   Delete (second click) and an award emoji from a fixed list of eight
   (`thumbsup`, `thumbsdown`, `heart`, `tada`, `laughing`, `confused`, `rocket`,
@@ -120,7 +129,7 @@ characters can't be cloned.
 When the branch's upstream is on a gitlab.com remote, the status bar shows
 `!iid on <branch>` for its open merge request (forks are skipped, as in the
 original). Clicking it selects the merge request in the Merge Request and
-Merge Request Changes tool windows. A branch other than the default branch
+Merge Request window. A branch other than the default branch
 with no open merge request shows *GitLab: Create Merge Request* instead. The
 lookup runs again on every repository change, and when a file opens if the
 commit changed or the last lookup is more than 5 minutes old.
@@ -135,7 +144,7 @@ open file, *GitLab: Apply suggestion* appears in the quick fixes there. It
 replaces the N lines above, the commented line and the M lines below with the
 suggestion (a plain ` ```suggestion ` replaces the commented line; an empty one
 deletes it). It's offered for the unresolved threads shown in the editor and
-isn't offered when the Changes view's cached diff shows a different text on any
+isn't offered when the Changes section's cached diff shows a different text on any
 line of the replaced range that appears in that diff (lines outside the diff
 aren't checked); without a cached diff it doesn't check at all, so look at the lines before
 applying. It only edits the open file; nothing is posted to GitLab.
@@ -144,11 +153,11 @@ applying. It only edits the open file; nothing is posted to GitLab.
 
 | Command | Does | Menus |
 |---|---|---|
-| GitLab: Open on GitLab | opens the file at the current commit on gitlab.com, with the selected lines (`#L3-L5`) | editor and editor tab context |
+| GitLab: Open on GitLab | opens the file at the current commit on gitlab.com, with the selected lines (`#L3-L5`) | editor, editor tab and Project view context (first selected file or folder, linked at the current commit) |
 | GitLab: Copy Link | copies the same link | none |
-| GitLab: Create Snippet | creates a private snippet from the selection, or the whole file, named after the file; the URL is copied and shown | editor and editor tab context |
+| GitLab: Create Snippet | asks for title, visibility and more files, then creates the snippet from the selection, or the whole file; the URL is copied and shown | editor and editor tab context |
 | GitLab: Create Merge Request | opens gitlab.com's new merge request page for the current branch | Tools |
-| GitLab: Share Project | creates a private project in your namespace named after the folder, adds it as `origin` (or `gitlab` if `origin` exists) and runs `git push -u` in a terminal; needs a commit, a checked-out branch and no gitlab.com remote yet | none |
+| GitLab: Share Project | asks for name and visibility, creates the project in your namespace, adds it as `origin` (or `gitlab` if `origin` exists) and runs `git push -u` in a terminal; needs a commit, a checked-out branch and no gitlab.com remote yet | none |
 | GitLab: Show Current Branch's Merge Request | selects the current branch's merge request (the status bar item runs it) | none |
 | GitLab: Open Merge Request in Worktree | fetches the selected merge request (else the current branch's) and runs `git worktree add --detach` in a sibling folder `<repository>-<branch>`; git refuses a folder that already holds files; the path is shown in a notification and no editor is opened | none |
 | GitLab: Update Merge Request Branch | asks GitLab to rebase the selected merge request (else the current branch's) onto its target (`PUT .../rebase`, the same call as the Rebase button, which only appears when GitLab reports `need_rebase`) and reports a conflict | none |
@@ -166,7 +175,6 @@ Settings › Plugins › GitLab:
 | Key | Default | Effect |
 |---|---|---|
 | `editorReview` | `true` | show the current branch's unresolved threads in the editor |
-| `forms` | `true` | the Create Merge Request, Create Snippet and Share Project views |
 | `noteActions` | `true` | edit, delete and react on your own comments |
 | `commitsView` | `true` | the merge request's commits and each commit's changes |
 | `pipelineView` | `true` | the merge request's pipelines and jobs, with retry and cancel |
@@ -181,10 +189,22 @@ Settings › Plugins › GitLab:
 
 In the CI files below, problems appear on open and save, and Cmd+click on a job
 name in `needs`, `dependencies` or `extends` opens the job, and on a `stage`
-value opens its entry in `stages`. Checks stay quiet when the file has
-`include:` (the included jobs and stages are not read), and for `needs` entries
+value opens its entry in `stages`. `include: local:` files are read (up to three
+levels) so their jobs and stages count; checks stay quiet when the file has a
+remote, project, template or component include, a glob, or a local file that
+can't be read, and for `needs` entries
 with `project:` or `pipeline:`, and for names built from variables. The reader
 is a line scanner, not a YAML parser: unusual shapes are skipped.
+
+Completion in these files: top-level keywords, job keywords one level inside a
+job or `default`, the predefined `CI_*` variables after `$` or `${`, values for
+`when`, `stage` (from `stages`), `allow_failure`, `interruptible`, job names for
+`extends`, `needs` and `dependencies` (inline, flow or list items), and the job
+then the key inside `!reference [`. A `!reference` naming a job that is not in
+the file is reported with `needs` (setting `ciJobReferences`) and Go to
+Definition jumps to that job. The
+lists are typed from the GitLab docs as of November 2026 and may miss newer
+names; the popup opens on letters, not on `$`.
 
 ## File icons
 
@@ -200,21 +220,20 @@ The GitLab icon on `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `*.gitlab-ci.yml`,
   per merge request, 1,000 projects, 1,000 diff files.
 - No side-by-side diff in the IDE's diff viewer, and no commenting from the
   editor gutter. Per-commit diffs are read-only.
-- Line comments, replies, resolving and Viewed in the Changes view need
+- Line comments, replies, resolving and Viewed in the Changes section need
   scripts, which the desktop IDE currently blocks in plugin pages; comment from
-  the Merge Request view or on GitLab instead.
+  the Merge Request view or on GitLab instead. Viewed also works in the Merge
+  Request Files section.
 - Threads in the editor don't move with unsaved edits.
 - Notes are plain text: no markdown rendering, `@mention` completion or
   attachments.
-- Filtering is limited to the five quick filters; no search by author, label
-  or text.
-- The form views have no pickers (users, labels, milestone), no file chooser
-  and no file-selection tree; a snippet holds one file.
-- No Open on GitLab entry in the Project view menu: commands there get no
-  selection.
+- Filtering: the five quick filters plus author, reviewer, label and text
+  filters from the Filter button.
+- The prompts have no pickers (users, labels, milestone), no file chooser
+  and no file-selection tree; extra snippet files are typed as paths.
 - A file counts as viewed until a later merge request commit touches it; that
   needs the commits in the local checkout, else the head commit is used.
-- Not ported: usage statistics, `.gitlab-ci.yml` schema validation, completion and inspections beyond the four listed under CI files; included files are not followed. Applying a suggestion doesn't mark it as applied on GitLab.
+- Not ported: usage statistics, `.gitlab-ci.yml` schema validation, completion and inspections beyond the four listed under CI files; `include: local:` files are followed, remote, project, template and component includes are not. Applying a suggestion doesn't mark it as applied on GitLab.
 
 See the `aritti.gitlab` section of `LIMITATIONS.md` at the repository root
 for the missing APIs behind each limit.

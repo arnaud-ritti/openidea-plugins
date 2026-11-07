@@ -96,6 +96,15 @@ pub(crate) fn mask(text: &str) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
+pub(crate) fn declares_enum(source: &str, short_name: &str) -> bool {
+    let masked = mask(source);
+    masked.match_indices("enum ").any(|(at, _)| {
+        let starts_word = masked[..at].bytes().last().is_none_or(|byte| !is_word_byte(byte));
+        let name = read_word(&masked, skip_whitespace(&masked, at + "enum ".len()));
+        starts_word && &masked[name] == short_name
+    })
+}
+
 fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\' | b'$' | b'?' | b'|' | b'&') || byte >= 0x80
 }
@@ -181,6 +190,12 @@ fn scan_header(masked: &str) -> Header {
 
 pub fn imports(text: &str) -> Vec<Import> {
     scan_header(&mask(text)).imports.into_iter().map(|(import, _)| import).collect()
+}
+
+/// Resolves a class name written in `text` to a fully qualified one.
+pub fn resolver(text: &str) -> impl Fn(&str) -> String {
+    let header = scan_header(&mask(text));
+    move |name| resolve(name, &header)
 }
 
 pub fn insert_use(text: &str, fqcn: &str) -> Option<UseEdit> {
@@ -282,6 +297,258 @@ pub(crate) fn matching_close(masked: &str, open: usize) -> Option<usize> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    pub name: String,
+    /// Class name resolved through `use`, or a lower-case built-in type; `None` when untyped or a union/intersection.
+    pub type_name: Option<String>,
+    pub typed: bool,
+    pub nullable: bool,
+    pub has_default: bool,
+    pub variadic: bool,
+    pub promoted: bool,
+    pub has_attribute: bool,
+    pub range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Method {
+    pub name: String,
+    pub name_range: Range<usize>,
+    pub visibility: Visibility,
+    pub is_static: bool,
+    pub params: Vec<Param>,
+    pub parameters: Range<usize>,
+    pub return_type: Option<String>,
+    pub body: Option<Range<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassModel {
+    pub fqcn: String,
+    pub name_range: Range<usize>,
+    pub parent: Option<String>,
+    pub parent_range: Option<Range<usize>>,
+    pub interfaces: Vec<String>,
+    pub body: Range<usize>,
+    pub has_traits: bool,
+    pub methods: Vec<Method>,
+}
+
+impl ClassModel {
+    pub fn method(&self, name: &str) -> Option<&Method> {
+        self.methods.iter().find(|method| method.name.eq_ignore_ascii_case(name))
+    }
+}
+
+pub(crate) const BUILT_IN_TYPES: [&str; 17] = [
+    "int", "string", "array", "bool", "float", "mixed", "callable", "iterable", "object", "self", "static", "null", "false", "true", "void", "never", "parent",
+];
+
+fn parameter_of(text: &str, masked: &str, header: &Header, range: Range<usize>) -> Option<Param> {
+    let range = crate::php_checks::trimmed(masked, range);
+    let mut at = range.start;
+    let mut has_attribute = false;
+
+    while masked[at..range.end].starts_with("#[") {
+        has_attribute = true;
+        at = skip_whitespace(masked, matching_close(masked, at + 1)? + 1);
+    }
+
+    let dollar = at + masked[at..range.end].find('$')?;
+    let name = read_word(masked, dollar + 1);
+    let mut head = masked[at..dollar].trim();
+    let variadic = head.ends_with("...");
+    head = head.trim_end_matches("...").trim_end().trim_end_matches('&').trim_end();
+
+    let mut promoted = false;
+    let mut words: Vec<&str> = head.split_whitespace().collect();
+    while words.first().is_some_and(|word| matches!(word.to_ascii_lowercase().as_str(), "public" | "protected" | "private" | "readonly")) {
+        promoted = true;
+        words.remove(0);
+    }
+
+    let declared = words.join(" ");
+    let nullable = declared.starts_with('?');
+    let plain = declared.trim_start_matches('?');
+    let simple = !plain.is_empty() && !plain.contains(['|', '&', '(', ' ']);
+    let type_name = simple.then(|| match BUILT_IN_TYPES.contains(&plain.to_ascii_lowercase().as_str()) {
+        true => plain.to_ascii_lowercase(),
+        false => resolve(plain, header),
+    });
+
+    let after = &masked[name.end..range.end];
+    Some(Param {
+        name: text[dollar + 1..name.end].to_owned(),
+        type_name,
+        typed: !declared.is_empty(),
+        nullable,
+        has_default: after.contains('='),
+        variadic,
+        promoted,
+        has_attribute,
+        range,
+    })
+}
+
+fn methods_of(text: &str, masked: &str, header: &Header, body: &Range<usize>) -> (Vec<Method>, bool) {
+    let mut methods = Vec::new();
+    let mut has_traits = false;
+    let mut depth = 0usize;
+    let mut boundary = body.start + 1;
+    let mut at = body.start + 1;
+
+    while at < body.end {
+        let byte = masked.as_bytes()[at];
+        match byte {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && byte == b'}' {
+                    boundary = at + 1;
+                }
+            }
+            b';' if depth == 0 => boundary = at + 1,
+            _ => {}
+        }
+
+        let starts_word = at == 0 || !is_word_byte(masked.as_bytes()[at - 1]);
+        if depth == 0 && starts_word && masked[at..body.end].starts_with("use ") {
+            has_traits = true;
+        }
+
+        if depth == 0 && starts_word && masked[at..body.end].starts_with("function") && !is_word_byte(masked.as_bytes().get(at + 8).copied().unwrap_or(b' ')) {
+            if let Some(method) = method_at(text, masked, header, boundary, at, body.end) {
+                at = method.1;
+                methods.push(method.0);
+                boundary = at;
+                continue;
+            }
+        }
+
+        at += 1;
+    }
+
+    (methods, has_traits)
+}
+
+fn method_at(text: &str, masked: &str, header: &Header, boundary: usize, at: usize, limit: usize) -> Option<(Method, usize)> {
+    let prefix = &masked[boundary..at];
+    let prefix = prefix.rsplit("]").next().unwrap_or(prefix).to_ascii_lowercase();
+    let visibility = match () {
+        _ if prefix.contains("private") => Visibility::Private,
+        _ if prefix.contains("protected") => Visibility::Protected,
+        _ => Visibility::Public,
+    };
+
+    let mut name_at = skip_whitespace(masked, at + "function".len());
+    if masked[name_at..].starts_with('&') {
+        name_at = skip_whitespace(masked, name_at + 1);
+    }
+
+    let name_range = read_word(masked, name_at);
+    let open = skip_whitespace(masked, name_range.end);
+    if name_range.is_empty() || !masked[open..].starts_with('(') {
+        return None;
+    }
+
+    let close = matching_close(masked, open)?;
+    let params = crate::php_checks::arguments(masked, open).into_iter().filter_map(|argument| parameter_of(text, masked, header, argument)).collect();
+    let after = skip_whitespace(masked, close + 1);
+    let end = masked[after..limit].find(['{', ';']).map_or(limit, |found| after + found);
+    let return_type = masked[after..end].trim().strip_prefix(':').map(|rest| rest.trim().to_owned());
+    let next = match masked.as_bytes().get(end) {
+        Some(b'{') => matching_close(masked, end).map_or(limit, |close| close + 1),
+        _ => end + 1,
+    };
+
+    let method = Method {
+        name: text[name_range.clone()].to_owned(),
+        name_range,
+        visibility,
+        is_static: prefix.split_whitespace().any(|word| word == "static"),
+        params,
+        parameters: open..close + 1,
+        return_type,
+        body: (masked.as_bytes().get(end) == Some(&b'{')).then(|| end..next),
+    };
+    Some((method, next))
+}
+
+/// Offset after the keyword of the first `class`, `interface`, `trait` or `enum`
+/// declaration that starts a line (modifiers allowed), and whether it is an interface.
+fn type_declaration(masked: &str) -> Option<(usize, bool)> {
+    ["class ", "interface ", "trait ", "enum "]
+        .iter()
+        .filter_map(|keyword| {
+            masked.match_indices(keyword).map(|(at, _)| at).find(|&at| {
+                let line_start = masked[..at].rfind('\n').map_or(0, |i| i + 1);
+                masked[line_start..at].split_whitespace().all(|word| matches!(word, "final" | "abstract" | "readonly"))
+            }).map(|at| (at + keyword.len(), *keyword == "interface "))
+        })
+        .min_by_key(|(at, _)| *at)
+}
+
+/// The first class, interface, trait or enum of the file with its parents, interfaces and methods,
+/// every class name resolved through `use`. Nothing here sees traits' members.
+pub fn class_model(text: &str) -> Option<ClassModel> {
+    let masked = mask(text);
+    let header = scan_header(&masked);
+    let (at, is_interface) = type_declaration(&masked)?;
+    let name_range = read_word(&masked, at);
+    let open = at + masked[at..].find('{')?;
+    let close = matching_close(&masked, open)?;
+
+    let mut parent = None;
+    let mut parent_range = None;
+    let mut interfaces = Vec::new();
+    let mut cursor = skip_whitespace(&masked, name_range.end);
+    let mut collecting_interfaces = false;
+
+    while cursor < open {
+        let word = read_word(&masked, cursor);
+        let comma = masked[cursor..open].starts_with(',');
+        if comma {
+            cursor = skip_whitespace(&masked, cursor + 1);
+            continue;
+        }
+
+        if word.is_empty() {
+            cursor += 1;
+            continue;
+        }
+
+        match masked[word.clone()].to_ascii_lowercase().as_str() {
+            "extends" if is_interface => {
+                collecting_interfaces = true;
+                cursor = skip_whitespace(&masked, word.end);
+            }
+            "extends" => {
+                let target = read_word(&masked, skip_whitespace(&masked, word.end));
+                parent = Some(resolve(&masked[target.clone()], &header));
+                parent_range = Some(target.clone());
+                cursor = skip_whitespace(&masked, target.end);
+                collecting_interfaces = false;
+            }
+            "implements" => {
+                collecting_interfaces = true;
+                cursor = skip_whitespace(&masked, word.end);
+            }
+            _ if collecting_interfaces => {
+                interfaces.push(resolve(&masked[word.clone()], &header));
+                cursor = skip_whitespace(&masked, word.end);
+            }
+            _ => cursor = skip_whitespace(&masked, word.end),
+        }
+    }
+
+    let body = open..close;
+    let (methods, has_traits) = methods_of(text, &masked, &header, &body);
+    let namespace = header.namespace.as_ref().map(|(namespace, _)| format!("{namespace}\\")).unwrap_or_default();
+
+    Some(ClassModel { fqcn: format!("{namespace}{}", &masked[name_range.clone()]), name_range, parent, parent_range, interfaces, body, has_traits, methods })
 }
 
 fn target_after(masked: &str, from: usize) -> Target {

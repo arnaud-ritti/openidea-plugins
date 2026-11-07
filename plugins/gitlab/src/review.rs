@@ -6,12 +6,13 @@ use std::collections::BTreeMap;
 
 use openidea_plugin::Error;
 use openidea_plugin::host::{self, storage};
-use openidea_plugin::views::{Body, Button, View};
+use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent};
 use serde_json::Value;
 
 use crate::api::{self, Commit, DiffRefs, Discussion, DraftNote, FileDiff};
 use crate::branch::git_ok;
-use crate::{CHANGES, DETAILS, GitLab, LIST, first_line, gitlab_project, safe};
+use crate::sections::Section;
+use crate::{DETAILS, GitLab, LIST, first_line, gitlab_project, safe};
 
 #[derive(Debug, PartialEq)]
 pub struct Line {
@@ -386,7 +387,153 @@ const anchor = document.body.dataset.anchor && document.getElementById(document.
 if (anchor) anchor.scrollIntoView({ block: 'center' });
 "#;
 
+fn set_viewed(project: &str, iid: u64, path: &str, sha: Option<String>) -> Result<(), Error> {
+    let mut marks = viewed(project, iid);
+    match sha {
+        Some(sha) => marks.insert(path.to_owned(), sha),
+        None => marks.remove(path),
+    };
+    let json = serde_json::to_string(&marks).map_err(|e| Error::Failed(e.to_string()))?;
+
+    storage::set(&viewed_key(project, iid), &json)
+}
+
+const LAYOUT_KEY: &str = "files-layout";
+
+fn files_as_list() -> bool {
+    storage::get(LAYOUT_KEY).ok().flatten().as_deref() == Some("list")
+}
+
+/// A list of full paths, or the directories as parents of their files.
+fn file_items(files: &[FileDiff], is_viewed: impl Fn(&str) -> bool, as_list: bool) -> Vec<TreeItem> {
+    let mut items: Vec<TreeItem> = Vec::new();
+    let mut dirs: BTreeMap<String, ()> = BTreeMap::new();
+
+    for file in files {
+        let lines = parse_diff(&file.diff);
+        let detail = format!("+{} -{}", lines.iter().filter(|l| l.kind == '+').count(), lines.iter().filter(|l| l.kind == '-').count());
+        let path = file.new_path.as_str();
+        let (parent, label) = match (as_list, path.rsplit_once('/')) {
+            (false, Some((dir, name))) => (Some(dir), name),
+            _ => (None, path),
+        };
+
+        if let Some(dir) = parent {
+            let mut prefix = String::new();
+            let mut grand: Option<String> = None;
+            for segment in dir.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(segment);
+                if dirs.insert(prefix.clone(), ()).is_none() {
+                    let mut item = TreeItem::new(&format!("dir:{prefix}"), segment).expandable(true);
+                    if let Some(grand) = &grand {
+                        item = item.parent(&format!("dir:{grand}"));
+                    }
+                    items.push(item);
+                }
+                grand = Some(prefix.clone());
+            }
+        }
+
+        let mut item = TreeItem::new(&format!("file:{path}"), label).detail(&detail);
+        if let Some(dir) = parent {
+            item = item.parent(&format!("dir:{dir}"));
+        }
+        if is_viewed(path) {
+            item = item.icon("check");
+        }
+        items.push(item);
+    }
+
+    items
+}
+
 impl GitLab {
+    fn ensure_diffs(&mut self, project: &str, iid: u64) -> Result<(), Error> {
+        if self.diffs.as_ref().map(|(i, _)| *i) != Some(iid) {
+            let _task = host::begin_task("Loading changes", false);
+            self.diffs = Some((iid, api::Project(project).diffs(iid)?));
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn render_files(&mut self, ctx: &openidea_plugin::Invocation) -> Result<View, Error> {
+        let Some(iid) = Self::selected() else {
+            return Ok(View::message("Select a merge request in the Merge Requests tool window."));
+        };
+
+        let project = gitlab_project(ctx)?.path;
+        self.ensure_details(&project, iid)?;
+        self.ensure_diffs(&project, iid)?;
+        let details = self.details.as_ref().ok_or("The merge request is not loaded; refresh it.")?;
+        let refresh = Button::new("refresh", "Refresh").icon("refresh");
+        let files = self.diffs.as_ref().map(|(_, d)| d.as_slice()).unwrap_or_default();
+        if files.is_empty() {
+            return Ok(View::message(&format!("!{iid} has no changed files.")).button(refresh));
+        }
+
+        let head = details.mr.diff_refs.as_ref().map(|r| r.head_sha.as_str()).unwrap_or("");
+        let commits = last_commits(ctx, details.mr.diff_refs.as_ref());
+        let marks = viewed(&project, iid);
+        let is_viewed = |path: &str| marks.get(path).is_some_and(|sha| sha == version(&commits, path, head));
+        let done = files.iter().filter(|f| is_viewed(&f.new_path)).count();
+        let as_list = files_as_list();
+        let layout = match as_list {
+            true => Button::new("layout", "Tree").icon("module"),
+            false => Button::new("layout", "List").icon("module"),
+        };
+
+        Ok(View::new(Body::Tree(file_items(files, is_viewed, as_list)))
+            .button(layout)
+            .button(Button::new("mark-all", "Mark All Viewed").icon("check"))
+            .button(Button::new("clear", "Clear Viewed").icon("undo"))
+            .button(refresh)
+            .status(&format!("!{iid} · {done} of {} files viewed · double-click a file to toggle", files.len())))
+    }
+
+    pub(crate) fn handle_files(&mut self, event: ViewEvent, ctx: &openidea_plugin::Invocation) -> Result<(), Error> {
+        let Some(iid) = Self::selected() else { return Ok(()) };
+        let project = gitlab_project(ctx)?.path;
+        self.ensure_details(&project, iid)?;
+        let head = self.details.as_ref().and_then(|d| d.mr.diff_refs.clone());
+        let commits = || last_commits(ctx, head.as_ref());
+        let head_sha = head.as_ref().map(|r| r.head_sha.clone()).unwrap_or_default();
+        let listed: Vec<String> = self.diffs.as_ref().filter(|(i, _)| *i == iid).map(|(_, d)| d.iter().map(|f| f.new_path.clone()).collect()).unwrap_or_default();
+
+        match event {
+            ViewEvent::Activate(key) => {
+                let Some(path) = key.strip_prefix("file:").filter(|p| listed.iter().any(|l| l == p)) else { return Ok(()) };
+                let sha = version(&commits(), path, &head_sha).to_owned();
+                let on = viewed(&project, iid).get(path) != Some(&sha);
+                set_viewed(&project, iid, path, on.then_some(sha))?;
+            }
+            ViewEvent::Button(id) if id == "layout" => {
+                storage::set(LAYOUT_KEY, if files_as_list() { "tree" } else { "list" })?;
+            }
+            ViewEvent::Button(id) if id == "mark-all" => {
+                let commits = commits();
+                let marks: BTreeMap<String, String> = listed.iter().map(|p| (p.clone(), version(&commits, p, &head_sha).to_owned())).collect();
+                storage::set(&viewed_key(&project, iid), &serde_json::to_string(&marks).map_err(|e| Error::Failed(e.to_string()))?)?;
+            }
+            ViewEvent::Button(id) if id == "clear" => storage::set(&viewed_key(&project, iid), "{}")?,
+            ViewEvent::Button(id) if id == "refresh" => {
+                self.diffs = None;
+                self.reload_merge_request(iid);
+
+                return Ok(());
+            }
+            _ => return Ok(()),
+        }
+
+        self.refresh_section(Section::Files);
+        self.refresh_section(Section::Changes);
+
+        Ok(())
+    }
+
     pub(crate) fn render_changes(&mut self, ctx: &openidea_plugin::Invocation) -> Result<View, Error> {
         let Some(iid) = Self::selected() else {
             return Ok(View::message("Select a merge request in the Merge Requests tool window."));
@@ -394,10 +541,7 @@ impl GitLab {
 
         let project = gitlab_project(ctx)?.path;
         self.ensure_details(&project, iid)?;
-        if self.diffs.as_ref().map(|(i, _)| *i) != Some(iid) {
-            let _task = host::begin_task("Loading changes", false);
-            self.diffs = Some((iid, api::Project(&project).diffs(iid)?));
-        }
+        self.ensure_diffs(&project, iid)?;
 
         if let Some(commit) = self.active_commit().cloned() {
             return self.render_commit_changes(&project, iid, &commit);
@@ -463,7 +607,7 @@ impl GitLab {
         let message: Value = serde_json::from_str(message).map_err(|e| Error::Invalid(e.to_string()))?;
         if self.active_commit().is_some() && message["type"] != "open" {
             let error = serde_json::json!({ "type": "error", "message": "A commit's changes are read-only. Click All Changes to comment." });
-            return host::post_view_message(CHANGES, &error.to_string());
+            return host::post_view_message(DETAILS, &error.to_string());
         }
 
         let repo = gitlab_project(ctx)?;
@@ -484,17 +628,13 @@ impl GitLab {
             }
             "viewed" => {
                 let head = details.mr.diff_refs.as_ref().map(|r| r.head_sha.clone()).unwrap_or_default();
-                let mut viewed = viewed(&project, iid);
-                match message["viewed"].as_bool() == Some(true) {
-                    true => {
-                        let commits = last_commits(ctx, details.mr.diff_refs.as_ref());
-                        let sha = version(&commits, &text("path"), &head).to_owned();
-                        viewed.insert(text("path"), sha)
-                    }
-                    false => viewed.remove(&text("path")),
-                };
-                let json = serde_json::to_string(&viewed).map_err(|e| Error::Failed(e.to_string()))?;
-                return storage::set(&viewed_key(&project, iid), &json);
+                let sha = (message["viewed"].as_bool() == Some(true)).then(|| {
+                    let commits = last_commits(ctx, details.mr.diff_refs.as_ref());
+                    version(&commits, &text("path"), &head).to_owned()
+                });
+                set_viewed(&project, iid, &text("path"), sha)?;
+
+                return Ok(self.refresh_section(Section::Files));
             }
             _ => {}
         }
@@ -521,7 +661,7 @@ impl GitLab {
 
         if let Err(e) = result {
             // Redrawing would reload the page and lose the open editor's text.
-            return host::post_view_message(CHANGES, &serde_json::json!({ "type": "error", "message": e.to_string() }).to_string());
+            return host::post_view_message(DETAILS, &serde_json::json!({ "type": "error", "message": e.to_string() }).to_string());
         }
 
         self.status = Some(match (draft, message["type"].as_str(), message["resolved"].as_bool()) {
@@ -543,7 +683,6 @@ impl GitLab {
         self.threads.remove(&iid);
         self.events.remove(&iid);
         host::refresh_view(DETAILS);
-        host::refresh_view(CHANGES);
         host::refresh_view(LIST);
     }
 }

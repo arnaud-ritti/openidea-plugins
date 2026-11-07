@@ -4,9 +4,10 @@ version = "0.1.0" # x-release-please-version
 description = "Checks Maven, Gradle, npm and Composer dependencies against the OSV.dev vulnerability database. Vulnerable dependencies are marked in pom.xml, build.gradle, build.gradle.kts, package.json, composer.json and their lockfiles when you open or save them, with a quick fix that upgrades to the nearest fixed version. Dependency Audit: Scan Project lists the project's vulnerable dependencies in the Vulnerable Dependencies tool window. Privacy: package names and versions (never source code) are sent to api.osv.dev, a free service run by Google. Turn off Check on open and save under Settings › Plugins › Dependency Audit to contact it only when you run a scan."
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0: first release. OSV.dev checks of pom.xml, build.gradle, build.gradle.kts, package.json, package-lock.json, composer.json and composer.lock on open and save, an upgrade quick fix, and Scan Project with the Vulnerable Dependencies tool window."
+change-notes = "0.1.0: first release. OSV.dev checks of pom.xml, build.gradle, build.gradle.kts, package.json, package-lock.json, composer.json and composer.lock on open and save, an upgrade quick fix, and Scan Project with the Vulnerable Dependencies tool window. Unreleased: 12 manifest and lockfile formats are checked (also libs.versions.toml, yarn.lock, pnpm-lock.yaml, Cargo.lock, poetry.lock, requirements.txt) and the upgrade quick fix also works in libs.versions.toml and requirements.txt."
 categories = ["linters", "tools"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved", "on-view:vulnerabilities"]
 

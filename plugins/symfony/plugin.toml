@@ -4,7 +4,7 @@ version = "0.1.0" # x-release-please-version
 description = """Symfony support in PHP, Twig, YAML and XML files. Completion and go to definition for routes, \
 Twig templates and blocks, services, classes, translation keys (per domain), assets, Encore and AssetMapper entries, \
 and roles, plus completion of the variables controllers pass to a Twig template. Reports missing routes, templates, \
-services and translation keys, and routes defined twice in a file, with a quick fix that adds a missing key. Gutter markers link controllers, templates, \
+services and translation keys, and routes defined twice in a file, with a quick fix that adds a missing key. Gutter markers (several targets open a chooser) link controllers, templates, \
 parent blocks, classes and service definitions. A Symfony tool window lists routes, templates, services and \
 translations, two commands run cache:warmup and cache:clear, and a Profiler view lists the latest requests. \
 Partial port of the Symfony Plugin for IntelliJ by Daniel Espendiller and Adrien Brault (MIT). \
@@ -14,21 +14,36 @@ homepage = "https://github.com/Haehnchen/idea-php-symfony2-plugin"
 license = "MIT"
 change-notes = """0.1.0: first release. Ported from the Symfony Plugin (fr.adrienbrault.idea.symfony2plugin) 2026.2.314, \
 source revision b6c1034f6669784d7a58de7535515b7da93db87e. This port works from a text index of the project, so the \
-features that need PhpStorm's PSI are missing (container type inference, Doctrine, forms, most inspections)."""
+features that need PhpStorm's PSI are missing (container type inference, Doctrine, forms, most inspections). \
+Unreleased: the Symfony tool window has Routes (a flat list: method icon, path, controller and route name, controller filter, flat or tree, Copy as curl and Create HTTP Request File on the row menu; optional clipboard and process:tee) and Index sections; the unclosed-tag diagnostic moved to aritti.twig, which now reports it in Symfony projects too; project-wide Go to Declaration for service ids and route names (YAML and XML services, attribute, YAML and XML routes; @service, path() and generate() references) from the host's document index. \
+Also new in this release (unverified in the IDE): Twig checks (assets tags, enum() classes, content outside blocks in extending templates, hard-coded paths with a quick fix); container reference checks (unknown %parameters%, missing service classes, deprecated classes) and service wiring checks (argument count and types, tag interfaces, listener methods, !php/const); practice hints and more version-gated deprecations for PHP; Doctrine removed-API checks; typo quick fixes for routes, templates, keys and domains; rewrites (Doctrine alias to ::class, command to invokable, Twig extension to attributes); service definition, argument resync and tag generators; Extract translation and Add form fields actions; Twig variable collectors; attribute argument completion; index links for events, macros, voters and validators; extra file templates and the extraServiceFiles, extraRoutingFiles and practiceChecks settings. Unreleased (practice and wiring): 12 more constructor and controller practice hints, deprecation checks (Routing Annotation Route, first-class callables, renderForm, constraint option arrays), Doctrine QueryBuilder, lifecycle visibility and discriminator-map checks, PHP service configuration and XML constant checks, Autowire service type check, XML service tags and arguments, Move property to the constructor, imported macro and constraint message completion, event and role values for attributes, and the Make, Create Twig Template and Insert Form Rows commands (optional process:tee). Also from the index: console command names, %parameters%, filters, functions and tests of the project's Twig extensions, UX Twig components and Stimulus controllers; gutter markers moved onto the index, so a template lists all its controllers, a block all its overriding templates and a route its path() uses. New commands: Run Console Command, Go to Route, Service, Console Command and Template, Extend Twig Template. Fixed: the document indexer no longer burns the CPU budget on minified single-line files (quote scan was quadratic)."""
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:php", "on-language:twig", "on-language:yaml", "on-language:xml", "on-view:symfony-profiler"]
 
 [capabilities]
 required = ["project.read"]
 # Cache: Warm Up / Clear run `php bin/console`; everything else works without it.
+# editor.*: Twig: Extend Template inserts the extends tag.
 # events: problems refresh on open and save; without it they are not published.
-optional = ["process:php", "events"]
+# process:tee: Create Template writes the file; without it the path is copied.
+optional = ["process:php", "process:tee", "events", "editor.read", "editor.write", "clipboard", "storage"]
 
 [[contributes.commands]]
 id = "reindex"
 title = "Symfony: Reindex Project"
+category = "Symfony"
+
+[[contributes.commands]]
+id = "route-copy-curl"
+title = "Symfony: Copy Route as curl"
+category = "Symfony"
+
+[[contributes.commands]]
+id = "route-create-http"
+title = "Symfony: Create HTTP Request File for Route"
 category = "Symfony"
 
 [[contributes.commands]]
@@ -46,9 +61,73 @@ id = "cache-clear"
 title = "Symfony: Clear Cache"
 category = "Symfony"
 
+[[contributes.commands]]
+id = "run-console-command"
+title = "Symfony: Run Console Command..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "go-to-route"
+title = "Symfony: Go to Route..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "go-to-service"
+title = "Symfony: Go to Service..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "go-to-command"
+title = "Symfony: Go to Console Command..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "go-to-template"
+title = "Symfony: Go to Template..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "twig-extends"
+title = "Symfony: Extend Twig Template..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "make"
+title = "Symfony: Make..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "create-template"
+title = "Symfony: Create Twig Template..."
+category = "Symfony"
+
+[[contributes.commands]]
+id = "twig-form-fields"
+title = "Symfony: Insert Form Rows from a Form Type..."
+category = "Symfony"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "twig-extends"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "symfony"
+command = "route-copy-curl"
+when = "viewItemKind == route"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "symfony"
+command = "route-create-http"
+when = "viewItemKind == route"
+
 [[contributes.providers]]
-kinds = ["completion", "definition", "line-markers", "code-actions"]
+kinds = ["completion", "definition", "code-actions"]
 languages = ["php", "twig", "yaml", "xml"]
+
+[[contributes.documentIndexers]]
+extensions = ["php", "yaml", "yml", "xml", "twig", "js", "ts"]
 
 [[contributes.views]]
 id = "symfony"
@@ -59,8 +138,38 @@ location = "right"
 [[contributes.views]]
 id = "symfony-profiler"
 title = "Symfony Profiler"
-icon = "file-php"
+icon = "icons/symfony.svg"
 location = "bottom"
+
+[[contributes.fileIcons]]
+id = "route-get"
+patterns = ["*.symfony-route-get"]
+icon = "icons/route-get.svg"
+
+[[contributes.fileIcons]]
+id = "route-post"
+patterns = ["*.symfony-route-post"]
+icon = "icons/route-post.svg"
+
+[[contributes.fileIcons]]
+id = "route-put"
+patterns = ["*.symfony-route-put"]
+icon = "icons/route-put.svg"
+
+[[contributes.fileIcons]]
+id = "route-delete"
+patterns = ["*.symfony-route-delete"]
+icon = "icons/route-delete.svg"
+
+[[contributes.fileIcons]]
+id = "route-patch"
+patterns = ["*.symfony-route-patch"]
+icon = "icons/route-patch.svg"
+
+[[contributes.fileIcons]]
+id = "route-other"
+patterns = ["*.symfony-route-other"]
+icon = "icons/route-other.svg"
 
 [contributes.settings]
 schema = "settings.schema.json"
@@ -137,6 +246,36 @@ id = "services-php"
 name = "Symfony Service Config (PHP)"
 extension = "php"
 path = "templates/ServicesPhp.php"
+
+[[contributes.fileTemplates]]
+id = "command-invokable"
+name = "Symfony Command (invokable)"
+extension = "php"
+path = "templates/CommandInvokable.php"
+
+[[contributes.fileTemplates]]
+id = "command-with-input"
+name = "Symfony Command with Argument and Option"
+extension = "php"
+path = "templates/CommandWithInput.php"
+
+[[contributes.fileTemplates]]
+id = "command-with-attributes"
+name = "Symfony Command with #[Argument] and #[Option]"
+extension = "php"
+path = "templates/CommandWithAttributes.php"
+
+[[contributes.fileTemplates]]
+id = "controller-annotations"
+name = "Symfony Controller (annotations)"
+extension = "php"
+path = "templates/ControllerAnnotations.php"
+
+[[contributes.fileTemplates]]
+id = "twig-extension-attributes"
+name = "Symfony Twig Extension (attributes)"
+extension = "php"
+path = "templates/TwigExtensionAttributes.php"
 
 [[contributes.fileIcons]]
 id = "symfony"

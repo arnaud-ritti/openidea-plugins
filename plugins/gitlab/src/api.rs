@@ -51,6 +51,18 @@ pub struct Permissions {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
+pub struct Milestone {
+    pub id: u64,
+    pub title: String,
+}
+
+#[derive(Deserialize)]
+struct Label {
+    name: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct DiffRefs {
     pub base_sha: String,
     pub head_sha: String,
@@ -72,6 +84,9 @@ pub struct MergeRequest {
     pub target_branch: String,
     pub author: User,
     pub reviewers: Vec<User>,
+    pub assignees: Vec<User>,
+    pub labels: Vec<String>,
+    pub milestone: Option<Milestone>,
     pub web_url: String,
     pub sha: Option<String>,
     pub detailed_merge_status: Option<String>,
@@ -309,6 +324,12 @@ pub fn blob_url(project: &str, revision: &str, path: &str, lines: Option<(u32, u
     }
 }
 
+pub fn tree_url(project: &str, revision: &str, path: &str) -> String {
+    let path: Vec<String> = path.split('/').map(encode).collect();
+
+    format!("{SERVER}/{project}/-/tree/{revision}/{}", path.join("/"))
+}
+
 pub fn new_merge_request_url(project: &str, source_branch: &str) -> String {
     format!("{SERVER}/{project}/-/merge_requests/new?merge_request%5Bsource_branch%5D={}", encode(source_branch))
 }
@@ -449,8 +470,8 @@ pub struct SnippetDraft {
     pub title: String,
     pub description: String,
     pub visibility: String,
-    pub file_path: String,
-    pub content: String,
+    /// `(repository path, content)` of each file.
+    pub files: Vec<(String, String)>,
     /// `group/name` for a project snippet, `None` for a personal one.
     pub project: Option<String>,
 }
@@ -463,7 +484,7 @@ pub fn create_snippet(draft: &SnippetDraft) -> Result<String, Error> {
     let mut body = json!({
         "title": draft.title,
         "visibility": draft.visibility,
-        "files": [{ "file_path": draft.file_path, "content": draft.content }],
+        "files": draft.files.iter().map(|(file_path, content)| json!({ "file_path": file_path, "content": content })).collect::<Vec<_>>(),
     });
     if !draft.description.is_empty() {
         body["description"] = json!(draft.description);
@@ -478,41 +499,17 @@ pub fn create_snippet(draft: &SnippetDraft) -> Result<String, Error> {
     snippet["web_url"].as_str().map(str::to_owned).ok_or_else(|| "GitLab returned no snippet URL.".into())
 }
 
-pub fn user_id(username: &str) -> Result<u64, Error> {
-    let users: Vec<User> = parse(rest("GET", &format!("/users?username={}", encode(safe::username(username)?)), None)?)?;
-
-    users.first().map(|u| u.id).ok_or_else(|| format!("No GitLab user is named {username}.").into())
-}
-
 /// Projects the user is a member of, most recently active first.
 pub fn member_projects() -> Result<Vec<ProjectInfo>, Error> {
     paged("/projects?membership=true&simple=true&order_by=last_activity_at", 100)
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct Namespace {
-    pub id: u64,
-    pub full_path: String,
-}
-
-/// The user's namespace and the groups they can create projects in.
-pub fn namespaces() -> Result<Vec<Namespace>, Error> {
-    paged("/namespaces", 100)
-}
-
-/// `namespace_id: None` is the user's own namespace; an empty description is left out.
-pub fn create_project(name: &str, namespace_id: Option<u64>, description: &str, visibility: &str) -> Result<ProjectInfo, Error> {
+pub fn create_project(name: &str, visibility: &str) -> Result<ProjectInfo, Error> {
     if !VISIBILITIES.contains(&visibility) {
         return Err(format!("Unknown visibility {visibility:?}.").into());
     }
 
-    let mut body = json!({ "name": name, "visibility": visibility });
-    if let Some(id) = namespace_id {
-        body["namespace_id"] = json!(id);
-    }
-    if !description.is_empty() {
-        body["description"] = json!(description);
-    }
+    let body = json!({ "name": name, "visibility": visibility });
 
     parse(rest("POST", "/projects", Some(body))?)
 }
@@ -677,6 +674,25 @@ impl Project<'_> {
     /// `close` or `reopen`.
     pub fn set_state(&self, iid: u64, event: &str) -> Result<(), Error> {
         rest("PUT", &self.mr(iid, ""), Some(json!({ "state_event": event }))).map(drop)
+    }
+
+    pub fn labels(&self) -> Result<Vec<String>, Error> {
+        let labels: Vec<Label> = paged(&self.path("/labels"), 100)?;
+
+        Ok(labels.into_iter().map(|l| l.name).collect())
+    }
+
+    pub fn members(&self) -> Result<Vec<User>, Error> {
+        paged(&self.path("/members/all"), 100)
+    }
+
+    pub fn milestones(&self) -> Result<Vec<Milestone>, Error> {
+        paged(&self.path("/milestones?state=active"), 100)
+    }
+
+    /// `fields` is the JSON body of the update (`{"labels": "a,b"}`).
+    pub fn update_merge_request(&self, iid: u64, fields: Value) -> Result<(), Error> {
+        rest("PUT", &self.mr(iid, ""), Some(fields)).map(drop)
     }
 
     pub fn set_reviewers(&self, iid: u64, ids: &[u64]) -> Result<(), Error> {

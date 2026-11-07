@@ -35,6 +35,13 @@ fn property_at(masked: &str, attribute: &AttributeUse) -> Option<usize> {
 }
 
 fn php(text: &str) -> Vec<Finding> {
+    let mut found = mapping_php(text);
+    found.extend(query_api(text));
+    found.extend(crate::query_builder_checks::check(text));
+    found
+}
+
+fn mapping_php(text: &str) -> Vec<Finding> {
     let imported = imports(text).iter().any(|import| import.fqcn == MAPPING_NAMESPACE || import.fqcn.starts_with(&format!("{MAPPING_NAMESPACE}\\")));
     if !imported {
         return Vec::new();
@@ -50,11 +57,110 @@ fn php(text: &str) -> Vec<Finding> {
             Some("OneToMany") => one_to_many(&masked, &attributes, attribute, &mut found),
             Some("OneToOne") => inverse_side_join_column(&masked, &attributes, attribute, &mut found),
             Some("JoinColumn") => nullable_attribute(&masked, attribute, &mut found),
+            Some("Column") => deprecated_column_type(&masked, text, attribute, &mut found),
+            Some("DiscriminatorMap") => discriminator_map(&masked, text, attribute, &mut found),
+            Some(name) if LIFECYCLE_ATTRIBUTES.contains(&name) => callback_visibility(attribute, &mut found),
             _ => {}
         }
     }
 
     lifecycle_callbacks(&masked, &attributes, &mut found);
+    found
+}
+
+const ENTITY_MANAGER_IMPORTS: [&str; 3] = ["Doctrine\\ORM\\EntityManager", "Doctrine\\ORM\\EntityManagerInterface", "Doctrine\\Persistence\\ObjectManager"];
+const ENTITY_MANAGER_RECEIVERS: [&str; 6] = ["$em->", "$entityManager->", "$this->em->", "$this->entityManager->", "$objectManager->", "$this->manager->"];
+const CRITERIA: &str = "Doctrine\\Common\\Collections\\Criteria";
+const DEPRECATED_COLUMN_TYPES: [&str; 5] = ["array", "object", "json_array", "Types::ARRAY", "Types::OBJECT"];
+
+fn deprecated_column_type(masked: &str, text: &str, attribute: &AttributeUse, found: &mut Vec<Finding>) {
+    if !masked[attribute.range.clone()].contains('(') {
+        return;
+    }
+
+    for argument in arguments(masked, attribute.arguments.start - 1) {
+        let Some((name, value)) = named(masked, argument) else { continue };
+        let written = text[value.clone()].trim_matches(['\'', '"']);
+        if &masked[name] == "type" && DEPRECATED_COLUMN_TYPES.contains(&written) {
+            found.push(Finding::warn(value, "orm-column-deprecated-type", "The `array` and `object` column types are deprecated in DBAL 3 and removed in DBAL 4: store the data as `json`.".into()));
+        }
+    }
+}
+
+/// Removed ORM and Collections APIs. Receivers of `merge()` and `flush($entity)`
+/// must be a conventionally named entity manager in a file that imports one.
+fn query_api(text: &str) -> Vec<Finding> {
+    let masked = mask(text);
+    let imports = imports(text);
+    let imported = |wanted: &[&str]| imports.iter().any(|import| wanted.contains(&import.fqcn.as_str()));
+    let mut found = Vec::new();
+
+    for (at, _) in masked.match_indices("->getQuery()->iterate(") {
+        let name = at + "->getQuery()->".len();
+        found.push(Finding::warn(name..name + "iterate".len(), "orm-query-iterate", "`iterate()` is deprecated since ORM 2.8 and removed in 3.0: use `toIterable()`.".into()));
+    }
+
+    if imported(&ENTITY_MANAGER_IMPORTS) {
+        for receiver in ENTITY_MANAGER_RECEIVERS {
+            for (at, _) in masked.match_indices(receiver) {
+                let glued = masked[..at].bytes().last().is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'>'));
+                let method_start = at + receiver.len();
+                let method = crate::php_text::read_word(&masked, method_start);
+                let open = crate::php_text::skip_whitespace(&masked, method.end);
+                if glued || !masked[open..].starts_with('(') {
+                    continue;
+                }
+
+                let has_arguments = !arguments(&masked, open).is_empty();
+                match &masked[method.clone()] {
+                    "merge" => found.push(Finding::warn(method, "orm-entity-manager-merge", "`EntityManager::merge()` is deprecated since ORM 2.7 and removed in 3.0.".into())),
+                    "flush" if has_arguments => found.push(Finding::warn(method, "orm-flush-entity", "Passing an entity to `flush()` is deprecated since ORM 2.7 and removed in 3.0: call `flush()` without arguments.".into())),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if imported(&[CRITERIA]) {
+        found.extend(criteria_orderings(&masked, text));
+    }
+
+    found
+}
+
+fn criteria_orderings(masked: &str, text: &str) -> Vec<Finding> {
+    let mut found = Vec::new();
+    let message = "String orderings are deprecated since doctrine/collections 2.1: use `Order::Ascending` or `Order::Descending`.";
+
+    for constant in ["Criteria::ASC", "Criteria::DESC"] {
+        for (at, _) in masked.match_indices(constant) {
+            let glued = masked[..at].bytes().last().is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\'));
+            if !glued {
+                found.push(Finding::hint(at..at + constant.len(), "collections-criteria-ordering", message.into()));
+            }
+        }
+    }
+
+    for (at, _) in masked.match_indices("->orderBy(") {
+        let open = at + "->orderBy".len();
+        let Some(argument) = arguments(masked, open).into_iter().next() else { continue };
+        let argument = trimmed(masked, argument);
+        if !masked[argument.clone()].starts_with('[') {
+            continue;
+        }
+
+        let Some(close) = matching_close(masked, argument.start) else { continue };
+        for (position, _) in masked[argument.start..close].match_indices("=>") {
+            let value_start = crate::php_text::skip_whitespace(masked, argument.start + position + 2);
+            let quote = text.as_bytes().get(value_start).copied();
+            let Some(length) = quote.filter(|q| matches!(q, b'\'' | b'"')).and_then(|q| text[value_start + 1..close].bytes().position(|b| b == q)) else { continue };
+            let word = &text[value_start + 1..value_start + 1 + length];
+            if word.eq_ignore_ascii_case("asc") || word.eq_ignore_ascii_case("desc") {
+                found.push(Finding::hint(value_start + 1..value_start + 1 + length, "collections-criteria-ordering", message.into()));
+            }
+        }
+    }
+
     found
 }
 
@@ -160,6 +266,50 @@ fn nullable_attribute(masked: &str, attribute: &AttributeUse, found: &mut Vec<Fi
     }
 }
 
+fn callback_visibility(attribute: &AttributeUse, found: &mut Vec<Finding>) {
+    let Target::Method { visibility, name_range, .. } = &attribute.target else { return };
+    if *visibility != crate::php_text::Visibility::Public {
+        found.push(Finding::warn(name_range.clone(), "orm-lifecycle-method-visibility", "Doctrine calls lifecycle callbacks from outside the entity: make this method public.".into()));
+    }
+}
+
+fn discriminator_map(masked: &str, text: &str, attribute: &AttributeUse, found: &mut Vec<Finding>) {
+    if !masked[attribute.range.clone()].contains('(') {
+        return;
+    }
+
+    let Some(first) = arguments(masked, attribute.arguments.start - 1).into_iter().next() else { return };
+    let first = trimmed(masked, first);
+    let map = match named(masked, first.clone()) {
+        Some((name, value)) if &masked[name.clone()] == "value" => value,
+        Some(_) => return,
+        None => first,
+    };
+    if !masked[map.clone()].starts_with('[') {
+        return;
+    }
+
+    let mut keys: Vec<&str> = Vec::new();
+    let mut classes: Vec<&str> = Vec::new();
+    for item in arguments(masked, map.start) {
+        let item = trimmed(masked, item);
+        let Some(arrow) = masked[item.clone()].find("=>") else { continue };
+        let key = text[item.start..item.start + arrow].trim().trim_matches(['\'', '"']);
+        let class = text[item.start + arrow + 2..item.end].trim();
+        let key_range = item.start..item.start + arrow;
+        let class_range = item.start + arrow + 2..item.end;
+
+        if keys.contains(&key) {
+            found.push(Finding::warn(key_range, "orm-discriminator-map-duplicate", format!("The discriminator value \"{key}\" is mapped twice.")));
+        }
+        if classes.contains(&class) {
+            found.push(Finding::warn(class_range, "orm-discriminator-map-duplicate", format!("{class} is mapped to two discriminator values.")));
+        }
+        keys.push(key);
+        classes.push(class);
+    }
+}
+
 fn lifecycle_callbacks(masked: &str, attributes: &[AttributeUse], found: &mut Vec<Finding>) {
     for entity in attributes.iter().filter(|a| mapping_name(a) == Some("Entity")) {
         let Target::Class { name } = &entity.target else { continue };
@@ -195,6 +345,19 @@ fn xml(text: &str) -> Vec<Finding> {
         if value == "true" {
             let start = at + offset - "nullable=\"".len();
             found.push(Finding::hint(start..at + offset + value.len() + 1, "orm-join-column-nullable", NULLABLE_MESSAGE.into()));
+        }
+    }
+
+    let mappings: Vec<(&str, usize)> = xml_tags(&masked, "discriminator-mapping");
+    let mut values: Vec<&str> = Vec::new();
+    let mut classes: Vec<&str> = Vec::new();
+    for (tag, at) in mappings {
+        for (attribute, seen) in [("value", &mut values), ("class", &mut classes)] {
+            let Some((value, offset)) = xml_attribute(tag, attribute) else { continue };
+            if seen.contains(&value) {
+                found.push(Finding::warn(at + offset..at + offset + value.len(), "orm-discriminator-map-duplicate", format!("\"{value}\" appears twice in the discriminator map.")));
+            }
+            seen.push(value);
         }
     }
 
@@ -539,5 +702,65 @@ mod tests {
 
         host.set_setting("doctrineChecks", "false");
         assert!(published(&host, &mut plugin, Event::FileOpened(PATH.into())).is_empty());
+    }
+
+    const SERVICE: &str = "<?php\nnamespace App\\Service;\n\nuse Doctrine\\ORM\\EntityManagerInterface;\nuse Doctrine\\Common\\Collections\\Criteria;\n\nclass Repo\n{\n    public function run($other)\n    {\n        $rows = $this->qb->getQuery()->iterate();\n        $this->em->merge($x);\n        $this->em->flush($x);\n        $this->em->flush();\n        $em->persist($x);\n        $other->flush($x);\n        $this->logger->merge($x);\n        $this->notem->flush($x);\n        $c = Criteria::create()->orderBy(['a' => 'ASC', 'b' => Criteria::DESC, 'c' => $dir])->orderBy(['d' => 'desc']);\n        $q = $qb->orderBy('u.name', 'ASC');\n    }\n}\n";
+
+    fn slices(text: &str) -> Vec<(&'static str, String)> {
+        check(PATH, "php", text).iter().map(|finding| (finding.code, text[finding.start..finding.end].to_owned())).collect()
+    }
+
+    #[test]
+    fn removed_query_and_manager_apis_are_reported_on_known_receivers_only() {
+        assert_eq!(
+            slices(SERVICE),
+            [
+                ("orm-query-iterate", "iterate".to_owned()),
+                ("orm-entity-manager-merge", "merge".to_owned()),
+                ("orm-flush-entity", "flush".to_owned()),
+                ("collections-criteria-ordering", "ASC".to_owned()),
+                ("collections-criteria-ordering", "Criteria::DESC".to_owned()),
+                ("collections-criteria-ordering", "desc".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn manager_and_criteria_checks_need_their_imports() {
+        let bare = SERVICE.replace("use Doctrine\\ORM\\EntityManagerInterface;\n", "").replace("use Doctrine\\Common\\Collections\\Criteria;\n", "");
+        assert_eq!(slices(&bare), [("orm-query-iterate", "iterate".to_owned())]);
+    }
+
+    #[test]
+    fn deprecated_column_types_are_warned() {
+        let text = entity("    #[ORM\\Column(type: 'array')]\n    private $a;\n\n    #[ORM\\Column(type: Types::OBJECT, nullable: true)]\n    private $b;\n\n    #[ORM\\Column(type: 'json')]\n    private $c;\n\n    #[ORM\\Column]\n    private $d;\n\n    #[ORM\\Column(type: $dynamic)]\n    private $e;");
+        assert_eq!(slices(&text), [("orm-column-deprecated-type", "'array'".to_owned()), ("orm-column-deprecated-type", "Types::OBJECT".to_owned())]);
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_callbacks_must_be_public() {
+        let text = "<?php\nuse Doctrine\\ORM\\Mapping as ORM;\n\n#[ORM\\Entity]\n#[ORM\\HasLifecycleCallbacks]\nclass U\n{\n    #[ORM\\PrePersist]\n    private function a(): void {}\n\n    #[ORM\\PostLoad]\n    public function b(): void {}\n}\n";
+        let found: Vec<_> = check("/p/U.php", "php", text).into_iter().map(|f| (f.code, text[f.start..f.end].to_owned())).collect();
+        assert_eq!(found, [("orm-lifecycle-method-visibility", "a".to_owned())]);
+    }
+
+    #[test]
+    fn discriminator_map_duplicates_in_php_and_xml() {
+        let text = "<?php\nuse Doctrine\\ORM\\Mapping as ORM;\n\n#[ORM\\DiscriminatorMap(['a' => A::class, 'b' => B::class, 'a' => C::class, 'd' => B::class])]\nclass U {}\n";
+        let found: Vec<_> = check("/p/U.php", "php", text).into_iter().map(|f| (f.code, text[f.start..f.end].trim().to_owned())).collect();
+        assert_eq!(found, [("orm-discriminator-map-duplicate", "'a'".to_owned()), ("orm-discriminator-map-duplicate", "B::class".to_owned())]);
+
+        let clean = text.replace("'a' => C::class, 'd' => B::class", "'c' => C::class");
+        assert!(check("/p/U.php", "php", &clean).is_empty());
+
+        let xml = "<doctrine-mapping><entity><discriminator-map><discriminator-mapping value=\"a\" class=\"A\"/><discriminator-mapping value=\"a\" class=\"B\"/></discriminator-map></entity></doctrine-mapping>";
+        let found = check("/p/U.orm.xml", "xml", xml);
+        assert_eq!(found.len(), 1);
+        assert_eq!(&xml[found[0].start..found[0].end], "a");
     }
 }

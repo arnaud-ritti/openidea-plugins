@@ -65,6 +65,8 @@ The OpenAPI Endpoints view (right side) lists `METHOD /path` for every OpenAPI
 YAML or JSON file (up to 1 MiB) of the current window's project, with the operationId and file name as
 detail. Activating an entry opens the operation. Refresh re-scans the project.
 
+It is the shared route list: a flat list: a method icon (GET, POST, PUT, DELETE, PATCH, other), the path, and grey text with the operationId after it. *Filter* narrows the list to one tag (the status line says which), *Clear* restores it, and *Flat/Tree* groups the rows by tag. Row actions: *Copy as curl* and *Create HTTP Request File* (writes `http/<verb>-<path>.http`, needs `process:tee`; without it the request is copied). Limits: the grey text follows the path rather than sitting in a column, there is no request panel beside the list, and no gutter icon on the handler; these wait on upstream OpenIDEA requests. The HTTP file is written beside the spec.
+
 ## Preview
 
 Swagger UI 5.34.1 beside the text. It opens automatically for `openapi.*`,
@@ -79,24 +81,68 @@ referenced files again (not verified in a live IDE).
   Swagger UI. Only one level is loaded (files referenced from those files are
   not), at most 50 files and 512 KiB in total; larger ones are skipped. The
   files are re-sent only when they changed.
+- A Redoc button switches the preview to Redoc 2.5.4 (and back). Redoc loads on first use and has its search
+  turned off (it needs a worker). Not verified in a live IDE.
 - There is no Try it out: the frame has no network.
 - The dark theme is a colour inversion of the light one.
 
-## Copy Requests for the HTTP Client
+## Write Requests for the HTTP Client
 
-The command "OpenAPI: Copy Requests for the HTTP Client" copies one request per
-operation of the focused file, ready for a `.http` file. The base URL comes from
+The command "OpenAPI: Write Requests for the HTTP Client" writes one request per
+operation of the focused file to `<name>.http` beside it and opens it (it asks before
+replacing an existing file). Writing needs the optional `tee` permission; without it the
+requests are copied to the clipboard. The base URL comes from
 `servers[0].url` (OpenAPI 3) or `schemes`, `host` and `basePath` (Swagger 2), and
 defaults to `http://localhost`. Path parameters become `{{name}}` variables.
-Without the clipboard permission the plugin shows a warning instead.
+Without both permissions the plugin shows a warning instead.
 
-## Skeleton completion
+## Live templates
 
-In an OpenAPI or Swagger file, completion offers three skeletons: `openapi-path`
-(a path item), `openapi-operation` (an operation with a response) and
-`swagger2-root` (a Swagger 2.0 root). They are plain completion items, offered
-anywhere in the file (`swagger2-root` also in an OpenAPI 3 file), and the tab
-stops are not verified in a live IDE.
+In an OpenAPI or Swagger file, completion offers four snippets: `oas3` (an OpenAPI 3.1 root with
+info and a GET path), `opnp` (a path item), `endp` (an operation with parameters and a response)
+and `swag` (a Swagger 2.0 root). They are plain completion items, offered anywhere in the file, and
+the tab stops are not verified in a live IDE.
+
+## Keyword and enum completion
+
+In an OpenAPI 3 file (YAML in block style, or JSON), completion on a blank or partly typed key offers the keys of the
+object at that indentation (`info`, `paths`, a path item's methods, an operation's `summary`, `parameters`,
+`responses` with common status codes, schema keywords, and so on), taken from a fixed tree of the OpenAPI
+Specification. After `key: ` it offers the enum values of `in`, `style`, `type`, `format`, `scheme`, the
+booleans, and so on (`null` as a type only for 3.1). It is quiet in Swagger 2, flow style, inside a
+multi-line scalar, and under keys it doesn't know (such as `x-` extensions, `example`, `callbacks`).
+Keys already present in the object are offered again. The skeletons stay available next to the keys.
+In JSON the keys come from the objects around the caret (arrays are transparent); typing inside quotes
+completes the name only, outside quotes it inserts `"name": `, and enum values are inserted quoted.
+
+## Extract, bundle and copy
+
+- Code action "Extract inline schema to components/schemas", with the caret on the line of a `schema:`,
+  `items:`, `additionalProperties:` or a property name whose value is an inline block mapping (or a JSON
+  object). The block moves to `components.schemas` (created if missing, with the comma handled in JSON) under
+  a generated name (`ListPetsResponse`, `Owner`; a number is appended when taken) and is replaced by a
+  `$ref`. Rename the new schema afterwards.
+- "OpenAPI: Write Self-Contained Spec" writes `<name>.bundled.<ext>` beside the file (clipboard without the
+  optional `tee` permission) with every `$ref` to another file replaced by a pointer
+  into `components` and the referenced objects copied there (including what they reference, recursively;
+  a recursive reference is copied once). A YAML spec bundles YAML files (target a block mapping), a JSON spec
+  bundles JSON files; mixing them is refused. An object that is not under `/components/<section>/` lands in `schemas`.
+- "OpenAPI: Copy Reference to the Key at the Caret" copies `$ref: '#/components/schemas/Pet'` (or the JSON form)
+  for the key on the caret's line.
+- "OpenAPI: Compare With Last Revision" compares the open file with its version in `HEAD` in the
+  OpenAPI Changes view. It needs the optional `git` permission and a committed file.
+
+## Markers, icons and detection
+
+Every operation whose body has a local `$ref` that resolves gets a gutter marker that opens the first such
+target. `openapi.*` and `swagger.*` files (and `*.openapi.*`, `*.swagger.*`) get the OpenAPI icon. The setting
+`specGlobs` (comma-separated, for example `api/*.yaml, *.contract.json`; a pattern without `/` matches the file
+name, with `/` the end of the path) makes completion, go to definition, problems and the endpoints view work
+in more files, including fragments without an `openapi` key (in a fragment, unresolved local `#/` pointers
+are not reported, since they may point into the root file, and the "missing root key" hint is off). The
+preview is not affected: its file patterns are fixed in the manifest, so use Open With and pick API Preview
+for other names. The icon and
+marker behaviour is not verified in a live IDE.
 
 ## Templates
 
@@ -107,7 +153,7 @@ preview leave them alone.
 
 ## Licences
 
-The plugin code is MIT. It bundles Swagger UI (Apache-2.0), whose licence and
+The plugin code is MIT. It bundles Swagger UI (Apache-2.0) and Redoc (MIT), whose licence and
 notice files are in `web/vendor/`; see `NOTICE.md`.
 
 ## Limits
@@ -123,7 +169,7 @@ notice files are in `web/vendor/`; see `NOTICE.md`.
   (`#/components/schemas/com` when `com.acme.Error` exists).
 - No rename, find usages, hover or structure view.
 - The endpoints view re-scans the project on each render.
-- The schema modeline is YAML only; JSON specs get no schema validation.
+- The schema modeline is YAML only; JSON specs get no schema validation. Keyword completion is OpenAPI 3 only.
 - The endpoints view reads a JSON file in full before the 1 MiB cap applies.
 - The preview isn't opened automatically for other file names, and loads only
   the files the open document references directly.

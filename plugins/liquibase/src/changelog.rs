@@ -8,6 +8,7 @@ use spring_text::xml;
 pub enum Format {
     Xml,
     Yaml,
+    Json,
     Sql,
 }
 
@@ -77,6 +78,9 @@ pub fn parse(path: &str, text: &str) -> Option<Changelog> {
     if path.ends_with(".sql") {
         return parse_sql(text);
     }
+    if path.ends_with(".json") && text.contains("databaseChangeLog") {
+        return parse_keys(crate::json::keys(text), Format::Json);
+    }
     None
 }
 
@@ -128,11 +132,14 @@ fn entry(key: &Key) -> Option<(usize, &str)> {
 }
 
 fn parse_yaml(text: &str) -> Option<Changelog> {
-    let keys = config::yaml(text);
+    parse_keys(config::yaml(text), Format::Yaml)
+}
+
+fn parse_keys(keys: Vec<Key>, format: Format) -> Option<Changelog> {
     if !keys.iter().any(|k| k.key == "databaseChangeLog") {
         return None;
     }
-    let mut log = empty(Format::Yaml, true);
+    let mut log = empty(format, true);
     let mut set_of: Vec<(usize, usize)> = Vec::new();
     let mut include_of: Vec<(usize, bool)> = Vec::new();
     for key in &keys {
@@ -256,15 +263,18 @@ pub fn describe(log: &Changelog, text: &str, index: usize) -> Option<String> {
     let body = text.get(set.at..next)?;
     let found = match log.format {
         Format::Xml => describe_xml(body),
-        Format::Yaml => comment_line(body, "comment:").or_else(|| {
-            log.changes.iter().find(|change| change.at >= set.at && change.at < next).map(|change| change.name.clone())
-        }),
+        Format::Yaml => comment_line(body, "comment:").or_else(|| first_change(log, set.at, next)),
+        Format::Json => first_change(log, set.at, next),
         Format::Sql => comment_line(body, "--comment:").or_else(|| {
             let statement = body.lines().skip(1).map(str::trim).find(|line| !line.is_empty() && !line.starts_with("--"))?;
             Some(statement.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
         }),
     };
     found.filter(|description| !description.is_empty())
+}
+
+fn first_change(log: &Changelog, from: usize, to: usize) -> Option<String> {
+    log.changes.iter().find(|change| change.at >= from && change.at < to).map(|change| change.name.clone())
 }
 
 fn comment_line(body: &str, key: &str) -> Option<String> {
@@ -431,7 +441,7 @@ mod tests {
         assert_eq!(parse("/p/pom.xml", "<project><modelVersion>4.0.0</modelVersion></project>"), None);
         assert_eq!(parse("/p/application.yml", "spring:\n  liquibase:\n    change-log: classpath:db/master.yaml\n"), None);
         assert_eq!(parse("/p/schema.sql", "create table t (id int);"), None);
-        assert_eq!(parse("/p/a.json", "{\"databaseChangeLog\": []}"), None);
+        assert_eq!(parse("/p/package.json", "{\"name\": \"x\"}"), None);
     }
 
     #[test]
@@ -495,5 +505,29 @@ mod tests {
         assert!(log.header);
         let set = &log.change_sets[0];
         assert_eq!(&text[set.at..set.end], "--changeset bob:1");
+    }
+
+    const JSON: &str = r#"{"databaseChangeLog": [
+  {"include": {"file": "db/a.json", "relativeToChangelogFile": true}},
+  {"changeSet": {"id": "1", "author": "bob", "changes": [{"createTable": {"tableName": "t"}}, {"frobnicate": {}}]}},
+  {"changeSet": {"id": "2"}}
+]}"#;
+
+    #[test]
+    fn parses_json_changelogs() {
+        let log = parse("/p/db.json", JSON).unwrap();
+        assert_eq!(log.format, Format::Json);
+        assert_eq!(log.change_sets.len(), 2);
+        assert_eq!((log.change_sets[0].id.as_deref(), log.change_sets[0].author.as_deref()), (Some("1"), Some("bob")));
+        assert_eq!(log.change_sets[1].author, None);
+        assert_eq!(log.changes.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["createTable", "frobnicate"]);
+        let include = &log.includes[0];
+        assert_eq!((include.path.as_str(), include.relative, include.dir), ("db/a.json", true, false));
+        assert_eq!(&JSON[include.at..include.end], "db/a.json");
+        assert_eq!(describe(&log, JSON, 0).as_deref(), Some("createTable"));
+        assert_eq!(parse("/p/x.json", "{\"databaseChangeLog\": []}").unwrap().change_sets.len(), 0);
+        for end in (0..=JSON.len()).filter(|&e| JSON.is_char_boundary(e)) {
+            parse("/p/db.json", &JSON[..end]);
+        }
     }
 }

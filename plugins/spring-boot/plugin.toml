@@ -4,9 +4,10 @@ version = "0.1.0" # x-release-please-version
 description = "Completion and checks for Spring Boot configuration files. Completes keys and values in application*.properties and application*.yml from the Spring Boot 3.5 metadata, the project's configuration metadata files and its @ConfigurationProperties classes. Warns about deprecated keys (with a quick fix) and unknown keys in known groups, and checks cron expressions in @Scheduled(cron) and *.cron keys. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0: first release, with key and value completion, warnings for deprecated and unknown keys, a quick fix for deprecated keys and cron validation. Bundled metadata from Spring Boot 3.5.16 (Apache-2.0)."
+change-notes = "Unreleased: a Show Configuration Problems command that lists the project's configuration and metadata problems, class, enum and classpath resource completion in values, enum, class and list value checks, configuration files pointed at by spring.config.import, location and name, navigation from classpath resource values, constructor-binding checks for @ConfigurationProperties, deeper metadata file checks (defaults, deprecation, unresolved classes, hint names), plus the previously unlisted checks for early @EventListener events, @ConfigurationProperties prefixes, @SpringBootApplication in the default package, redundant @EnableAutoConfiguration/@ComponentScan, @DirtiesContext modes and transaction callbacks. Also: warns about property values that cannot convert to the key's type, navigation from spring.config.import and class-valued keys, completion of logger packages, profiles and ${} keys, checks and a define-key fix for additional-spring-configuration-metadata.json, a Reactor debug agent hint, an opt-in JDBC driver check and Spring Boot file templates. 0.1.0: 0.1.0: first release, with key and value completion, warnings for deprecated and unknown keys, a quick fix for deprecated keys and cron validation. Bundled metadata from Spring Boot 3.5.16 (Apache-2.0)."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [
     "on-file:**/application*.properties",
@@ -15,15 +16,25 @@ activation = [
     "on-file:**/bootstrap*.properties",
     "on-file:**/bootstrap*.yml",
     "on-file:**/bootstrap*.yaml",
+    "on-file:**/*spring-configuration-metadata.json",
     "on-language:java",
 ]
 
 [capabilities]
 required = ["project.read"]
 
+[[contributes.commands]]
+id = "show-diagnostics"
+title = "Spring Boot: Show Configuration Problems"
+category = "Spring Boot"
+
 [[contributes.providers]]
-kinds = ["completion", "code-actions", "line-markers"]
+kinds = ["completion", "definition", "code-actions", "line-markers"]
 languages = ["properties", "yaml"]
+
+[[contributes.providers]]
+kinds = ["line-markers"]
+languages = ["json"]
 
 [[contributes.providers]]
 kinds = ["code-actions", "line-markers"]
@@ -38,3 +49,39 @@ id = "spring-boot-config"
 patterns = ["application*.properties", "application*.yml", "application*.yaml", "bootstrap*.properties", "bootstrap*.yml", "bootstrap*.yaml"]
 icon = "icons/config.svg"
 iconDark = "icons/config_dark.svg"
+
+[[contributes.fileTemplates]]
+id = "spring-boot-application-java"
+name = "Spring Boot Application"
+extension = "java"
+path = "templates/Application.java"
+
+[[contributes.fileTemplates]]
+id = "spring-boot-application-kotlin"
+name = "Spring Boot Application (Kotlin)"
+extension = "kt"
+path = "templates/Application.kt"
+
+[[contributes.fileTemplates]]
+id = "spring-boot-test-java"
+name = "Spring Boot Test"
+extension = "java"
+path = "templates/BootTest.java"
+
+[[contributes.fileTemplates]]
+id = "spring-boot-test-kotlin"
+name = "Spring Boot Test (Kotlin)"
+extension = "kt"
+path = "templates/BootTest.kt"
+
+[[contributes.fileTemplates]]
+id = "spring-boot-configuration-properties-java"
+name = "Spring Boot ConfigurationProperties"
+extension = "java"
+path = "templates/ConfigurationProperties.java"
+
+[[contributes.fileTemplates]]
+id = "spring-boot-configuration-properties-kotlin"
+name = "Spring Boot ConfigurationProperties (Kotlin)"
+extension = "kt"
+path = "templates/ConfigurationProperties.kt"

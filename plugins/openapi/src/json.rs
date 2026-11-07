@@ -44,6 +44,121 @@ pub fn unescape(raw: &str) -> String {
     out
 }
 
+/// The offset of the `}` or `]` closing the container opened at `open`.
+pub fn container_end(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+struct Frame {
+    object: bool,
+    key: Option<String>,
+    expect_key: bool,
+}
+
+/// Where the caret sits in an object: the keys of the enclosing objects, and whether it is
+/// on a key or on the value of `key`.
+pub struct Caret {
+    pub path: Vec<String>,
+    pub key: Option<String>,
+    pub value: bool,
+    pub in_string: bool,
+    pub from: usize,
+}
+
+pub fn caret(text: &str, offset: usize) -> Option<Caret> {
+    let bytes = text.as_bytes();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut i = 0;
+    let mut string_start = None;
+    while i < offset {
+        match bytes[i] {
+            c if c.is_ascii_whitespace() || c == b':' => i += 1,
+            b'{' | b'[' => {
+                stack.push(Frame { object: bytes[i] == b'{', key: None, expect_key: true });
+                i += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                i += 1;
+            }
+            b',' => {
+                let frame = stack.last_mut()?;
+                frame.key = None;
+                frame.expect_key = true;
+                i += 1;
+            }
+            b'"' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end] != b'"' {
+                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                }
+                if end >= offset {
+                    string_start = Some(start);
+                    break;
+                }
+                let frame = stack.last_mut()?;
+                if frame.object && frame.expect_key {
+                    frame.key = Some(unescape(&text[start..end]));
+                    frame.expect_key = false;
+                }
+                i = end + 1;
+            }
+            _ => {
+                while i < offset && !bytes[i].is_ascii_whitespace() && !matches!(bytes[i], b',' | b'}' | b']' | b':') {
+                    i += 1;
+                }
+                if i >= offset {
+                    return None;
+                }
+            }
+        }
+    }
+
+    let top = stack.last().filter(|frame| frame.object)?;
+    let after_colon = text[..offset].trim_end().ends_with(':');
+    let value = !top.expect_key;
+    if value && string_start.is_none() && !after_colon {
+        return None;
+    }
+    if !value && string_start.is_none() && after_colon {
+        return None;
+    }
+
+    let key = top.key.clone();
+    let mut path = Vec::new();
+    for frame in &stack[..stack.len() - 1] {
+        if frame.object {
+            path.push(frame.key.clone()?);
+        }
+    }
+
+    Some(Caret { path, key, value, in_string: string_start.is_some(), from: string_start.unwrap_or(offset) })
+}
+
 fn hex4(chars: &mut std::str::Chars) -> Option<u32> {
     let digits: String = chars.clone().take(4).collect();
     let code = u32::from_str_radix(&digits, 16).ok().filter(|_| digits.len() == 4)?;

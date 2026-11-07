@@ -5,7 +5,8 @@ use crate::checks::spring;
 use crate::model::is_repository;
 use openidea_plugin::Severity;
 use spring_text::finding::Finding;
-use spring_text::java::{Annotation, JavaFile, TypeDecl};
+use spring_text::java::{self, Annotation, JavaFile, Member, TypeDecl};
+use spring_text::sibling::SiblingCall;
 
 const CACHE_ANNOTATIONS: [&str; 3] = ["Cacheable", "CachePut", "CacheEvict"];
 const CACHE_NAME_ARGS: [&str; 3] = ["value", "cacheNames", "cacheResolver"];
@@ -161,7 +162,19 @@ fn cache_annotations<'a>(file: &JavaFile, annotations: &'a [Annotation]) -> Vec<
     CACHE_ANNOTATIONS.iter().filter_map(|name| spring(file, annotations, name)).collect()
 }
 
-pub fn check_cache(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
+fn check_cache_config(file: &JavaFile, ty: &TypeDecl, subtyped: bool, out: &mut Vec<Finding>) {
+    let Some(config) = spring(file, &ty.annotations, "CacheConfig") else { return };
+    if let (Some(_), Some(other)) = (config.arg("cacheManager"), config.arg("cacheResolver")) {
+        out.push(Finding::new(other.at, other.end, "cache-attribute-conflict", "@CacheConfig sets both cacheManager and cacheResolver: Spring rejects the configuration, use one.").with_severity(Severity::Error));
+    }
+    let used = ty.methods().any(|m| !cache_annotations(file, &m.annotations).is_empty() || spring(file, &m.annotations, "Caching").is_some());
+    if used || subtyped || ty.kind != "class" || ty.modifiers.iter().any(|m| m == "abstract") {
+        return;
+    }
+    out.push(Finding::new(config.at, config.end, "cache-config-unused", "@CacheConfig only supplies defaults to cache annotations on the methods of this class, and none has one.").with_severity(Severity::Hint));
+}
+
+pub fn check_cache(file: &JavaFile, ty: &TypeDecl, subtyped: bool, out: &mut Vec<Finding>) {
     if ty.kind == "interface" {
         if is_repository(&ty.kind, ty.supers().map(|s| s.name.as_str())) {
             return;
@@ -177,6 +190,11 @@ pub fn check_cache(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
             ).with_severity(Severity::Hint));
         }
         return;
+    }
+
+    check_cache_config(file, ty, subtyped, out);
+    for method in ty.methods() {
+        cache_expressions(&method.annotations, file, out);
     }
 
     // A supertype may carry the @CacheConfig: Spring looks it up through the hierarchy.
@@ -205,6 +223,114 @@ pub fn check_cache(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
                 "cacheable-and-cache-put",
                 "@Cacheable skips the method when the entry exists, while @CachePut always runs it: combining them on one method gives surprising results.",
             ));
+        }
+    }
+}
+
+/// Like `spring_text::sibling::sibling_calls`, but a name shared by overloads counts when every
+/// overload is a plain target: the text cannot tell which one a call picks.
+pub fn overloaded_sibling_calls<'a>(
+    ty: &'a TypeDecl,
+    text: &str,
+    is_target: impl Fn(&Member) -> bool,
+    excused: impl Fn(&Member, &Member) -> bool,
+) -> Vec<SiblingCall<'a>> {
+    let mut out = Vec::new();
+    if !ty.extends.is_empty() {
+        return out;
+    }
+    let plain = |m: &Member| !["private", "final", "static"].iter().any(|k| m.modifiers.iter().any(|x| x == k));
+    let mut seen = Vec::new();
+    for callee in ty.methods() {
+        if seen.contains(&callee.name.as_str()) {
+            continue;
+        }
+        seen.push(callee.name.as_str());
+        if !ty.methods().filter(|m| m.name == callee.name).all(|m| is_target(m) && plain(m)) {
+            continue;
+        }
+        for caller in ty.methods().filter(|m| m.name != callee.name && !excused(m, callee)) {
+            let Some((from, to)) = caller.body else { continue };
+            let Some(body) = text.get(from..to) else { continue };
+            for call in java::calls(body).into_iter().filter(|c| c.name == callee.name && !c.is_new && !c.chained) {
+                if call.receiver.as_deref().is_some_and(|r| r != "this") {
+                    continue;
+                }
+                let at = from + call.at;
+                out.push(SiblingCall { callee, caller, at, end: at + call.name.len() });
+            }
+        }
+    }
+    out
+}
+
+pub fn check_bean_method_calls(file: &JavaFile, ty: &TypeDecl, text: &str, out: &mut Vec<Finding>) {
+    let Some(configuration) = spring(file, &ty.annotations, "Configuration") else { return };
+    if configuration.arg("proxyBeanMethods").is_none_or(|a| a.text.trim() != "false") {
+        return;
+    }
+    let is_bean = |m: &Member| spring(file, &m.annotations, "Bean").is_some();
+    let excused = |caller: &Member, _: &Member| !is_bean(caller);
+    for call in overloaded_sibling_calls(ty, text, is_bean, excused) {
+        out.push(Finding::new(
+            call.at,
+            call.end,
+            "unproxied-bean-method-call",
+            format!(
+                "{}() is called directly in a @Configuration(proxyBeanMethods = false) class, so every call creates a new instance instead of returning the shared bean. Take it as a parameter of this @Bean method instead.",
+                call.callee.name
+            ),
+        ));
+    }
+}
+
+const SPEL_ARGS: [&str; 3] = ["key", "condition", "unless"];
+
+/// What is wrong with the brackets and quotes of a SpEL expression, if anything.
+pub fn spel_problem(expr: &str) -> Option<&'static str> {
+    let mut open = Vec::new();
+    let mut quoted = false;
+    for c in expr.chars() {
+        if quoted {
+            quoted = c != '\'';
+            continue;
+        }
+        match c {
+            '\'' => quoted = true,
+            '(' | '[' | '{' => open.push(c),
+            ')' | ']' | '}' => {
+                let wanted = match c {
+                    ')' => '(',
+                    ']' => '[',
+                    _ => '{',
+                };
+                if open.pop() != Some(wanted) {
+                    return Some("has a closing bracket without a matching opening one");
+                }
+            }
+            _ => {}
+        }
+    }
+    if quoted {
+        return Some("has a string literal that is never closed");
+    }
+    (!open.is_empty()).then_some("has an opening bracket that is never closed")
+}
+
+fn cache_expressions(annotations: &[Annotation], file: &JavaFile, out: &mut Vec<Finding>) {
+    for annotation in cache_annotations(file, annotations) {
+        for name in SPEL_ARGS {
+            let Some(arg) = annotation.arg(name) else { continue };
+            let [literal] = arg.strings.as_slice() else { continue };
+            if arg.text.matches('"').count() != 2 || !arg.text.starts_with('"') || !arg.text.ends_with('"') {
+                continue;
+            }
+            let Some(problem) = spel_problem(&literal.value) else { continue };
+            out.push(Finding::new(literal.at, literal.end, "cache-spel-syntax", format!("The {name} expression {problem}: Spring fails to parse it when the method first runs.")).with_severity(Severity::Error));
+        }
+        for (first, second) in [("key", "keyGenerator"), ("cacheManager", "cacheResolver")] {
+            let (Some(_), Some(other)) = (annotation.arg(first), annotation.arg(second)) else { continue };
+            out.push(Finding::new(other.at, other.end, "cache-attribute-conflict", format!("@{} sets both {first} and {second}: Spring rejects the configuration, use one.", annotation.name)).with_severity(Severity::Error));
         }
     }
 }

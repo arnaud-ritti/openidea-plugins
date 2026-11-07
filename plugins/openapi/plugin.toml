@@ -4,19 +4,20 @@ version = "0.1.0" # x-release-please-version
 description = "Editing support for OpenAPI 3 and Swagger 2 files in YAML and JSON: $ref completion and navigation, problems for unresolved references, duplicate operationIds and path parameters, the official schema for validation, an endpoints tool window, a Swagger UI preview beside the text, and requests for the HTTP client. Independent implementation, not affiliated with JetBrains or SmartBear."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT AND Apache-2.0"
-change-notes = "0.1.0: first release, with $ref completion and go to definition, problems on open and save, the OpenAPI schema modeline, the endpoints tool window, the Swagger UI preview (bundles Swagger UI 5.34.1, Apache-2.0) and Copy Requests for the HTTP Client."
+change-notes = "Unreleased: the endpoints view is the shared route list (method icons, controller-style filter by first tag, flat or tree, Copy as curl and Create HTTP Request File on a row, written beside the spec); live templates oas3 (OpenAPI 3.1 root), opnp, endp and swag; key and enum completion in OpenAPI 3 JSON; Extract inline schema and Self-Contained Spec also for JSON; Write Requests for the HTTP Client and Write Self-Contained Spec save a file beside the spec through the optional tee permission (clipboard without it); specGlobs files get problems and appear in the endpoints view, but the preview patterns stay fixed (use Open With). Earlier unreleased: keyword and enum completion in OpenAPI 3 YAML; Extract inline schema to components/schemas; Copy Self-Contained Spec (bundles external $refs into components); Copy Reference to the Key at the Caret; Compare With Last Revision (git, optional); operation gutter markers that open the operation's first local schema; the specGlobs setting; an OpenAPI file icon; a Redoc view in the preview (bundles Redoc 2.5.4, MIT). OpenAPI: Compare With Another Spec… lists added, removed and changed operations, schemas and sections against a spec you pick, in the OpenAPI Changes view. 0.1.0: first release, with $ref completion and go to definition, problems on open and save, the OpenAPI schema modeline, the endpoints tool window, the Swagger UI preview (bundles Swagger UI 5.34.1, Apache-2.0) and Copy Requests for the HTTP Client."
 categories = ["languages", "tools"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 
 activation = ["on-event:file-opened", "on-event:file-saved", "on-view:endpoints"]
 
 [capabilities]
 required = ["project.read", "editor.read", "events"]
-optional = ["clipboard"]
+optional = ["clipboard", "process:git", "process:tee", "storage"]
 
 [[contributes.providers]]
-kinds = ["completion", "definition", "code-actions"]
+kinds = ["completion", "definition", "code-actions", "line-markers"]
 languages = ["yaml", "json"]
 
 [[contributes.views]]
@@ -25,10 +26,88 @@ title = "OpenAPI Endpoints"
 icon = "web"
 location = "right"
 
+[[contributes.views]]
+id = "compare"
+title = "OpenAPI Changes"
+icon = "icons/openapiinitiative.svg"
+location = "bottom"
+
+[[contributes.commands]]
+id = "compare-specs"
+title = "OpenAPI: Compare With Another Spec…"
+category = "OpenAPI"
+
+[[contributes.commands]]
+id = "compare-last-revision"
+title = "OpenAPI: Compare With Last Revision"
+category = "OpenAPI"
+
+[[contributes.commands]]
+id = "export-self-contained"
+title = "OpenAPI: Write Self-Contained Spec"
+category = "OpenAPI"
+
+[[contributes.commands]]
+id = "copy-reference"
+title = "OpenAPI: Copy Reference to the Key at the Caret"
+category = "OpenAPI"
+
 [[contributes.commands]]
 id = "copy-http-requests"
-title = "OpenAPI: Copy Requests for the HTTP Client"
+title = "OpenAPI: Write Requests for the HTTP Client"
 category = "OpenAPI"
+
+[[contributes.commands]]
+id = "copy-route-curl"
+title = "OpenAPI: Copy as curl"
+category = "OpenAPI"
+
+[[contributes.commands]]
+id = "create-route-http"
+title = "OpenAPI: Create HTTP Request File"
+category = "OpenAPI"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "endpoints"
+command = "copy-route-curl"
+when = "viewItemKind == route"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "endpoints"
+command = "create-route-http"
+when = "viewItemKind == route"
+
+[[contributes.fileIcons]]
+id = "route-get"
+patterns = ["*.openapi-route-get"]
+icon = "icons/route-get.svg"
+
+[[contributes.fileIcons]]
+id = "route-post"
+patterns = ["*.openapi-route-post"]
+icon = "icons/route-post.svg"
+
+[[contributes.fileIcons]]
+id = "route-put"
+patterns = ["*.openapi-route-put"]
+icon = "icons/route-put.svg"
+
+[[contributes.fileIcons]]
+id = "route-delete"
+patterns = ["*.openapi-route-delete"]
+icon = "icons/route-delete.svg"
+
+[[contributes.fileIcons]]
+id = "route-patch"
+patterns = ["*.openapi-route-patch"]
+icon = "icons/route-patch.svg"
+
+[[contributes.fileIcons]]
+id = "route-other"
+patterns = ["*.openapi-route-other"]
+icon = "icons/route-other.svg"
 
 [[contributes.customEditors]]
 id = "preview"
@@ -44,6 +123,11 @@ title = "API Preview"
 patterns = ["*.yaml", "*.yml", "*.json"]
 priority = "option"
 web = "web/index.html"
+
+[[contributes.fileIcons]]
+id = "openapi"
+patterns = ["openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.yml", "swagger.json", "*.openapi.yaml", "*.openapi.yml", "*.openapi.json", "*.swagger.yaml", "*.swagger.yml", "*.swagger.json"]
+icon = "icons/openapiinitiative.svg"
 
 [[contributes.fileTemplates]]
 id = "openapi-yaml"

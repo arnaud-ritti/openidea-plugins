@@ -106,6 +106,7 @@ fn placeholders(text: &str, format: Format) -> Vec<(usize, usize, &str)> {
         let before_on_line = text[line_start..at].trim_start();
         let commented = match format {
             Format::Yaml => before_on_line.starts_with('#'),
+            Format::Json => false,
             Format::Sql => {
                 before_on_line.starts_with("--") && !before_on_line[2..].trim_start().to_lowercase().starts_with("property")
             }

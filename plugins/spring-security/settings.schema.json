@@ -14,6 +14,16 @@
       "type": "boolean",
       "title": "Warn when security debug logging is enabled (@EnableWebSecurity(debug = true), WebSecurity.debug(true), <debug/>)",
       "default": true
+    },
+    "springSecurity.checkBeanReferences": {
+      "type": "boolean",
+      "title": "Report bean references (userDetailsServiceBeanName, @bean in security expressions, ref attributes of the security namespace) that no bean of the project answers (Info)",
+      "default": true
+    },
+    "springSecurity.checkSelfInvocation": {
+      "type": "boolean",
+      "title": "Warn when a method protected by @PreAuthorize, @PostAuthorize, @PreFilter or @PostFilter is called from the same class (skips the proxy; wrong when method security uses AspectJ mode)",
+      "default": false
     }
   }
 }

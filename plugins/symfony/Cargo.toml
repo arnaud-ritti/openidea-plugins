@@ -11,7 +11,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.37" }
+openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.38" }
+ui-kit = { path = "../../crates/ui-kit" }
 
 [profile.release]
 opt-level = "s"

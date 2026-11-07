@@ -7,35 +7,35 @@
 //! Create Snippet.
 
 mod api;
+mod attributes;
 mod branch;
 mod ci;
-mod forms;
+mod ci_data;
+mod prompts;
 mod repo;
 mod review;
 mod safe;
+mod sections;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use api::{Approvals, Commit, Discussion, DraftNote, FileDiff, Job, MergeRequest, Note, Pipeline, ProjectInfo, TimelineEvent, User};
 use branch::BranchReview;
+use sections::{Badges, Section};
 use openidea_plugin::host::{self, storage};
-use openidea_plugin::providers::{CodeAction, Document, LineMarker, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Range, RepositoryStatus, register_plugin, text,
+    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, PickItem, Plugin, Position, Range, RepositoryStatus, register_plugin, text,
 };
 
 const LIST: &str = "merge-requests";
 const DETAILS: &str = "merge-request";
-const CHANGES: &str = "merge-request-changes";
 const PROJECTS: &str = "gitlab-projects";
-const NEW_MR: &str = "new-merge-request";
-const NEW_SNIPPET: &str = "new-snippet";
-const SHARE: &str = "share-project-form";
-const COMMITS: &str = "merge-request-commits";
-const PIPELINES: &str = "merge-request-pipeline";
 
 const FILTER_KEY: &str = "filter";
+/// Typed filters (author, reviewer, label, text) as a query-string fragment added to the quick filter's.
+const EXTRA_FILTER_KEY: &str = "filter-extra";
 const SELECTED_KEY: &str = "selected";
 const THREAD_KEY: &str = "thread";
 /// The selected reply; without it a selected thread means its first note.
@@ -79,6 +79,90 @@ fn filter_query(key: &str, me: &User) -> String {
         "review" => format!("state=opened&scope=all&reviewer_username={}", api::encode(&me.username)),
         "closed" => "state=closed&scope=all".into(),
         _ => "state=opened&scope=assigned_to_me".into(),
+    }
+}
+
+fn extra_filter() -> String {
+    storage::get(EXTRA_FILTER_KEY).ok().flatten().unwrap_or_default()
+}
+
+fn set_extra_filter(key: &str, value: Option<&str>) -> Result<(), Error> {
+    let kept = extra_filter();
+    let mut pairs: Vec<String> = kept.split('&').filter(|p| !p.is_empty() && p.split('=').next() != Some(key)).map(str::to_owned).collect();
+
+    if let Some(value) = value {
+        pairs.push(format!("{key}={}", api::encode(value)));
+    }
+
+    storage::set(EXTRA_FILTER_KEY, &pairs.join("&"))
+}
+
+fn full_filter_query(key: &str, me: &User) -> String {
+    let query = filter_query(key, me);
+
+    match extra_filter().as_str() {
+        "" => query,
+        extra => format!("{query}&{extra}"),
+    }
+}
+
+/// Asks which filter to change: the quick filter, or a typed one (author, reviewer and label from the project's lists).
+/// Where the IDE refuses the picker the quick filter just moves on to the next.
+fn edit_filter(ctx: &Invocation) -> Result<(), Error> {
+    let dimensions = [
+        PickItem::new("quick", "Quick filter"),
+        PickItem::new("author_username", "Author"),
+        PickItem::new("reviewer_username", "Reviewer"),
+        PickItem::new("labels", "Label"),
+        PickItem::new("search", "Text in title or description"),
+        PickItem::new("clear", "Clear author, reviewer, label and text"),
+    ];
+
+    let dimension = match host::pick("Filter merge requests", &dimensions) {
+        Err(Error::Invalid(_)) => return storage::set(FILTER_KEY, next_filter(filter())),
+        Err(e) => return Err(e),
+        Ok(None) => return Ok(()),
+        Ok(Some(dimension)) => dimension,
+    };
+
+    match dimension.as_str() {
+        "quick" => {
+            let items: Vec<PickItem> = FILTERS.iter().map(|(key, label)| PickItem::new(key, label)).collect();
+            if let Some(key) = host::pick("Quick filter", &items)? {
+                storage::set(FILTER_KEY, &key)?;
+            }
+        }
+        "clear" => storage::delete(EXTRA_FILTER_KEY)?,
+        "search" => {
+            if let Some(text) = host::input("Search merge requests", None)? {
+                set_extra_filter("search", Some(text.trim()).filter(|t| !t.is_empty()))?;
+            }
+        }
+        key => {
+            let repo = gitlab_project(ctx)?;
+            let _task = host::begin_task("Loading choices", false);
+            let api = api::Project(&repo.path);
+            let names = match key {
+                "labels" => api.labels()?,
+                _ => api.members()?.into_iter().map(|u| u.username).collect(),
+            };
+            let items: Vec<PickItem> = names.iter().map(|name| PickItem::new(name, name)).collect();
+
+            if let Some(name) = host::pick("Filter merge requests", &items)? {
+                set_extra_filter(key, Some(&name))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn filter_button_label(filter: &str, extra: &str) -> String {
+    let typed = extra.split('&').filter(|p| !p.is_empty()).count();
+
+    match typed {
+        0 => filter_label(filter).to_owned(),
+        n => format!("{} + {n} typed", filter_label(filter)),
     }
 }
 
@@ -324,14 +408,6 @@ pub struct GitLab {
     projects: Option<Vec<ProjectInfo>>,
     /// The `CONFIRMED` button clicked once, waiting for its second click.
     confirm: Option<String>,
-    new_merge_request: forms::MergeRequestForm,
-    /// The project's branches, the only values the target branch can take.
-    branches: Option<Vec<String>>,
-    form_status: Option<String>,
-    new_snippet: forms::SnippetForm,
-    share: forms::ShareForm,
-    /// The namespaces the share form offers, loaded when it is first drawn.
-    namespaces: Option<Vec<api::Namespace>>,
     /// The reaction picked in the details form, checked against `safe::EMOJIS` when used.
     emoji: Option<String>,
     /// The commit whose diff the changes view shows instead of the merge request's; see [`GitLab::active_commit`].
@@ -431,9 +507,7 @@ impl GitLab {
         self.pipeline_confirm = None;
         self.pipeline_status = None;
         self.pipeline_open.clear();
-        host::refresh_view(CHANGES);
-        host::refresh_view(COMMITS);
-        host::refresh_view(PIPELINES);
+        host::refresh_view(DETAILS);
 
         Ok(())
     }
@@ -538,11 +612,12 @@ impl GitLab {
     fn render_list(&mut self, ctx: &Invocation) -> Result<View, Error> {
         let repo = gitlab_project(ctx)?;
         let filter = filter();
-        let wanted = (repo.path.clone(), filter.to_owned());
+        let extra = extra_filter();
+        let wanted = (repo.path.clone(), format!("{filter}&{extra}"));
 
         if self.loaded.as_ref() != Some(&wanted) {
             let _task = host::begin_task("Loading merge requests", false);
-            let query = filter_query(filter, &self.me()?);
+            let query = full_filter_query(filter, &self.me()?);
             self.list = api::Project(&repo.path).merge_requests(&query)?;
             self.loaded = Some(wanted);
         }
@@ -570,14 +645,14 @@ impl GitLab {
         }
 
         let body = match items.is_empty() {
-            true => Body::Message(format!("No merge requests match the filter \"{}\".", filter_label(filter))),
+            true => Body::Message(format!("No merge requests match the filter \"{}\".", filter_button_label(filter, &extra))),
             false => Body::Tree(items),
         };
         let events = if preference(EVENTS_KEY, true) { "Hide Events" } else { "Show Events" };
 
         Ok(View::new(body)
             .button(Button::new("refresh", "Refresh").icon("refresh"))
-            .button(Button::new("filter", &format!("Filter: {}", filter_label(filter))).icon("filter"))
+            .button(Button::new("filter", &filter_button_label(filter, &extra)).icon("filter"))
             .button(Button::new("events", events).icon("github-timeline"))
             .status(&format!("{} · {}", repo.path, filter_label(filter))))
     }
@@ -587,9 +662,8 @@ impl GitLab {
             ViewEvent::Button(id) if id == "refresh" => {
                 self.reset();
                 host::refresh_view(DETAILS);
-                host::refresh_view(CHANGES);
             }
-            ViewEvent::Button(id) if id == "filter" => storage::set(FILTER_KEY, next_filter(filter()))?,
+            ViewEvent::Button(id) if id == "filter" => edit_filter(ctx)?,
             ViewEvent::Button(id) if id == "events" => {
                 storage::set(EVENTS_KEY, &(!preference(EVENTS_KEY, true)).to_string())?;
                 let repo = gitlab_project(ctx)?;
@@ -681,6 +755,60 @@ impl GitLab {
         host::open_url(&format!("{}#note_{}", mr.web_url, note.unwrap_or(first.id)))
     }
 
+    fn set_section(&self, section: Section) -> Result<(), Error> {
+        storage::set(sections::SECTION_KEY, section.id())?;
+        host::refresh_view(DETAILS);
+
+        Ok(())
+    }
+
+    fn refresh_section(&self, section: Section) {
+        if Section::stored() == section {
+            host::refresh_view(DETAILS);
+        }
+    }
+
+    fn badges(&self) -> Badges {
+        let diff_count = self.diffs.as_ref().map(|(_, diffs)| diffs.len());
+
+        Badges {
+            changes: diff_count,
+            files: diff_count,
+            commits: self.commits.as_ref().map(|(_, commits)| commits.len()),
+            pipeline: self.details.as_ref().and_then(|d| d.mr.head_pipeline.as_ref()).map(|p| p.status.clone()),
+        }
+    }
+
+    fn render_section(&mut self, ctx: &Invocation) -> Result<View, Error> {
+        let section = Section::stored();
+        let view = match section {
+            Section::Overview => self.render_details(ctx),
+            Section::Changes => self.render_changes(ctx),
+            Section::Commits => self.render_commits(ctx),
+            Section::Files => self.render_files(ctx),
+            Section::Pipelines => self.render_pipelines(ctx),
+        }
+        .unwrap_or_else(|e| View::message(&e.to_string()).button(Button::new("refresh", "Refresh").icon("refresh")));
+
+        Ok(sections::with_sections(view, section, &self.badges()))
+    }
+
+    fn handle_section(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if let ViewEvent::Button(id) = &event {
+            if let Some(section) = Section::from_button(id) {
+                return self.set_section(section);
+            }
+        }
+
+        match Section::stored() {
+            Section::Overview => self.handle_details(event, ctx),
+            Section::Changes => self.handle_changes(event, ctx),
+            Section::Commits => self.handle_commits(event),
+            Section::Files => self.handle_files(event, ctx),
+            Section::Pipelines => self.handle_pipelines(event, ctx),
+        }
+    }
+
     fn render_details(&mut self, ctx: &Invocation) -> Result<View, Error> {
         let Some(iid) = Self::selected() else {
             return Ok(View::message("Select a merge request in the Merge Requests tool window."));
@@ -745,6 +873,8 @@ impl GitLab {
             if !mr.reviewers.iter().any(|u| u.id == me.id) {
                 view = view.button(Button::new("review", "Add Me as Reviewer").icon("github-review"));
             }
+
+            view = view.button(Button::new("edit", "Edit Labels, People, Milestone").icon("edit"));
 
             let (draft, draft_icon) = match mr.draft {
                 true => ("Mark as Ready", "github-pr-open"),
@@ -932,6 +1062,10 @@ impl GitLab {
                 let ids: Vec<u64> = mr.reviewers.iter().map(|u| u.id).chain([me.id]).collect();
                 api.set_reviewers(mr.iid, &ids).and_then(|_| done("Added you as a reviewer."))
             }
+            "edit" => match attributes::edit(&api, mr) {
+                Err(Error::Invalid(_)) => Err("The IDE shows pickers only for commands. Run GitLab: Edit Merge Request from the command palette.".into()),
+                result => result.map(|message| message.unwrap_or_else(|| "Nothing changed.".into())),
+            },
             "checkout" => {
                 let project = ctx.project().ok_or("No project is open.")?;
                 branch::checkout(&project, &repo.remote, mr).map_err(|e| match e {
@@ -952,7 +1086,7 @@ impl GitLab {
                 self.status = None;
                 match Self::selected() {
                     Some(iid) => self.reload_merge_request(iid),
-                    None => host::refresh_view(CHANGES),
+                    None => self.refresh_section(Section::Changes),
                 }
                 Ok(())
             }
@@ -1032,8 +1166,10 @@ fn commits_enabled() -> bool {
     host::setting_bool("commitsView").unwrap_or(true)
 }
 
-fn forms_enabled() -> bool {
-    host::setting_bool("forms").unwrap_or(true)
+fn first_listed<'a>(first: &str, branches: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let rest = branches.filter(|b| *b != first).map(str::to_owned);
+
+    std::iter::once(first.to_owned()).filter(|b| !b.is_empty()).chain(rest).collect()
 }
 
 fn copy_link(url: &str) -> Result<(), Error> {
@@ -1065,6 +1201,31 @@ fn file_link(ctx: &Invocation) -> Result<String, Error> {
     let revision = repo.status.commit.as_deref().ok_or("The repository has no commits.")?;
 
     Ok(api::blob_url(&repo.path, revision, &relative.replace('\\', "/"), selected_lines(&editor)))
+}
+
+fn selected_link(ctx: &Invocation, path: &str) -> Result<String, Error> {
+    let repo = gitlab_project(ctx)?;
+    let relative = match path == repo.status.root {
+        true => "",
+        false => relative_path(&repo.status.root, path).ok_or("The selection is not in the repository.")?,
+    };
+    let revision = repo.status.commit.as_deref().ok_or("The repository has no commits.")?;
+    let relative = relative.replace('\\', "/");
+    let is_file = ctx.project().is_some_and(|p| p.read_file(path).is_ok());
+
+    Ok(match is_file {
+        true => api::blob_url(&repo.path, revision, &relative, None),
+        false => api::tree_url(&repo.path, revision, &relative),
+    })
+}
+
+fn open_link(ctx: &Invocation) -> Result<(), Error> {
+    let link = match ctx.selected_paths().first() {
+        Some(path) => selected_link(ctx, path)?,
+        None => file_link(ctx)?,
+    };
+
+    host::open_url(&link)
 }
 
 /// The focused file's repository path (its name outside the repository) and the selection, or the whole file.
@@ -1100,56 +1261,64 @@ fn post_snippet(draft: &api::SnippetDraft) -> Result<(), Error> {
     Ok(())
 }
 
+fn selected_files(ctx: &Invocation) -> Vec<(String, String)> {
+    let Some(project) = ctx.project() else { return Vec::new() };
+    let root = project.vcs_status().ok().flatten().map(|s| s.root);
+
+    ctx.selected_paths()
+        .into_iter()
+        .filter_map(|path| {
+            let content = project.read_file(&path).ok().filter(|c| !c.is_empty())?;
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+            let file_path = root.as_deref().and_then(|r| relative_path(r, &path)).unwrap_or(name).replace('\\', "/");
+
+            Some((file_path, content))
+        })
+        .collect()
+}
+
 fn create_snippet(ctx: &Invocation) -> Result<Option<String>, Error> {
     if !host::secret_is_set(api::TOKEN) {
         return Err(NO_TOKEN.into());
     }
 
-    let (file_path, content) = snippet_content(ctx)?;
-    let title = file_path.rsplit('/').next().unwrap_or(&file_path).to_owned();
-    post_snippet(&api::SnippetDraft { title, description: String::new(), visibility: "private".into(), file_path, content, project: None })?;
+    let mut files = selected_files(ctx);
+    if files.is_empty() {
+        files = vec![snippet_content(ctx)?];
+    }
+
+    let default_title = match files.as_slice() {
+        [(path, _)] => path.rsplit('/').next().unwrap_or(path).to_owned(),
+        _ => format!("{} files", files.len()),
+    };
+    let paths: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
+    let Some(answers) = prompts::ask_new_snippet(&default_title, &paths)? else {
+        return Ok(None);
+    };
+
+    files.extend(extra_snippet_files(&answers.extra_paths, ctx)?);
+    post_snippet(&api::SnippetDraft { title: answers.title, description: String::new(), visibility: answers.visibility, files, project: None })?;
 
     Ok(None)
 }
 
-/// Unverified that the host sets `ctx.editor()` while a view button is clicked; without it the form says so.
-fn focused_snippet(ctx: &Invocation) -> Result<(String, String), Error> {
-    if ctx.editor().is_none() {
-        return Err("Focus a file first.".into());
+fn extra_snippet_files(paths: &[String], ctx: &Invocation) -> Result<Vec<(String, String)>, Error> {
+    let paths = paths.iter().map(|p| safe::repo_file_path(p)).collect::<Result<Vec<_>, _>>()?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
     }
 
-    snippet_content(ctx)
-}
+    let project = ctx.project().ok_or("Open a project first.")?;
+    let root = project.root()?;
 
-/// Posts and returns `None`, or returns why it waits or refused. A public snippet posts only on a confirm
-/// of the same file and content its warning named, so a focus change between the clicks publishes nothing.
-fn snippet_click(form: &mut forms::SnippetForm, confirming: Option<(String, String)>, ctx: &Invocation) -> Result<Option<String>, Error> {
-    let focused = focused_snippet(ctx)?;
-    if form.visibility == "public" {
-        match confirming {
-            None => {
-                let warning = format!("Publish {} publicly? Anyone can see a public snippet, signed in or not. Click Confirm public.", focused.0);
-                form.confirm_public = Some(focused);
-                return Ok(Some(warning));
-            }
-            Some(shown) if shown != focused => {
-                return Ok(Some("The focused file or selection changed since the warning. Nothing was published; click Create Snippet again.".into()));
-            }
-            Some(_) => {}
-        }
-    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let content = project.read_file(&format!("{root}/{path}")).map_err(|_| Error::from(format!("Cannot read {path}.")))?;
 
-    let (path, content) = focused;
-    post_snippet(&form.draft(path, content, &snippet_scopes(ctx))?)?;
-
-    Ok(None)
-}
-
-/// `Personal`, and `Project <group/name>` when the repository has a gitlab.com remote.
-fn snippet_scopes(ctx: &Invocation) -> Vec<String> {
-    let project = gitlab_project(ctx).ok().map(|repo| format!("Project {}", repo.path));
-
-    std::iter::once(forms::PERSONAL.to_owned()).chain(project).collect()
+            Ok((path.to_owned(), content))
+        })
+        .collect()
 }
 
 impl Plugin for GitLab {
@@ -1157,7 +1326,7 @@ impl Plugin for GitLab {
         api::begin_budget();
         match id {
             "new-token" => host::open_url(&api::new_token_url())?,
-            "open-in-browser" => host::open_url(&file_link(ctx)?)?,
+            "open-in-browser" => open_link(ctx)?,
             "copy-link" => copy_link(&file_link(ctx)?)?,
             "create-snippet" => return create_snippet(ctx),
             "share-project" => {
@@ -1167,14 +1336,11 @@ impl Plugin for GitLab {
 
                 return repo::share(ctx);
             }
+            "edit-merge-request" => return self.edit_merge_request(ctx),
             "show-branch-merge-request" => return self.show_branch_merge_request(),
             "open-merge-request-in-worktree" => return self.open_worktree(ctx),
             "update-merge-request-branch" => return self.update_merge_request_branch(ctx),
-            "create-merge-request" => {
-                let repo = gitlab_project(ctx)?;
-                let branch = repo.status.branch.ok_or("HEAD is detached. Check out a branch first.")?;
-                host::open_url(&api::new_merge_request_url(&repo.path, &branch))?;
-            }
+            "create-merge-request" => return self.create_merge_request(ctx),
             _ => return Err(Error::NotFound(format!("command {id}"))),
         }
 
@@ -1207,6 +1373,24 @@ impl GitLab {
         let branch_iid = self.branch.as_ref().and_then(|b| b.mr.as_ref()).map(|mr| mr.iid);
 
         Self::selected().or(branch_iid).ok_or_else(|| "Select a merge request first.".into())
+    }
+
+    fn edit_merge_request(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        if !host::secret_is_set(api::TOKEN) {
+            return Err(NO_TOKEN.into());
+        }
+
+        let repo = gitlab_project(ctx)?;
+        let api = api::Project(&repo.path);
+        let mr = api.merge_request(self.command_target()?)?;
+        let message = attributes::edit(&api, &mr)?;
+
+        if message.is_some() {
+            self.loaded = None;
+            self.reload_merge_request(mr.iid);
+        }
+
+        Ok(message)
     }
 
     fn open_worktree(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
@@ -1251,161 +1435,53 @@ impl GitLab {
         Ok(Some(format!("Rebase of !{iid} requested.")))
     }
 
-    fn render_new_merge_request(&mut self, ctx: &Invocation) -> Result<View, Error> {
+    fn merge_request_defaults(&mut self, ctx: &Invocation, repo: &Repo) -> Result<prompts::MrDefaults, Error> {
+        let current = safe::ref_name(repo.status.branch.as_deref().ok_or(DETACHED)?)?.to_owned();
+        let project = ctx.project().ok_or("No project is open.")?;
+        let local = branch::git_ok(&project, &["branch", "--format=%(refname:short)"]).unwrap_or_default();
+        let sources = first_listed(&current, local.lines().map(str::trim).filter(|b| safe::ref_name(b).is_ok()));
+        let title = branch::git_ok(&project, &["log", "-1", "--format=%s"]).unwrap_or_default().trim().to_owned();
+
+        let default = self.default_branch(&repo.path)?;
+        let targets = first_listed(&default, api::Project(&repo.path).branches()?.iter().map(String::as_str));
+
+        Ok(prompts::MrDefaults { title, sources, targets })
+    }
+
+    fn create_merge_request(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        if !host::secret_is_set(api::TOKEN) {
+            return Err(NO_TOKEN.into());
+        }
+
         let repo = gitlab_project(ctx)?;
-        let source = safe::ref_name(repo.status.branch.as_deref().ok_or(DETACHED)?)?.to_owned();
-        let branches = match self.branches.clone() {
-            Some(branches) => branches,
-            None => {
-                let _task = host::begin_task("Loading branches", false);
-                let branches = api::Project(&repo.path).branches()?;
-                self.branches = Some(branches.clone());
-                branches
-            }
+        let defaults = {
+            let _task = host::begin_task("Loading branches", false);
+            self.merge_request_defaults(ctx, &repo)?
+        };
+        let Some(answers) = prompts::ask_new_merge_request(&defaults)? else {
+            return Ok(None);
         };
 
-        if !branches.contains(&self.new_merge_request.target) {
-            let default = self.default_branch(&repo.path)?;
-            self.new_merge_request.target = match branches.contains(&default) {
-                true => default,
-                false => branches.first().cloned().unwrap_or_default(),
-            };
-        }
-
-        let mut view = self.new_merge_request.render(&branches, &source);
-        if let (Some(status), Some(summary)) = (&self.form_status, &mut view.status) {
-            *summary = format!("{status} · {summary}");
-        }
-
-        Ok(view)
-    }
-
-    fn handle_new_merge_request(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
-        match event {
-            ViewEvent::Field(key, value) => {
-                let listed = self.branches.iter().flatten().any(|b| *b == value);
-                if key != "target-branch" || listed {
-                    self.new_merge_request.field(&key, &value);
-                }
-                return Ok(());
+        let source = answers.source.clone();
+        let created = {
+            let _task = host::begin_task("Creating merge request", false);
+            api::Project(&repo.path).create_merge_request(&answers.into_request()?)
+        };
+        match created {
+            Ok(mr) => {
+                host::notify(NotificationLevel::Info, "Merge request created", &format!("!{} {}\n{}", mr.iid, mr.title, mr.web_url));
+                self.loaded = None;
+                host::refresh_view(LIST);
             }
-            ViewEvent::Button(id) if id == "refresh" => {
-                self.branches = None;
-                self.form_status = None;
-            }
-            ViewEvent::Button(id) if id == "create" => self.form_status = self.create_merge_request(ctx).err().map(|e| e.to_string()),
-            _ => return Ok(()),
-        }
-
-        host::refresh_view(NEW_MR);
-
-        Ok(())
-    }
-
-    fn create_merge_request(&mut self, ctx: &Invocation) -> Result<(), Error> {
-        let repo = gitlab_project(ctx)?;
-        let source = repo.status.branch.as_deref().ok_or(DETACHED)?;
-        let branches = self.branches.as_deref().ok_or("The branches are not loaded. Refresh the form.")?;
-
-        let _task = host::begin_task("Creating merge request", false);
-        let new = self.new_merge_request.request(source, branches)?;
-        let mr = api::Project(&repo.path).create_merge_request(&new)?;
-        host::notify(NotificationLevel::Info, "Merge request created", &format!("!{} {}\n{}", mr.iid, mr.title, mr.web_url));
-
-        self.new_merge_request = forms::MergeRequestForm::default();
-        self.loaded = None;
-        host::refresh_view(LIST);
-
-        Ok(())
-    }
-
-    fn handle_new_snippet(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
-        let form = &mut self.new_snippet;
-        let pending = form.confirm_public.take();
-        match event {
-            ViewEvent::Field(key, value) => {
-                let was_pending = pending.is_some();
-                form.confirm_public = pending;
-                if key != "scope" || snippet_scopes(ctx).contains(&value) {
-                    form.field(&key, &value);
+            Err(error) => {
+                host::notify(NotificationLevel::Error, "Merge request not created", &error.to_string());
+                if host::confirm("Create Merge Request", "Open on GitLab?")? {
+                    host::open_url(&api::new_merge_request_url(&repo.path, &source))?;
                 }
-                if form.confirm_public.is_some() || !was_pending {
-                    return Ok(());
-                }
-                form.status = None;
-            }
-            ViewEvent::Button(id) if id == "create" || (id == "confirm-public" && pending.is_some()) => {
-                let confirming = pending.filter(|_| id == "confirm-public");
-                match snippet_click(form, confirming, ctx) {
-                    Ok(None) => self.new_snippet = forms::SnippetForm::default(),
-                    Ok(Some(text)) => form.status = Some(text),
-                    Err(e) => form.status = Some(e.to_string()),
-                }
-            }
-            _ => {
-                form.confirm_public = pending;
-                return Ok(());
             }
         }
 
-        host::refresh_view(NEW_SNIPPET);
-
-        Ok(())
-    }
-
-    fn render_share(&mut self) -> Result<View, Error> {
-        if self.namespaces.is_none() {
-            let _task = host::begin_task("Loading GitLab namespaces", false);
-            self.namespaces = Some(api::namespaces()?);
-        }
-
-        Ok(self.share.render(self.namespaces.as_deref().unwrap_or_default()))
-    }
-
-    fn handle_share(&mut self, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
-        let namespaces = self.namespaces.as_deref().unwrap_or_default();
-        let form = &mut self.share;
-        match event {
-            ViewEvent::Field(key, value) => {
-                let was_pending = form.confirm_commit.is_some();
-                if key != "namespace" || forms::namespace_choices(namespaces).contains(&value) {
-                    form.field(&key, &value);
-                }
-                if !was_pending || form.confirm_commit.is_some() {
-                    return Ok(());
-                }
-                form.status = None;
-            }
-            ViewEvent::Button(id) if id == "refresh" => {
-                self.namespaces = None;
-                form.status = None;
-                form.confirm_commit = None;
-            }
-            ViewEvent::Button(id) if id == "share" || (id == "confirm-commit" && form.confirm_commit.is_some()) => {
-                let shown = form.confirm_commit.take().filter(|_| id == "confirm-commit");
-                let shared = form.namespace_id(namespaces).and_then(|namespace| repo::share_with(ctx, form, namespace, shown.as_deref()));
-                match shared {
-                    Ok(None) => *form = forms::ShareForm::default(),
-                    Ok(Some(files)) => {
-                        let count = match files.len() {
-                            1 => "1 file".to_owned(),
-                            n => format!("{n} files"),
-                        };
-                        form.status = Some(match shown {
-                            Some(_) => format!("The files changed since the list was shown; nothing was committed. Check the {count} below and confirm again."),
-                            None => format!("Commit {count} as \"Initial commit\"? Check the list below, then click Confirm commit."),
-                        });
-                        form.confirm_commit = Some(files);
-                    }
-                    Err(e) => form.status = Some(e.to_string()),
-                }
-            }
-            _ => return Ok(()),
-        }
-
-        host::refresh_view(SHARE);
-
-        Ok(())
+        Ok(None)
     }
 
     /// The picked commit while it belongs to the selected merge request and the view is on.
@@ -1449,7 +1525,7 @@ impl GitLab {
         Ok(match self.active_commit() {
             Some(c) => view
                 .button(Button::new("all-changes", "All Changes").icon("arrow-left"))
-                .status(&format!("Showing {} {} in Merge Request Changes", c.short_id, first_line(&c.title))),
+                .status(&format!("Showing {} {} in the Changes section", c.short_id, first_line(&c.title))),
             None => view.status(&format!("!{iid} · double-click a commit to see its changes")),
         })
     }
@@ -1460,6 +1536,7 @@ impl GitLab {
             return Ok(());
         }
 
+        let mut show_changes = true;
         match event {
             ViewEvent::Activate(key) => {
                 let Ok(sha) = safe::hex_sha(&key) else { return Ok(()) };
@@ -1471,13 +1548,19 @@ impl GitLab {
                 self.commit = Some(sha.to_owned());
             }
             ViewEvent::Button(id) if id == "all-changes" => self.commit = None,
-            ViewEvent::Button(id) if id == "refresh" => self.commits = None,
+            ViewEvent::Button(id) if id == "refresh" => {
+                self.commits = None;
+                show_changes = false;
+            }
             _ => return Ok(()),
         }
 
         self.anchor = None;
-        host::refresh_view(COMMITS);
-        host::refresh_view(CHANGES);
+        self.refresh_section(Section::Commits);
+        if show_changes {
+            return self.set_section(Section::Changes);
+        }
+        self.refresh_section(Section::Changes);
 
         Ok(())
     }
@@ -1652,7 +1735,7 @@ impl GitLab {
                 let cancellable = pipeline.as_ref().filter(|p| ACTIVE_PIPELINE.contains(&p.status.as_str())).map(|p| p.id);
                 if CONFIRMED.contains(&id.as_str()) && cancellable.is_some() && pending != cancellable {
                     self.pipeline_confirm = cancellable;
-                    host::refresh_view(PIPELINES);
+                    self.refresh_section(Section::Pipelines);
                     return Ok(());
                 }
 
@@ -1669,7 +1752,7 @@ impl GitLab {
             _ => {}
         }
 
-        host::refresh_view(PIPELINES);
+        self.refresh_section(Section::Pipelines);
 
         Ok(())
     }
@@ -1710,7 +1793,9 @@ impl GitLab {
                 }
                 continue;
             };
-            let problems = ci::check(&ci::parse(&source))
+            let mut file = ci::parse(&source);
+            resolve_local_includes(&mut file, &project);
+            let problems = ci::check(&file)
                 .into_iter()
                 .filter(|f| ci_group_enabled(f.code))
                 .map(|f| {
@@ -1728,9 +1813,19 @@ impl GitLab {
     }
 }
 
+fn resolve_local_includes(file: &mut ci::CiFile, project: &host::Project) {
+    let Some(root) = project.vcs_status().ok().flatten().map(|s| s.root) else {
+        file.has_include |= !file.local_includes.is_empty();
+        file.local_includes.clear();
+        return;
+    };
+
+    ci::resolve_includes(file, &|path| project.read_file(&format!("{root}/{}", path.trim_start_matches('/'))).ok());
+}
+
 fn ci_group_enabled(code: &str) -> bool {
     let key = match code {
-        "undefined-job" => "ciJobReferences",
+        "undefined-job" | "undefined-reference" => "ciJobReferences",
         "undefined-stage" => "ciStages",
         "duplicate-job-usage" => "ciDuplicateJobUsage",
         _ => "ciSingleQuotedVariables",
@@ -1752,6 +1847,22 @@ impl Providers for GitLab {
         vec![Location { path: doc.path.clone(), range }]
     }
 
+    fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
+        match ci::is_ci_path(&doc.path) {
+            true => ci::completions(&doc.text, text::offset(&doc.text, at)),
+            false => Vec::new(),
+        }
+        .into_iter()
+        .map(|c| {
+            let kind = if c.variable { CompletionKind::Variable } else { CompletionKind::Keyword };
+            let mut item = CompletionItem::new(&c.label, kind);
+            item.insert_text = c.insert;
+            item.replace = Some(Range::new(text::position(&doc.text, c.from), at));
+            item
+        })
+        .collect()
+    }
+
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         self.branch_line_markers(doc)
     }
@@ -1770,17 +1881,8 @@ impl Views for GitLab {
 
         let rendered = match view {
             LIST => self.render_list(ctx),
-            DETAILS => self.render_details(ctx),
-            CHANGES => self.render_changes(ctx),
+            DETAILS => self.render_section(ctx),
             PROJECTS => self.render_projects(ctx),
-            NEW_MR if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
-            NEW_MR => self.render_new_merge_request(ctx),
-            NEW_SNIPPET if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
-            NEW_SNIPPET => Ok(self.new_snippet.render(&snippet_scopes(ctx))),
-            SHARE if !forms_enabled() => return Ok(View::message("Form views are off. Turn them on under Settings › Plugins › GitLab.")),
-            SHARE => self.render_share(),
-            COMMITS => self.render_commits(ctx),
-            PIPELINES => self.render_pipelines(ctx),
             _ => return Err(Error::NotFound(format!("view {view}"))),
         };
 
@@ -1797,14 +1899,8 @@ impl Views for GitLab {
 
         match view {
             LIST => self.handle_list(event, ctx),
-            DETAILS => self.handle_details(event, ctx),
-            CHANGES => self.handle_changes(event, ctx),
+            DETAILS => self.handle_section(event, ctx),
             PROJECTS => self.handle_projects(event, ctx),
-            NEW_MR if forms_enabled() => self.handle_new_merge_request(event, ctx),
-            NEW_SNIPPET if forms_enabled() => self.handle_new_snippet(event, ctx),
-            SHARE if forms_enabled() => self.handle_share(event, ctx),
-            COMMITS => self.handle_commits(event),
-            PIPELINES => self.handle_pipelines(event, ctx),
             _ => Ok(()),
         }
     }

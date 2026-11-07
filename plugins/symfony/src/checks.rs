@@ -61,7 +61,7 @@ impl<'a> Context<'a> {
 
     /// A class file, read at most once per run; `None` when it is too large
     /// or the run already read `MAX_CLASS_READS` files.
-    fn source(&self, path: &str) -> Option<String> {
+    pub(crate) fn source(&self, path: &str) -> Option<String> {
         let mut sources = self.sources.borrow_mut();
         if let Some(cached) = sources.get(path) {
             return cached.clone();
@@ -313,7 +313,7 @@ struct ServiceDef {
     named: Vec<(String, Range<usize>)>,
 }
 
-fn clean_class(class: &str) -> String {
+pub(crate) fn clean_class(class: &str) -> String {
     class.replace("\\\\", "\\").trim_start_matches('\\').to_owned()
 }
 
@@ -401,7 +401,7 @@ fn xml_definitions(text: &str) -> Vec<ServiceDef> {
 }
 
 /// Byte spans of `<name …>…</name>` (or self-closing) elements within a range.
-fn xml_spans(text: &str, from: usize, to: usize, name: &str) -> Vec<Range<usize>> {
+pub(crate) fn xml_spans(text: &str, from: usize, to: usize, name: &str) -> Vec<Range<usize>> {
     index::xml_tags(&text[from..to], name)
         .into_iter()
         .map(|(tag, at)| {
@@ -523,6 +523,11 @@ pub fn check_services(ctx: &Context, path: &str, language: &str, text: &str) -> 
 
     for definition in &definitions {
         let Some((class, range)) = &definition.class else { continue };
+        if class_is_missing(ctx, class) {
+            out.push(Finding::warn(range.clone(), "service-class-missing", format!("Class \"{class}\" does not exist.")));
+            continue;
+        }
+
         let Some(entry) = ctx.index.classes.get(class) else { continue };
         let Some(source) = ctx.source(&entry.path) else { continue };
 
@@ -540,6 +545,16 @@ pub fn check_services(ctx: &Context, path: &str, language: &str, text: &str) -> 
     }
 
     out
+}
+
+/// A class in one of the project's own PSR-4 namespaces that has no file.
+/// `Tests` namespaces are skipped: composer maps them from `autoload-dev`.
+pub(crate) fn class_is_missing(ctx: &Context, class: &str) -> bool {
+    let prefix = ctx.index.psr4_prefixes.iter().find(|prefix| class.starts_with(prefix.as_str()));
+    let Some(prefix) = prefix else { return false };
+    let tests = class[prefix.len()..].split('\\').next().is_some_and(|segment| matches!(segment, "Tests" | "Test"));
+
+    !ctx.index.partial && !tests && !is_dynamic(class) && !class.contains('%') && !ctx.index.classes.contains_key(class)
 }
 
 pub(crate) const FORM_TYPES: &[(&str, &str)] = &[
@@ -632,6 +647,49 @@ fn form_type_strings(text: &str, out: &mut Vec<Finding>) {
     }
 }
 
+/// `new X` and `X::class` of a project class whose declaration is marked
+/// deprecated; the deprecated class itself and other deprecated classes may use it.
+fn deprecated_class_usages(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
+    if ctx.index.classes.is_empty() || is_deprecated(text) {
+        return;
+    }
+
+    let masked = crate::php_text::mask(text);
+    let resolve = crate::php_text::resolver(text);
+    let own = crate::php_text::class_model(text).map(|model| model.fqcn);
+    let mut candidates: Vec<Range<usize>> = Vec::new();
+
+    for (at, _) in masked.match_indices("new ") {
+        let starts_word = !masked[..at].bytes().last().is_some_and(|b| refs::is_identifier(b) || matches!(b, b'$' | b'>' | b'\\'));
+        let word = crate::php_text::read_word(&masked, crate::php_text::skip_whitespace(&masked, at + 4));
+        if starts_word && !word.is_empty() {
+            candidates.push(word);
+        }
+    }
+
+    for (at, _) in masked.match_indices("::class") {
+        let start = masked[..at].rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '\\'))).map_or(0, |found| found + 1);
+        if start < at {
+            candidates.push(start..at);
+        }
+    }
+
+    for range in candidates {
+        let name = &masked[range.clone()];
+        if name.starts_with('$') || matches!(name.to_ascii_lowercase().as_str(), "self" | "static" | "parent") {
+            continue;
+        }
+
+        let class = resolve(name);
+        let Some(entry) = ctx.index.classes.get(&class) else { continue };
+        if Some(&class) == own.as_ref() || !ctx.source(&entry.path).is_some_and(|source| is_deprecated(&source)) {
+            continue;
+        }
+
+        out.push(Finding::warn(range, "deprecated-class-usage", format!("Class \"{class}\" is deprecated.")));
+    }
+}
+
 fn missing_assets(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
     if ctx.index.assets.is_empty() {
         return;
@@ -656,7 +714,7 @@ fn missing_assets(ctx: &Context, text: &str, out: &mut Vec<Finding>) {
 
 /// An `asset()` path that no indexed public file matches; false for URLs,
 /// dynamic names, generated output and directories the index never saw.
-fn asset_is_missing(ctx: &Context, name: &str) -> bool {
+pub(crate) fn asset_is_missing(ctx: &Context, name: &str) -> bool {
     let external = name.contains("://") || name.starts_with(['/', '#']) || name.starts_with("data:");
     if external || is_dynamic(name) {
         return false;
@@ -707,6 +765,7 @@ pub fn check_php(ctx: &Context, language: &str, text: &str) -> Vec<Finding> {
     }
 
     form_type_strings(text, &mut out);
+    deprecated_class_usages(ctx, text, &mut out);
     missing_assets(ctx, text, &mut out);
     missing_translation_domains(ctx, text, &mut out);
     out.sort_by_key(|finding| finding.start);
@@ -1383,7 +1442,7 @@ mod tests {
 
         let template = "/project/templates/a.html.twig";
         host.add_file("templates/a.html.twig", "{% block a %}{{ path('nope') }}{{ include('gone.html.twig') }}");
-        assert_eq!(codes(&opened(&host, &mut plugin, template)), ["missing-template", "unclosed-tag", "twig-missing-route"]);
+        assert_eq!(codes(&opened(&host, &mut plugin, template)), ["missing-template", "twig-missing-route"]);
 
         host.add_file("templates/a.html.twig", "{% block a %}{{ path('app_home') }}{% endblock %}");
         plugin.handle_events(&[Event::FileSaved(template.into())], &host.invocation());
@@ -1395,5 +1454,96 @@ mod tests {
         let host = MockHost::install();
         let mut plugin = project(&host);
         assert!(opened(&host, &mut plugin, "/project/templates/gone.html.twig").is_empty());
+    }
+
+    fn project_index() -> Index {
+        let mut index = fixture_index();
+        index.psr4_prefixes.push("App\\".into());
+        index
+    }
+
+    #[test]
+    fn service_class_missing_warns_only_inside_project_namespaces() {
+        let yaml = "services:\n    a:\n        class: App\\Gone\\Thing\n    App\\Also\\Gone: ~\n    b:\n        class: App\\Mailer\n    c:\n        class: Vendor\\Lib\\Thing\n    d:\n        class: '%cls%'\n    e:\n        class: App\\Tests\\Fixture\n    App\\Controller\\:\n        resource: ../src\n    f:\n        alias: App\\Gone\\Alias\n";
+        let found = run_with(&project_index(), SERVICES, "yaml", yaml);
+        assert_eq!(codes(&found), ["service-class-missing"; 2]);
+        assert_eq!(found[0].message, "Class \"App\\Gone\\Thing\" does not exist.");
+
+        let xml = "<container><services><service id=\"a\" class=\"App\\Gone\"/><service id=\"b\" class=\"Vendor\\X\"/></services></container>";
+        assert_eq!(codes(&run_with(&project_index(), "/project/config/services.xml", "xml", xml)), ["service-class-missing"]);
+
+        assert!(run_with(&fixture_index(), SERVICES, "yaml", yaml).is_empty());
+        let mut partial = project_index();
+        partial.partial = true;
+        assert!(run_with(&partial, SERVICES, "yaml", yaml).is_empty());
+    }
+
+    fn container_index(parameters: &[&str]) -> Index {
+        let mut index = Index { compiled_container: true, ..Index::default() };
+        for name in parameters {
+            index.parameters.insert((*name).into(), Entry { detail: None, path: "/project/config/services.yaml".into(), at: Position::new(0, 0) });
+        }
+        index
+    }
+
+    #[test]
+    fn unknown_parameter_needs_the_compiled_container() {
+        let yaml = "parameters:\n    app.dir: '%kernel.project_dir%/x'\nservices:\n    a:\n        arguments: ['%app.dir%', '%App.Dir%', \"%gone.param%\", '%env(FOO)%', '100%%', '%s%', '%env(resolve:BAR)%/%other.gone%']  # %comment.gone%\n";
+        let found = run_with(&container_index(&["app.dir"]), SERVICES, "yaml", yaml);
+        let found: Vec<_> = found.iter().filter(|d| d.code.as_deref() == Some("unknown-parameter")).collect();
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert_eq!(found[0].message, "Parameter \"gone.param\" is not defined.");
+        assert_eq!(found[1].message, "Parameter \"s\" is not defined.");
+        assert_eq!(found[2].message, "Parameter \"other.gone\" is not defined.");
+
+        let silent = run_with(&Index::default(), SERVICES, "yaml", yaml);
+        assert!(silent.iter().all(|d| d.code.as_deref() != Some("unknown-parameter")));
+        assert!(run_with(&container_index(&[]), "/project/src/x.yaml", "yaml", yaml).is_empty());
+    }
+
+    #[test]
+    fn unknown_parameter_in_xml_skips_comments() {
+        let xml = "<container>\n<!-- %commented.gone% -->\n<services><service id=\"a\" class=\"A\"><argument>%gone%</argument><argument>%known%</argument></service></services>\n</container>";
+        let found = run_with(&container_index(&["known"]), "/project/config/services.xml", "xml", xml);
+        assert_eq!(codes(&found), ["unknown-parameter"]);
+        assert_eq!(found[0].range.start.line, 2);
+    }
+
+    #[test]
+    fn parameters_of_config_files_and_the_compiled_container_reach_the_index() {
+        let host = MockHost::install();
+        host.add_file("composer.json", r#"{"require": {"symfony/framework-bundle": "^7.0"}}"#);
+        host.add_file("config/services.yaml", "parameters:\n    app.one: 1\nservices:\n    a:\n        arguments: ['%app.one%', '%app.two%', '%bundle.value%']\n");
+        host.add_file("config/extra.xml", "<container><parameters><parameter key=\"app.two\">2</parameter></parameters></container>");
+        host.add_file("var/cache/dev/App_KernelDevDebugContainer.xml", "<container><parameters><parameter key=\"bundle.value\">3</parameter></parameters></container>");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        assert!(opened(&host, &mut plugin, SERVICES).is_empty());
+
+        host.add_file("config/services.yaml", "services:\n    a:\n        arguments: ['%nope%']\n");
+        plugin.handle_events(&[Event::FileSaved(SERVICES.into())], &host.invocation());
+        assert_eq!(codes(&host.diagnostics()[SERVICES]), ["unknown-parameter"]);
+    }
+
+    #[test]
+    fn deprecated_class_usage_reports_new_and_class_constants() {
+        let mut index = fixture_index();
+        index.classes.insert("App\\Mailer".into(), index.classes["App\\Mailer"].clone());
+        let php = "<?php\nnamespace App\\Service;\n\nuse App\\Legacy\\OldMailer;\nuse App\\Legacy\\OldMailer as Alias;\n\nclass User\n{\n    public function f()\n    {\n        $a = new OldMailer();\n        $b = Alias::class;\n        $c = new \\App\\Legacy\\OldMailer;\n        $d = new App\\Mailer();\n        $e = 'new OldMailer';\n        // new OldMailer\n    }\n}\n";
+        let found = run_with(&index, "/project/src/Service/User.php", "php", php);
+        let hits: Vec<_> = found.iter().filter(|d| d.code.as_deref() == Some("deprecated-class-usage")).collect();
+        assert_eq!(hits.len(), 3, "{found:?}");
+        assert_eq!(hits[0].message, "Class \"App\\Legacy\\OldMailer\" is deprecated.");
+    }
+
+    #[test]
+    fn deprecated_class_usage_is_quiet_inside_deprecated_files_and_for_unknown_classes() {
+        let index = fixture_index();
+        let own = "<?php\nnamespace App\\Legacy;\n\n/** @deprecated */\nclass Other\n{\n    public function f() { return new OldMailer(); }\n}\n";
+        assert!(run_with(&index, "/project/src/Legacy/Other.php", "php", own).is_empty());
+
+        let vendor = "<?php\nnamespace App;\n\nclass A\n{\n    public function f() { return [new \\Vendor\\Old(), self::class, static::class, new static()]; }\n}\n";
+        assert!(run_with(&index, "/project/src/A.php", "php", vendor).is_empty());
     }
 }

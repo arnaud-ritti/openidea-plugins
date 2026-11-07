@@ -4,9 +4,10 @@ use openidea_plugin::text::position;
 use openidea_plugin::{Diagnostic, Range, Severity};
 
 use crate::model::{
-    Annotation, Edit, annotations, closing, declaration_keyword, declared_type, has_word, import_edit, is_ident, kotlin_supertype, mask, members, split_top_level,
+    Annotation, Class, Edit, Relation, declaration, element_type, plain_literal, value_range, annotations, closing, declaration_keyword, declared_type, has_word, import_edit, is_ident, kotlin_supertype, mask, members, split_top_level,
     without_annotations, words,
 };
+use crate::build::{Build, Plugin};
 use crate::queries::{Props, Repository, boxed, problem};
 
 #[derive(Debug)]
@@ -20,7 +21,7 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn new(start: usize, end: usize, severity: Severity, code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(start: usize, end: usize, severity: Severity, code: &'static str, message: impl Into<String>) -> Self {
         Self { start, end, severity, code, message: message.into(), fix: None }
     }
 
@@ -348,6 +349,554 @@ pub fn inspect_attribute_types(text: &str, kotlin: bool, is_model: &dyn Fn(&str)
     findings
 }
 
+const RELATION_ANNOTATIONS: &[&str] = &["OneToOne", "ManyToOne", "OneToMany", "ManyToMany", "ElementCollection"];
+
+const MAPPING_ANNOTATIONS: &[&str] = &[
+    "Id", "EmbeddedId", "Column", "Basic", "JoinColumn", "JoinColumns", "JoinTable", "Enumerated", "Temporal", "Lob", "Version", "Embedded",
+    "OneToOne", "ManyToOne", "OneToMany", "ManyToMany", "ElementCollection",
+];
+
+const COLLECTION_TYPES: &[&str] =
+    &["List", "Set", "Collection", "Map", "SortedSet", "SortedMap", "ArrayList", "HashSet", "HashMap", "MutableList", "MutableSet", "MutableMap", "MutableCollection"];
+
+fn base_type(ty: &str) -> &str {
+    last_name(ty.split('<').next().unwrap_or(ty))
+}
+
+/// Attribute declarations that break the JPA specification: two associations on one attribute, `@Id` with `@EmbeddedId`,
+/// an association on a type that cannot hold it, and annotations on getters and fields mixed.
+pub fn inspect_attribute_signatures(text: &str, kotlin: bool) -> Vec<Finding> {
+    let masked = mask(text);
+    let all = annotations(&masked);
+    let mut findings = Vec::new();
+
+    let Some((class_at, _)) = declaration_keyword(&masked, 0, &["class"]) else { return findings };
+    let members = class_members(&masked, kotlin);
+    let mut ids: Vec<&Annotation> = Vec::new();
+    let mut embedded_ids: Vec<&Annotation> = Vec::new();
+
+    for &(start, end) in &members {
+        let in_member: Vec<&Annotation> = all.iter().filter(|a| a.start >= start && a.start < end).collect();
+        let decl = without_annotations(&masked, start, end);
+        let relations: Vec<&&Annotation> = in_member.iter().filter(|a| RELATION_ANNOTATIONS.contains(&a.name)).collect();
+
+        ids.extend(in_member.iter().copied().filter(|a| a.name == "Id"));
+        embedded_ids.extend(in_member.iter().copied().filter(|a| a.name == "EmbeddedId"));
+
+        if let Some(second) = relations.get(1) {
+            findings.push(Finding::new(
+                second.start,
+                second.end(),
+                Severity::Warning,
+                "jpa-attribute-multiple-relations",
+                format!("An attribute has one association: @{} and @{} can't both map it.", relations[0].name, second.name),
+            ));
+            continue;
+        }
+
+        let (Some(relation), Some(ty)) = (relations.first(), declared_type(&decl, kotlin)) else { continue };
+        let base = base_type(&ty);
+        let basic = NOT_A_DATE.contains(&base) || ty.ends_with("[]") || base == "ByteArray";
+        let to_one = matches!(relation.name, "OneToOne" | "ManyToOne");
+        let to_many = matches!(relation.name, "OneToMany" | "ManyToMany");
+
+        let wrong = if to_one && (basic || COLLECTION_TYPES.contains(&base)) {
+            Some(format!("@{} maps a single entity, but {base} is {}.", relation.name, if basic { "a basic type" } else { "a collection" }))
+        } else if to_many && basic {
+            Some(format!("@{} maps a collection of entities, but {base} is a basic type.", relation.name))
+        } else {
+            None
+        };
+
+        if let Some(message) = wrong {
+            findings.push(Finding::new(relation.start, relation.end(), Severity::Warning, "jpa-relationship-type", message));
+        }
+    }
+
+    let id_class = all.iter().any(|a| a.start < class_at && a.name == "IdClass");
+    for embedded in &embedded_ids {
+        if let Some(other) = ids.first().map(|a| a.name).or(id_class.then_some("IdClass")) {
+            findings.push(Finding::new(
+                embedded.start,
+                embedded.end(),
+                Severity::Warning,
+                "jpa-multiple-id-kinds",
+                format!("@EmbeddedId can't be combined with @{other}: use one kind of identifier."),
+            ));
+        }
+    }
+
+    if !kotlin && !all.iter().any(|a| a.name == "Access") {
+        findings.extend(mixed_access(&masked, &all, &members));
+        findings.extend(missing_setters(&masked, &all, &members));
+    }
+
+    findings
+}
+
+fn mixed_access(masked: &str, all: &[Annotation], members: &[(usize, usize)]) -> Vec<Finding> {
+    let mut fields: Vec<&Annotation> = Vec::new();
+    let mut getters: Vec<&Annotation> = Vec::new();
+
+    for &(start, end) in members {
+        let decl = without_annotations(masked, start, end);
+        let left = decl.split('=').next().unwrap_or(&decl);
+        let signature_end = left.find('(').map(|p| start + p);
+        let mapped = all
+            .iter()
+            .filter(|a| a.start >= start && a.start < end && MAPPING_ANNOTATIONS.contains(&a.name))
+            .filter(|a| signature_end.is_none_or(|e| a.start < e));
+
+        match signature_end {
+            Some(_) => getters.extend(mapped),
+            None => fields.extend(mapped),
+        }
+    }
+
+    let (kept, ignored, place) = match (fields.iter().any(|a| a.name == "Id"), getters.iter().any(|a| a.name == "Id")) {
+        (true, false) => ("field", getters, "getter"),
+        (false, true) => ("getter", fields, "field"),
+        _ => return Vec::new(),
+    };
+
+    ignored
+        .into_iter()
+        .map(|a| {
+            Finding::new(
+                a.start,
+                a.end(),
+                Severity::Warning,
+                "jpa-mixed-access",
+                format!("The @Id is on a {kept}, so access is by {kept} and this annotation on a {place} is ignored. Move it, or add @Access."),
+            )
+        })
+        .collect()
+}
+
+/// Annotated getters of an entity with property access (the `@Id` sits on a getter) that have no setter.
+fn missing_setters(masked: &str, all: &[Annotation], members: &[(usize, usize)]) -> Vec<Finding> {
+    let mut getters: Vec<(String, &Annotation)> = Vec::new();
+    let mut field_mapped = false;
+    let mut getter_id = false;
+
+    for &(start, end) in members {
+        let decl = without_annotations(masked, start, end);
+        let left = decl.split('=').next().unwrap_or(&decl);
+        let mapped = all.iter().filter(|a| a.start >= start && a.start < end && MAPPING_ANNOTATIONS.contains(&a.name));
+        let Some(paren) = left.find('(') else {
+            field_mapped |= mapped.clone().next().is_some();
+            continue;
+        };
+
+        let name: String = left[..paren].trim_end().bytes().rev().take_while(|&c| is_ident(c)).map(char::from).collect::<Vec<_>>().into_iter().rev().collect();
+        let property = name.strip_prefix("get").or_else(|| name.strip_prefix("is")).filter(|p| p.starts_with(|c: char| c.is_ascii_uppercase()));
+        let (Some(property), Some(first)) = (property, mapped.clone().next()) else { continue };
+        if left[paren + 1..].trim_start().starts_with(')') {
+            getter_id |= mapped.clone().any(|a| a.name == "Id");
+            getters.push((property.to_owned(), first));
+        }
+    }
+
+    if field_mapped || !getter_id {
+        return Vec::new();
+    }
+
+    getters
+        .into_iter()
+        .filter(|(property, _)| words(masked, &format!("set{property}")).next().is_none())
+        .map(|(property, first)| {
+            Finding::new(
+                first.start,
+                first.end(),
+                Severity::Info,
+                "jpa-missing-setter",
+                format!("Property access needs a setter for '{property}': add set{property}()."),
+            )
+        })
+        .collect()
+}
+
+/// Kotlin entity constructors against the `kotlin-jpa` compiler plugin: a missing plugin, a redundant no-arg constructor, a redundant `open`.
+pub fn inspect_kotlin_build(text: &str, build: &Build) -> Vec<Finding> {
+    let masked = mask(text);
+    let all = annotations(&masked);
+    let mut findings = Vec::new();
+
+    let Some((class_at, _)) = declaration_keyword(&masked, 0, &["class"]) else { return findings };
+    let Some(entity) = all.iter().find(|a| a.start < class_at && a.name == "Entity") else { return findings };
+    let after_keyword = &masked[class_at + "class".len()..];
+    let name_end = masked.len() - after_keyword.trim_start().len() + after_keyword.trim_start().bytes().take_while(|&c| is_ident(c)).count();
+    let header_end = masked[class_at..].find('{').map_or(masked.len(), |p| p + class_at);
+    let header = &masked[name_end..header_end];
+    let modifiers = without_annotations(&masked, entity.end(), class_at);
+
+    if build.all_open_entities
+        && let Some(open) = words(&modifiers, "open").next().map(|i| i + entity.end())
+    {
+        let removed = open + "open".len() + masked[open + "open".len()..].bytes().take_while(u8::is_ascii_whitespace).count();
+        findings.push(
+            Finding::new(open, open + "open".len(), Severity::Info, "jpa-redundant-open", "The allopen plugin already opens entity classes, so this modifier is redundant.")
+                .fix("Remove open", vec![Edit { start: open, end: removed, text: String::new() }]),
+        );
+    }
+
+    if has_word(header, "constructor") {
+        return findings;
+    }
+
+    let primary = header.trim_start().starts_with('(').then(|| header.find('(')).flatten().and_then(|p| closing(header.as_bytes(), p).map(|c| &header[p + 1..c]));
+    let needs_arguments = primary.is_some_and(|params| split_top_level(params).iter().any(|(_, p)| !p.trim().is_empty() && !p.contains('=')));
+
+    let secondary: Vec<(usize, usize)> = (header_end < masked.len())
+        .then(|| closing(masked.as_bytes(), header_end))
+        .flatten()
+        .map(|close| members(&masked, header_end + 1, close, true, false))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&(s, e)| without_annotations(&masked, s, e).trim_start().strip_prefix("constructor").is_some_and(|r| r.trim_start().starts_with('(')))
+        .collect();
+    let no_arg = secondary.iter().copied().find(|&(s, e)| {
+        let decl = without_annotations(&masked, s, e);
+        decl.trim_start().strip_prefix("constructor").is_some_and(|r| r.trim_start().starts_with("()"))
+    });
+
+    match build.plugin {
+        Plugin::Missing if needs_arguments && no_arg.is_none() => findings.push(Finding::new(
+            entity.start,
+            entity.end(),
+            Severity::Info,
+            "jpa-kotlin-plugin-missing",
+            "This entity has no constructor without arguments, which JPA needs. Apply the kotlin-jpa (no-arg) compiler plugin.",
+        )),
+        Plugin::Applied => {
+            if let Some((s, e)) = no_arg {
+                let decl = without_annotations(&masked, s, e);
+                let rest = decl.trim_start().trim_start_matches("constructor").trim_start().trim_start_matches("()").trim();
+                let at = s + decl.find("constructor").unwrap_or(0);
+                let body_is_empty = rest.is_empty() || rest.strip_prefix('{').and_then(|r| r.strip_suffix('}')).is_some_and(|r| r.trim().is_empty());
+                let annotated = all.iter().any(|a| a.start >= s && a.start < e);
+
+                if body_is_empty && !annotated {
+                    let line_start = masked[..at].rfind('\n').map_or(0, |p| p + 1);
+                    let line_end = e + masked[e..].bytes().take_while(|&c| c == b' ' || c == b'\t').count();
+                    let line_end = line_end + usize::from(masked[line_end..].starts_with('\n'));
+                    findings.push(
+                        Finding::new(at, at + "constructor".len(), Severity::Info, "jpa-redundant-constructor", "The kotlin-jpa plugin generates a constructor without arguments, so this one is redundant.")
+                            .fix("Remove constructor", vec![Edit { start: line_start, end: line_end, text: String::new() }]),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+
+    findings
+}
+
+/// An attribute name written as a string in a mapping annotation, and the class it must be an attribute of.
+pub struct NameReference {
+    pub owner: String,
+    pub value: String,
+    pub start: usize,
+    pub end: usize,
+    pub code: &'static str,
+    pub annotation: &'static str,
+}
+
+fn name_reference(
+    text: &str, masked: &str, a: &Annotation, key: &str, owner: &str, kotlin: bool, code: &'static str, annotation: &'static str,
+) -> Option<NameReference> {
+    let (start, value) = plain_literal(text, value_range(text, masked, a, key)?, kotlin)?;
+    Some(NameReference { owner: owner.to_owned(), value: value.to_owned(), start, end: start + value.len(), code, annotation })
+}
+
+/// The attribute names that `@AttributeOverride`, `@MapsId`, `@MapKey` and `@NamedAttributeNode` of `class` spell out.
+pub fn name_references(text: &str, kotlin: bool, class: &Class) -> Vec<NameReference> {
+    let masked = mask(text);
+    let all = annotations(&masked);
+    let mut found = Vec::new();
+
+    let Some((class_at, _)) = declaration_keyword(&masked, 0, &["class"]) else { return found };
+    let members = class_members(&masked, kotlin);
+    let owner_of = |a: &Annotation| -> Option<(String, bool)> {
+        let &(start, end) = members.iter().find(|&&(s, e)| a.start >= s && a.start < e)?;
+        let (_, _, ty) = declaration(&without_annotations(&masked, start, end), kotlin)?;
+        Some((element_type(&ty), true))
+    };
+
+    for a in &all {
+        match a.name {
+            "AttributeOverride" => {
+                let owner = if a.start < class_at { class.superclass.clone().map(|s| (s, false)) } else { owner_of(a) };
+                let Some((owner, _)) = owner else { continue };
+                found.extend(name_reference(text, &masked, a, "name", &owner, kotlin, "jpa-unknown-attribute-override", "@AttributeOverride"));
+            }
+            "MapsId" => {
+                let Some(embedded) = class.attributes.iter().find(|x| x.id && x.relation == Relation::Embedded) else { continue };
+                found.extend(name_reference(text, &masked, a, "value", &element_type(&embedded.ty), kotlin, "jpa-unknown-maps-id", "@MapsId"));
+            }
+            "MapKey" => {
+                let Some(&(start, end)) = members.iter().find(|&&(s, e)| a.start >= s && a.start < e) else { continue };
+                let to_many = all.iter().any(|o| o.start >= start && o.start < end && matches!(o.name, "OneToMany" | "ManyToMany"));
+                let Some((owner, _)) = owner_of(a).filter(|_| to_many) else { continue };
+                found.extend(name_reference(text, &masked, a, "name", &owner, kotlin, "jpa-unknown-map-key", "@MapKey"));
+            }
+            "NamedAttributeNode" => {
+                let inside = |outer: &str| all.iter().any(|o| o.name == outer && o.args.is_some_and(|(s, e)| a.start >= s && a.start < e));
+                if !inside("NamedEntityGraph") || inside("NamedSubgraph") {
+                    continue;
+                }
+                found.extend(name_reference(text, &masked, a, "value", &class.name, kotlin, "jpa-unknown-entity-graph-node", "@NamedAttributeNode"));
+            }
+            _ => {}
+        }
+    }
+
+    found
+}
+
+/// Findings for the references whose owner's attribute names are known; the first segment of a dotted path is judged.
+pub fn inspect_name_references(references: &[NameReference], names: &dyn Fn(&str) -> Option<Vec<String>>) -> Vec<Finding> {
+    references
+        .iter()
+        .filter_map(|r| {
+            let first = r.value.split('.').next().unwrap_or(&r.value);
+            if first.is_empty() || matches!(first, "key" | "value") && r.annotation == "@AttributeOverride" {
+                return None;
+            }
+
+            let known = names(&r.owner)?;
+            if known.iter().any(|n| n == first) {
+                return None;
+            }
+
+            Some(Finding::new(
+                r.start,
+                r.end,
+                Severity::Warning,
+                r.code,
+                format!("{} has no attribute '{first}' (named in {}).", r.owner, r.annotation),
+            ))
+        })
+        .collect()
+}
+
+/// `:name` parameters of the `@Query` string literals in a repository that the method does not declare.
+pub fn inspect_query_parameters(text: &str, kotlin: bool) -> Vec<Finding> {
+    let masked = mask(text);
+    let all = annotations(&masked);
+    let mut findings = Vec::new();
+
+    let Some(interface) = words(&masked, "interface").next() else { return findings };
+    let Some(open) = masked[interface..].find('{').map(|p| p + interface) else { return findings };
+    let Some(close) = closing(masked.as_bytes(), open) else { return findings };
+
+    for (start, end) in members(&masked, open + 1, close, kotlin, false) {
+        let Some(query) = all.iter().find(|a| a.start >= start && a.start < end && a.name == "Query") else { continue };
+        let Some((content_at, query_text)) = value_range(text, &masked, query, "value").and_then(|r| plain_literal(text, r, kotlin)) else { continue };
+
+        let decl = without_annotations(&masked, start, end);
+        let Some(paren) = decl.find('(') else { continue };
+        let Some(paren_close) = closing(decl.as_bytes(), paren) else { continue };
+        let Some(declared) = parameter_names(text, &masked, &all, start + paren + 1, start + paren_close, kotlin) else { continue };
+
+        for (offset, name) in query_parameters(query_text) {
+            if declared.iter().any(|d| *d == name) {
+                continue;
+            }
+
+            let at = content_at + offset;
+            findings.push(Finding::new(
+                at,
+                at + 1 + name.len(),
+                Severity::Warning,
+                "jpa-unknown-query-parameter",
+                format!("The method has no parameter named '{name}'. Name the parameter or annotate it with @Param(\"{name}\")."),
+            ));
+        }
+    }
+
+    findings
+}
+
+/// The names the parameters in `start..end` bind under: a `@Param` value, else the parameter name; `None` when one is not spelled out.
+fn parameter_names(text: &str, masked: &str, all: &[Annotation], start: usize, end: usize, kotlin: bool) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+
+    for (offset, part) in split_top_level(&masked[start..end]).into_iter().filter(|(_, p)| !p.trim().is_empty()) {
+        let at = start + offset;
+        let param = all.iter().find(|a| a.name == "Param" && a.start >= at && a.start < at + part.len());
+
+        if let Some(param) = param {
+            let (_, value) = plain_literal(text, value_range(text, masked, param, "value")?, kotlin)?;
+            names.push(value.to_owned());
+            continue;
+        }
+
+        let bare = without_annotations(masked, at, at + part.len());
+        let bare = if kotlin { bare.split(':').next()?.to_owned() } else { bare };
+        let name: String = bare.trim_end().bytes().rev().take_while(|&c| is_ident(c)).map(char::from).collect::<Vec<_>>().into_iter().rev().collect();
+        if name.is_empty() {
+            return None;
+        }
+        names.push(name);
+    }
+
+    Some(names)
+}
+
+/// `(offset of the colon, name)` of each named parameter of a query string, skipping quoted text, `::` casts and SpEL.
+fn query_parameters(query: &str) -> Vec<(usize, String)> {
+    let b = query.as_bytes();
+    let mut found = Vec::new();
+    let mut quoted = false;
+    let mut i = 0;
+
+    while i < b.len() {
+        match b[i] {
+            b'\'' => quoted = !quoted,
+            b':' if !quoted => {
+                if b.get(i + 1) == Some(&b':') {
+                    i += 2;
+                    continue;
+                }
+
+                let length = b[i + 1..].iter().take_while(|&&c| is_ident(c)).count();
+                if length > 0 && !b[i + 1].is_ascii_digit() && (i == 0 || b[i - 1] != b':') {
+                    found.push((i, query[i + 1..i + 1 + length].to_owned()));
+                }
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    found
+}
+
+/// Names `@Query(name = "...")` and `createNamedQuery("...")` refer to, as (name, start, end) of the literal's content.
+pub fn named_query_references(text: &str, kotlin: bool) -> Vec<(String, usize, usize)> {
+    let masked = mask(text);
+    let mut found = Vec::new();
+
+    for a in annotations(&masked).iter().filter(|a| a.name == "Query") {
+        if let Some((at, name)) = value_range(text, &masked, a, "name").and_then(|r| plain_literal(text, r, kotlin)) {
+            found.push((name.to_owned(), at, at + name.len()));
+        }
+    }
+
+    found.extend(call_literals(text, &masked, &["createNamedQuery", "createNamedStoredProcedureQuery"], kotlin));
+
+    found
+}
+
+/// The first string literal argument of each call to one of `calls`, as (value, start, end) of the literal's content.
+fn call_literals(text: &str, masked: &str, calls: &[&str], kotlin: bool) -> Vec<(String, usize, usize)> {
+    let mut found = Vec::new();
+
+    for call in calls {
+        for at in words(masked, call) {
+            let open = at + call.len();
+            if !masked[open..].trim_start().starts_with('(') {
+                continue;
+            }
+
+            let paren = open + masked[open..].find('(').unwrap_or(0);
+            let end = closing(masked.as_bytes(), paren).unwrap_or(masked.len());
+            let first = text[paren + 1..end].split(',').next().unwrap_or("");
+            let lead = first.len() - first.trim_start().len();
+            let from = paren + 1 + lead;
+            if let Some((content_at, name)) = plain_literal(text, (from, from + first.trim().len()), kotlin) {
+                found.push((name.to_owned(), content_at, content_at + name.len()));
+            }
+        }
+    }
+
+    found
+}
+
+/// Names `@EntityGraph("...")` and `getEntityGraph("...")` refer to, as (name, start, end) of the literal's content.
+pub fn entity_graph_references(text: &str, kotlin: bool) -> Vec<(String, usize, usize)> {
+    let masked = mask(text);
+    let mut found = Vec::new();
+
+    for a in annotations(&masked).iter().filter(|a| a.name == "EntityGraph") {
+        if let Some((at, name)) = value_range(text, &masked, a, "value").and_then(|r| plain_literal(text, r, kotlin))
+            && !name.is_empty()
+        {
+            found.push((name.to_owned(), at, at + name.len()));
+        }
+    }
+
+    found.extend(call_literals(text, &masked, &["getEntityGraph"], kotlin));
+
+    found
+}
+
+/// The first segment of each `@EntityGraph(attributePaths = ...)` literal, judged against `entity`.
+pub fn entity_graph_paths(text: &str, kotlin: bool, entity: &str) -> Vec<NameReference> {
+    let masked = mask(text);
+    let mut found = Vec::new();
+
+    for a in annotations(&masked).iter().filter(|a| a.name == "EntityGraph") {
+        let Some((start, end)) = value_range(text, &masked, a, "attributePaths") else { continue };
+        let mut at = start;
+
+        while let Some(open) = text[at..end].find('"').map(|p| p + at) {
+            let Some(close) = text[open + 1..end].find('"').map(|p| p + open + 1) else { break };
+            at = close + 1;
+
+            if let Some((content_at, value)) = plain_literal(text, (open, close + 1), kotlin) {
+                found.push(NameReference {
+                    owner: entity.to_owned(),
+                    value: value.to_owned(),
+                    start: content_at,
+                    end: content_at + value.len(),
+                    code: "jpa-unknown-entity-graph-path",
+                    annotation: "@EntityGraph",
+                });
+            }
+        }
+    }
+
+    found
+}
+
+pub fn unknown_entity_graph(name: &str, start: usize, end: usize) -> Finding {
+    Finding::new(start, end, Severity::Warning, "jpa-unknown-entity-graph", format!("No @NamedEntityGraph named '{name}' in the project."))
+}
+
+/// Names declared by `@NamedEntityGraph` in `text`; `None` when one has no literal name.
+pub fn declared_entity_graphs(text: &str, kotlin: bool) -> Option<Vec<String>> {
+    let masked = mask(text);
+    let mut names = Vec::new();
+
+    for a in annotations(&masked).iter().filter(|a| a.name == "NamedEntityGraph") {
+        let (_, name) = value_range(text, &masked, a, "name").and_then(|r| plain_literal(text, r, kotlin))?;
+        names.push(name.to_owned());
+    }
+
+    Some(names)
+}
+
+pub fn unknown_named_query(name: &str, start: usize, end: usize) -> Finding {
+    Finding::new(start, end, Severity::Warning, "jpa-unknown-named-query", format!("No @NamedQuery or @NamedNativeQuery named '{name}' in the project."))
+}
+
+/// Names declared by `@NamedQuery`, `@NamedNativeQuery` and `@NamedStoredProcedureQuery` in `text`; `None` when one is not a literal.
+pub fn declared_named_queries(text: &str, kotlin: bool) -> Option<Vec<String>> {
+    let masked = mask(text);
+    let mut names = Vec::new();
+
+    for a in annotations(&masked).iter().filter(|a| matches!(a.name, "NamedQuery" | "NamedNativeQuery" | "NamedStoredProcedureQuery")) {
+        let (_, name) = value_range(text, &masked, a, "name").and_then(|r| plain_literal(text, r, kotlin))?;
+        names.push(name.to_owned());
+    }
+
+    Some(names)
+}
+
 const DECLARATIONS: &[&str] = &["class", "interface", "enum", "record"];
 
 fn declaration_start(masked: &str, at: usize) -> usize {
@@ -486,6 +1035,68 @@ pub fn is_empty_listener(text: &str, name: &str, kotlin: bool) -> bool {
 
     let extended = if kotlin { kotlin_supertype(rest).is_some() } else { has_word(rest, "extends") };
     !extended
+}
+
+/// Whether class `name` in `text` declares constructors but none that is public and takes no argument.
+pub fn lacks_default_constructor(text: &str, name: &str, kotlin: bool) -> bool {
+    let masked = mask(text);
+    let Some((at, "class")) = declaration_keyword(&masked, 0, DECLARATIONS) else { return false };
+    let Some(rest) = masked[at + "class".len()..].trim_start().strip_prefix(name) else { return false };
+    if rest.bytes().next().is_some_and(is_ident) {
+        return false;
+    }
+
+    let rest_at = masked.len() - rest.len();
+    let Some(open) = masked[rest_at..].find('{').map(|p| p + rest_at) else { return false };
+    let Some(close) = closing(masked.as_bytes(), open) else { return false };
+    let header = &masked[rest_at..open];
+    let body = members(&masked, open + 1, close, kotlin, false);
+
+    if kotlin {
+        let secondary_default = body.iter().any(|&(s, e)| {
+            let decl = without_annotations(&masked, s, e);
+            let decl = decl.trim_start();
+            decl.strip_prefix("constructor").is_some_and(|r| r.trim_start().starts_with("()"))
+        });
+        if has_word(header, "constructor") {
+            return false;
+        }
+
+        let primary = header.trim_start().starts_with('(').then(|| header.find('(')).flatten().and_then(|p| closing(header.as_bytes(), p).map(|c| &header[p + 1..c]));
+        let primary_needs_arguments = primary.is_some_and(|params| split_top_level(params).iter().any(|(_, p)| !p.trim().is_empty() && !p.contains('=')));
+
+        return primary_needs_arguments && !secondary_default;
+    }
+
+    let mut constructors = Vec::new();
+    for &(s, e) in &body {
+        let decl = without_annotations(&masked, s, e);
+        let Some(paren) = decl.find('(') else { continue };
+        let head = decl[..paren].trim_end();
+        if !head.ends_with(name) || head.len() > name.len() && is_ident(head.as_bytes()[head.len() - name.len() - 1]) {
+            continue;
+        }
+
+        let modifiers = head[..head.len() - name.len()].split_whitespace().collect::<Vec<_>>();
+        if !modifiers.iter().all(|m| matches!(*m, "public" | "protected" | "private")) {
+            continue;
+        }
+
+        let params_end = closing(decl.as_bytes(), paren).unwrap_or(decl.len());
+        constructors.push(modifiers.contains(&"public") && decl[paren + 1..params_end].trim().is_empty());
+    }
+
+    !constructors.is_empty() && !constructors.contains(&true)
+}
+
+pub fn listener_without_constructor(start: usize, end: usize, name: &str) -> Finding {
+    Finding::new(
+        start,
+        end,
+        Severity::Info,
+        "jpa-listener-constructor",
+        format!("{name} has no public constructor without arguments, which JPA needs to create the listener (a Spring-managed listener is exempt)."),
+    )
 }
 
 pub fn unused_listener(start: usize, end: usize, name: &str) -> Finding {

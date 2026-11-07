@@ -527,6 +527,10 @@ fn lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
+fn offset_in(text: &str, part: &str) -> usize {
+    part.as_ptr() as usize - text.as_ptr() as usize
+}
+
 fn lock_dep(path: &str, ecosystem: Ecosystem, name: &str, version: &str, at: usize) -> Dep {
     Dep {
         path: path.to_owned(),
@@ -625,6 +629,8 @@ fn version_catalog(path: &str, text: &str) -> Vec<Dep> {
         };
 
         let mut dep = lock_dep(path, Ecosystem::Maven, &name, version, name_at);
+        let version_at = offset_in(text, version);
+        dep.version_at = Some((version_at, version_at + version.len()));
         dep.at.1 = name_at + name.len().max(1);
         deps.push(dep);
     }
@@ -745,7 +751,10 @@ fn requirements(path: &str, text: &str) -> Vec<Dep> {
         let version = version.split_whitespace().next().unwrap_or_default();
         let is_name = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
         if is_name && is_version(version) && !version.contains('*') {
-            deps.push(lock_dep(path, Ecosystem::PyPI, name, version, at + line.len() - line.trim_start().len()));
+            let mut dep = lock_dep(path, Ecosystem::PyPI, name, version, at + line.len() - line.trim_start().len());
+            let version_at = offset_in(text, version);
+            dep.version_at = Some((version_at, version_at + version.len()));
+            deps.push(dep);
         }
     }
 

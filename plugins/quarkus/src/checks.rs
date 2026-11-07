@@ -7,6 +7,7 @@ use openidea_plugin::Severity;
 use spring_text::finding::Finding;
 use spring_text::config::{self, Key};
 use spring_text::metadata::{Catalog, Lookup, Prop, strip_profile};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 /// The check groups that are on.
@@ -49,11 +50,12 @@ pub fn check(text: &str, yaml: bool, lookup: &Lookup, groups: Groups) -> Vec<Fin
         if continued(text, k) || is_parent(&keys, i) && yaml {
             continue;
         }
-        let base = strip_profile(&k.key);
+        let written = strip_profile(&k.key);
+        let base = &*normalize(lookup, written);
         let prop = known(lookup, base);
         if groups.syntax && k.value.is_empty() && has_separator(text, k, yaml) {
             if let Some(prop) = prop.filter(|p| !p.open() && !p.default.is_empty()) {
-                let message = format!("`{base}` is empty, so Quarkus treats it as unset and uses the default `{}`.", prop.default);
+                let message = format!("`{written}` is empty, so Quarkus treats it as unset and uses the default `{}`.", prop.default);
                 out.push(Finding::new(k.at, k.end, "unassigned-value", message).with_severity(Severity::Hint));
             }
         }
@@ -64,12 +66,29 @@ pub fn check(text: &str, yaml: bool, lookup: &Lookup, groups: Groups) -> Vec<Fin
             expressions(k, &defined, lookup, &mut out);
         }
         if groups.values && !k.value.contains("${") {
-            if let Some(message) = invalid(lookup, base, prop, &k.value) {
+            if let Some(message) = invalid(lookup, written, base, prop, &k.value) {
                 out.push(Finding::new(k.value_at, k.value_end, "invalid-value", message));
             }
         }
     }
     out
+}
+
+/// `quarkus.datasource."users".jdbc.url` is the property `quarkus.datasource.jdbc.url` of a named
+/// instance. Only the roots the metadata lists as named are rewritten (`quarkus.log.category."a.b".level` is not).
+pub fn normalize<'k>(lookup: &Lookup, key: &'k str) -> Cow<'k, str> {
+    let Some(open) = key.find(".\"") else { return Cow::Borrowed(key) };
+    let Some(close) = key[open + 2..].find('"').map(|i| open + 2 + i) else { return Cow::Borrowed(key) };
+    let rest = &key[close + 1..];
+    if !rest.starts_with('.') || !lookup.values("!named").iter().any(|root| root == &key[..open]) {
+        return Cow::Borrowed(key);
+    }
+    Cow::Owned(format!("{}{rest}", &key[..open]))
+}
+
+/// The key without case, dots, dashes and underscores, so `quarkus.http.port` and `QUARKUS_HTTP_PORT` agree.
+pub fn squash(key: &str) -> String {
+    key.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
 }
 
 fn known<'l>(lookup: &'l Lookup, key: &str) -> Option<&'l Prop> {
@@ -78,6 +97,25 @@ fn known<'l>(lookup: &'l Lookup, key: &str) -> Option<&'l Prop> {
         return None;
     }
     lookup.prop(key)
+}
+
+/// A key the metadata lists as required (no default, not Optional) that the file leaves out although
+/// a sibling of it is set. `elsewhere` holds the squashed keys of every other config file and `.env`.
+pub fn missing_required(keys: &[Key], elsewhere: &BTreeSet<String>, lookup: &Lookup) -> Vec<Finding> {
+    let written: Vec<(&Key, String)> = keys.iter().map(|k| (k, normalize(lookup, strip_profile(&k.key)).into_owned())).collect();
+    let mut out = Vec::new();
+    for required in lookup.values("!required") {
+        let Some((group, _)) = required.rsplit_once('.') else { continue };
+        let wanted = squash(&required);
+        if elsewhere.contains(&wanted) || written.iter().any(|(_, key)| squash(key) == wanted) {
+            continue;
+        }
+        let sibling = |key: &str| key.rsplit_once('.').is_some_and(|(parent, _)| squash(parent) == squash(group));
+        let Some((anchor, _)) = written.iter().find(|(_, key)| sibling(key)) else { continue };
+        let message = format!("`{required}` is required when `{}` is set. Quarkus may still read it from the environment or another source.", anchor.key);
+        out.push(Finding::new(anchor.at, anchor.end, "missing-required", message).with_severity(Severity::Info));
+    }
+    out
 }
 
 fn is_parent(keys: &[Key], i: usize) -> bool {
@@ -186,7 +224,7 @@ const JUL_LEVELS: [&str; 14] = ["ALL", "OFF", "WARNING", "SEVERE", "CONFIG", "FI
 /// Booleans are never reported: SmallRye reads anything that is not true/yes/y/1/on as false.
 /// Enums are checked only when the type is a closed enum of the metadata (not a level: levels also
 /// take the JUL names and numbers), ignoring case, `-` and `_`; the property's own default is always valid.
-fn invalid(lookup: &Lookup, key: &str, prop: Option<&Prop>, value: &str) -> Option<String> {
+fn invalid(lookup: &Lookup, written: &str, key: &str, prop: Option<&Prop>, value: &str) -> Option<String> {
     let prop = prop?;
     let value = value.trim();
     if value.contains('\\') || prop.open() || same_word(&prop.default, value) {
@@ -209,7 +247,7 @@ fn invalid(lookup: &Lookup, key: &str, prop: Option<&Prop>, value: &str) -> Opti
     if ok {
         return None;
     }
-    Some(format!("`{value}` is not a valid `{}` for `{key}`.", prop.ty))
+    Some(format!("`{value}` is not a valid `{}` for `{written}`.", prop.ty))
 }
 
 fn same_word(a: &str, b: &str) -> bool {
@@ -219,7 +257,7 @@ fn same_word(a: &str, b: &str) -> bool {
 
 /// A number (milliseconds), an ISO-8601 `PT1H30M`, or a run of `<number><unit>` pairs
 /// (`30s`, `1h30m`, `1.5s`, `2d`; units ms, s, m, h, d) separated by optional blanks.
-fn duration(value: &str) -> bool {
+pub(crate) fn duration(value: &str) -> bool {
     if value.chars().all(|c| c.is_ascii_digit()) {
         return true;
     }

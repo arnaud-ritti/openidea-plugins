@@ -2,7 +2,7 @@
   "properties": {
     "kubeconfig": {
       "type": "string",
-      "title": "Kubeconfig file (leave empty to use KUBECONFIG or ~/.kube/config)",
+      "title": "Kubeconfig file, or several separated by commas (Choose Kubeconfig picks one; empty: KUBECONFIG or ~/.kube/config)",
       "default": ""
     },
     "debugImage": {
@@ -54,6 +54,56 @@
       "type": "boolean",
       "title": "Report a Helm trim marker on an output that joins it to a neighbouring YAML line",
       "default": true
+    },
+    "checkKindSchema": {
+      "type": "boolean",
+      "title": "Report an unknown top-level or spec key of a built-in kind (core, apps, batch, networking, rbac) and a kind its API group does not have",
+      "default": true
+    },
+    "checkReadOnlyFields": {
+      "type": "boolean",
+      "title": "Hint at fields the API server owns (status, metadata.uid, resourceVersion, ...) in a manifest",
+      "default": true
+    },
+    "checkDeprecatedKeys": {
+      "type": "boolean",
+      "title": "Report deprecated or removed keys (spec.serviceAccount, spec.rollbackTo, the ingress.class annotation, ...)",
+      "default": true
+    },
+    "checkRequiredKeys": {
+      "type": "boolean",
+      "title": "Hint at a key the API requires but a Pod, workload, CronJob, NetworkPolicy, claim or binding manifest lacks (spec.containers, spec.template, roleRef, ...)",
+      "default": true
+    },
+    "checkFieldValues": {
+      "type": "boolean",
+      "title": "Hint at a value of a built-in kind that is not one of the field's values (restartPolicy, Service type, strategy, ...) or not an integer or boolean where one is required",
+      "default": true
+    },
+    "checkHelmValues": {
+      "type": "boolean",
+      "title": "Hint at a .Values path in a chart template that values.yaml does not define",
+      "default": true
+    },
+    "checkHelmIncludes": {
+      "type": "boolean",
+      "title": "Report an include or template of a name that no define in the chart's templates provides",
+      "default": true
+    },
+    "logViewerLines": {
+      "type": "number",
+      "title": "Lines per pod the Log Viewer reads (10 to 20000)",
+      "default": 1000
+    },
+    "notifySuccess": {
+      "type": "boolean",
+      "title": "Show a notification when a command succeeds (errors are always shown)",
+      "default": true
+    },
+    "nonKubernetesGlobs": {
+      "type": "string",
+      "title": "Globs of YAML files that are not Kubernetes, separated by commas (no problems are reported for them), e.g. *.compose.yaml, ci/*.yml",
+      "default": ""
     },
     "checkChartKeys": {
       "type": "boolean",

@@ -1,5 +1,11 @@
 {
   "properties": {
+    "bundle.writeOtherLocales": {
+      "type": "boolean",
+      "title": "Resource Bundle editor: write other locales",
+      "description": "Editing another locale's cell rewrites its file with tee (needs the optional tee permission; without it the file is opened). An unsaved editor buffer of that file is overwritten.",
+      "default": true
+    },
     "codeStyle.keyValueDelimiter": {
       "type": "string",
       "title": "Code style: key/value delimiter",
@@ -47,6 +53,12 @@
       "title": "Report keys in code that no bundle declares",
       "description": "Warn on a literal key in getMessage, ResourceBundle.getString, #{key}, <spring:message> and <fmt:message> when the project's only MessageSource bundle (messages, ValidationMessages or i18n/*) doesn't declare it. Dynamic keys, default messages and bundles outside the project are never reported.",
       "default": true
+    },
+    "unusedProperties.live": {
+      "type": "boolean",
+      "title": "Mark unused keys when a bundle file opens or saves",
+      "description": "Scans up to 2000 project files (each under 256 KiB) for mentions of the file's keys and shows the unused ones faded. Keys built at run time look unused, so they show as hints. Find Unused Properties scans everything on demand.",
+      "default": false
     },
     "inspections.alphaUnsorted": {
       "type": "boolean",

@@ -11,8 +11,11 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.37" }
+openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.38" }
 spring-text = { path = "../../crates/spring-text" }
+ui-kit = { path = "../../crates/ui-kit" }
+batch = { package = "openidea-plugin-aritti-spring-batch", path = "modules/batch", features = ["embedded"] }
+modulith = { package = "openidea-plugin-aritti-spring-modulith", path = "modules/modulith", features = ["embedded"] }
 
 [profile.release]
 opt-level = "s"

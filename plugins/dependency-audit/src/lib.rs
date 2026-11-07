@@ -340,7 +340,7 @@ impl Plugin for DependencyAudit {
 
 impl Providers for DependencyAudit {
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
-        if !matches!(kind(&doc.path), Some(Kind::Pom | Kind::Gradle | Kind::PackageJson | Kind::ComposerJson)) {
+        if !matches!(kind(&doc.path), Some(Kind::Pom | Kind::Gradle | Kind::PackageJson | Kind::ComposerJson | Kind::VersionCatalog | Kind::Requirements)) {
             return Vec::new();
         }
 
@@ -348,9 +348,15 @@ impl Providers for DependencyAudit {
             return Vec::new();
         };
         let lock = lockfile(&doc.path).and_then(|lock| project.read_file(&lock).ok());
-        let deps: Vec<Dep> = parse(&doc.path, &doc.text, lock.as_deref())
+        let all = parse(&doc.path, &doc.text, lock.as_deref());
+        let selected_ranges: Vec<(usize, usize)> = all
+            .iter()
+            .filter(|dep| overlaps(dep, &doc.text, &selection))
+            .filter_map(|dep| dep.version_at)
+            .collect();
+        let deps: Vec<Dep> = all
             .into_iter()
-            .filter(|dep| dep.version_at.is_some() && overlaps(dep, &doc.text, &selection))
+            .filter(|dep| dep.version_at.is_some_and(|at| selected_ranges.contains(&at)))
             .collect();
         if deps.is_empty() {
             return Vec::new();

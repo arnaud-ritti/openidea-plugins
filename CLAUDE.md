@@ -45,7 +45,7 @@ Release: `openidea-plugin pack plugins/<name> --key <path outside repo> --publis
 ## Rules
 
 - The signing key never enters the repo (`*.key` is gitignored). A leaked key lets anyone publish updates to installed `aritti.*` plugins; rotating means `index --previous-key` or a revocation.
-- Bump `version` (semver) and `change-notes` in `plugin.toml` for every release; the marketplace keeps only the newest version per API requirement.
+- Never edit `version` in `plugin.toml` by hand: release-please bumps it from the conventional commits (`feat:` minor, `fix:` patch) together with `.release-please-manifest.json`, and the `versions` CI job fails when the two differ. Do write `change-notes` for what changed; the marketplace keeps only the newest version per API requirement.
 - Request only the capabilities the code uses; put degradable ones in `optional` and handle `Error::Denied`.
 - Ports: run the licence gate before any work. Source/decompile ports keep `LICENSE`/`NOTICE`, credit original authors and record source plugin, version and revision in `description` or `change-notes`. Paid/proprietary plugins are clean-room only: no jar download, no copied code, strings, icons or name.
 - The plugin API (WIT, SDK, host) is upstream. A plugin needing a new extension point goes to `l0ng-ai/openidea` as its own pull request; don't vendor or patch the SDK here.

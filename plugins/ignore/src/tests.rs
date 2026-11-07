@@ -36,6 +36,7 @@ fn invalid_syntax_values_offer_both_syntaxes() {
 
 #[test]
 fn completes_syntax_values_in_hgignore_only() {
+    let _host = MockHost::install();
     let mut plugin = IgnorePlugin::default();
     let items = plugin.completion(&doc("/p/.hgignore", "syntax: g"), Position::new(0, 9), None);
     assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["glob", "regexp", "rootglob"]);
@@ -401,4 +402,164 @@ fn a_missing_gitignore_offers_no_action() {
     let host = MockHost::install();
     assert!(IgnorePlugin::default().code_actions(&doc("/project/src/a.rs", ""), Range::default()).is_empty());
     drop(host);
+}
+
+#[test]
+fn selected_paths_are_appended_to_the_open_ignore_file() {
+    let host = MockHost::install();
+    host.open_editor("/project/.dockerignore", "ignore", "/dist\n", &[(0, 0, 0, 0)]);
+    host.select_paths(&["/project/dist", "/project/src/a[1].rs", "/project/node_modules", "/elsewhere/x"]);
+
+    IgnorePlugin::default().run_command("add-selected", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.editor_text(), "/dist\n/src/a\\[1\\].rs\n/node_modules\n");
+}
+
+#[test]
+fn selected_paths_need_an_open_ignore_file() {
+    let host = MockHost::install();
+    host.open_editor("/project/main.rs", "rust", "", &[(0, 0, 0, 0)]);
+    host.select_paths(&["/project/dist"]);
+
+    assert!(IgnorePlugin::default().run_command("add-selected", &host.invocation(), None).is_err());
+}
+
+#[test]
+fn selected_paths_go_to_the_picked_root_ignore_file() {
+    let host = MockHost::install();
+    host.open_editor("/project/.dockerignore", "ignore", "/dist\n", &[(0, 0, 0, 0)]);
+    host.add_file("/project/.gitignore", "");
+    host.select_paths(&["/project/build"]);
+    host.answer_next_prompt(Some(&["/project/.gitignore"]));
+
+    IgnorePlugin::default().run_command("add-selected", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.opened_locations(), [("/project/.gitignore".to_owned(), 0, 0)]);
+    assert!(host.notifications()[0].body.starts_with("Opened /project/.gitignore"));
+    assert_eq!(host.editor_text(), "/dist\n");
+}
+
+#[test]
+fn picking_the_focused_ignore_file_edits_it() {
+    let host = MockHost::install();
+    host.open_editor("/project/.dockerignore", "ignore", "/dist\n", &[(0, 0, 0, 0)]);
+    host.add_file("/project/.gitignore", "");
+    host.select_paths(&["/project/build"]);
+    host.answer_next_prompt(Some(&["/project/.dockerignore"]));
+
+    IgnorePlugin::default().run_command("add-selected", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.editor_text(), "/dist\n/build\n");
+}
+
+#[test]
+fn dismissing_the_ignore_file_pick_changes_nothing() {
+    let host = MockHost::install();
+    host.open_editor("/project/.dockerignore", "ignore", "/dist\n", &[(0, 0, 0, 0)]);
+    host.add_file("/project/.gitignore", "");
+    host.select_paths(&["/project/build"]);
+
+    let message = IgnorePlugin::default().run_command("add-selected", &host.invocation(), None).unwrap();
+
+    assert_eq!(message, None);
+    assert_eq!(host.editor_text(), "/dist\n");
+}
+
+#[test]
+fn completes_entries_from_the_files_below_the_ignore_file() {
+    let host = MockHost::install();
+    host.set_project_root(Some("/project"));
+    host.add_file("/project/web/.gitignore", "");
+    host.add_file("/project/web/dist/app.js", "");
+    host.add_file("/project/web/dist/vendor/lib.js", "");
+    host.add_file("/project/web/docs.md", "");
+    host.add_file("/project/web/src/main.ts", "");
+    let mut plugin = IgnorePlugin::default();
+    let labels = |plugin: &mut IgnorePlugin, text: &str| -> Vec<String> {
+        let at = Position::new(0, text.len() as u32);
+        plugin.completion(&doc("/project/web/.gitignore", text), at, None).into_iter().map(|i| i.label).collect()
+    };
+
+    assert_eq!(labels(&mut plugin, "d"), ["dist/", "docs.md"]);
+    assert_eq!(labels(&mut plugin, "!/dist/"), ["app.js", "vendor/"]);
+    assert_eq!(labels(&mut plugin, "dist/v"), ["vendor/"]);
+    assert!(labels(&mut plugin, "dist/*").is_empty());
+    assert!(labels(&mut plugin, "# d").is_empty());
+    assert!(labels(&mut plugin, "../x").is_empty());
+
+    let item = plugin.completion(&doc("/project/web/.gitignore", "dist/ap"), Position::new(0, 7), None).remove(0);
+    assert_eq!(item.replace, Some(Range::new(Position::new(0, 5), Position::new(0, 7))));
+}
+
+#[test]
+fn regexp_ignore_files_get_no_path_completion() {
+    let host = MockHost::install();
+    host.set_project_root(Some("/project"));
+    host.add_file("/project/build/a.o", "");
+    let mut plugin = IgnorePlugin::default();
+
+    assert!(plugin.completion(&doc("/project/.boringignore", "b"), Position::new(0, 1), None).is_empty());
+    assert!(plugin.completion(&doc("/project/.hgignore", "b"), Position::new(0, 1), None).is_empty());
+}
+
+#[test]
+fn unignore_selected_adds_negated_entries() {
+    let host = MockHost::install();
+    host.open_editor("/project/.gitignore", "ignore", "/dist\n", &[(0, 0, 0, 0)]);
+    host.select_paths(&["/project/dist/keep.txt"]);
+
+    IgnorePlugin::default().run_command("unignore-selected", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.editor_text(), "/dist\n!/dist/keep.txt\n");
+    assert_eq!(host.notifications().len(), 1);
+}
+
+#[test]
+fn the_editor_menu_adds_the_current_file_when_nothing_is_selected() {
+    let host = MockHost::install();
+    host.open_editor("/project/src/a.rs", "rust", "", &[(0, 0, 0, 0)]);
+    host.add_file("/project/.gitignore", "");
+    host.answer_next_prompt(Some(&["/project/.gitignore"]));
+
+    IgnorePlugin::default().run_command("add-selected", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.opened_locations(), [("/project/.gitignore".to_owned(), 0, 0)]);
+}
+
+fn tee_host() -> MockHost {
+    let host = MockHost::install().with_capabilities(&["project.read", "process:tee", "clipboard"]);
+    host.on_process("tee", |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() }));
+    host
+}
+
+#[test]
+fn new_file_writes_the_picked_dot_file_with_tee_and_opens_it() {
+    let host = tee_host();
+    host.answer_next_prompt(Some(&[".dockerignore"]));
+
+    IgnorePlugin::default().run_command("new-file", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.process_runs()[0].args, ["/project/.dockerignore"]);
+    assert_eq!(host.opened_locations(), [("/project/.dockerignore".to_owned(), 0, 0)]);
+}
+
+#[test]
+fn new_file_refuses_an_existing_file() {
+    let host = tee_host();
+    host.add_file("/project/.gitignore", "");
+    host.answer_next_prompt(Some(&[".gitignore"]));
+
+    assert!(IgnorePlugin::default().run_command("new-file", &host.invocation(), None).is_err());
+    assert!(host.process_runs().is_empty());
+}
+
+#[test]
+fn new_file_copies_the_name_when_tee_is_denied() {
+    let host = MockHost::install().with_capabilities(&["project.read", "clipboard"]);
+    host.answer_next_prompt(Some(&[".npmignore"]));
+
+    IgnorePlugin::default().run_command("new-file", &host.invocation(), None).unwrap();
+
+    assert_eq!(host.clipboard().as_deref(), Some(".npmignore"));
+    assert!(host.opened_locations().is_empty());
 }

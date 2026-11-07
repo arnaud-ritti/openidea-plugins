@@ -20,8 +20,12 @@ comments, `@@escaped` directives, inline `@section('a', 'b')` and `@php(...)`,
 and custom directives are never reported. The checks need the `events`
 capability; without it nothing is published.
 
-Directive completion is not part of this plugin (see below); it ships inspections
-only.
+Directive completion is deliberately not in this plugin: `aritti.laravel`
+already completes Blade directives (core ones with about 45 snippets such as
+`@if(…) … @endif` and `@foreach`, plus custom directives found in `app/`), so a
+second provider here would list every directive twice. Install both plugins.
+There is no formatter: OpenIDEA only runs Prettier and Ruff from a language
+definition, and neither parses Blade.
 
 Only the directives Laravel and Livewire ship are known to the highlighter;
 directives registered with `Blade::directive()` stay plain text, since a plugin

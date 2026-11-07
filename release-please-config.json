@@ -97,12 +97,6 @@
         "plugin.toml"
       ]
     },
-    "plugins/spring-batch": {
-      "component": "spring-batch",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
     "plugins/spring-beans": {
       "component": "spring-beans",
       "extra-files": [
@@ -115,20 +109,8 @@
         "plugin.toml"
       ]
     },
-    "plugins/spring-cloud": {
-      "component": "spring-cloud",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
     "plugins/spring-data": {
       "component": "spring-data",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
-    "plugins/spring-graphql": {
-      "component": "spring-graphql",
       "extra-files": [
         "plugin.toml"
       ]
@@ -141,18 +123,6 @@
     },
     "plugins/spring-integration": {
       "component": "spring-integration",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
-    "plugins/spring-messaging": {
-      "component": "spring-messaging",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
-    "plugins/spring-modulith": {
-      "component": "spring-modulith",
       "extra-files": [
         "plugin.toml"
       ]
@@ -183,18 +153,6 @@
     },
     "plugins/spring-web": {
       "component": "spring-web",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
-    "plugins/spring-webflow": {
-      "component": "spring-webflow",
-      "extra-files": [
-        "plugin.toml"
-      ]
-    },
-    "plugins/spring-websocket": {
-      "component": "spring-websocket",
       "extra-files": [
         "plugin.toml"
       ]

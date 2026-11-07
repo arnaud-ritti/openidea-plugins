@@ -6,7 +6,9 @@
 
 use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::offset;
-use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Range, Severity, host, register_plugin};
+use openidea_plugin::{
+    Diagnostic, Error, Invocation, Location, PickItem, Plugin, Position, Range, Severity, TextEdit, host, register_plugin,
+};
 use spring_text::index::{Index, Indexes, PROVIDER_BUDGET};
 use spring_text::xml::{self, Attr, Element};
 use spring_text::{beans, java, range};
@@ -352,7 +354,24 @@ fn check(doc: &OsgiXml, index: &Index<Info>) -> Vec<Diagnostic> {
             _ => {}
         }
     }
+    check_refs(doc, index, &mut out);
     out
+}
+
+/// Beans of libraries and of the container are invisible here, so an unknown `ref` is only information.
+fn check_refs(doc: &OsgiXml, index: &Index<Info>, out: &mut Vec<Diagnostic>) {
+    for e in doc.els.iter().filter(|e| doc.osgi(e) && matches!(e.local(), "service" | "listener" | "registration-listener")) {
+        let Some(a) = e.attr("ref") else { continue };
+        let name = a.value.trim();
+        if name.is_empty() || beans::is_expression(name) || named(index, name).next().is_some() {
+            continue;
+        }
+        let message = format!("No bean named '{name}' is defined in the project.");
+        out.push(Diagnostic {
+            code: Some("unresolved-osgi-ref".into()),
+            ..Diagnostic::new(range(doc.text, a.value_at, a.value_end), Severity::Info, message)
+        });
+    }
 }
 
 const BOOLEANS: &[&str] = &["true", "false"];
@@ -517,15 +536,24 @@ impl Providers for SpringOsgi {
 
     fn completion(&mut self, doc: &Document, at: Position, _trigger: Option<&str>) -> Vec<CompletionItem> {
         let Some((osgi, at, index)) = self.open(doc, at) else { return Vec::new() };
-        let Some((target, _, from, to)) = target_at(&osgi, index, at) else { return Vec::new() };
+        let Some((target, _, from, to)) = target_at(&osgi, index, at) else {
+            return compendium_tags(&osgi, &doc.text, at);
+        };
         let replace = Some(range(&doc.text, from, to));
+        let exported = exported_interfaces(&osgi, at);
         let mut items: Vec<CompletionItem> = match target {
             Target::Bean => index
                 .iter()
                 .flat_map(|(_, info)| &info.beans)
                 .map(|b| {
                     let simple = b.class.as_deref().map(|c| c.rsplit('.').next().unwrap_or(c).to_owned());
-                    CompletionItem { detail: simple, ..CompletionItem::new(&b.name, CompletionKind::Reference) }
+                    let implements = !exported.is_empty()
+                        && b.class.as_deref().is_some_and(|c| {
+                            let (supers, _) = ancestors(index, c);
+                            exported.iter().any(|i| supers.contains(i))
+                        });
+                    let sort = (!exported.is_empty()).then(|| format!("{}{}", if implements { 0 } else { 1 }, b.name));
+                    CompletionItem { detail: simple, sort_text: sort, ..CompletionItem::new(&b.name, CompletionKind::Reference) }
                 })
                 .collect(),
             Target::Class => index
@@ -556,10 +584,99 @@ impl Providers for SpringOsgi {
     }
 }
 
-impl Plugin for SpringOsgi {
-    fn run_command(&mut self, id: &str, _ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        Err(Error::NotFound(format!("command {id}")))
+/// The interfaces a `<service ref>` under the cursor exports; empty elsewhere.
+fn exported_interfaces(doc: &OsgiXml, at: usize) -> Vec<String> {
+    let Some(i) = xml::element_at(&doc.els, at) else { return Vec::new() };
+    if !doc.osgi(&doc.els[i]) || doc.els[i].local() != "service" {
+        return Vec::new();
     }
+    doc.interfaces(i).into_iter().map(|(v, ..)| v.replace('$', ".")).collect()
+}
+
+/// Elements of the Spring DM compendium schema, written by hand: (name, attributes worth knowing).
+const COMPENDIUM_TAGS: &[(&str, &str)] = &[
+    ("cm-properties", "id, persistent-id"),
+    ("managed-properties", "persistent-id, update-strategy, update-method"),
+    ("managed-service-factory", "id, factory-pid, interface, auto-export"),
+];
+
+/// Offers the compendium elements while a `<prefix:name` tag name is being typed.
+fn compendium_tags(doc: &OsgiXml, text: &str, at: usize) -> Vec<CompletionItem> {
+    let Some(head) = text.get(..at) else { return Vec::new() };
+    let typed = head.rsplit(|c: char| !(c.is_alphanumeric() || matches!(c, ':' | '-' | '_' | '.'))).next().unwrap_or("");
+    let from = at - typed.len();
+    if !head[..from].ends_with('<') {
+        return Vec::new();
+    }
+    let Some((prefix, _)) = typed.split_once(':') else { return Vec::new() };
+    let compendium = doc.els.iter().flat_map(|e| &e.attrs).any(|a| a.value.trim() == COMPENDIUM && a.name.strip_prefix("xmlns:") == Some(prefix));
+    if !compendium {
+        return Vec::new();
+    }
+    let replace = Some(range(text, from, at));
+    COMPENDIUM_TAGS
+        .iter()
+        .map(|(name, attrs)| CompletionItem {
+            detail: Some(attrs.to_string()),
+            replace,
+            ..CompletionItem::new(&format!("{prefix}:{name}"), CompletionKind::Keyword)
+        })
+        .collect()
+}
+
+impl Plugin for SpringOsgi {
+    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+        match id {
+            "generate-osgi-bean" => generate_osgi_bean(ctx),
+            _ => Err(Error::NotFound(format!("command {id}"))),
+        }
+    }
+}
+
+fn osgi_prefix(text: &str) -> Option<&'static str> {
+    if text.contains(&format!("xmlns:osgi=\"{OSGI}\"")) {
+        return Some("osgi:");
+    }
+
+    text.contains(&format!("xmlns=\"{OSGI}\"")).then_some("")
+}
+
+fn generate_osgi_bean(ctx: &Invocation) -> Result<Option<String>, Error> {
+    let editor = ctx.editor().ok_or("Open the Spring XML file to add the bean to.")?;
+    let doc = editor.document()?;
+    let Some(prefix) = osgi_prefix(&doc.text) else {
+        return Err("Declare the Spring OSGi namespace (xmlns:osgi) in this file first.".into());
+    };
+
+    let items = [PickItem::new("service", "osgi:service"), PickItem::new("reference", "osgi:reference")];
+    let Some(kind) = host::pick("Generate OSGi bean", &items)? else { return Ok(None) };
+    let Some(interface) = host::input("Interface (fully qualified class name)", None)? else { return Ok(None) };
+    let interface = interface.trim().to_owned();
+    if interface.is_empty() {
+        return Ok(None);
+    }
+
+    let element = if kind == "service" {
+        let Some(target) = host::input("Bean to export (ref)", None)? else { return Ok(None) };
+        format!("<{prefix}service ref=\"{}\" interface=\"{}\"/>", escape(target.trim()), escape(&interface))
+    } else {
+        let id = interface.rsplit('.').next().unwrap_or(&interface);
+        let id = format!("{}{}Reference", id[..1].to_lowercase(), &id[1..]);
+        format!("<{prefix}reference id=\"{id}\" interface=\"{}\"/>", escape(&interface))
+    };
+
+    let at = editor.selections()?.first().map_or(Position::new(0, 0), |r| Position::new(r.start.line, 0));
+    let line = doc.text.lines().nth(at.line as usize).unwrap_or("");
+    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let newline = if doc.text.contains("\r\n") { "\r\n" } else { "\n" };
+    let edit = TextEdit { range: Range::new(at, at), text: format!("{indent}{element}{newline}") };
+    editor.apply_edits(doc.version, &[edit])?;
+
+    Ok(Some(format!("Added {kind} bean.")))
+}
+
+fn escape(value: &str) -> String {
+    value.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;")
 }
 
 register_plugin!(SpringOsgi, providers);
@@ -656,6 +773,7 @@ public class AuditListener implements OsgiServiceLifecycleListener {
         let problems = &host.diagnostics()[&format!("{ROOT}resources/META-INF/spring/context.xml")];
         let found: Vec<_> = problems
             .iter()
+            .filter(|d| d.severity == Severity::Error)
             .map(|d| {
                 let r = d.range;
                 let line = CONTEXT.lines().nth(r.start.line as usize).unwrap();
@@ -674,6 +792,40 @@ public class AuditListener implements OsgiServiceLifecycleListener {
             ("osgi:list".into(), ILLEGAL_COMPARATOR),
         ]);
         assert!(problems.iter().all(|d| d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn unresolved_ref_is_quiet_for_known_and_dynamic_names() {
+        let host = setup();
+        let text = "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:osgi=\"http://www.springframework.org/schema/osgi\">\n<osgi:service ref=\"greeter\"/>\n<osgi:service ref=\"${bean}\"/>\n<osgi:service ref=\"ghost\"/>\n</beans>\n";
+        SpringOsgi::default().line_markers(&doc("refs.xml", text));
+        let found = &host.diagnostics()[&format!("{ROOT}resources/META-INF/spring/refs.xml")];
+        let codes: Vec<_> = found.iter().map(|d| (d.code.as_deref().unwrap(), d.severity, d.range.start.line)).collect();
+        assert_eq!(codes, [("unresolved-osgi-ref", Severity::Info, 4)]);
+    }
+
+    #[test]
+    fn service_ref_completion_puts_implementors_first() {
+        let _host = setup();
+        let mut p = SpringOsgi::default();
+        let d = doc("context.xml", CONTEXT);
+        let items = p.completion(&d, after(CONTEXT, "<osgi:service id=\"plainService\" ref=\"pl"), None);
+        let sort = |label: &str| items.iter().find(|i| i.label == label).unwrap().sort_text.clone().unwrap();
+        assert_eq!(sort("greeter"), "0greeter");
+        assert_eq!(sort("plain"), "1plain");
+    }
+
+    #[test]
+    fn completes_compendium_tags_only_when_declared() {
+        let _host = setup();
+        let mut p = SpringOsgi::default();
+        let text = "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:osgi=\"http://www.springframework.org/schema/osgi\"\n       xmlns:osgix=\"http://www.springframework.org/schema/osgi-compendium\">\n<osgix:cm\n</beans>\n";
+        let d = doc("cm.xml", text);
+        let items = p.completion(&d, after(text, "<osgix:cm"), None);
+        assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["osgix:cm-properties", "osgix:managed-properties", "osgix:managed-service-factory"]);
+        assert_eq!(items[0].replace.unwrap().start, after(text, "\n<"));
+        let undeclared = text.replace("xmlns:osgix=", "xmlns:other=");
+        assert!(p.completion(&doc("cm2.xml", &undeclared), after(&undeclared, "<osgix:cm"), None).is_empty());
     }
 
     #[test]
@@ -746,9 +898,9 @@ public class AuditListener implements OsgiServiceLifecycleListener {
         );
         SpringOsgi::default().line_markers(&doc(name, &text));
         let found = host.diagnostics().get(&format!("{ROOT}resources/META-INF/spring/{name}")).cloned().unwrap_or_default();
-        assert!(found.iter().all(|d| d.code.as_deref() == Some("osgi-attribute-value") && d.severity == Severity::Error));
         found
             .iter()
+            .filter(|d| d.code.as_deref() == Some("osgi-attribute-value") && d.severity == Severity::Error)
             .map(|d| {
                 let line = text.lines().nth(d.range.start.line as usize).unwrap();
                 let at = line[d.range.start.character as usize..d.range.end.character as usize].to_owned();
@@ -865,7 +1017,7 @@ public class AuditListener implements OsgiServiceLifecycleListener {
     fn value_ranges_use_utf16_columns_with_multibyte_text() {
         let found = {
             let host = setup();
-            let text = "<beans xmlns:osgi=\"http://www.springframework.org/schema/osgi\"><!-- \u{1F600}\u{e9} --><osgi:service ref=\"x\" auto-export=\"bad\"/></beans>";
+            let text = "<beans xmlns:osgi=\"http://www.springframework.org/schema/osgi\"><!-- \u{1F600}\u{e9} --><osgi:service ref=\"greeter\" auto-export=\"bad\"/></beans>";
             SpringOsgi::default().line_markers(&doc("u.xml", text));
             let d = host.diagnostics()[&format!("{ROOT}resources/META-INF/spring/u.xml")].clone();
             let prefix = text.find("bad").unwrap();
@@ -879,7 +1031,7 @@ public class AuditListener implements OsgiServiceLifecycleListener {
     #[test]
     fn value_lines_are_right_in_crlf_files() {
         let host = setup();
-        let text = "<beans xmlns:osgi=\"http://www.springframework.org/schema/osgi\">\r\n<osgi:service ref=\"x\"\r\n    auto-export=\"bad\"/>\r\n</beans>\r\n";
+        let text = "<beans xmlns:osgi=\"http://www.springframework.org/schema/osgi\">\r\n<osgi:service ref=\"greeter\"\r\n    auto-export=\"bad\"/>\r\n</beans>\r\n";
         SpringOsgi::default().line_markers(&doc("crlf.xml", text));
         let d = &host.diagnostics()[&format!("{ROOT}resources/META-INF/spring/crlf.xml")];
         assert_eq!(d.len(), 1);
@@ -894,5 +1046,44 @@ public class AuditListener implements OsgiServiceLifecycleListener {
         p.line_markers(&doc("plain.xml", beans));
         assert!(host.diagnostics().get(&format!("{ROOT}resources/META-INF/spring/plain.xml")).is_none_or(Vec::is_empty));
         assert!(p.completion(&doc("plain.xml", beans), after(beans, "ref=\""), None).is_empty());
+    }
+
+    const EMPTY_CONTEXT: &str = "<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:osgi=\"http://www.springframework.org/schema/osgi\">\n  <bean id=\"a\" class=\"A\"/>\n</beans>\n";
+
+    fn generate(host: &MockHost, text: &str, answers: &[Option<&[&str]>]) -> Result<Option<String>, Error> {
+        host.open_editor("/project/ctx.xml", "xml", text, &[(2, 2, 2, 2)]);
+        for a in answers {
+            host.answer_next_prompt(*a);
+        }
+        SpringOsgi::default().run_command("generate-osgi-bean", &host.invocation(), None)
+    }
+
+    #[test]
+    fn generates_a_service_before_the_selected_line() {
+        let host = MockHost::install();
+        generate(&host, EMPTY_CONTEXT, &[Some(&["service"]), Some(&["com.acme.Api"]), Some(&["a"])]).unwrap();
+        assert!(host.editor_text().contains("  <osgi:service ref=\"a\" interface=\"com.acme.Api\"/>\n  <bean id=\"a\""));
+    }
+
+    #[test]
+    fn generates_a_reference() {
+        let host = MockHost::install();
+        generate(&host, EMPTY_CONTEXT, &[Some(&["reference"]), Some(&["com.acme.Greeter"])]).unwrap();
+        assert!(host.editor_text().contains("<osgi:reference id=\"greeterReference\" interface=\"com.acme.Greeter\"/>"));
+    }
+
+    #[test]
+    fn dismissed_prompts_leave_the_file_alone() {
+        let host = MockHost::install();
+        for answers in [vec![None], vec![Some(&["service"][..]), None], vec![Some(&["service"][..]), Some(&["X"][..]), None]] {
+            assert_eq!(generate(&host, EMPTY_CONTEXT, &answers).unwrap(), None);
+            assert_eq!(host.editor_text(), EMPTY_CONTEXT);
+        }
+    }
+
+    #[test]
+    fn refuses_a_file_without_the_osgi_namespace() {
+        let host = MockHost::install();
+        assert!(generate(&host, "<beans/>", &[]).is_err());
     }
 }

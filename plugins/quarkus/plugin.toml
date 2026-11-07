@@ -4,15 +4,17 @@ version = "0.1.0" # x-release-please-version
 description = "Quarkus support for application.properties, application.yaml and microprofile-config.properties: completion of keys and values from the Quarkus 3.40 configuration metadata, MicroProfile Config and the project's @ConfigProperty and @ConfigMapping declarations, %dev/%test/%prod profiles, warnings for deprecated and unknown keys, Quarkus Dev Mode run configurations (mvn, gradle, quarkus CLI) and a shortcut to code.quarkus.io. Ported from Red Hat's Quarkus Tools for IntelliJ (com.redhat.devtools.intellij.quarkus), EPL-2.0."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "Red Hat, Inc. (original Quarkus Tools for IntelliJ)"]
 license = "EPL-2.0"
-change-notes = "0.1.0: first release, with key and value completion, profiles, project keys from @ConfigProperty and @ConfigMapping, deprecated and unknown key warnings, Quarkus Dev Mode run detectors and the Open code.quarkus.io command. Ported from com.redhat.devtools.intellij.quarkus 2.6.1 (source: redhat-developer/intellij-quarkus tag 2.6.1, be058542ce55eda5a72d3b35a205d3027e8a906f). Bundled configuration metadata from Quarkus 3.40.1 (Apache-2.0)."
+change-notes = "Unreleased: Java checks for health checks (@Liveness/@Readiness/@Wellness without HealthCheck and HealthCheck without a qualifier, with quick fixes) and @Gauge (scope, return type), setting quarkus.checkHealthMetrics; quick fix Add @RegisterRestClient (and its import) to the REST client interface. keys of named instances (quarkus.datasource.\"users\".jdbc.url) complete and are checked like the unnamed ones; opt-in setting quarkus.checkRequired notes required keys that no config file sets; Java: completion in @ConfigProperty(name) and @ConfigMapping(prefix), checks for @RestClient without @RegisterRestClient and @Scheduled expressions, opt-in quarkus.checkUnassigned, quick fixes to add a defaultValue or the key to application.properties; Go to Declaration and gutter markers between config keys and @ConfigProperty/@ConfigMapping declarations. 0.1.0: first release, with key and value completion, profiles, project keys from @ConfigProperty and @ConfigMapping, deprecated and unknown key warnings, Quarkus Dev Mode run detectors and the Open code.quarkus.io command. Ported from com.redhat.devtools.intellij.quarkus 2.6.1 (source: redhat-developer/intellij-quarkus tag 2.6.1, be058542ce55eda5a72d3b35a205d3027e8a906f). Bundled configuration metadata from Quarkus 3.40.1 (Apache-2.0)."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [
     "on-file:**/application*.properties",
     "on-file:**/application*.yaml",
     "on-file:**/application*.yml",
     "on-file:**/microprofile-config.properties",
+    "on-language:java",
 ]
 
 [capabilities]
@@ -23,8 +25,11 @@ kinds = ["completion", "line-markers"]
 languages = ["properties", "yaml"]
 
 [[contributes.providers]]
-kinds = ["line-markers"]
+kinds = ["completion", "code-actions", "line-markers"]
 languages = ["java"]
+
+[[contributes.documentIndexers]]
+extensions = ["properties", "yaml", "yml", "java"]
 
 [[contributes.commands]]
 id = "open-code-quarkus"

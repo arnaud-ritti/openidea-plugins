@@ -12,6 +12,10 @@ pub enum Site {
     Pointcut,
     /// A fully qualified class name (XML `class="…"`).
     Class,
+    /// A bean scope (`@Scope`, XML `scope`).
+    Scope,
+    /// A profile name or expression (`@Profile`, `@ActiveProfiles`, `<beans profile>`).
+    Profile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +35,8 @@ fn site(annotation: &str, arg: &str, value: &str, params: &[String]) -> Option<S
     let with = |extra: &[&str]| Site::Spel(params.iter().cloned().chain(extra.iter().map(|s| s.to_string())).collect());
     match (annotation, arg) {
         (a, "value") if BEAN_NAMES.contains(&a) => Some(Site::BeanRef),
+        ("Scope", "value" | "scopeName") => Some(Site::Scope),
+        ("Profile", "value") | ("ActiveProfiles", "value" | "profiles") => Some(Site::Profile),
         ("Resource", "name") => Some(Site::BeanRef),
         (a, "value" | "pointcut") if ADVICE.contains(&a) => Some(Site::Pointcut),
         (a, "key" | "condition" | "unless") if CACHE.contains(&a) => Some(with(&["root", "result"])),
@@ -90,6 +96,10 @@ pub fn xml(text: &str) -> Vec<Hit> {
                 Site::BeanRef
             } else if a.local() == "class" {
                 Site::Class
+            } else if a.name == "scope" && e.local() == "bean" {
+                Site::Scope
+            } else if a.name == "profile" && e.local() == "beans" {
+                Site::Profile
             } else if a.value.contains("#{") {
                 Site::Spel(Vec::new())
             } else {
@@ -118,6 +128,21 @@ pub fn word(text: &str, from: usize, at: usize, to: usize) -> (usize, usize) {
     }
     let mut e = at;
     while e < to && word_byte(b[e]) {
+        e += 1;
+    }
+    (s, e)
+}
+
+/// The profile name around `at`: expression operators and separators end it.
+pub fn word_in(text: &str, from: usize, at: usize, to: usize) -> (usize, usize) {
+    let sep = |c: u8| matches!(c, b',' | b';' | b' ' | b'&' | b'|' | b'!' | b'(' | b')');
+    let b = text.as_bytes();
+    let mut s = at;
+    while s > from && !sep(b[s - 1]) {
+        s -= 1;
+    }
+    let mut e = at;
+    while e < to && !sep(b[e]) {
         e += 1;
     }
     (s, e)

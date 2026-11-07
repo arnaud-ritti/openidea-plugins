@@ -13,6 +13,7 @@ use openidea_plugin::host::{self, Project};
 use openidea_plugin::Position;
 
 use crate::refs::TEMPLATE_CALLS;
+use crate::route_defs::{self, RouteDef};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -36,9 +37,19 @@ pub struct Render {
     pub at: Position,
 }
 
+/// `{% include 'target' with {…} %}` in the `caller` template.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateInclude {
+    pub target: String,
+    pub variables: Vec<String>,
+    pub caller: String,
+}
+
 #[derive(Default, Debug)]
 pub struct Index {
     pub routes: Names,
+    /// Routes with their path, methods and controller, for the flat list.
+    pub route_defs: Vec<RouteDef>,
     pub templates: Names,
     pub services: Names,
     /// Keys by domain.
@@ -47,13 +58,22 @@ pub struct Index {
     pub translation_files: BTreeMap<String, Vec<String>>,
     /// Project classes (PSR-4 autoload) and their files.
     pub classes: Names,
+    /// PSR-4 namespace prefixes of the project's own code.
+    pub psr4_prefixes: Vec<String>,
     pub assets: Names,
     /// Webpack Encore and AssetMapper entry points.
     pub entries: Names,
     pub roles: Names,
+    /// Container parameters of the project's config and of the compiled container.
+    pub parameters: Names,
+    pub commands: Names,
     /// Service tags used in `config/**`, at their first use.
     pub tags: Names,
     pub renders: Vec<Render>,
+    /// `twig.globals` of config/packages/twig.yaml.
+    pub twig_globals: Names,
+    /// Templates included with variables.
+    pub includes: Vec<TemplateInclude>,
     /// `symfony/framework-bundle` constraint of composer.json as (major, minor).
     pub framework_version: Option<(u32, u32)>,
     /// The compiled routes / container were read: bundles' names are known, so
@@ -140,6 +160,12 @@ impl Index {
             }
         }
 
+        let lines = Lines::new(&twig_config);
+        for key in yaml_keys(&twig_config).into_iter().filter(|key| key.parents == ["twig", "globals"]) {
+            let at = lines.position(key.offset);
+            index.twig_globals.add(key.key.trim_matches(['\'', '"']), Some("Twig global".into()), "config/packages/twig.yaml", at);
+        }
+
         let public = host::setting_string("publicDirectory").filter(|d| !d.is_empty()).unwrap_or("public".into());
         let public = public.trim_end_matches('/');
         for path in files(&[&format!("{public}/**/*")]) {
@@ -152,6 +178,7 @@ impl Index {
         let composer = project.read_file("composer.json").unwrap_or_default();
         index.framework_version = framework_version(&composer);
         for (namespace, directory) in psr4(&composer) {
+            index.psr4_prefixes.push(namespace.clone());
             let directory = format!("{}/", directory.trim_end_matches('/'));
             for path in files(&[&format!("{directory}**/*.php")]) {
                 let Some(class) = relative(&path).strip_prefix(&directory).and_then(|p| p.strip_suffix(".php")).map(str::to_owned)
@@ -163,8 +190,21 @@ impl Index {
             }
         }
 
+        let template_paths: Vec<(String, String)> = index.templates.iter().map(|(name, entry)| (name.clone(), entry.path.clone())).collect();
+        for (caller, path) in template_paths {
+            if started.elapsed() > BUDGET / 2 {
+                break;
+            }
+
+            let Ok(text) = project.read_file(&path) else { continue };
+            for (target, variables) in crate::twig::includes(&text).into_iter().filter(|(_, variables)| !variables.is_empty()) {
+                index.includes.push(TemplateInclude { target, variables, caller: caller.clone() });
+            }
+        }
+
         let config = files(&["config/**/*.yaml", "config/**/*.yml", "config/**/*.xml"]);
         let controllers = files(&["src/**/*Controller.php", "src/Controller/**/*.php"]);
+        let commands = files(&["src/Command/**/*.php", "src/**/*Command.php"]);
         let translations =
             files(&["translations/**/*.yaml", "translations/**/*.yml", "translations/**/*.xlf", "translations/**/*.xliff"]);
 
@@ -186,6 +226,7 @@ impl Index {
 
             if relative.ends_with(".xml") {
                 xml_services(path, &text, &mut index.services);
+                xml_params(path, &text, &mut index.parameters);
                 xml_routes(path, &text, &mut index.routes);
                 xml_service_tags(path, &text, &mut index.tags);
                 continue;
@@ -193,18 +234,49 @@ impl Index {
 
             if relative.starts_with("config/routes") {
                 yaml_routes(path, &text, &mut index.routes);
+                index.route_defs.extend(route_defs::yaml_route_defs(path, &text));
                 continue;
             }
 
             yaml_services(path, &text, &mut index.services);
+            yaml_params(path, &text, &mut index.parameters);
             yaml_service_tags(path, &text, &mut index.tags);
+        }
+
+        for (key, routes) in [("extraServiceFiles", false), ("extraRoutingFiles", true)] {
+            for relative in setting_paths(key) {
+                let path = format!("{root}/{relative}");
+                let Some(text) = read(&path, &mut index) else { continue };
+
+                match (relative.ends_with(".xml"), routes) {
+                    (true, true) => xml_routes(&path, &text, &mut index.routes),
+                    (false, true) => {
+                        yaml_routes(&path, &text, &mut index.routes);
+                        index.route_defs.extend(route_defs::yaml_route_defs(&path, &text));
+                    }
+                    (true, false) => {
+                        xml_services(&path, &text, &mut index.services);
+                        xml_service_tags(&path, &text, &mut index.tags);
+                    }
+                    (false, false) => {
+                        yaml_services(&path, &text, &mut index.services);
+                        yaml_service_tags(&path, &text, &mut index.tags);
+                    }
+                }
+            }
         }
 
         for path in &controllers {
             let Some(text) = read(path, &mut index) else { continue };
             php_routes(path, &text, &mut index.routes);
+            index.route_defs.extend(route_defs::php_route_defs(path, &text));
             roles(path, &text, &mut index.roles);
             index.renders.extend(php_renders(path, &text));
+        }
+
+        for path in &commands {
+            let Some(text) = read(path, &mut index) else { continue };
+            php_commands(path, &text, &mut index.commands);
         }
 
         for path in &translations {
@@ -239,6 +311,7 @@ impl Index {
             let path = format!("{root}/{relative}");
             if let Some(text) = read(&path, &mut index) {
                 xml_services(&path, &text, &mut index.services);
+                xml_params(&path, &text, &mut index.parameters);
                 index.compiled_container = true;
             }
         }
@@ -504,7 +577,7 @@ impl Sink for Vec<(String, Position)> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct YamlKey {
     /// Parent keys, outermost first, without `when@<env>`.
     pub parents: Vec<String>,
@@ -631,7 +704,7 @@ pub(crate) fn yaml_tag_slots(text: &str) -> Vec<(usize, usize)> {
     slots
 }
 
-fn without_comment(value: &str) -> &str {
+pub(crate) fn without_comment(value: &str) -> &str {
     value.find(" #").map_or(value, |i| &value[..i])
 }
 
@@ -713,7 +786,7 @@ fn mapping_tag_slots(mapping: &str, base: usize, slots: &mut Vec<(usize, usize)>
 }
 
 /// `text` split at the commas outside quotes and brackets, with the offsets.
-fn split_flow(text: &str, base: usize) -> Vec<(usize, &str)> {
+pub(crate) fn split_flow(text: &str, base: usize) -> Vec<(usize, &str)> {
     let mut parts = Vec::new();
     let (mut depth, mut quote, mut from) = (0_u32, None, 0);
 
@@ -737,7 +810,7 @@ fn split_flow(text: &str, base: usize) -> Vec<(usize, &str)> {
 }
 
 /// The unquoted name in a scalar at `base`; an empty one sits at the end.
-fn scalar_slot(value: &str, base: usize) -> (usize, usize) {
+pub(crate) fn scalar_slot(value: &str, base: usize) -> (usize, usize) {
     let trimmed = value.trim();
     let leading = value.len() - value.trim_start().len();
     if trimmed.is_empty() {
@@ -1003,6 +1076,107 @@ pub fn php_routes(path: &str, text: &str, names: &mut impl Sink) {
 
         let full = format!("{prefix}{name}");
         names.add(&full, None, path, lines.position(offset));
+    }
+}
+
+/// The name an attribute or `new X(` call is given: its first string, or `name:`.
+fn named_argument(text: &str, args_start: usize) -> Option<(&str, usize)> {
+    if text[args_start..].trim_start().starts_with(['\'', '"']) {
+        return quoted_at(text, args_start);
+    }
+
+    route_name_argument(text, args_start..closing_paren(text, args_start))
+}
+
+/// Console command names: `#[AsCommand('x')]`, `#[AsCommand(name: 'x')]`, `$defaultName = 'x'`.
+pub fn php_commands(path: &str, text: &str, names: &mut impl Sink) {
+    let lines = Lines::new(text);
+
+    for (at, matched) in text.match_indices("AsCommand(") {
+        if let Some((name, offset)) = named_argument(text, at + matched.len()) {
+            names.add(name, None, path, lines.position(offset));
+        }
+    }
+
+    for (at, matched) in text.match_indices("$defaultName") {
+        let after = at + matched.len();
+        let Some(equals) = text[after..].find('=').filter(|e| !text[after..after + e].contains(';')) else { continue };
+        if let Some((name, offset)) = quoted_at(text, after + equals + 1) {
+            names.add(name, None, path, lines.position(offset));
+        }
+    }
+}
+
+const TWIG_EXTENSION_CALLS: &[(&str, &str)] = &[
+    ("new TwigFilter(", "filter"),
+    ("AsTwigFilter(", "filter"),
+    ("new TwigFunction(", "function"),
+    ("AsTwigFunction(", "function"),
+    ("new TwigTest(", "test"),
+    ("AsTwigTest(", "test"),
+];
+
+/// Filters, functions and tests a project's Twig extensions define: (kind, name, position).
+pub fn php_twig_extensions(text: &str) -> Vec<(&'static str, String, Position)> {
+    let lines = Lines::new(text);
+    let mut found = Vec::new();
+
+    for (call, kind) in TWIG_EXTENSION_CALLS {
+        for (at, _) in text.match_indices(call) {
+            if let Some((name, offset)) = named_argument(text, at + call.len()) {
+                found.push((*kind, name.to_owned(), lines.position(offset)));
+            }
+        }
+    }
+
+    found
+}
+
+/// `#[AsTwigComponent]` classes: the `name` argument, else the class name.
+pub fn php_components(text: &str) -> Vec<(String, Position)> {
+    let lines = Lines::new(text);
+    let mut found = Vec::new();
+
+    for (at, matched) in text.match_indices("AsTwigComponent") {
+        let args_start = at + matched.len() + 1;
+        let has_arguments = text[at + matched.len()..].starts_with('(');
+        if let Some((name, offset)) = has_arguments.then(|| named_argument(text, args_start)).flatten() {
+            found.push((name.to_owned(), lines.position(offset)));
+            continue;
+        }
+
+        if let Some((class, offset)) = php_class(text) {
+            let short = class.rsplit('\\').next().unwrap_or(&class).to_owned();
+            found.push((short, lines.position(offset)));
+        }
+    }
+
+    found
+}
+
+/// `parameters:` keys of a YAML file.
+pub fn yaml_params(path: &str, text: &str, names: &mut impl Sink) {
+    let lines = Lines::new(text);
+
+    for key in yaml_keys(text) {
+        if key.parents != ["parameters"] {
+            continue;
+        }
+
+        let name = key.key.trim_matches(['\'', '"']);
+        let quote = usize::from(name.len() != key.key.len());
+        names.add(name, None, path, lines.position(key.offset + quote));
+    }
+}
+
+/// `<parameter key="…">` of an XML file.
+pub fn xml_params(path: &str, text: &str, names: &mut impl Sink) {
+    let lines = Lines::new(text);
+
+    for (tag, at) in xml_tags(text, "parameter") {
+        if let Some((key, offset)) = xml_attribute(tag, "key") {
+            names.add(key, None, path, lines.position(at + offset));
+        }
     }
 }
 

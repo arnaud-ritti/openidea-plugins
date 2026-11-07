@@ -2,13 +2,13 @@
 //! check stays quiet when an annotation comes from a library other than
 //! Spring or a name is not a plain string literal.
 
-use crate::{annotation_checks, aop, injection_checks};
+use crate::{annotation_checks, aop, injection_checks, target_checks};
 use crate::model::{Bean, class_bean, method_bean, short_name};
 use crate::xml_checks::dynamic;
 use crate::{World, file_name};
 use openidea_plugin::{Severity, host};
 use spring_text::finding::Finding;
-use spring_text::java::{self, Annotation, JavaFile, Member, STEREOTYPES, TypeDecl};
+use spring_text::java::{Annotation, JavaFile, Member, STEREOTYPES, TypeDecl};
 
 const PROXY_ANNOTATIONS: [&str; 11] = [
     "Transactional",
@@ -96,7 +96,8 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
     let mut out = Vec::new();
     if groups.cache {
         for ty in file.types.iter().filter(|t| t.kind == "class" || t.kind == "interface") {
-            annotation_checks::check_cache(file, ty, &mut out);
+            let subtyped = !world.complete || world.files.values().flat_map(|m| &m.types).any(|t| t.supers.contains(&ty.name));
+            annotation_checks::check_cache(file, ty, subtyped, &mut out);
         }
     }
     for ty in file.types.iter().filter(|t| t.kind == "class") {
@@ -108,6 +109,7 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         }
         if groups.configuration {
             configuration(file, ty, &mut out);
+            annotation_checks::check_bean_method_calls(file, ty, text, &mut out);
         }
         if groups.naming {
             naming(file, ty, &mut out);
@@ -120,6 +122,7 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         }
         if groups.injection {
             injection_checks::check(file, ty, &mut out);
+            target_checks::required_setters(file, ty, &mut out);
         }
         if groups.profiles {
             annotation_checks::check_profiles(file, ty, &mut out);
@@ -130,7 +133,11 @@ pub fn check_java(path: &str, file: &JavaFile, text: &str, world: &World, groups
         if groups.aop {
             pointcut_designators(path, file, ty, &mut out);
         }
+        if groups.configuration && world.complete {
+            target_checks::lifecycle_methods(file, ty, world, &mut out);
+        }
         if groups.unresolved_references && world.complete {
+            target_checks::unresolved_targets(path, file, ty, world, &mut out);
             depends_on(file, ty, world, &mut out);
             component_scan(file, ty, world, &mut out);
         }
@@ -249,6 +256,25 @@ fn naming(file: &JavaFile, ty: &TypeDecl, out: &mut Vec<Finding>) {
 
 pub(crate) fn names_of(bean: &Bean) -> impl Iterator<Item = &str> {
     std::iter::once(bean.name.as_str()).chain(bean.aliases.iter().map(String::as_str))
+}
+
+/// Whether a bean under `profiles` exists when the user picked `active` profiles (none picked: it may).
+pub(crate) fn enabled(profiles: &[String], active: &[String]) -> bool {
+    active.is_empty()
+        || profiles.is_empty()
+        || profiles.iter().any(|p| match p.strip_prefix('!') {
+            Some(negated) => !active.iter().any(|a| a == negated),
+            None => active.contains(p),
+        })
+}
+
+/// [`profiles_overlap`], narrowed to the profiles chosen with Change Active Profiles.
+pub(crate) fn coexist(a: &[String], b: &[String]) -> bool {
+    if !profiles_overlap(a, b) {
+        return false;
+    }
+    let active = crate::commands::active_profiles();
+    enabled(a, &active) && enabled(b, &active)
 }
 
 /// Whether two beans can be active together; a `${...}` or `#{...}` profile is unknown, so never.
@@ -392,7 +418,7 @@ fn duplicate_names(path: &str, file: &JavaFile, ty: &TypeDecl, text: &str, world
                 && !overload
                 && !other.conditional
                 && shares_name
-                && profiles_overlap(&bean.profiles, &other.profiles)
+                && coexist(&bean.profiles, &other.profiles)
                 && same_scope(path, other_path)
         });
         let Some((other_path, other)) = clash else { continue };
@@ -410,38 +436,20 @@ fn duplicate_names(path: &str, file: &JavaFile, ty: &TypeDecl, text: &str, world
 }
 
 fn self_invocation(file: &JavaFile, ty: &TypeDecl, text: &str, out: &mut Vec<Finding>) {
-    if !ty.extends.is_empty() {
-        return;
-    }
-    for callee in ty.methods() {
-        let Some(annotation) = proxy_annotation(file, callee) else { continue };
-        let plain = !["private", "final", "static"].iter().any(|m| modifier(callee, m));
-        let unique = ty.methods().filter(|m| m.name == callee.name).count() == 1;
-        if !plain || !unique {
-            continue;
-        }
-        for caller in ty.methods().filter(|m| m.name != callee.name) {
-            let Some((from, to)) = caller.body else { continue };
-            let Some(body) = text.get(from..to) else { continue };
-            if caller.annotations.iter().any(|a| a.name == annotation.name) {
-                continue;
-            }
-            for call in java::calls(body).into_iter().filter(|c| c.name == callee.name && !c.is_new && !c.chained) {
-                if call.receiver.as_deref().is_some_and(|r| r != "this") {
-                    continue;
-                }
-                let at = from + call.at;
-                out.push(Finding::new(
-                    at,
-                    at + call.name.len(),
-                    "self-invocation",
-                    format!(
-                        "Calling @{} method {}() from the same class bypasses the Spring proxy, so the annotation does not apply. Call it through another bean.",
-                        annotation.name, callee.name
-                    ),
-                ));
-            }
-        }
+    let excused = |caller: &Member, callee: &Member| {
+        proxy_annotation(file, callee).is_some_and(|a| caller.annotations.iter().any(|c| c.name == a.name))
+    };
+    for call in annotation_checks::overloaded_sibling_calls(ty, text, |m| proxy_annotation(file, m).is_some(), excused) {
+        let Some(annotation) = proxy_annotation(file, call.callee) else { continue };
+        out.push(Finding::new(
+            call.at,
+            call.end,
+            "self-invocation",
+            format!(
+                "Calling @{} method {}() from the same class bypasses the Spring proxy, so the annotation does not apply. Call it through another bean.",
+                annotation.name, call.callee.name
+            ),
+        ));
     }
 }
 
@@ -455,16 +463,21 @@ fn project_shaped(world: &World, name: &str) -> bool {
         || world.beans().any(|(_, b)| names_of(b).any(|n| n.eq_ignore_ascii_case(name)))
 }
 
-fn depends_on(file: &JavaFile, ty: &TypeDecl, world: &World, out: &mut Vec<Finding>) {
+/// No project bean answers to `name` and, in an auto-configured project, `name` looks like one of the project's own.
+pub(crate) fn unresolved_bean(world: &World, name: &str) -> bool {
     let auto_configured = world.files.values().any(|m| m.auto_configuration)
         || world.beans().any(|(_, b)| b.kind == "@SpringBootApplication");
+    world.named(name).is_empty() && (!auto_configured || project_shaped(world, name))
+}
+
+fn depends_on(file: &JavaFile, ty: &TypeDecl, world: &World, out: &mut Vec<Finding>) {
     let declared = ty.annotations.iter().chain(ty.methods().flat_map(|m| m.annotations.iter()));
     for annotation in declared.filter(|a| a.name == "DependsOn") {
         if spring(file, std::slice::from_ref(annotation), "DependsOn").is_none() || is_dynamic(annotation, &["value"]) {
             continue;
         }
         for name in annotation.strings(&["value"]) {
-            if !world.named(&name.value).is_empty() || (auto_configured && !project_shaped(world, &name.value)) {
+            if !unresolved_bean(world, &name.value) {
                 continue;
             }
             out.push(Finding::new(

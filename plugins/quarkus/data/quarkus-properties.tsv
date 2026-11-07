@@ -2796,6 +2796,8 @@ quarkus.websockets-next.server.traces.enabled	boolean	true		If collection of Web
 quarkus.websockets-next.server.traffic-logging.enabled	boolean	false		If set to true then binary/text messages received/sent are logged if the DEBUG level is enabled for the logge…
 quarkus.websockets-next.server.traffic-logging.text-payload-limit	int	100		The number of characters of a text message which will be logged if traffic logging is enabled
 quarkus.websockets-next.server.unhandled-failure-strategy	UnhandledFailureStrategy	log-and-close		The strategy used when an error occurs but no error handler can handle the failure
+@!named	quarkus.datasource	quarkus.flyway	quarkus.hibernate-envers	quarkus.hibernate-orm	quarkus.hibernate-search-orm	quarkus.hibernate-search-orm.elasticsearch	quarkus.liquibase	quarkus.liquibase-mongodb	quarkus.mailer	quarkus.mongodb	quarkus.oidc	quarkus.oidc-client	quarkus.redis	quarkus.smallrye-openapi
+@!required	quarkus.knative.node-selector.key	quarkus.knative.node-selector.value	quarkus.kubernetes.node-selector.key	quarkus.kubernetes.node-selector.value	quarkus.oidc.authentication.rar.type	quarkus.openshift.node-selector.key	quarkus.openshift.node-selector.value	quarkus.tls.key-store.jks.path	quarkus.tls.key-store.other.type	quarkus.tls.key-store.p12.path	quarkus.tls.trust-store.jks.path	quarkus.tls.trust-store.other.type	quarkus.tls.trust-store.p12.path
 @mp.opentracing.server.operation-name-provider	class-method	http-path
 @quarkus.arc.dev-mode.generate-dependency-graphs	auto	false	true
 @quarkus.bootstrap.misaligned-platform-imports	error	ignore	warn

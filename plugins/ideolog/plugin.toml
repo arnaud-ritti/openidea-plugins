@@ -5,15 +5,17 @@ description = "Log file viewer. Detects the log format (IntelliJ IDEA, TeamCity 
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "JetBrains (original Ideolog plugin)"]
 homepage = "https://github.com/JetBrains/ideolog"
 license = "MIT"
-change-notes = "0.2.0: custom formats and highlighting patterns (Ideolog XML, lookaround supported); Jump to Source (F7) for stack frames and logging lines; Go to Next Error (Shift+F7), Go to Previous / Next Entry; Cmd+click on stack frames; *.log files open as Log (Ideolog). 0.1.0: first release, ported from Ideolog 263.7307.101 (github.com/JetBrains/ideolog, tag pycharm/263.7307.101, 41beb53)."
+change-notes = "Unreleased: Ideolog: Highlight Selection (editor menu) adds the selected text as a highlighting pattern; Remove Custom Highlightings; the Patterns view edits a pattern in place (Edit) and reorders (Move Up). Ideolog Patterns view to add and remove custom formats and highlighting patterns without XML; status bar item naming the detected log format; timeGapSeconds setting colours the time of events that follow a long pause. 0.2.0: custom formats and highlighting patterns (Ideolog XML, lookaround supported); Jump to Source (F7) for stack frames and logging lines; Go to Next Error (Shift+F7), Go to Previous / Next Entry; Cmd+click on stack frames; *.log files open as Log (Ideolog). 0.1.0: first release, ported from Ideolog 263.7307.101 (github.com/JetBrains/ideolog, tag pycharm/263.7307.101, 41beb53)."
 categories = ["languages", "tools"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
-activation = ["on-language:ideolog"]
+activation = ["on-language:ideolog", "on-event:editor-focused", "on-event:file-opened"]
 
-# Highlighting needs neither; the navigation commands read the log and open files.
+# Highlighting needs none; the navigation commands read the log and open files,
+# the status item follows the focused editor, the Patterns view keeps its patterns in storage.
 [capabilities]
-optional = ["editor.read", "project.read"]
+optional = ["editor.read", "project.read", "events", "storage"]
 
 [[contributes.languages]]
 path = "languages/ideolog.toml"
@@ -26,6 +28,28 @@ languages = ["ideolog", "log"]
 [contributes.settings]
 schema = "settings.schema.json"
 title = "Ideolog"
+
+[[contributes.views]]
+id = "patterns"
+title = "Ideolog Patterns"
+icon = "settings"
+location = "right"
+
+[[contributes.commands]]
+id = "patterns"
+title = "Ideolog: Custom Formats and Highlighting"
+category = "Ideolog"
+
+[[contributes.commands]]
+id = "highlight-selection"
+title = "Ideolog: Highlight Selection"
+category = "Ideolog"
+when = "editorFocus"
+
+[[contributes.commands]]
+id = "remove-highlightings"
+title = "Ideolog: Remove Custom Highlightings"
+category = "Ideolog"
 
 [[contributes.commands]]
 id = "jump-to-source"
@@ -70,3 +94,7 @@ key = "F7"
 [[contributes.keymaps]]
 command = "next-error"
 key = "Shift+F7"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "highlight-selection"

@@ -43,6 +43,38 @@ pub fn parse(relative: &str, text: &str) -> Option<Controller> {
     Some(Controller { class, class_offset: declaration, methods })
 }
 
+/// Every method a controller file declares, whatever its visibility, or
+/// `None` when the class may have more (a trait, `__call`, a parent other
+/// than `Controller`).
+pub fn declared_methods(masked: &str) -> Option<Vec<String>> {
+    let class_at = masked.match_indices("class ").find_map(|(at, _)| {
+        let line_start = masked[..at].rfind('\n').map_or(0, |i| i + 1);
+        masked[line_start..at].split_whitespace().all(|word| matches!(word, "final" | "abstract" | "readonly")).then_some(at)
+    })?;
+    let open = masked[class_at..].find('{').map(|i| class_at + i)?;
+
+    let header: Vec<&str> = masked[class_at..open].split_whitespace().collect();
+    if let Some(at) = header.iter().position(|word| *word == "extends") {
+        let parent = header.get(at + 1)?.trim_start_matches('\\');
+        if parent.rsplit('\\').next() != Some("Controller") {
+            return None;
+        }
+    }
+
+    let body = &masked[open..];
+    let has_trait = body.lines().skip(1).map(str::trim).any(|line| line.starts_with("use ") && !line.contains('(') && line.ends_with(';'));
+    if has_trait || body.contains("__call") {
+        return None;
+    }
+
+    let names = body
+        .match_indices("function ")
+        .map(|(at, _)| body[at + "function ".len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<String>())
+        .filter(|name| !name.is_empty())
+        .collect();
+    Some(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +92,14 @@ mod tests {
     #[test]
     fn ignores_files_that_declare_no_such_class() {
         assert!(parse("A.php", "<?php\ntrait A {}\n").is_none());
+    }
+
+    #[test]
+    fn declared_methods_are_unknown_for_classes_that_may_inherit_more() {
+        let plain = "<?php\nclass A extends Controller\n{\n    public function index() {}\n    protected function p() {}\n}\n";
+        assert_eq!(declared_methods(plain).unwrap(), ["index", "p"]);
+        assert!(declared_methods("<?php\nclass A extends Base\n{\n}\n").is_none());
+        assert!(declared_methods("<?php\nclass A extends Controller\n{\n    use Foo;\n}\n").is_none());
+        assert!(declared_methods("<?php\nclass A\n{\n    public function __call($m, $a) {}\n}\n").is_none());
     }
 }

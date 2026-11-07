@@ -5,33 +5,54 @@
 //! Partial port of the Symfony Plugin for IntelliJ (Daniel Espendiller, Adrien
 //! Brault; MIT), see README.md for what was and wasn't ported.
 
+mod attr_args;
 mod checks;
 mod config_checks;
 mod doctrine;
+mod generators;
 mod index;
+mod indexer;
 mod intentions;
+mod make_commands;
 mod php_checks;
 mod php_text;
+mod practice_checks;
 mod profiler;
+mod query_builder_checks;
 mod refs;
+mod rewrites;
+mod route_defs;
+mod service_gen;
+mod suggest;
 mod twig;
 mod twig_checks;
+mod wiring;
 mod yaml_quotes;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
+use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, Providers};
 use openidea_plugin::views::{Body, Button, Table, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, Position, Range, Severity, TextEdit};
-use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, host, register_plugin, text};
+use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, PickItem, Position, Range, Severity, TextEdit};
+use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, host, text};
 
 pub use index::Index;
 use index::{Entry, Names, Sink};
+use ui_kit::routes::{self, Handler, Route, RouteEvent, RouteList};
+use ui_kit::sections::{SectionDef, Switcher};
 use refs::{Kind, Reference};
 
 const VIEW: &str = "symfony";
 const STATUS_ITEM: &str = "symfony";
+const SECTIONS_KEY: &str = "symfony.section";
+const ROUTES_KEY: &str = "symfony.routes";
+const DEFAULT_BASE_URL: &str = "http://localhost:8000";
+const ROUTES_SECTION: &str = "routes";
+const SECTIONS: &[SectionDef] = &[
+    SectionDef { id: ROUTES_SECTION, label: "Routes" },
+    SectionDef { id: "index", label: "Index" },
+];
 const PROFILER_VIEW: &str = "symfony-profiler";
 const SOURCE: &str = "Symfony";
 const DEFAULT_DOMAIN: &str = "messages";
@@ -225,7 +246,12 @@ fn completion_kind(kind: Kind) -> CompletionKind {
     }
 }
 
-/// Variables a template gets from its controllers' render calls.
+/// Twig built-ins that are variables rather than functions.
+const TWIG_BUILT_IN_VARIABLES: [(&str, &str); 4] = [("app", "Symfony global"), ("_self", "Twig"), ("_context", "Twig"), ("_charset", "Twig")];
+
+/// Variables at the caret: the template's own (`set`, `for`, macro arguments, `@var`),
+/// those a controller renders it with or another template includes it with,
+/// `twig.globals` and Twig's built-ins.
 fn twig_variables(index: &Index, doc: &Document, offset: usize) -> Vec<CompletionItem> {
     if doc.language != "twig" {
         return Vec::new();
@@ -234,25 +260,51 @@ fn twig_variables(index: &Index, doc: &Document, offset: usize) -> Vec<Completio
     let Some((start, end)) = refs::twig_variable_at(&doc.text, offset) else { return Vec::new() };
     let template = index.template_of(&doc.path);
     let mut seen = BTreeSet::new();
-    index
-        .renders
-        .iter()
-        .filter(|render| Some(render.template.as_str()) == template)
-        .flat_map(|render| render.variables.iter().map(move |variable| (variable, &render.caller)))
-        .filter(|(variable, _)| seen.insert(variable.as_str()))
-        .map(|(variable, caller)| {
-            let mut item = CompletionItem::new(variable, CompletionKind::Variable);
-            item.detail = Some(caller.clone());
+    let mut items = Vec::new();
+    let mut add = |name: &str, detail: String| {
+        if seen.insert(name.to_owned()) {
+            let mut item = CompletionItem::new(name, CompletionKind::Variable);
+            item.detail = Some(detail);
             item.replace = Some(range_of(&doc.text, start, end));
-            item
-        })
-        .collect()
+            items.push(item);
+        }
+    };
+
+    for local in twig::local_variables(&doc.text, offset) {
+        add(&local.name, local.detail.to_owned());
+    }
+
+    for include in index.includes.iter().filter(|include| Some(include.target.as_str()) == template) {
+        for variable in &include.variables {
+            add(variable, format!("included from {}", include.caller));
+        }
+    }
+
+    for render in index.renders.iter().filter(|render| Some(render.template.as_str()) == template) {
+        for variable in &render.variables {
+            add(variable, render.caller.clone());
+        }
+    }
+
+    for name in index.twig_globals.keys() {
+        add(name, "Twig global".into());
+    }
+
+    for (name, detail) in TWIG_BUILT_IN_VARIABLES {
+        add(name, detail.into());
+    }
+
+    items
 }
 
 /// Twig tags, filters, functions and tests, plus variables where an expression can start.
 fn twig_names(index: &Index, doc: &Document, offset: usize) -> Vec<CompletionItem> {
     if doc.language != "twig" {
         return Vec::new();
+    }
+
+    if let Some((template, typed)) = twig::macro_import_at(&doc.text, offset) {
+        return imported_macros(index, doc, &template, typed);
     }
 
     let Some((slot, start, end)) = twig::slot_at(&doc.text, offset) else { return Vec::new() };
@@ -277,6 +329,24 @@ fn twig_names(index: &Index, doc: &Document, offset: usize) -> Vec<CompletionIte
     items
 }
 
+fn imported_macros(index: &Index, doc: &Document, template: &str, typed: std::ops::Range<usize>) -> Vec<CompletionItem> {
+    let source = match template {
+        "_self" => Some(doc.text.clone()),
+        name => index.templates.get(name).and_then(|entry| project_for(&doc.path)?.read_file(&entry.path).ok()),
+    };
+    let replace = range_of(&doc.text, typed.start, typed.end);
+
+    twig::macro_definitions(&source.unwrap_or_default())
+        .into_iter()
+        .map(|(name, arguments)| {
+            let mut item = CompletionItem::new(&name, CompletionKind::Function);
+            item.detail = Some(format!("macro {name}({arguments})"));
+            item.replace = Some(replace);
+            item
+        })
+        .collect()
+}
+
 /// A name that is built at run time (`'blog/' ~ name`, `"{$x}"`): not checked.
 fn is_dynamic(name: &str) -> bool {
     name.is_empty() || name.contains(['{', '~', '$', '#'])
@@ -293,7 +363,6 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
     let mut problem = |start: usize, end: usize, code: &str, message: String| {
         let severity = match code {
             "missing-translation" => Severity::Info,
-            "unclosed-tag" => Severity::Error,
             _ => Severity::Warning,
         };
         problems.push(Diagnostic {
@@ -332,12 +401,6 @@ pub fn problems(index: &Index, path: &str, language: &str, text: &str) -> Vec<Di
                 }
             }
             _ => {}
-        }
-    }
-
-    if language == "twig" {
-        for (range, name) in twig::unclosed_tags(text) {
-            problem(range.start, range.end, "unclosed-tag", format!("Tag \"{name}\" is never closed: missing {{% end{name} %}}."));
         }
     }
 
@@ -380,6 +443,7 @@ struct Groups {
     commands: bool,
     deprecations: bool,
     doctrine: bool,
+    practices: bool,
 }
 
 impl Groups {
@@ -395,6 +459,7 @@ impl Groups {
             commands: true,
             deprecations: true,
             doctrine: true,
+            practices: true,
         }
     }
 
@@ -410,6 +475,7 @@ impl Groups {
             commands: on("commandChecks"),
             deprecations: on("deprecationChecks"),
             doctrine: on("doctrineChecks"),
+            practices: on("practiceChecks"),
         }
     }
 }
@@ -445,6 +511,10 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
 
     if groups.services {
         findings.extend(config_checks::deprecated_factory_settings(path, language, text));
+        findings.extend(config_checks::unknown_parameters(&ctx, path, language, text));
+        findings.extend(wiring::check(&ctx, path, language, text));
+        findings.extend(wiring::php_constants(&ctx, path, language, text));
+        findings.extend(wiring::autowire_service(&ctx, language, text));
     }
 
     if groups.yaml_syntax {
@@ -459,6 +529,10 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
         findings.extend(php_checks::deprecations(&ctx, text));
     }
 
+    if groups.practices && language == "php" {
+        findings.extend(php_checks::practices(text));
+    }
+
     if groups.doctrine {
         findings.extend(doctrine::check(path, language, text));
     }
@@ -466,17 +540,30 @@ fn findings(index: &Index, groups: Groups, read: checks::Reader, path: &str, lan
     findings
 }
 
-/// Findings that carry a replacement, for quick fixes: only the YAML scalar check has one.
+/// Findings that carry a replacement, for quick fixes: YAML scalars and hard-coded Twig paths.
 fn fixes(index: &Index, path: &str, language: &str, text: &str) -> Vec<checks::Finding> {
     let published = host::setting_bool("diagnostics").unwrap_or(true) && !index.partial;
-    if !published || !Groups::from_settings().yaml_syntax {
+    if !published {
         return Vec::new();
     }
 
-    config_checks::yaml_scalars(path, language, text)
-        .into_iter()
-        .filter(|finding| finding.replacement.is_some())
-        .collect()
+    let groups = Groups::from_settings();
+    let mut found = Vec::new();
+    if groups.yaml_syntax {
+        found.extend(config_checks::yaml_scalars(path, language, text));
+    }
+
+    if groups.twig && language == "twig" {
+        let read = |_: &str| None;
+        found.extend(twig_checks::names(&checks::Context::new(index, &read), text));
+    }
+
+    if groups.deprecations && language == "php" {
+        let read = |_: &str| None;
+        found.extend(php_checks::deprecations(&checks::Context::new(index, &read), text));
+    }
+
+    found.into_iter().filter(|finding| finding.replacement.is_some()).collect()
 }
 
 /// Problems of the text inspections, converted to diagnostics.
@@ -496,14 +583,36 @@ fn extra_problems(index: &Index, groups: Groups, read: checks::Reader, path: &st
         .collect()
 }
 
+struct Window {
+    sections: Switcher,
+    routes: RouteList,
+}
+
+impl Window {
+    fn new() -> Window {
+        Window { sections: Switcher::new(SECTIONS_KEY, SECTIONS), routes: RouteList::new(ROUTES_KEY, "aritti.symfony") }
+    }
+}
+
 #[derive(Default)]
 pub struct Main {
+    window: Option<Window>,
+    /// Key of the last selected row of the tool window.
+    selected: Option<String>,
     /// By project root.
     indexes: BTreeMap<String, Index>,
     /// Files with published problems, checked again when the index changes.
     checked: BTreeSet<String>,
     /// Expanded nodes of the tool window.
     expanded: BTreeSet<String>,
+}
+
+fn concrete_method(route: &Route) -> Route {
+    let mut route = route.clone();
+    if route.method == "ANY" {
+        route.method = "GET".into();
+    }
+    route
 }
 
 impl Main {
@@ -599,6 +708,98 @@ impl Main {
         Ok(None)
     }
 
+    fn run_console_command(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let project = ctx.project().ok_or("No project is open.")?;
+        let args = ["bin/console".to_owned(), "list".to_owned(), "--raw".to_owned()];
+        let listed = project.run_process("php", &args, None).ok().filter(|o| o.status == Some(0));
+
+        let mut descriptions: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for line in listed.iter().flat_map(|o| o.stdout.lines()) {
+            let mut parts = line.trim().splitn(2, char::is_whitespace);
+            let Some(name) = parts.next().filter(|n| !n.is_empty()) else { continue };
+            descriptions.insert(name.to_owned(), parts.next().map(|d| d.trim().to_owned()));
+        }
+        if let Some(index) = self.view_index(ctx) {
+            for name in index.commands.keys() {
+                descriptions.entry(name.clone()).or_default();
+            }
+        }
+        if descriptions.is_empty() {
+            return Err("No console commands found. Allow process:php in Settings › Plugins or define a command in the project.".into());
+        }
+
+        let items: Vec<PickItem> = descriptions
+            .iter()
+            .map(|(name, description)| {
+                let item = PickItem::new(name, name);
+                match description {
+                    Some(description) => item.description(description),
+                    None => item,
+                }
+            })
+            .collect();
+        let Some(name) = host::pick("Run console command", &items)? else { return Ok(None) };
+        let Some(arguments) = host::input(&format!("Arguments for bin/console {name}"), None)? else { return Ok(None) };
+
+        let mut args = vec!["bin/console".to_owned(), name.clone()];
+        args.extend(arguments.split_whitespace().map(str::to_owned));
+        match host::open_terminal(&format!("console {name}"), "php", &args) {
+            Err(Error::Denied(_)) => Err("Allow the process:php capability in Settings › Plugins.".into()),
+            result => result.map(|()| None),
+        }
+    }
+
+    fn go_to(&self, ctx: &Invocation, what: &str, select: impl Fn(&Index) -> &Names) -> Result<Option<String>, Error> {
+        let index = self.view_index(ctx).ok_or("No Symfony project is indexed.")?;
+        let names = select(index);
+        if names.is_empty() {
+            return Err(format!("No {what}s are indexed.").into());
+        }
+
+        let items: Vec<PickItem> = names
+            .iter()
+            .map(|(name, entry)| {
+                let item = PickItem::new(name, name);
+                match &entry.detail {
+                    Some(detail) => item.description(detail),
+                    None => item,
+                }
+            })
+            .collect();
+        let Some(key) = host::pick(&format!("Go to {what}"), &items)? else { return Ok(None) };
+        let entry = names.get(&key).ok_or_else(|| format!("{key} is no longer indexed."))?;
+        if entry.path.is_empty() {
+            return Err(format!("{key} is defined by the framework, not by a project file.").into());
+        }
+
+        host::open_location(&entry.path, entry.at.line, entry.at.character)?;
+        Ok(None)
+    }
+
+    fn twig_extends(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+        let editor = ctx.editor().ok_or("Open a Twig template first.")?;
+        let path = editor.path();
+        if !path.ends_with(".twig") {
+            return Err("The open file is not a Twig template.".into());
+        }
+
+        let document = editor.document()?;
+        if refs::twig_parent(&document.text).is_some() {
+            return Err("This template already extends another.".into());
+        }
+
+        let index = self.index_for(&path).ok_or("The file is not in an indexed Symfony project.")?;
+        let own = index.template_of(&path);
+        let items: Vec<PickItem> =
+            index.templates.keys().filter(|name| Some(name.as_str()) != own).map(|name| PickItem::new(name, name)).collect();
+        let Some(parent) = host::pick("Extend template", &items)? else { return Ok(None) };
+
+        let start = Position::new(0, 0);
+        let edit = TextEdit { range: Range::new(start, start), text: format!("{{% extends '{parent}' %}}\n") };
+        editor.apply_edits(document.version, &[edit])?;
+        Ok(None)
+    }
+
     fn summary(&self) -> String {
         if self.indexes.is_empty() {
             return "No Symfony project is open.".into();
@@ -646,6 +847,27 @@ impl Plugin for Main {
             }
             "cache-warmup" => self.console(ctx, "cache:warmup"),
             "cache-clear" => self.console(ctx, "cache:clear"),
+            "run-console-command" => self.run_console_command(ctx),
+            "route-copy-curl" => {
+                if let Some(route) = self.selected_route() {
+                    routes::copy_as_curl(&concrete_method(route), DEFAULT_BASE_URL)?;
+                }
+                Ok(None)
+            }
+            "route-create-http" => {
+                if let Some(route) = self.selected_route() {
+                    routes::create_http_file(&concrete_method(route), DEFAULT_BASE_URL, None)?;
+                }
+                Ok(None)
+            }
+            "go-to-route" => self.go_to(ctx, "route", |i| &i.routes),
+            "go-to-service" => self.go_to(ctx, "service", |i| &i.services),
+            "go-to-command" => self.go_to(ctx, "console command", |i| &i.commands),
+            "go-to-template" => self.go_to(ctx, "template", |i| &i.templates),
+            "twig-extends" => self.twig_extends(ctx),
+            "make" => self.make(ctx),
+            "create-template" => self.create_template(ctx),
+            "twig-form-fields" => self.twig_form_fields(ctx),
             _ => Err(Error::NotFound(format!("command {id}"))),
         }
     }
@@ -688,6 +910,22 @@ impl Providers for Main {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
         let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
 
+        if doc.language == "php" {
+            if let Some((range, items)) = attr_args::completions(&doc.text, offset) {
+                let replace = range_of(&doc.text, range.start, range.end);
+                return items
+                    .into_iter()
+                    .map(|completion| {
+                        let mut item = CompletionItem::new(&completion.label, CompletionKind::Property);
+                        item.insert_text = completion.insert;
+                        item.detail = Some(completion.detail.to_owned());
+                        item.replace = Some(replace);
+                        item
+                    })
+                    .collect();
+            }
+        }
+
         let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else {
             return twig_names(index, doc, offset);
         };
@@ -721,71 +959,6 @@ impl Providers for Main {
         location(entry, width).into_iter().collect()
     }
 
-    /// Controller ↔ template, block → parent block, class ↔ service
-    /// definition (the plugin's PHP, Twig, Service and YAML line markers).
-    fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
-        let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
-        let mut markers = Vec::new();
-        let mut marker = |line: u32, icon: Option<&str>, tooltip: String, target: Option<Location>| {
-            markers.push(LineMarker { line, icon: icon.map(Into::into), tooltip, target });
-        };
-
-        match doc.language.as_str() {
-            "php" => {
-                for reference in refs::references("php", &doc.text).into_iter().filter(|r| r.kind == Kind::Template) {
-                    let name = &doc.text[reference.start..reference.end];
-                    if let Some(entry) = index.templates.get(name) {
-                        let line = text::position(&doc.text, reference.start).line;
-                        marker(line, None, format!("Template {name}"), location(entry, 0));
-                    }
-                }
-
-                if let Some((class, offset)) = index::php_class(&doc.text) {
-                    let service = index.services.iter().find(|(id, e)| **id == class || e.detail.as_deref() == Some(&class));
-                    if let Some((id, entry)) = service {
-                        let line = text::position(&doc.text, offset).line;
-                        marker(line, None, format!("Service {id}"), location(entry, id.encode_utf16().count() as u32));
-                    }
-                }
-            }
-            "twig" => {
-                if let Some(template) = index.template_of(&doc.path) {
-                    let renders: Vec<&index::Render> = index.renders.iter().filter(|r| r.template == template).collect();
-                    if let Some(first) = renders.first() {
-                        let callers: Vec<&str> = renders.iter().map(|r| r.caller.as_str()).collect();
-                        let target = Location { path: first.path.clone(), range: Range::new(first.at, first.at) };
-                        marker(0, None, format!("Rendered by {}", callers.join(", ")), Some(target));
-                    }
-                }
-
-                let parents = project_for(&doc.path).map(|p| parent_blocks(index, &p, &doc.text)).unwrap_or_default();
-                for (block, offset) in refs::twig_blocks(&doc.text) {
-                    let Some(entry) = parents.get(block) else { continue };
-                    let from = entry.detail.clone().unwrap_or_default();
-                    let line = text::position(&doc.text, offset).line;
-                    let target = location(entry, block.len() as u32);
-                    marker(line, Some("overriding"), format!("Overrides block \"{block}\" of {from}"), target);
-                }
-            }
-            "yaml" => {
-                let lines = |offset| text::position(&doc.text, offset).line;
-                for key in index::yaml_keys(&doc.text) {
-                    let class = match key.parents.as_slice() {
-                        [services] if services == "services" => &key.key,
-                        [services, _] if services == "services" && key.key == "class" => &key.value,
-                        _ => continue,
-                    };
-                    if let Some(entry) = index.classes.get(class.trim_matches(['\'', '"'])) {
-                        marker(lines(key.offset), None, format!("Class {class}"), location(entry, 0));
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        markers
-    }
-
     /// Quick fixes (quote YAML scalars, apply check replacements, add a missing translation key) and refactorings (`intentions.rs`).
     fn code_actions(&mut self, doc: &Document, selection: Range) -> Vec<CodeAction> {
         let Some(index) = self.index_for(&doc.path) else { return Vec::new() };
@@ -814,7 +987,11 @@ impl Providers for Main {
         let selection_end = text::offset(&doc.text, selection.end).unwrap_or(offset);
 
         let intentions = match doc.language.as_str() {
-            "php" => intentions::php_actions(&doc.text, offset, index.framework_version),
+            "php" => {
+                let mut php = intentions::php_actions(&doc.text, offset, index.framework_version);
+                php.extend(rewrites::php_rewrites(&doc.text, offset, &|class| index.classes.contains_key(class)));
+                php
+            }
             "twig" if intentions::caret_on_extends(&doc.text, offset) => {
                 let blocks: Vec<String> = project_for(&doc.path).map(|project| parent_blocks(index, &project, &doc.text).into_keys().collect()).unwrap_or_default();
                 intentions::twig_actions(&doc.text, offset, &blocks)
@@ -828,6 +1005,9 @@ impl Providers for Main {
             edits: vec![(doc.path.clone(), action.edits.into_iter().map(|(range, text)| TextEdit { range: range_of(&doc.text, range.start, range.end), text }).collect())],
             data: None,
         }));
+
+        actions.extend(service_actions(index, doc, offset));
+        actions.extend(generator_actions(index, doc, offset, selection_end));
 
         for finding in fixes(index, &doc.path, &doc.language, &doc.text) {
             let Some(replacement) = finding.replacement else { continue };
@@ -843,6 +1023,8 @@ impl Providers for Main {
                 data: None,
             });
         }
+
+        actions.extend(typo_fixes(index, doc, offset, selection_end));
 
         let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) else { return actions };
 
@@ -864,8 +1046,20 @@ impl Providers for Main {
         actions
     }
 
-    fn resolve_code_action(&mut self, _doc: &Document, mut action: CodeAction) -> Result<CodeAction, Error> {
+    fn resolve_code_action(&mut self, doc: &Document, mut action: CodeAction) -> Result<CodeAction, Error> {
         let data = action.data.clone().ok_or("Nothing to resolve.")?;
+        if let Some(rest) = data.strip_prefix("translate\n") {
+            action.edits = translation_edits(doc, rest)?;
+            return Ok(action);
+        }
+
+        if let Some(rest) = data.strip_prefix("service\n") {
+            let (services_file, class_file) = rest.split_once('\n').ok_or("Malformed code action.")?;
+            let index = self.index_for(services_file).ok_or("The file is not in a Symfony project.")?;
+            action.edits = vec![service_definition_edit(index, services_file, class_file)?];
+            return Ok(action);
+        }
+
         let (file, key) = data.split_once('\n').ok_or("Malformed code action.")?;
         let project = project_for(file).ok_or("The file is not in an open project.")?;
         let text = project.read_file(file)?;
@@ -878,6 +1072,198 @@ impl Providers for Main {
         action.edits = vec![(file.to_owned(), vec![edit])];
         Ok(action)
     }
+}
+
+/// Replaces the selected Twig text with a `trans` call and adds the key to the domain's translation file.
+fn translation_edits(doc: &Document, data: &str) -> Result<Vec<(String, Vec<TextEdit>)>, Error> {
+    let mut parts = data.splitn(4, '\n');
+    let (file, start, end, key) = (parts.next(), parts.next(), parts.next(), parts.next());
+    let (Some(file), Some(Ok(start)), Some(Ok(end)), Some(key)) = (file, start.map(str::parse::<usize>), end.map(str::parse::<usize>), key) else { return Err("Malformed code action.".into()) };
+    let value = doc.text.get(start..end).ok_or("The selection changed.")?;
+    let project = project_for(file).ok_or("The file is not in an open project.")?;
+    let existing = project.read_file(file)?;
+
+    let (at, line) = generators::translation_line(&existing, key, value);
+    let replacement = TextEdit { range: range_of(&doc.text, start, end), text: format!("{{{{ '{key}'|trans }}}}") };
+    let addition = TextEdit { range: range_of(&existing, at, at), text: line };
+
+    Ok(vec![(doc.path.clone(), vec![replacement]), (file.to_owned(), vec![addition])])
+}
+
+/// "Add form fields" in a form type and "Extract translation" for selected Twig text.
+fn generator_actions(index: &Index, doc: &Document, offset: usize, selection_end: usize) -> Vec<CodeAction> {
+    let Some(project) = project_for(&doc.path) else { return Vec::new() };
+
+    if doc.language == "php" {
+        let read = |file: &str| project.read_file(file).ok();
+        let ctx = checks::Context::new(index, &read);
+        return generators::form_fields(&doc.text, offset, &ctx)
+            .into_iter()
+            .map(|action| CodeAction {
+                title: action.title,
+                kind: Some(action.kind.into()),
+                preferred: false,
+                edits: vec![(doc.path.clone(), action.edits.into_iter().map(|(range, text)| TextEdit { range: range_of(&doc.text, range.start, range.end), text }).collect())],
+                data: None,
+            })
+            .collect();
+    }
+
+    if doc.language != "twig" || selection_end <= offset {
+        return Vec::new();
+    }
+
+    let Some(range) = generators::translatable(&doc.text, offset, selection_end) else { return Vec::new() };
+    let domain = generators::default_domain(&doc.text);
+    let Some(file) = index.translation_files.get(&domain).and_then(|files| files.iter().find(|file| file.contains(".en.")).or(files.first())) else { return Vec::new() };
+    let Some(base) = generators::translation_key(index.template_of(&doc.path), &doc.text[range.clone()]) else { return Vec::new() };
+
+    let taken = |key: &str| index.translations.get(&domain).is_some_and(|keys| keys.contains_key(key));
+    let Some(key) = std::iter::once(base.clone()).chain((2..10).map(|n| format!("{base}_{n}"))).find(|key| !taken(key)) else { return Vec::new() };
+
+    vec![CodeAction {
+        title: format!("Extract translation \"{key}\" to {}", file_name(file)),
+        kind: Some("refactor.extract".into()),
+        preferred: false,
+        edits: Vec::new(),
+        data: Some(format!("translate\n{file}\n{}\n{}\n{key}", range.start, range.end)),
+    }]
+}
+
+const SERVICE_FILES: [&str; 3] = ["config/services.yaml", "config/services.yml", "config/services.xml"];
+
+/// The first existing service definition file of the project and its text.
+fn services_file(project: &Project) -> Option<(String, String)> {
+    let root = project.root().ok()?;
+    SERVICE_FILES.iter().find_map(|relative| {
+        let path = format!("{root}/{relative}");
+        project.read_file(&path).ok().map(|text| (path, text))
+    })
+}
+
+/// Appends the definition of the class in `class_file` to the service file.
+fn service_definition_edit(index: &Index, services_file: &str, class_file: &str) -> Result<(String, Vec<TextEdit>), Error> {
+    let project = project_for(services_file).ok_or("The file is not in an open project.")?;
+    let services = project.read_file(services_file)?;
+    let source = project.read_file(class_file)?;
+    let model = php_text::class_model(&source).ok_or("No class found.")?;
+    let read = |file: &str| project.read_file(file).ok();
+    let ctx = checks::Context::new(index, &read);
+
+    let plan = service_gen::plan(&ctx, &model, &[], !service_gen::has_autoconfigure(&services));
+    let (range, text) = match services_file.ends_with(".xml") {
+        true => service_gen::xml_insertion(&services, &plan).ok_or("The service file has no <services> element.")?,
+        false => service_gen::yaml_insertion(&services, &plan),
+    };
+
+    Ok((services_file.to_owned(), vec![TextEdit { range: range_of(&services, range.start, range.end), text }]))
+}
+
+/// Service definition generators: a new definition for the class at the caret
+/// (in the project's service file) and, in a YAML service file, constructor
+/// arguments and implied tags for the service at the caret.
+fn service_actions(index: &Index, doc: &Document, offset: usize) -> Vec<CodeAction> {
+    let Some(project) = project_for(&doc.path) else { return Vec::new() };
+    let read = |file: &str| project.read_file(file).ok();
+    let ctx = checks::Context::new(index, &read);
+    let mut actions = Vec::new();
+
+    if doc.language == "yaml" && checks::is_service_file(&doc.path) {
+        let edit = |range: std::ops::Range<usize>, text: String| vec![(doc.path.clone(), vec![TextEdit { range: range_of(&doc.text, range.start, range.end), text }])];
+
+        if let Some((range, text)) = service_gen::resync_arguments(&ctx, &doc.text, offset) {
+            actions.push(CodeAction { title: "Resync arguments with the constructor".into(), kind: Some("refactor.rewrite".into()), preferred: false, edits: edit(range, text), data: None });
+        }
+
+        if let Some((tags, (range, text))) = service_gen::add_implied_tags(&ctx, &doc.text, offset) {
+            actions.push(CodeAction { title: format!("Add tags {}", tags.join(", ")), kind: Some("refactor.rewrite".into()), preferred: false, edits: edit(range, text), data: None });
+        }
+    }
+
+    if doc.language == "xml" && checks::is_service_file(&doc.path) && doc.text.contains("<container") {
+        let edit = |range: std::ops::Range<usize>, text: String| vec![(doc.path.clone(), vec![TextEdit { range: range_of(&doc.text, range.start, range.end), text }])];
+
+        if let Some((range, text)) = service_gen::add_arguments_xml(&ctx, &doc.text, offset) {
+            actions.push(CodeAction { title: "Add arguments from the constructor".into(), kind: Some("refactor.rewrite".into()), preferred: false, edits: edit(range, text), data: None });
+        }
+
+        if let Some((tags, (range, text))) = service_gen::add_implied_tags_xml(&ctx, &doc.text, offset) {
+            actions.push(CodeAction { title: format!("Add tags {}", tags.join(", ")), kind: Some("refactor.rewrite".into()), preferred: false, edits: edit(range, text), data: None });
+        }
+    }
+
+    if doc.language != "php" {
+        return actions;
+    }
+
+    let Some(model) = php_text::class_model(&doc.text) else { return actions };
+    let masked = php_text::mask(&doc.text);
+    let line_start = masked[..model.name_range.start].rfind('\n').map_or(0, |at| at + 1);
+    let line_end = masked[model.name_range.start..].find('\n').map_or(masked.len(), |at| model.name_range.start + at);
+    let on_declaration = (line_start..=line_end).contains(&offset);
+    let declaration = &masked[line_start..model.name_range.start];
+    let concrete = declaration.contains("class ") && !declaration.contains("abstract");
+    if !on_declaration || !concrete || !index.classes.contains_key(&model.fqcn) || index.services.contains_key(&model.fqcn) {
+        return actions;
+    }
+
+    let Some((services_path, services)) = services_file(&project) else { return actions };
+    if service_gen::registered_by_prototype(&services, &model.fqcn) {
+        return actions;
+    }
+
+    actions.push(CodeAction {
+        title: format!("Add service definition to {}", file_name(&services_path)),
+        kind: Some("refactor.rewrite".into()),
+        preferred: false,
+        edits: Vec::new(),
+        data: Some(format!("service\n{services_path}\n{}", doc.path)),
+    });
+    actions
+}
+
+/// Replaces a route, template, translation key or translation domain that is
+/// not defined with the single known name that differs by a typo.
+fn typo_fixes(index: &Index, doc: &Document, offset: usize, selection_end: usize) -> Vec<CodeAction> {
+    let mut wanted: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+
+    if let Some(reference) = refs::reference_at(&doc.language, &doc.text, offset) {
+        let name = &doc.text[reference.start..reference.end];
+        let domain = domain_of(&doc.language, &doc.text, &reference);
+        let known = match reference.kind {
+            Kind::Route if index.compiled_routes && !name.starts_with('_') && !index.routes.contains_key(name) => Some(&index.routes),
+            Kind::Template if !name.starts_with('@') && !index.templates.contains_key(name) => Some(&index.templates),
+            Kind::Translation => index.translations.get(&domain).filter(|keys| !keys.contains_key(name)),
+            _ => None,
+        };
+
+        let near = known.filter(|_| !is_dynamic(name)).and_then(|names| suggest::closest(name, names.keys().map(String::as_str).filter(|candidate| !candidate.starts_with('_'))));
+        wanted.extend(near.map(|candidate| (reference.start..reference.end, candidate.to_owned())));
+    }
+
+    let read = |_: &str| None;
+    let domain_codes = ["missing-translation-domain", "twig-missing-translation-domain"];
+    for finding in findings(index, Groups::from_settings(), &read, &doc.path, &doc.language, &doc.text) {
+        let overlaps = finding.start <= selection_end && finding.end >= offset;
+        if !overlaps || !domain_codes.contains(&finding.code) {
+            continue;
+        }
+
+        let domains = index.translations.keys().map(String::as_str);
+        let near = suggest::closest(&doc.text[finding.start..finding.end], domains);
+        wanted.extend(near.map(|candidate| (finding.start..finding.end, candidate.to_owned())));
+    }
+
+    wanted
+        .into_iter()
+        .map(|(range, candidate)| CodeAction {
+            title: format!("Change to \"{candidate}\""),
+            kind: Some("quickfix".into()),
+            preferred: true,
+            edits: vec![(doc.path.clone(), vec![TextEdit { range: range_of(&doc.text, range.start, range.end), text: candidate }])],
+            data: None,
+        })
+        .collect()
 }
 
 /// Tool window node keys: `group:<kind>`, `domain:<name>`, `<kind>:<name>`, `translation:<domain>:<key>`.
@@ -960,6 +1346,55 @@ impl Main {
         items
     }
 
+    fn routes(&self, index: &Index) -> Vec<Route> {
+        let mut routes = Vec::new();
+        let mut handled: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
+        let mut named: BTreeSet<&str> = BTreeSet::new();
+
+        for def in &index.route_defs {
+            handled.insert((&def.class, def.member.as_deref()));
+            named.extend(def.name.as_deref());
+            let class = if def.class.is_empty() { "Closure" } else { def.class.as_str() };
+            let handler = Handler { class: class.to_owned(), member: def.member.clone() };
+            let width = def.path.len() as u32;
+            let location = Some(Location { path: def.file.clone(), range: Range::new(def.at, Position::new(def.at.line, def.at.character + width)) });
+            let methods: Vec<&str> = if def.methods.is_empty() { vec!["ANY"] } else { def.methods.iter().map(String::as_str).collect() };
+            for method in methods {
+                routes.push(Route { method: method.to_owned(), path: def.path.clone(), handler: handler.clone(), name: def.name.clone(), location: location.clone() });
+            }
+        }
+
+        for (name, entry) in &index.routes {
+            if named.contains(name.as_str()) {
+                continue;
+            }
+
+            let controller = entry.detail.as_deref().filter(|detail| !detail.starts_with('/'));
+            let (class, member) = match controller.and_then(|controller| controller.split_once("::")) {
+                Some((class, member)) => (class.rsplit('\\').next().unwrap_or(class), Some(member)),
+                None => (controller.map_or("Closure", |class| class.rsplit('\\').next().unwrap_or(class)), None),
+            };
+            if handled.contains(&(class, member)) {
+                continue;
+            }
+
+            let path = entry.detail.as_deref().filter(|detail| detail.starts_with('/')).unwrap_or(name);
+            routes.push(Route {
+                method: "ANY".into(),
+                path: path.to_owned(),
+                handler: Handler { class: class.to_owned(), member: member.map(str::to_owned) },
+                name: Some(name.clone()),
+                location: location(entry, name.len() as u32),
+            });
+        }
+
+        routes
+    }
+
+    fn selected_route(&self) -> Option<&Route> {
+        self.window.as_ref()?.routes.route(self.selected.as_deref()?)
+    }
+
     fn view_index(&self, ctx: &Invocation) -> Option<&Index> {
         let root = ctx.project()?.root().ok()?;
         self.indexes.get(&root)
@@ -1000,6 +1435,7 @@ impl Views for Main {
             return Ok(profiler_view(ctx));
         }
 
+        let routes_active = self.window.get_or_insert_with(Window::new).sections.active() == ROUTES_SECTION;
         let reindex = Button::new("reindex", "Reindex").icon("refresh");
         let Some(index) = self.view_index(ctx) else {
             return Ok(View::message("This project is not a Symfony application.").button(reindex));
@@ -1014,13 +1450,54 @@ impl Views for Main {
             status.push_str(" · Index incomplete (time limit reached)");
         }
 
-        Ok(View::new(Body::Tree(self.tree(index)))
+        let base = View::new(Body::Tree(Vec::new()))
             .button(reindex)
             .button(Button::new("cache-warmup", "Warm Up Cache").icon("build-project"))
-            .status(&status))
+            .status(&status);
+        let (routes, tree) = match routes_active {
+            true => (self.routes(index), Vec::new()),
+            false => (Vec::new(), self.tree(index)),
+        };
+        let window = self.window.get_or_insert_with(Window::new);
+        let view = if routes_active {
+            window.routes.set_routes(routes);
+            window.routes.render(base)
+        } else {
+            View { body: Body::Tree(tree), ..base }
+        };
+        let view = window.sections.buttons(view, &[]);
+        Ok(view)
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, ctx: &Invocation) -> Result<(), Error> {
+        if view == VIEW {
+            let window = self.window.get_or_insert_with(Window::new);
+            if window.sections.handle(&event) {
+                host::refresh_view(view);
+                return Ok(());
+            }
+
+            if let ViewEvent::Select(key) = &event {
+                self.selected = Some(key.clone());
+            }
+
+            if window.sections.active() == ROUTES_SECTION {
+                match window.routes.handle(&event) {
+                    RouteEvent::Changed => {
+                        host::refresh_view(view);
+                        return Ok(());
+                    }
+                    RouteEvent::Open(route) => {
+                        if let Some(location) = route.location {
+                            host::open_location(&location.path, location.range.start.line, location.range.start.character)?;
+                        }
+                        return Ok(());
+                    }
+                    RouteEvent::Ignored => {}
+                }
+            }
+        }
+
         match event {
             ViewEvent::Expand(key) => {
                 self.expanded.insert(key);
@@ -1047,7 +1524,17 @@ impl Views for Main {
     }
 }
 
-register_plugin!(Main, providers, views);
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn() -> Main = <Main as Default>::default;
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    struct Component;
+    openidea_plugin::__plugin_exports!(Main, Component, openidea_plugin::bindings);
+    openidea_plugin::__providers_exports!(Main, Component);
+    openidea_plugin::__views_exports!(Main, Component);
+    openidea_plugin::__indexing_exports!(Main, Component);
+    openidea_plugin::bindings::__export_plugin_world!(Component with_types_in openidea_plugin::bindings);
+};
 
 #[cfg(test)]
 mod tests {
@@ -1219,32 +1706,6 @@ mod tests {
     }
 
     #[test]
-    fn unclosed_block_tag_is_reported() {
-        let host = MockHost::install();
-        let plugin = activated(&host);
-        let index = plugin.index_for("/project/x").unwrap();
-        let found = |text: &str| -> Vec<(String, u32)> {
-            problems(index, "/project/templates/a.html.twig", "twig", text)
-                .into_iter()
-                .filter(|d| d.code.as_deref() == Some("unclosed-tag"))
-                .map(|d| (d.message, d.range.start.character))
-                .collect()
-        };
-
-        let reported = found("{% block a %}\n{% if x %}{% endif %}");
-        assert_eq!(reported, [("Tag \"block\" is never closed: missing {% endblock %}.".to_owned(), 3)]);
-
-        for name in ["for x in y", "macro m()", "embed 'a.html.twig'", "apply upper", "autoescape", "with {}", "cache 'k'", "sandbox"] {
-            assert_eq!(found(&format!("{{% {name} %}}")).len(), 1, "{name}");
-        }
-
-        assert_eq!(found("{% if a %}{% for x in y %}{% endif %}").len(), 1);
-        assert!(found("{% block a %}{% if x %}{% else %}{% endif %}{% endblock %}{% block t 'x' %}{% set v = 1 %}").is_empty());
-        assert!(found("{# {% block a %} #}{% verbatim %}{% if %}{% endverbatim %}").is_empty());
-        assert!(found("{%- block a -%}{%- endblock -%}").is_empty());
-    }
-
-    #[test]
     fn reports_missing_names_and_duplicate_routes() {
         let host = MockHost::install();
         let plugin = activated(&host);
@@ -1273,32 +1734,141 @@ mod tests {
         assert_eq!(host.diagnostics()["/project/templates/broken.html.twig"].len(), 1);
     }
 
-    #[test]
-    fn marks_controllers_templates_blocks_and_services() {
-        let host = MockHost::install();
+    fn console_host() -> (MockHost, Main) {
+        let host = MockHost::install().with_capabilities(&["project.read", "events", "process:php", "editor.read", "editor.write"]);
         let mut plugin = activated(&host);
-
-        let template = host_text(&host, "templates/blog/index.html.twig");
-        let markers = plugin.line_markers(&doc("/project/templates/blog/index.html.twig", "twig", &template));
-        let tooltips: Vec<_> = markers.iter().map(|m| (m.line, m.tooltip.as_str())).collect();
-        assert_eq!(tooltips, [(0, "Rendered by BlogController::index"), (1, "Overrides block \"body\" of base.html.twig")]);
-
-        let controller = host_text(&host, "src/Controller/BlogController.php");
-        let markers = plugin.line_markers(&doc("/project/src/Controller/BlogController.php", "php", &controller));
-        assert_eq!(markers[0].line, 7);
-        assert_eq!(markers[0].target.as_ref().unwrap().path, "/project/templates/blog/index.html.twig");
-
-        let mailer = host_text(&host, "src/Mailer.php");
-        let markers = plugin.line_markers(&doc("/project/src/Mailer.php", "php", &mailer));
-        assert_eq!(markers[0].tooltip, "Service app.mailer");
-
-        let services = host_text(&host, "config/services.yaml");
-        let markers = plugin.line_markers(&doc("/project/config/services.yaml", "yaml", &services));
-        assert_eq!(markers[0].target.as_ref().unwrap().path, "/project/src/Mailer.php");
+        host.add_file("src/Command/SyncCommand.php", "<?php\n#[AsCommand(name: 'app:sync')]\nclass SyncCommand {}\n");
+        plugin.index_all();
+        host.on_process("php", |args, _| {
+            assert_eq!(args, ["bin/console", "list", "--raw"]);
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "about  Display info\ncache:clear  Clear\n".into(), stderr: String::new() })
+        });
+        (host, plugin)
     }
 
-    fn host_text(host: &MockHost, path: &str) -> String {
-        host.invocation().project().unwrap().read_file(path).unwrap()
+    #[test]
+    fn runs_a_picked_console_command_in_a_terminal() {
+        let (host, mut plugin) = console_host();
+        host.answer_next_prompt(Some(&["app:sync"]));
+        host.answer_next_prompt(Some(&["--env=dev -v"]));
+        plugin.run_command("run-console-command", &host.invocation(), None).unwrap();
+        let terminal = &host.terminals()[0];
+        assert_eq!((terminal.title.as_str(), terminal.program.as_str()), ("console app:sync", "php"));
+        assert_eq!(terminal.args, ["bin/console", "app:sync", "--env=dev", "-v"]);
+    }
+
+    fn generator_host(capabilities: &[&str]) -> (MockHost, Main) {
+        let host = MockHost::install().with_capabilities(capabilities);
+        let mut plugin = activated(&host);
+        host.add_file("templates/base.html.twig", "{% block body %}{% endblock %}");
+        host.add_file("src/Form/PostType.php", "<?php\nnamespace App\\Form;\n\nclass PostType\n{\n    function f($builder) { $builder->add('title')->add('body', TextareaType::class); }\n}\n");
+        plugin.index_all();
+        (host, plugin)
+    }
+
+    #[test]
+    fn make_runs_the_picked_maker_in_a_terminal() {
+        let (host, mut plugin) = generator_host(&["project.read", "process:php"]);
+        host.on_process("php", |args, _| {
+            assert_eq!(args, ["bin/console", "list", "make", "--raw"]);
+            Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: "make:controller  Create a controller\nmake:entity  Create an entity\ncache:clear  x\n".into(), stderr: String::new() })
+        });
+        host.answer_next_prompt(Some(&["controller"]));
+        host.answer_next_prompt(Some(&["Blog --no-template"]));
+        plugin.run_command("make", &host.invocation(), None).unwrap();
+        let terminal = &host.terminals()[0];
+        assert_eq!((terminal.title.as_str(), terminal.program.as_str()), ("make:controller", "php"));
+        assert_eq!(terminal.args, ["bin/console", "make:controller", "Blog", "--no-template"]);
+    }
+
+    #[test]
+    fn make_falls_back_to_the_built_in_makers_and_stops_when_dismissed() {
+        let (host, mut plugin) = generator_host(&["project.read", "process:php"]);
+        host.on_process("php", |_, _| Err(Error::Invalid("no console".into())));
+        host.answer_next_prompt(Some(&["form"]));
+        plugin.run_command("make", &host.invocation(), None).unwrap();
+        assert!(host.terminals().is_empty());
+
+        host.answer_next_prompt(Some(&["form"]));
+        host.answer_next_prompt(Some(&[""]));
+        plugin.run_command("make", &host.invocation(), None).unwrap();
+        assert_eq!(host.terminals()[0].args, ["bin/console", "make:form"]);
+    }
+
+    #[test]
+    fn create_template_writes_with_tee_and_falls_back_to_the_clipboard() {
+        let (host, mut plugin) = generator_host(&["project.read", "process:tee", "clipboard"]);
+        host.on_process("tee", |_, _| Ok(openidea_plugin::ProcessOutput { status: Some(0), stdout: String::new(), stderr: String::new() }));
+        host.answer_next_prompt(Some(&["blog/show.html.twig"]));
+        plugin.run_command("create-template", &host.invocation(), None).unwrap();
+        let run = host.process_runs().into_iter().find(|run| run.program == "tee").unwrap();
+        assert_eq!(run.args, ["/project/templates/blog/show.html.twig"]);
+
+        host.answer_next_prompt(Some(&["../escape.html.twig"]));
+        assert!(plugin.run_command("create-template", &host.invocation(), None).is_err());
+        host.answer_next_prompt(Some(&["base.html.twig"]));
+        assert!(plugin.run_command("create-template", &host.invocation(), None).is_err());
+
+        let (denied, mut plugin) = generator_host(&["project.read", "clipboard"]);
+        denied.answer_next_prompt(Some(&["blog/show.html.twig"]));
+        plugin.run_command("create-template", &denied.invocation(), None).unwrap();
+        assert_eq!(denied.clipboard().as_deref(), Some("templates/blog/show.html.twig"));
+    }
+
+    #[test]
+    fn twig_form_rows_are_inserted_from_a_form_type() {
+        let (host, mut plugin) = generator_host(&["project.read", "editor.read", "editor.write"]);
+        host.open_editor("/project/templates/post.html.twig", "twig", "<h1>x</h1>\n", &[(1, 0, 1, 0)]);
+        host.answer_next_prompt(Some(&["App\\Form\\PostType"]));
+        plugin.run_command("twig-form-fields", &host.invocation(), None).unwrap();
+        assert_eq!(host.editor_text(), "<h1>x</h1>\n{{ form_start(form) }}\n{{ form_row(form.title) }}\n{{ form_row(form.body) }}\n{{ form_end(form) }}\n");
+    }
+
+    #[test]
+    fn dismissed_console_prompts_run_nothing() {
+        let (host, mut plugin) = console_host();
+        plugin.run_command("run-console-command", &host.invocation(), None).unwrap();
+        host.answer_next_prompt(Some(&["about"]));
+        plugin.run_command("run-console-command", &host.invocation(), None).unwrap();
+        assert!(host.terminals().is_empty());
+    }
+
+    #[test]
+    fn go_to_commands_open_the_picked_name() {
+        let (host, mut plugin) = console_host();
+        let ctx = host.invocation();
+        host.answer_next_prompt(Some(&["blog_index"]));
+        plugin.run_command("go-to-route", &ctx, None).unwrap();
+        host.answer_next_prompt(Some(&["app:sync"]));
+        plugin.run_command("go-to-command", &ctx, None).unwrap();
+        host.answer_next_prompt(None);
+        plugin.run_command("go-to-service", &ctx, None).unwrap();
+        let opened = host.opened_locations();
+        assert_eq!(opened.len(), 2);
+        assert_eq!(opened[0].0, "/project/src/Controller/BlogController.php");
+        assert_eq!(opened[1], ("/project/src/Command/SyncCommand.php".into(), 1, 19));
+    }
+
+    #[test]
+    fn extends_generator_inserts_the_picked_template() {
+        let (host, mut plugin) = console_host();
+        host.open_editor("/project/templates/page.html.twig", "twig", "{% block body %}{% endblock %}", &[(0, 0, 0, 0)]);
+        host.answer_next_prompt(Some(&["base.html.twig"]));
+        plugin.run_command("twig-extends", &host.invocation(), None).unwrap();
+        assert_eq!(host.editor_text(), "{% extends 'base.html.twig' %}\n{% block body %}{% endblock %}");
+
+        host.answer_next_prompt(None);
+        assert!(plugin.run_command("twig-extends", &host.invocation(), None).is_err());
+        assert_eq!(host.editor_version(), 2);
+    }
+
+    #[test]
+    fn dismissed_extends_generator_leaves_the_template_alone() {
+        let (host, mut plugin) = console_host();
+        host.open_editor("/project/templates/page.html.twig", "twig", "x", &[(0, 0, 0, 0)]);
+        host.answer_next_prompt(None);
+        plugin.run_command("twig-extends", &host.invocation(), None).unwrap();
+        assert_eq!(host.editor_text(), "x");
     }
 
     #[test]
@@ -1323,6 +1893,7 @@ mod tests {
         let mut plugin = activated(&host);
         let ctx = host.invocation();
 
+        plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
         plugin.handle(VIEW, ViewEvent::Expand("group:route".into()), &ctx).unwrap();
         let View { body: Body::Tree(items), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a tree") };
         let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
@@ -1339,6 +1910,145 @@ mod tests {
 
         plugin.handle(VIEW, ViewEvent::Activate("route:blog_index".into()), &ctx).unwrap();
         assert_eq!(host.opened_locations(), [("/project/src/Controller/BlogController.php".into(), 4, 28)]);
+    }
+
+    fn toolbar_labels(view: &View) -> Vec<String> {
+        view.toolbar.iter().map(|button| button.label.clone()).collect()
+    }
+
+    #[test]
+    fn symfony_window_has_routes_and_index_sections() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+
+        let view = plugin.render(VIEW, None, &ctx).unwrap();
+        assert!(matches!(view.body, Body::List(_)));
+        assert_eq!(toolbar_labels(&view)[..2], ["\u{25cf} Routes", "Index"]);
+
+        plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
+        let view = plugin.render(VIEW, None, &ctx).unwrap();
+        assert!(matches!(view.body, Body::Tree(_)));
+        assert_eq!(toolbar_labels(&view)[..2], ["Routes", "\u{25cf} Index"]);
+    }
+
+    #[test]
+    fn routes_section_lists_controller_method_and_route_name() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+
+        let View { body: Body::List(rows), status, .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "/blog");
+        assert_eq!(rows[0].detail.as_deref(), Some("[ANY] BlogController \u{b7} blog_index"));
+        assert_eq!(status.as_deref(), Some("1 endpoints"));
+
+        plugin.handle(VIEW, ViewEvent::Activate(rows[0].key.clone()), &ctx).unwrap();
+        assert_eq!(host.opened_locations(), [("/project/src/Controller/BlogController.php".into(), 4, 13)]);
+    }
+
+    #[test]
+    fn attribute_methods_give_one_row_each_with_the_controller_method() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        host.add_file(
+            "src/Controller/UserController.php",
+            "<?php\nnamespace App\\Controller;\n#[Route('/users')]\nclass UserController\n{\n    #[Route('/{id}', name: 'app_user_show', methods: ['GET', 'POST'])]\n    public function show() {}\n}\n",
+        );
+        plugin.run_command("reindex", &host.invocation(), None).unwrap();
+
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &host.invocation()).unwrap() else { panic!("not a list") };
+        let details: Vec<_> = rows.iter().map(|row| (row.label.as_str(), row.detail.clone().unwrap())).collect();
+        assert!(details.contains(&("/users/{id}", "[GET] UserController \u{b7} app_user_show".to_owned())), "{details:?}");
+        assert!(details.contains(&("/users/{id}", "[POST] UserController \u{b7} app_user_show".to_owned())), "{details:?}");
+    }
+
+    #[test]
+    fn filter_and_toggle_buttons_show_only_in_the_routes_section() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+
+        let labels = toolbar_labels(&plugin.render(VIEW, None, &ctx).unwrap());
+        assert!(labels.iter().any(|label| label.starts_with("Filter")), "{labels:?}");
+        assert!(labels.contains(&"Tree".to_owned()), "{labels:?}");
+
+        plugin.handle(VIEW, ViewEvent::Button("section:index".into()), &ctx).unwrap();
+        let labels = toolbar_labels(&plugin.render(VIEW, None, &ctx).unwrap());
+        assert!(!labels.iter().any(|label| label.starts_with("Filter") || label == "Tree" || label == "Clear"), "{labels:?}");
+    }
+
+    #[test]
+    fn non_symfony_project_still_shows_the_message() {
+        let host = MockHost::install();
+        host.add_file("composer.json", r#"{"require": {"laravel/framework": "^11.0"}}"#);
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        let view = plugin.render(VIEW, None, &host.invocation()).unwrap();
+        let Body::Message(text) = view.body else { panic!("not a message") };
+        assert_eq!(text, "This project is not a Symfony application.");
+    }
+
+    #[test]
+    fn route_row_actions_use_the_selected_route() {
+        let host = MockHost::install().with_capabilities(&["project.read", "clipboard"]);
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+
+        plugin.handle(VIEW, ViewEvent::Select(rows[0].key.clone()), &ctx).unwrap();
+        host.answer_next_prompt(Some(&["http://localhost:8000"]));
+        plugin.run_command("route-copy-curl", &ctx, None).unwrap();
+        assert_eq!(host.clipboard().as_deref(), Some("curl -X GET 'http://localhost:8000/blog'"));
+    }
+
+    #[test]
+    fn dismissed_base_url_prompt_copies_nothing() {
+        let host = MockHost::install().with_capabilities(&["project.read", "clipboard"]);
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+
+        plugin.handle(VIEW, ViewEvent::Select(rows[0].key.clone()), &ctx).unwrap();
+        host.answer_next_prompt(None);
+        plugin.run_command("route-copy-curl", &ctx, None).unwrap();
+        assert_eq!(host.clipboard(), None);
+    }
+
+    #[test]
+    fn project_without_routes_shows_the_empty_message() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        host.add_file("config/routes.yaml", "");
+        host.add_file("src/Controller/BlogController.php", "<?php\nclass BlogController {}\n");
+        plugin.run_command("reindex", &host.invocation(), None).unwrap();
+
+        let view = plugin.render(VIEW, None, &host.invocation()).unwrap();
+        assert!(matches!(view.body, Body::Message(ref text) if text.contains("No routes")), "{:?}", view.body);
+    }
+
+    #[test]
+    fn filter_on_a_vanished_controller_falls_back_to_all_routes() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let ctx = host.invocation();
+        host.add_file(
+            "src/Controller/UserController.php",
+            "<?php\nnamespace App\\Controller;\nclass UserController\n{\n    #[Route('/users', name: 'users')]\n    public function index() {}\n}\n",
+        );
+        plugin.run_command("reindex", &ctx, None).unwrap();
+        plugin.render(VIEW, None, &ctx).unwrap();
+        host.answer_next_prompt(Some(&["UserController"]));
+        plugin.handle(VIEW, ViewEvent::Button("routes:filter".into()), &ctx).unwrap();
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+        assert_eq!(rows.len(), 1);
+
+        host.add_file("src/Controller/UserController.php", "<?php\nclass UserController {}\n");
+        plugin.run_command("reindex", &ctx, None).unwrap();
+        let View { body: Body::List(rows), .. } = plugin.render(VIEW, None, &ctx).unwrap() else { panic!("not a list") };
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]
@@ -1543,6 +2253,19 @@ mod tests {
     }
 
     #[test]
+    fn imported_macros_are_completed_after_the_alias() {
+        let host = MockHost::install();
+        host.add_file("templates/forms.html.twig", "{% macro input(name, type = 'text') %}x{% endmacro %}{% macro row() %}{% endmacro %}");
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% import 'forms.html.twig' as f %}{{ f.in| }}");
+        assert_eq!(offered, ["input", "row"]);
+
+        let own = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% import _self as me %}{% macro mine() %}{% endmacro %}{{ me.| }}");
+        assert_eq!(own, ["mine"]);
+    }
+
+    #[test]
     fn twig_namespaces_setting_resolves_templates() {
         let host = MockHost::install();
         host.set_setting("twigNamespaces", r#""emails=templates/mail""#);
@@ -1581,6 +2304,22 @@ mod tests {
         let offered = complete_marked(&mut plugin, "/project/templates/a.html.twig", "twig", "{% include '|' %}");
         assert!(offered.contains(&"@c/fine.html.twig".to_owned()));
         assert!(!offered.iter().any(|name| name.contains("welcome") || name.starts_with("@a/") || name.starts_with("@b/")), "{offered:?}");
+    }
+
+    #[test]
+    fn extra_service_and_routing_files_settings_feed_the_index() {
+        let host = MockHost::install();
+        host.set_setting("extraServiceFiles", r#""legacy/services.yml, legacy/other.xml, gone.yml""#);
+        host.set_setting("extraRoutingFiles", r#""legacy/routes.yml""#);
+        host.add_file("legacy/services.yml", "services:\n    legacy.mailer:\n        class: App\\M\n");
+        host.add_file("legacy/other.xml", "<container><services><service id=\"legacy.xml\" class=\"App\\X\"/></services></container>");
+        host.add_file("legacy/routes.yml", "legacy_home:\n    path: /\n    controller: App\\C::i\n");
+        let plugin = activated(&host);
+
+        let index = plugin.index_for(SERVICES_FILE).unwrap();
+        assert!(index.services.contains_key("legacy.mailer"));
+        assert!(index.services.contains_key("legacy.xml"));
+        assert!(index.routes.contains_key("legacy_home"));
     }
 
     #[test]
@@ -1718,8 +2457,8 @@ mod tests {
             paths.extend(value(line, "path"));
         }
 
-        assert_eq!(ids.len(), 12);
-        assert_eq!((names.len(), paths.len()), (12, 12));
+        assert_eq!(ids.len(), 17);
+        assert_eq!((names.len(), paths.len()), (17, 17));
         for list in [&ids, &names, &paths] {
             let unique: BTreeSet<_> = list.iter().collect();
             assert_eq!(unique.len(), list.len(), "{list:?}");
@@ -1823,5 +2562,360 @@ mod tests {
         plugin.indexes.clear();
         plugin.update_status_item("/not-symfony");
         assert!(!host.status_items().contains_key("symfony"));
+    }
+
+    fn change_titles(plugin: &mut Main, document: &Document, marked_at: usize) -> Vec<(String, String)> {
+        let before = &document.text[..marked_at];
+        let line = before.matches('\n').count() as u32;
+        let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
+        let at = Position::new(line, column);
+        plugin
+            .code_actions(document, Range::new(at, at))
+            .into_iter()
+            .filter(|action| action.title.starts_with("Change to"))
+            .map(|action| (action.title, action.edits[0].1[0].text.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn typo_in_a_route_template_key_or_domain_offers_the_known_name() {
+        let host = MockHost::install();
+        host.add_file("var/cache/dev/url_generating_routes.php", "<?php\n\nreturn [\n    'app_home' => [[], ['_controller' => 'x'], [], []],\n    'app_about' => [[], ['_controller' => 'x'], [], []],\n];\n");
+        let mut plugin = activated(&host);
+        let path = "/project/src/Controller/BlogController.php";
+
+        let route = doc(path, "php", "<?php\n$this->generateUrl('app_hom');\n");
+        assert_eq!(change_titles(&mut plugin, &route, route.text.find("app_hom").unwrap() + 2), [("Change to \"app_home\"".to_owned(), "app_home".to_owned())]);
+
+        let template = doc(path, "php", "<?php\n$this->render('blog/indx.html.twig');\n");
+        assert_eq!(change_titles(&mut plugin, &template, template.text.find("indx").unwrap()), [("Change to \"blog/index.html.twig\"".to_owned(), "blog/index.html.twig".to_owned())]);
+
+        let domain = doc(path, "php", "<?php\n$t->trans('menu', [], 'admn');\n");
+        assert_eq!(change_titles(&mut plugin, &domain, domain.text.find("admn").unwrap()), [("Change to \"admin\"".to_owned(), "admin".to_owned())]);
+
+        let twig_path = "/project/templates/a.html.twig";
+        let in_twig = doc(twig_path, "twig", "{{ path('app_abot') }}{{ 'app.titl'|trans({}, 'messages') }}");
+        assert_eq!(change_titles(&mut plugin, &in_twig, in_twig.text.find("app_abot").unwrap()), [("Change to \"app_about\"".to_owned(), "app_about".to_owned())]);
+        assert_eq!(change_titles(&mut plugin, &in_twig, in_twig.text.find("app.titl").unwrap()), [("Change to \"app.title\"".to_owned(), "app.title".to_owned())]);
+    }
+
+    #[test]
+    fn typo_fix_is_quiet_for_ties_dynamic_names_and_defined_names() {
+        let host = MockHost::install();
+        host.add_file("var/cache/dev/url_generating_routes.php", "<?php\n\nreturn [\n    'app_hom1' => [[], [], [], []],\n    'app_hom2' => [[], [], [], []],\n    'app_home' => [[], [], [], []],\n];\n");
+        let mut plugin = activated(&host);
+        let path = "/project/src/Controller/BlogController.php";
+
+        for text in ["<?php\n$this->generateUrl('app_hom');\n", "<?php\n$this->generateUrl('app_home');\n", "<?php\n$this->generateUrl('app_' . $x);\n", "<?php\n$this->generateUrl('zzzzzz');\n"] {
+            let document = doc(path, "php", text);
+            let at = text.find("generateUrl").unwrap() + 14;
+            assert!(change_titles(&mut plugin, &document, at).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn twig_path_replacement_hints_at_exact_route_paths_only() {
+        let host = MockHost::install();
+        host.add_file("config/routes.yaml", "blog:\n    path: /blog\n    controller: App\\C::i\nshow:\n    path: /blog/{id}\nx:\n    path: /dup\ny:\n    path: /dup\n");
+        let mut plugin = activated(&host);
+        let text = "<a href=\"/blog\">a</a><a href='/blog/{id}'>b</a><a href=\"/dup\">c</a><a href=\"https://x/blog\">d</a><form action=\"/blog\"></form><a data-href=\"/blog\"></a>{# <a href=\"/blog\"> #}";
+        let template = doc("/project/templates/a.html.twig", "twig", text);
+
+        let index = plugin.index_for("/project/x").unwrap();
+        let read = |_: &str| None;
+        let found = extra_problems(index, Groups::all_on(), &read, &template.path, "twig", text);
+        let found: Vec<_> = found.iter().filter(|d| d.code.as_deref() == Some("twig-path-replacement")).collect();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].severity, Severity::Hint);
+        assert_eq!(found[0].message, "Use path('blog') instead of the hard-coded URL \"/blog\".");
+
+        let at = Position::new(0, 10);
+        let actions = plugin.code_actions(&template, Range::new(at, at));
+        let fix = actions.iter().find(|action| action.title == "Replace with {{ path('blog') }}").unwrap();
+        assert_eq!(fix.edits[0].1[0].range, Range::new(Position::new(0, 9), Position::new(0, 14)));
+    }
+
+    const MAILER: &str = "<?php\nnamespace App\\Service;\n\nuse App\\Logger;\n\nclass Mailer\n{\n    public function __construct(private Logger $logger, private string $dsn, private int $retries = 3, private array $options = [], private ?Missing $x = null)\n    {\n    }\n}\n";
+
+    const VOTER: &str = "<?php\nnamespace App\\Security;\n\nuse Symfony\\Component\\Security\\Core\\Authorization\\Voter\\Voter;\n\nclass PostVoter extends Voter\n{\n}\n";
+
+    fn generator_project(host: &MockHost, services: &str) {
+        host.add_file("composer.json", r#"{"require": {"symfony/framework-bundle": "^7.0"}, "autoload": {"psr-4": {"App\\": "src/"}}}"#);
+        host.add_file("src/Service/Mailer.php", MAILER);
+        host.add_file("src/Logger.php", "<?php\nnamespace App;\n\nclass Logger {}\n");
+        host.add_file("src/Security/PostVoter.php", "<?php\nnamespace App\\Security;\n\nuse Symfony\\Component\\Security\\Core\\Authorization\\Voter\\Voter;\n\nclass PostVoter extends Voter\n{\n}\n");
+        if !services.is_empty() {
+            host.add_file("config/services.yaml", services);
+        }
+    }
+
+    fn service_action(plugin: &mut Main, path: &str, text: &str, marker: &str) -> Option<CodeAction> {
+        let document = doc(path, "php", text);
+        let before = &text[..text.find(marker).unwrap()];
+        let at = Position::new(before.matches('\n').count() as u32, before.rsplit('\n').next().unwrap().len() as u32);
+        let action = plugin.code_actions(&document, Range::new(at, at)).into_iter().find(|action| action.title.starts_with("Add service definition"))?;
+        Some(plugin.resolve_code_action(&document, action).unwrap())
+    }
+
+    fn applied(text: &str, action: &CodeAction) -> String {
+        let (_, edits) = &action.edits[0];
+        let mut out = text.to_owned();
+        for edit in edits {
+            let start = text::offset(text, edit.range.start).unwrap();
+            let end = text::offset(text, edit.range.end).unwrap();
+            out.replace_range(start..end, &edit.text);
+        }
+        out
+    }
+
+    #[test]
+    fn service_definition_is_appended_to_the_existing_yaml_file() {
+        let host = MockHost::install();
+        let services = "parameters:\n    a: 1\n\nservices:\n    _defaults:\n        autowire: true\n\n    App\\Other: ~\n\nwhen@dev:\n    services:\n        x: ~\n";
+        generator_project(&host, services);
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        let action = service_action(&mut plugin, "/project/src/Service/Mailer.php", MAILER, "class Mailer").unwrap();
+        assert_eq!(action.title, "Add service definition to services.yaml");
+        assert_eq!(action.edits[0].0, "/project/config/services.yaml");
+        let out = applied(services, &action);
+        assert!(out.contains("    App\\Other: ~\n\n    App\\Service\\Mailer:\n        arguments:\n            $logger: '@App\\Logger'\n            $dsn: ''\n\nwhen@dev:"), "{out}");
+        assert!(!out.contains("$retries") && !out.contains("$options") && !out.contains("$x:"), "{out}");
+    }
+
+    #[test]
+    fn service_definition_adds_implied_tags_unless_autoconfigure_is_on() {
+        let host = MockHost::install();
+        generator_project(&host, "services:\n    _defaults:\n        autowire: true\n");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+        let voter = VOTER.to_owned();
+
+        let action = service_action(&mut plugin, "/project/src/Security/PostVoter.php", &voter, "class PostVoter").unwrap();
+        assert!(applied("services:\n    _defaults:\n        autowire: true\n", &action).ends_with("    App\\Security\\PostVoter:\n        tags: ['security.voter']\n"));
+
+        let auto = "services:\n    _defaults:\n        autowire: true\n        autoconfigure: true\n";
+        host.add_file("config/services.yaml", auto);
+        let action = service_action(&mut plugin, "/project/src/Security/PostVoter.php", &voter, "class PostVoter").unwrap();
+        assert!(applied(auto, &action).ends_with("    App\\Security\\PostVoter: ~\n"));
+    }
+
+    #[test]
+    fn service_definition_goes_into_xml_when_there_is_no_yaml_file() {
+        let host = MockHost::install();
+        generator_project(&host, "");
+        let xml = "<?xml version=\"1.0\"?>\n<container>\n    <services>\n        <service id=\"App\\Other\"/>\n    </services>\n</container>\n";
+        host.add_file("config/services.xml", xml);
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        let action = service_action(&mut plugin, "/project/src/Service/Mailer.php", MAILER, "class Mailer").unwrap();
+        let out = applied(xml, &action);
+        assert!(out.contains("        <service id=\"App\\Other\"/>\n        <service id=\"App\\Service\\Mailer\">\n            <argument key=\"$logger\" type=\"service\" id=\"App\\Logger\"/>\n            <argument key=\"$dsn\" type=\"string\"></argument>\n        </service>\n    </services>"), "{out}");
+    }
+
+    #[test]
+    fn service_definition_is_not_offered_for_registered_or_other_classes() {
+        let host = MockHost::install();
+        generator_project(&host, "services:\n    App\\:\n        resource: '../src/'\n");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+        assert!(service_action(&mut plugin, "/project/src/Service/Mailer.php", MAILER, "class Mailer").is_none());
+
+        host.add_file("config/services.yaml", "services:\n    App\\Service\\Mailer: ~\n");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+        assert!(service_action(&mut plugin, "/project/src/Service/Mailer.php", MAILER, "class Mailer").is_none());
+
+        host.add_file("config/services.yaml", "services: {}\n");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+        assert!(service_action(&mut plugin, "/project/src/Service/Mailer.php", MAILER, "namespace").is_none());
+        assert!(service_action(&mut plugin, "/project/src/Service/Mailer.php", MAILER, "class Mailer").is_some());
+        let abstract_text = MAILER.replace("class Mailer", "abstract class Mailer");
+        assert!(service_action(&mut plugin, "/project/src/Service/Mailer.php", &abstract_text, "abstract class").is_none());
+    }
+
+    fn yaml_actions(plugin: &mut Main, text: &str, marker: &str) -> Vec<CodeAction> {
+        let document = doc("/project/config/services.yaml", "yaml", text);
+        let before = &text[..text.find(marker).unwrap()];
+        let at = Position::new(before.matches('\n').count() as u32, before.rsplit('\n').next().unwrap().len() as u32);
+        plugin.code_actions(&document, Range::new(at, at))
+    }
+
+    fn yaml_applied(text: &str, action: &CodeAction) -> String {
+        let mut out = text.to_owned();
+        for edit in &action.edits[0].1 {
+            let start = text::offset(text, edit.range.start).unwrap();
+            let end = text::offset(text, edit.range.end).unwrap();
+            out.replace_range(start..end, &edit.text);
+        }
+        out
+    }
+
+    #[test]
+    fn arguments_are_resynced_with_the_constructor() {
+        let host = MockHost::install();
+        generator_project(&host, "");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        let stale = "services:\n    App\\Service\\Mailer:\n        arguments:\n            $dsn: 'smtp://x'\n            $gone: 1\n\n    App\\Other: ~\n";
+        let actions = yaml_actions(&mut plugin, stale, "$dsn");
+        let action = actions.iter().find(|action| action.title == "Resync arguments with the constructor").unwrap();
+        assert_eq!(yaml_applied(stale, action), "services:\n    App\\Service\\Mailer:\n        arguments:\n            $logger: '@App\\Logger'\n            $dsn: 'smtp://x'\n\n    App\\Other: ~\n");
+
+        let bare = "services:\n    App\\Service\\Mailer:\n        public: true\n\n    App\\Other: ~\n";
+        let actions = yaml_actions(&mut plugin, bare, "public");
+        let action = actions.iter().find(|action| action.title == "Resync arguments with the constructor").unwrap();
+        assert_eq!(yaml_applied(bare, action), "services:\n    App\\Service\\Mailer:\n        public: true\n        arguments:\n            $logger: '@App\\Logger'\n            $dsn: ''\n\n    App\\Other: ~\n");
+    }
+
+    #[test]
+    fn arguments_resync_is_quiet_for_positional_lists_in_sync_blocks_and_unknown_classes() {
+        let host = MockHost::install();
+        generator_project(&host, "");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        for text in [
+            "services:\n    App\\Service\\Mailer:\n        arguments:\n            - '@App\\Logger'\n",
+            "services:\n    App\\Service\\Mailer:\n        arguments: ['@App\\Logger']\n",
+            "services:\n    App\\Service\\Mailer:\n        arguments:\n            $logger: '@App\\Logger'\n            $dsn: 'x'\n",
+            "services:\n    app.x:\n        class: Vendor\\Thing\n",
+        ] {
+            let marker = if text.contains("app.x") { "app.x" } else { "App\\Service\\Mailer" };
+            let actions = yaml_actions(&mut plugin, text, marker).into_iter().filter(|action| action.title.starts_with("Resync")).count();
+            assert_eq!(actions, 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn implied_tags_are_added_to_a_service_without_tags() {
+        let host = MockHost::install();
+        generator_project(&host, "");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        let text = "services:\n    App\\Security\\PostVoter:\n        public: true\n\n    App\\Other: ~\n";
+        let actions = yaml_actions(&mut plugin, text, "public");
+        let action = actions.iter().find(|action| action.title == "Add tags security.voter").unwrap();
+        assert_eq!(yaml_applied(text, action), "services:\n    App\\Security\\PostVoter:\n        public: true\n        tags: ['security.voter']\n\n    App\\Other: ~\n");
+
+        let tagged = text.replace("public: true", "tags: ['x']");
+        assert!(yaml_actions(&mut plugin, &tagged, "tags").iter().all(|action| !action.title.starts_with("Add tags")));
+
+        let auto = format!("services:\n    _defaults:\n        autoconfigure: true\n{}", &text["services:\n".len()..]);
+        assert!(yaml_actions(&mut plugin, &auto, "public").iter().all(|action| !action.title.starts_with("Add tags")));
+    }
+
+    fn xml_actions(plugin: &mut Main, text: &str, marker: &str) -> Vec<CodeAction> {
+        let document = doc("/project/config/services.xml", "xml", text);
+        let before = &text[..text.find(marker).unwrap()];
+        let at = Position::new(before.matches('\n').count() as u32, before.rsplit('\n').next().unwrap().len() as u32);
+        plugin.code_actions(&document, Range::new(at, at))
+    }
+
+    #[test]
+    fn xml_services_get_tags_and_constructor_arguments() {
+        let host = MockHost::install();
+        generator_project(&host, "");
+        let mut plugin = Main::default();
+        plugin.activate(&host.context("aritti.symfony")).unwrap();
+
+        let text = "<container>\n    <services>\n        <service id=\"App\\Security\\PostVoter\"/>\n        <service id=\"App\\Service\\Mailer\">\n        </service>\n    </services>\n</container>\n";
+        let actions = xml_actions(&mut plugin, text, "PostVoter");
+        let action = actions.iter().find(|action| action.title == "Add tags security.voter").unwrap();
+        assert_eq!(
+            yaml_applied(text, action),
+            "<container>\n    <services>\n        <service id=\"App\\Security\\PostVoter\">\n            <tag name=\"security.voter\"/>\n        </service>\n        <service id=\"App\\Service\\Mailer\">\n        </service>\n    </services>\n</container>\n"
+        );
+
+        let actions = xml_actions(&mut plugin, text, "Mailer");
+        let action = actions.iter().find(|action| action.title == "Add arguments from the constructor").unwrap();
+        assert!(yaml_applied(text, action).contains("            <argument key=\"$logger\" type=\"service\" id=\"App\\Logger\"/>\n            <argument key=\"$dsn\" type=\"string\"></argument>\n        </service>"));
+
+        let tagged = text.replace("PostVoter\"/>", "PostVoter\"><tag name=\"x\"/></service>");
+        assert!(xml_actions(&mut plugin, &tagged, "PostVoter").iter().all(|action| !action.title.starts_with("Add tags")));
+    }
+
+    #[test]
+    fn selected_twig_text_is_extracted_into_the_translation_file() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let text = "<p>Read more</p>";
+        let template = doc("/project/templates/blog/index.html.twig", "twig", text);
+        let start = Position::new(0, 3);
+        let end = Position::new(0, 12);
+
+        let actions = plugin.code_actions(&template, Range::new(start, end));
+        let action = actions.into_iter().find(|action| action.title.starts_with("Extract translation")).unwrap();
+        assert_eq!(action.title, "Extract translation \"blog.index.read_more\" to messages.en.yaml");
+
+        let resolved = plugin.resolve_code_action(&template, action).unwrap();
+        assert_eq!(resolved.edits[0].0, "/project/templates/blog/index.html.twig");
+        assert_eq!(resolved.edits[0].1[0].text, "{{ 'blog.index.read_more'|trans }}");
+        assert_eq!(resolved.edits[0].1[0].range, Range::new(start, end));
+        assert_eq!(resolved.edits[1].0, "/project/translations/messages.en.yaml");
+        assert_eq!(resolved.edits[1].1[0].text, "'blog.index.read_more': 'Read more'\n");
+
+        let at_tag = Range::new(Position::new(0, 0), Position::new(0, 6));
+        assert!(plugin.code_actions(&template, at_tag).iter().all(|action| !action.title.starts_with("Extract translation")));
+        let empty = Range::new(start, start);
+        assert!(plugin.code_actions(&template, empty).iter().all(|action| !action.title.starts_with("Extract translation")));
+    }
+
+    #[test]
+    fn form_fields_are_offered_in_a_form_type_with_a_project_entity() {
+        let host = MockHost::install();
+        host.add_file("src/Entity/Product.php", "<?php\nnamespace App\\Entity;\n\nclass Product\n{\n    private string $name;\n    private int $stock;\n}\n");
+        let mut plugin = activated(&host);
+        let form = "<?php\nnamespace App\\Form;\n\nuse App\\Entity\\Product;\nuse Symfony\\Component\\Form\\AbstractType;\n\nclass ProductType extends AbstractType\n{\n    public function buildForm(FormBuilderInterface $builder, array $options): void\n    {\n        $builder->add('name', TextType::class);\n    }\n\n    public function configureOptions($resolver): void\n    {\n        $resolver->setDefaults(['data_class' => Product::class]);\n    }\n}\n";
+        let document = doc("/project/src/Form/ProductType.php", "php", form);
+        let at = Position::new(10, 10);
+
+        let action = plugin.code_actions(&document, Range::new(at, at)).into_iter().find(|action| action.title == "Add form fields for Product").unwrap();
+        let text = &action.edits[0].1.iter().map(|edit| edit.text.as_str()).collect::<String>();
+        assert!(text.contains("$builder->add('stock', IntegerType::class);") && !text.contains("'name', TextType"), "{text}");
+    }
+
+    #[test]
+    fn twig_variables_come_from_the_template_includes_globals_and_built_ins() {
+        let host = MockHost::install();
+        host.add_file("config/packages/twig.yaml", "twig:\n    globals:\n        site_name: 'x'\n        'ga_id': y\n    paths: {}\n");
+        host.add_file("templates/blog/_row.html.twig", "{% set row_local = 1 %}{{ x }}");
+        host.add_file("templates/blog/list.html.twig", "{% include 'blog/_row.html.twig' with {post: p, index: 1} %}");
+        let mut plugin = activated(&host);
+
+        let offered = complete_marked(&mut plugin, "/project/templates/blog/_row.html.twig", "twig", "{% set row_local = 1 %}{{ |");
+        for name in ["row_local", "post", "index", "site_name", "ga_id", "app", "_self"] {
+            assert!(offered.contains(&name.to_owned()), "{name} in {offered:?}");
+        }
+
+        let elsewhere = complete_marked(&mut plugin, "/project/templates/base.html.twig", "twig", "{{ |");
+        assert!(!elsewhere.contains(&"post".to_owned()) && elsewhere.contains(&"site_name".to_owned()));
+
+        let in_loop = complete_marked(&mut plugin, "/project/templates/base.html.twig", "twig", "{% for item in items %}{{ it| }}{% endfor %}");
+        assert!(in_loop.contains(&"item".to_owned()) && in_loop.contains(&"loop".to_owned()));
+    }
+
+    #[test]
+    fn attribute_arguments_complete_in_php_files() {
+        let host = MockHost::install();
+        let mut plugin = activated(&host);
+        let path = "/project/src/Controller/BlogController.php";
+        let header = "<?php\nuse Symfony\\Component\\Routing\\Attribute\\Route;\n\n";
+
+        let names = complete_marked(&mut plugin, path, "php", &format!("{header}#[Route('/x', me|)]\nclass A {{}}"));
+        assert!(names.contains(&"methods".to_owned()) && names.contains(&"name".to_owned()), "{names:?}");
+
+        let values = complete_marked(&mut plugin, path, "php", &format!("{header}#[Route('/x', methods: ['|'])]\nclass A {{}}"));
+        assert!(values.contains(&"GET".to_owned()), "{values:?}");
+
+        let items = plugin.completion(&doc(path, "php", &format!("{header}#[Route('/x', me)]\nclass A {{}}")), Position::new(3, 16), None);
+        let item = items.iter().find(|item| item.label == "methods").unwrap();
+        assert_eq!(item.insert_text, "methods: ");
+        assert_eq!(item.replace, Some(Range::new(Position::new(3, 14), Position::new(3, 16))));
     }
 }

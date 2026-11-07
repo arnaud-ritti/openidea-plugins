@@ -6,7 +6,8 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = "0.1.0: first release, with the Actuator snapshot (refresh, clear and optional auto-refresh), the Spring Runtime tool window, runtime markers for beans, @Value and configuration keys, and hints for beans that aren't loaded."
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = [
     "on-view:runtime",
@@ -46,7 +47,7 @@ description = "A bearer token or API key for protected Actuator endpoints (with 
 [[contributes.views]]
 id = "runtime"
 title = "Spring Runtime"
-icon = "toolwindow-services"
+icon = "icons/spring.svg"
 location = "bottom"
 
 [contributes.settings]

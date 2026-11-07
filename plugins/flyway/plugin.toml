@@ -4,16 +4,17 @@ version = "0.1.0" # x-release-please-version
 description = "Flyway database migrations in OpenIDEA. Checks migration file names (V, U, R and B prefixes, version, separator, suffix, as configured in flyway.toml, flyway.conf or spring.flyway.*) and reports duplicate versions across migration locations. Copies the next migration version, runs Flyway info, validate, migrate, repair and clean (CLI or Maven) in a terminal, and completes ${…} placeholders in SQL and keys in flyway.conf and flyway.toml. Independent implementation, not affiliated with JetBrains or Redgate."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
-change-notes = "0.1.0: first release. Migration name and duplicate version checks on open and save and with Flyway: Check Migrations; Copy Next Migration Version; info, validate, migrate, repair and clean in a terminal (flyway or mvn); completion of placeholders in SQL and of keys in flyway.conf and flyway.toml."
+change-notes = "Unreleased: Flyway: New Migration asks for a description and creates V<next>__<description>.sql next to the latest migration (needs the optional tee permission; without it the file name is copied instead). New › Flyway SQL Migration, Java Migration, Kotlin Migration, Java Callback and SQL Callback templates; Flyway icon on V*__*.sql, U*__*.sql and R__*.sql files. Project-wide Go to Declaration and gutter markers from the document index: entity and migration tables (@Entity, @Table(name), CREATE TABLE in V/U/R migrations) and ${placeholder} to its flyway.conf or flyway.toml entry. Flyway: Clean asks for confirmation in a dialog (older hosts: run it twice within 30 seconds). 0.1.0: first release. Migration name and duplicate version checks on open and save and with Flyway: Check Migrations; Copy Next Migration Version; info, validate, migrate, repair and clean in a terminal (flyway or mvn); completion of placeholders in SQL and of keys in flyway.conf and flyway.toml."
 categories = ["frameworks", "linters"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-event:file-opened", "on-event:file-saved", "on-view:migrations"]
 
 [capabilities]
 required = ["project.read", "events"]
-# clipboard: Copy Next Migration Version. process: the Flyway commands (setting `runner`).
-optional = ["clipboard", "process:flyway", "process:mvn"]
+# clipboard: Copy Next Migration Version. process:tee: New Migration creates the file. process: the Flyway commands (setting `runner`).
+optional = ["clipboard", "process:flyway", "process:mvn", "process:tee"]
 
 # flyway.conf is the `ini` language, flyway.toml `toml`; the code filters by file name.
 [[contributes.providers]]
@@ -28,6 +29,11 @@ category = "Flyway"
 [[contributes.commands]]
 id = "copy-next-version"
 title = "Flyway: Copy Next Migration Version"
+category = "Flyway"
+
+[[contributes.commands]]
+id = "new-migration"
+title = "Flyway: New Migration…"
 category = "Flyway"
 
 [[contributes.commands]]
@@ -78,11 +84,49 @@ files = ["flyway.toml", "flyway.conf"]
 command = "flyway"
 args = ["migrate"]
 
+[[contributes.documentIndexers]]
+extensions = ["sql", "conf", "toml", "java", "kt"]
+
 [[contributes.views]]
 id = "migrations"
 title = "Flyway Migrations"
-icon = "database"
+icon = "icons/flyway.svg"
 location = "bottom"
+
+[[contributes.fileTemplates]]
+id = "migration-sql"
+name = "Flyway SQL Migration"
+extension = "sql"
+path = "templates/migration.sql"
+
+[[contributes.fileTemplates]]
+id = "migration-java"
+name = "Flyway Java Migration"
+extension = "java"
+path = "templates/Migration.java"
+
+[[contributes.fileTemplates]]
+id = "migration-kotlin"
+name = "Flyway Kotlin Migration"
+extension = "kt"
+path = "templates/Migration.kt"
+
+[[contributes.fileTemplates]]
+id = "callback-java"
+name = "Flyway Java Callback"
+extension = "java"
+path = "templates/Callback.java"
+
+[[contributes.fileTemplates]]
+id = "callback-sql"
+name = "Flyway SQL Callback"
+extension = "sql"
+path = "templates/callback.sql"
+
+[[contributes.fileIcons]]
+id = "migrations"
+patterns = ["V*__*.sql", "U*__*.sql", "R__*.sql"]
+icon = "icons/flyway.svg"
 
 [contributes.settings]
 title = "Flyway Migrations"

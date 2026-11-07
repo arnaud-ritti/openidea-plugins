@@ -164,6 +164,10 @@ pub fn reference_at(language: &str, text: &str, at: usize) -> Option<Reference> 
                 return reference(Kind::Translation);
             }
 
+            if is_constraint_message(before) && contents.contains('.') && !contents.contains(char::is_whitespace) {
+                return reference(Kind::Translation);
+            }
+
             if ROLE_CALLS.iter().any(|call| before.ends_with(call)) {
                 return reference(Kind::Role);
             }
@@ -303,6 +307,12 @@ pub fn references(language: &str, text: &str) -> Vec<Reference> {
             continue;
         }
 
+        let (line_start, line_end) = line_bounds(text, i);
+        if line_end - line_start > MAX_LINE {
+            i = line_end;
+            continue;
+        }
+
         let opening = literal_at(language, text, i + 1).is_some_and(|(start, _, _)| start == i + 1);
         let reference = opening.then(|| reference_at(language, text, i + 1)).flatten();
         match reference {
@@ -359,7 +369,16 @@ fn unquote(argument: &str) -> Option<&str> {
 
 /// The domain a translation reference names explicitly: the call's `domain`
 /// argument, or the template's `{% trans_default_domain %}`.
+/// A named argument such as `message:` or `minMessage:` of a constraint: its text is a `validators` key.
+fn is_constraint_message(before: &str) -> bool {
+    before.strip_suffix(':').is_some_and(|name| name.ends_with("message") || name.ends_with("Message"))
+}
+
 pub fn translation_domain(language: &str, text: &str, reference: &Reference) -> Option<String> {
+    if language == "php" && is_constraint_message(text[..reference.start - 1].trim_end()) {
+        return Some("validators".to_owned());
+    }
+
     let (call_open, position) = if language == "twig" {
         let after = text[reference.end + 1..].trim_start().strip_prefix('|')?.trim_start().strip_prefix("trans")?;
         let after = after.trim_start();
@@ -406,7 +425,7 @@ pub fn twig_blocks(text: &str) -> Vec<(&str, usize)> {
 }
 
 /// `{% name rest %}` tags: name, the text after it, and the offset of that text.
-fn twig_tags(text: &str) -> impl Iterator<Item = (&str, &str, usize)> {
+pub(crate) fn twig_tags(text: &str) -> impl Iterator<Item = (&str, &str, usize)> {
     text.match_indices("{%").filter_map(|(open, _)| {
         let inside_start = open + 2;
         let close = text[inside_start..].find("%}").map_or(text.len(), |i| inside_start + i);
@@ -525,5 +544,17 @@ mod tests {
         assert_eq!(twig_parent(text), Some("base.html.twig"));
         let blocks: Vec<_> = twig_blocks(text).into_iter().map(|(n, at)| (n, &text[at..at + n.len()])).collect();
         assert_eq!(blocks, [("title", "title"), ("body", "body")]);
+    }
+
+    #[test]
+    fn constraint_messages_that_look_like_keys_are_translations_of_the_validators_domain() {
+        let text = "#[Assert\\NotBlank(message: 'post.title.blank')]";
+        let at = text.find("blank").unwrap();
+        let reference = reference_at("php", text, at).unwrap();
+        assert_eq!(reference.kind, Kind::Translation);
+        assert_eq!(translation_domain("php", text, &reference).as_deref(), Some("validators"));
+
+        assert!(reference_at("php", "#[Assert\\NotBlank(message: 'Must not be blank.')]", 30).is_none());
+        assert!(reference_at("php", "#[Assert\\NotBlank(message: 'blank')]", 30).is_none());
     }
 }

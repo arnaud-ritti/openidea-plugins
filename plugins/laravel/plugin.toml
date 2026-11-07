@@ -11,20 +11,21 @@ documentation. Blade files need the aritti.blade plugin for highlighting."""
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>", "Daniel Espendiller (original Laravel Plugin)"]
 homepage = "https://github.com/Haehnchen/idea-php-laravel-plugin"
 license = "MIT"
-change-notes = """0.1.0: first release. Ported from the Laravel Plugin (de.espend.idea.laravel) 0.15.4, \
+change-notes = """Unreleased: Laravel: the tool window has Routes and Index sections; Routes is a flat list with method icons, a controller filter, a flat/tree toggle, and Copy as curl and Create HTTP Request File row actions. Laravel: 20 more file templates (Channel, Console Command, Http Exception, PHPUnit tests, Resource Collection, Class, Model, Dusk, Nova, Livewire Form, Fractal, Volt, Inertia pages, four Blade files); one problem listing the missing Route::resource methods; Use #[Scope] on all scope methods; column completion through `$query = Model::query()` variables; route and controller gutter links from the document indexer; Remove IDE Helper PHPDoc from Models; Generate for Model from the Project view with factory and resource bodies filled from migration columns (optional process:tee); Nova, Filament and Livewire form generators; Create Missing for Job, Mail, Event and similar classes; settings modelDirectories and reportMissingResourceMethods. Laravel: Livewire method, route controller and method problems, Find Unused Views, model/factory/policy/observer/event gutter links from a document indexer, component attribute and slot completion, relation-aware column completion, container name completion (app(), @inject, config providers), scope/constructor/facade/translation/rules intentions and 11 more file templates. Laravel: Run Artisan Command..., Generate with artisan make..., New Eloquent Model..., Generate for Model... and Create Missing View, Component or Controller ask for names and options, then run php artisan make:* in a terminal. 0.1.0: first release. Ported from the Laravel Plugin (de.espend.idea.laravel) 0.15.4, \
 source revision 3a07f4a5f67dc0aacbcd6fdb11a8b5c9814803b0 (tag 0.15.4): routes, controllers, views, config, translations, \
 assets and the Blade layout markers. Env keys, middleware, route groups, JSON translations, components, Vite entries, \
 validation rules, abilities, columns, problems, the tool window and artisan commands follow Laravel's documentation. This port works from a text index of the project, so the features that \
 need PhpStorm's PSI are missing (container types, Eloquent, facades)."""
 categories = ["frameworks"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:php", "on-language:blade", "on-file:resources/js/**"]
 
 [capabilities]
 required = ["project.read", "events"]
-# Artisan commands run `php artisan`; everything else works without it.
-optional = ["process:php"]
+# clipboard: Copy as curl, and the fallback of Create HTTP Request File. process:tee: bulk PHPDoc removal and factory/resource generators write files. Artisan commands run `php artisan`; editor.read: Create Missing Target reads the name under the cursor.
+optional = ["process:php", "process:tee", "editor.read", "clipboard", "storage"]
 
 [[contributes.commands]]
 id = "reindex"
@@ -81,6 +82,88 @@ id = "migrate-fresh"
 title = "Laravel: Fresh Migration (drops all tables)"
 category = "Laravel"
 
+[[contributes.commands]]
+id = "artisan-run"
+title = "Laravel: Run Artisan Command..."
+category = "Laravel"
+
+[[contributes.commands]]
+id = "make"
+title = "Laravel: Generate with artisan make..."
+category = "Laravel"
+
+[[contributes.commands]]
+id = "new-model"
+title = "Laravel: New Eloquent Model..."
+category = "Laravel"
+
+[[contributes.commands]]
+id = "generate-for-model"
+title = "Laravel: Generate for Model..."
+category = "Laravel"
+
+[[contributes.commands]]
+id = "create-missing"
+title = "Laravel: Create Missing View, Component or Controller"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "unused-views"
+title = "Laravel: Find Unused Views"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "remove-phpdocs"
+title = "Laravel: Remove IDE Helper PHPDoc from Models"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "route-copy-curl"
+title = "Laravel: Copy as curl"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "route-create-http"
+title = "Laravel: Create HTTP Request File"
+category = "Laravel"
+
+[[contributes.commands]]
+id = "reveal"
+title = "Laravel: Show Laravel Tool Window"
+category = "Laravel"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "create-missing"
+
+[[contributes.menus]]
+menu = "projectView.context"
+command = "generate-for-model"
+when = "plugin.aritti.laravel.indexed"
+
+[[contributes.menus]]
+menu = "projectView.context"
+command = "remove-phpdocs"
+when = "plugin.aritti.laravel.indexed"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "laravel"
+command = "reindex"
+when = "viewItemKind == group"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "laravel"
+command = "route-copy-curl"
+when = "viewItemKind == route"
+
+[[contributes.menus]]
+menu = "viewItem.context"
+view = "laravel"
+command = "route-create-http"
+when = "viewItemKind == route"
+
 [[contributes.runDetectors]]
 id = "serve"
 name = "Laravel: Serve"
@@ -118,10 +201,13 @@ languages = ["php", "blade"]
 kinds = ["completion", "definition"]
 languages = ["javascript", "typescript", "vue", "javascriptreact", "typescriptreact"]
 
+[[contributes.documentIndexers]]
+extensions = ["php"]
+
 [[contributes.views]]
 id = "laravel"
 title = "Laravel"
-icon = "file-php"
+icon = "icons/laravel.svg"
 location = "right"
 
 [contributes.settings]
@@ -224,3 +310,218 @@ name = "Pest Unit Test"
 extension = "php"
 path = "templates/UnitTest.php"
 
+[[contributes.fileTemplates]]
+id = "laravel-action"
+name = "Laravel Action"
+extension = "php"
+path = "templates/Action.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-cast"
+name = "Laravel Cast"
+extension = "php"
+path = "templates/Cast.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-scope"
+name = "Laravel Global Scope"
+extension = "php"
+path = "templates/Scope.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-notification"
+name = "Laravel Notification"
+extension = "php"
+path = "templates/Notification.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-rule"
+name = "Laravel Validation Rule"
+extension = "php"
+path = "templates/Rule.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-trait"
+name = "Laravel Trait"
+extension = "php"
+path = "templates/Trait.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-json-resource"
+name = "Laravel JSON Resource"
+extension = "php"
+path = "templates/JsonResource.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-service-provider"
+name = "Laravel Service Provider"
+extension = "php"
+path = "templates/ServiceProvider.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-view-composer"
+name = "Laravel View Composer"
+extension = "php"
+path = "templates/ViewComposer.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-exception"
+name = "Laravel Exception"
+extension = "php"
+path = "templates/Exception.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-livewire-component"
+name = "Laravel Livewire Component"
+extension = "php"
+path = "templates/LivewireComponent.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-channel"
+name = "Laravel Broadcast Channel"
+extension = "php"
+path = "templates/Channel.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-console-command"
+name = "Laravel Console Command"
+extension = "php"
+path = "templates/ConsoleCommand.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-http-exception"
+name = "Laravel Http Exception"
+extension = "php"
+path = "templates/HttpException.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-phpunit-feature-test"
+name = "PHPUnit Feature Test"
+extension = "php"
+path = "templates/PhpUnitFeatureTest.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-phpunit-unit-test"
+name = "PHPUnit Unit Test"
+extension = "php"
+path = "templates/PhpUnitUnitTest.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-resource-collection"
+name = "Laravel Resource Collection"
+extension = "php"
+path = "templates/ResourceCollection.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-class"
+name = "Laravel Class"
+extension = "php"
+path = "templates/PlainClass.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-model"
+name = "Laravel Eloquent Model"
+extension = "php"
+path = "templates/Model.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-dusk-test"
+name = "Laravel Dusk Test"
+extension = "php"
+path = "templates/DuskTest.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-nova-resource"
+name = "Laravel Nova Resource"
+extension = "php"
+path = "templates/NovaResource.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-livewire-form"
+name = "Livewire Form"
+extension = "php"
+path = "templates/LivewireForm.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-volt-component"
+name = "Livewire Volt Component"
+extension = "blade.php"
+path = "templates/Volt.blade.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-inertia-vue-page"
+name = "Inertia Vue Page"
+extension = "vue"
+path = "templates/InertiaVue.vue"
+
+[[contributes.fileTemplates]]
+id = "laravel-inertia-react-page"
+name = "Inertia React Page"
+extension = "tsx"
+path = "templates/InertiaReact.tsx"
+
+[[contributes.fileTemplates]]
+id = "laravel-inertia-svelte-page"
+name = "Inertia Svelte Page"
+extension = "svelte"
+path = "templates/InertiaSvelte.svelte"
+
+[[contributes.fileTemplates]]
+id = "laravel-blade-view"
+name = "Blade View"
+extension = "blade.php"
+path = "templates/BladeView.blade.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-blade-layout"
+name = "Blade Layout"
+extension = "blade.php"
+path = "templates/BladeLayout.blade.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-blade-component"
+name = "Blade Anonymous Component"
+extension = "blade.php"
+path = "templates/BladeComponent.blade.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-blade-child-view"
+name = "Blade View Extending a Layout"
+extension = "blade.php"
+path = "templates/BladeChildView.blade.php"
+
+[[contributes.fileTemplates]]
+id = "laravel-fractal-transformer"
+name = "Laravel Fractal Transformer"
+extension = "php"
+path = "templates/FractalTransformer.php"
+
+[[contributes.fileIcons]]
+id = "route-get"
+patterns = ["*.laravel-route-get"]
+icon = "icons/route-get.svg"
+
+[[contributes.fileIcons]]
+id = "route-post"
+patterns = ["*.laravel-route-post"]
+icon = "icons/route-post.svg"
+
+[[contributes.fileIcons]]
+id = "route-put"
+patterns = ["*.laravel-route-put"]
+icon = "icons/route-put.svg"
+
+[[contributes.fileIcons]]
+id = "route-delete"
+patterns = ["*.laravel-route-delete"]
+icon = "icons/route-delete.svg"
+
+[[contributes.fileIcons]]
+id = "route-patch"
+patterns = ["*.laravel-route-patch"]
+icon = "icons/route-patch.svg"
+
+[[contributes.fileIcons]]
+id = "route-other"
+patterns = ["*.laravel-route-other"]
+icon = "icons/route-other.svg"

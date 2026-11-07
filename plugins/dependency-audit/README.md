@@ -27,7 +27,7 @@ installed, not by the range.
 ⌥⏎ on an underlined dependency offers **Upgrade … to …**: the nearest fixed version above the
 current one (a `^` or `~` in front stays). It is offered only for a single constraint, not for
 ranges like `>=1 <2`, and only once per Maven property shared by several dependencies, with
-the highest fix among them. Lockfile entries have no quick fix: update them with your package manager.
+the highest fix among them. It also works on exact versions in `libs.versions.toml` (literal, `version` or the shared `[versions]` entry) and `requirements.txt` `==` pins. Lockfile entries have no quick fix: update them with your package manager.
 After upgrading a range in `package.json` or `composer.json`, the underline stays until the lockfile
 follows: run `npm install` / `composer update`, then reopen the file.
 

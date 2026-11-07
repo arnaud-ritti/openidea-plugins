@@ -13,13 +13,16 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>", "JetBrains s.r.o. and contri
 homepage = "https://github.com/JetBrains/intellij-community/tree/master/plugins/tasks"
 license = "Apache-2.0"
 change-notes = """\
+Unreleased: Tasks: Search Issues asks for a query, searches every set-up tracker and opens the picked issue. Save, Load and Remove Context keep named lists of the open files. Add and Remove Repository read issues from several GitHub, GitLab or Codeberg repositories. \
+0.2.0: Tasks: Switch Task picks a task from a list; Close Active Task brings the Tasks view to the front. Needs OpenIDEA API 1.2. \
 0.1.0: first release, ported from com.intellij.tasks 263.7307.108 (intellij-community idea/263.7307.112). \
 Local tasks, task switching and time tracking. Issues from GitHub, gitlab.com, codeberg.org, *.youtrack.cloud, \
 *.atlassian.net and Trello, updated every 20 minutes. With git: a branch per task, shelving, and merging on close. \
 Closing a task can update the issue state; work time can be posted to YouTrack and Jira. Each task reopens its files. \
 The active task's commit message goes to the clipboard or to commit.template."""
 categories = ["tools", "vcs"]
-engines.openidea = "^1.0"
+icon = "icon.svg"
+engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-view:tasks", "on-startup-finished", "on-schedule:1200", "on-event:file-opened"]
 
@@ -90,6 +93,11 @@ tooltip = "Active task"
 command = "copy-commit-message"
 
 [[contributes.commands]]
+id = "switch"
+title = "Tasks: Switch Task"
+category = "Tasks"
+
+[[contributes.commands]]
 id = "close"
 title = "Tasks: Close Active Task"
 category = "Tasks"
@@ -107,6 +115,36 @@ category = "Tasks"
 [[contributes.commands]]
 id = "refresh"
 title = "Tasks: Update Issues"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "search-issues"
+title = "Tasks: Search Issues"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "save-context"
+title = "Tasks: Save Context"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "load-context"
+title = "Tasks: Load Context"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "remove-context"
+title = "Tasks: Remove Saved Context"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "add-repository"
+title = "Tasks: Add Repository"
+category = "Tasks"
+
+[[contributes.commands]]
+id = "remove-repository"
+title = "Tasks: Remove Added Repository"
 category = "Tasks"
 
 [[contributes.keymaps]]

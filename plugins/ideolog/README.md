@@ -9,6 +9,9 @@ OpenIDEA port of JetBrains' [Ideolog](https://github.com/JetBrains/ideolog) (MIT
   ties); other logs are split on the first space, like Ideolog does.
 - Colours each event by level (error, warning, info), including its stack trace lines. The time
   column of a coloured event gets its own colour.
+- The status bar names the detected format (`Log: IntelliJ IDEA`, or `Log: plain text`); click it to open the Patterns view.
+- Setting _Mark time gaps_: the time of an event that comes at least N seconds after the previous one
+  gets its own colour (ISO-like, Logcat, syslog and `HH:MM:SS` times; zones are ignored).
 - Folds multi-line events (stack traces).
 - Lists errors and warnings in the structure view.
 - **Ideolog: Jump to Source** (F7): opens the stack frame on the caret line (Java/Kotlin, Python,
@@ -28,6 +31,11 @@ Settings › Plugins › Ideolog › _Custom log formats and highlighting_: past
 or a file from Ideolog's [custom log formats](https://github.com/JetBrains/ideolog/wiki/Custom-Log-Formats)
 (Laravel, Symfony, Serilog, Xdebug…). Patterns use Java-like regular expressions, lookaround
 included. Highlighting colours map to the nearest theme colour; `HIDE` patterns are ignored.
+**Ideolog: Custom Formats and Highlighting** opens the Patterns view: a table of the patterns you
+added, with Add Format (name, regex, per-column groups), Add Highlighting (regex, line/field/match,
+one of six colours), Edit (re-asks the fields with the current values), Move Up and Remove.
+**Ideolog: Highlight Selection** (editor menu) adds the selected text, escaped, as a highlighting pattern; **Remove Custom Highlightings** deletes them all. They are kept in the plugin's storage next to the setting. Invalid
+regexes are refused with a notification.
 Open logs pick up a change when they're edited or reopened.
 
 ## `.log` files
@@ -43,13 +51,13 @@ the built-in `Log` type.
 No OpenIDEA API for these yet:
 
 - Hiding, whitelisting or highlighting values and columns, hiding lines above/below or containing
-  a substring, time-gap highlighting: the editor has no API to fold, hide or re-colour on demand.
+  a substring: the editor has no API to fold, hide or re-colour on demand.
 - Extend selection: plugins can't set the selection.
 - Error stripe heat map: no editor decoration API.
 - Large file editor, terminal and TextMate integrations.
 
 Stack frame links and syntax come from one component through a hand-expanded `register_plugin!`
-(SDK 0.1.37 has no `syntax, providers` arm), see `src/lib.rs`.
+(the SDK has no `syntax, providers, views` arm), see `src/lib.rs`.
 
 Navigation needs the log inside the open project (the IDE only opens project files for plugins).
 Jump to Source scans up to 5,000 source files, as there is no index to query. Only the first 512 KiB

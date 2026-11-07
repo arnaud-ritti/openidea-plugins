@@ -84,11 +84,19 @@ pub struct Index {
     pub directives: Names,
     /// Validation rule names.
     pub rules: Names,
+    /// Container names: the framework's aliases, literal `bind('x'` calls and the classes of `app/`.
+    pub bindings: Names,
+    /// Classes of `app/Providers`.
+    pub providers: Names,
     /// Columns by table, from the migrations.
     pub columns: BTreeMap<String, Names>,
     /// Table of each model, by short class name and by file.
     pub models: BTreeMap<String, String>,
     pub model_files: BTreeMap<String, String>,
+    /// Relation methods of each model and the model each returns.
+    pub relations: BTreeMap<String, BTreeMap<String, String>>,
+    /// Local scopes (`scopeActive`, `#[Scope]`) by model, as called.
+    pub scopes: BTreeMap<String, BTreeSet<String>>,
     pub renders: Vec<Render>,
     /// Inertia pages by name (`Posts/Index`), from `resources/js/Pages` and `resources/js/pages`.
     pub inertia_pages: Names,
@@ -357,8 +365,76 @@ pub fn table_name(class: &str) -> String {
     format!("{snake}s")
 }
 
+/// Aliases the framework registers in the container (the "Facade Class Reference" and the container's core aliases).
+const CORE_BINDINGS: &[&str] = &[
+    "app", "auth", "auth.driver", "blade.compiler", "cache", "cache.store", "config", "cookie", "db", "db.connection", "encrypter", "events",
+    "files", "filesystem", "filesystem.disk", "hash", "log", "mailer", "queue", "queue.connection", "redirect", "request", "router",
+    "session", "session.store", "translator", "url", "validator", "view",
+];
+
+/// `namespace X; class Stem`: the fully qualified name and the offset of the name.
+fn declared_class(masked: &str, stem: &str) -> Option<(String, usize)> {
+    let namespace = masked.lines().find_map(|line| line.trim().strip_prefix("namespace ")?.strip_suffix(';')).map(|n| n.trim().to_owned());
+
+    let offset = ["class ", "interface ", "trait ", "enum "].iter().find_map(|keyword| {
+        masked.match_indices(keyword).find_map(|(at, _)| {
+            let line_start = masked[..at].rfind('\n').map_or(0, |i| i + 1);
+            let before = masked[line_start..at].trim();
+            let start = at + keyword.len();
+            let declares = before.split_whitespace().all(|word| matches!(word, "final" | "abstract" | "readonly"));
+            let named = masked[start..].starts_with(stem) && !masked.as_bytes().get(start + stem.len()).is_some_and(|b| php::is_identifier(*b));
+            (declares && named).then_some(start)
+        })
+    })?;
+
+    let fqcn = namespace.map_or_else(|| stem.to_owned(), |namespace| format!("{namespace}\\{stem}"));
+    Some((fqcn, offset))
+}
+
+const RELATION_CALLS: &[&str] =
+    &["hasManyThrough", "hasOneThrough", "hasMany", "hasOne", "belongsToMany", "belongsTo", "morphToMany", "morphMany", "morphOne"];
+
+/// Relation methods (`hasMany(Comment::class)`) and local scopes of a model's text.
+fn model_members(masked: &str) -> (BTreeMap<String, String>, BTreeSet<String>) {
+    let mut relations = BTreeMap::new();
+    let mut scopes = BTreeSet::new();
+
+    for (at, _) in masked.match_indices("function ") {
+        let name: String = masked[at + "function ".len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        let open = at + "function ".len() + name.len();
+        if name.is_empty() || !masked[open..].starts_with('(') {
+            continue;
+        }
+
+        if let Some(rest) = name.strip_prefix("scope").filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase())) {
+            let mut chars = rest.chars();
+            scopes.insert(chars.next().map(|c| c.to_ascii_lowercase()).into_iter().chain(chars).collect());
+        }
+
+        if masked[..at].trim_end().ends_with("#[Scope]") {
+            scopes.insert(name.clone());
+        }
+
+        let Some(brace) = php::closing(masked, open).and_then(|close| masked[close..].find(['{', ';']).map(|i| close + i)).filter(|i| masked.as_bytes()[*i] == b'{') else { continue };
+        let Some(end) = php::closing(masked, brace) else { continue };
+        let body = &masked[brace..end];
+
+        for call in RELATION_CALLS {
+            let needle = format!("$this->{call}(");
+            let Some(found) = body.find(&needle) else { continue };
+            let first = php::arguments(body, found + needle.len() - 1).into_iter().next().and_then(|range| php::class_constant(body, range));
+            if let Some(target) = first {
+                relations.insert(name.clone(), target.rsplit('\\').next().unwrap_or(target).to_owned());
+            }
+            break;
+        }
+    }
+
+    (relations, scopes)
+}
+
 /// `protected $table = 'x';`
-fn explicit_table(text: &str) -> Option<String> {
+pub fn explicit_table(text: &str) -> Option<String> {
     let at = text.find("$table")?;
     let rest = text[at + "$table".len()..].trim_start().strip_prefix('=')?;
     let start = text.len() - rest.len();
@@ -611,10 +687,32 @@ impl Index {
             }
         }
 
+        for alias in CORE_BINDINGS {
+            index.bindings.add(alias, Some("framework".into()), "", Position::new(0, 0), 0);
+        }
+
         for path in files(&globs(&["app/**/*.php"])) {
             let Some(text) = read(&path, &mut index) else { continue };
             let masked = php::mask_comments(&text);
             let lines = Lines::new(&text);
+
+            if let Some(stem) = file_name(&path).strip_suffix(".php")
+                && let Some((fqcn, offset)) = declared_class(&masked, stem)
+            {
+                index.bindings.add(&fqcn, Some("class".into()), &path, lines.position(offset), stem.len());
+                if relative(&path).starts_with("app/Providers/") {
+                    index.providers.add(&fqcn, None, &path, lines.position(offset), stem.len());
+                }
+            }
+
+            for call in ["->bind(", "->singleton(", "->scoped(", "->instance(", "->alias(", "::bind(", "::singleton("] {
+                for (at, _) in masked.match_indices(call) {
+                    let first = php::arguments(&masked, at + call.len() - 1).into_iter().next();
+                    if let Some((name, offset)) = first.and_then(|range| php::literal(&masked, range)) {
+                        index.bindings.add(&name.replace("\\\\", "\\"), Some(call.trim_matches(['-', '>', ':', '(']).to_owned()), &path, lines.position(offset), name.len());
+                    }
+                }
+            }
             for (at, _) in masked.match_indices("Blade::directive(") {
                 let first = php::arguments(&masked, at + "Blade::directive".len()).into_iter().next();
                 if let Some((name, offset)) = first.and_then(|range| php::literal(&masked, range)) {
@@ -644,7 +742,9 @@ impl Index {
             }
         }
 
-        for path in files(&globs(&["app/Models/**/*.php", "app/*.php"])) {
+        let mut model_globs = globs(&["app/Models/**/*.php", "app/*.php"]);
+        model_globs.extend(comma_separated("modelDirectories").into_iter().filter(|d| !d.contains("..") && !d.starts_with('/')).map(|d| format!("{d}/**/*.php")));
+        for path in files(&model_globs) {
             let Some(text) = read(&path, &mut index) else { continue };
             let relative_path = relative(&path);
             let inside = relative_path.trim_start_matches("app/").trim_start_matches("Models/");
@@ -656,6 +756,9 @@ impl Index {
             if masked.contains("newFactory") || masked.contains("UseFactory") {
                 index.factory_overrides.insert(short.clone());
             }
+            let (relations, scopes) = model_members(&masked);
+            index.relations.insert(short.clone(), relations);
+            index.scopes.insert(short.clone(), scopes);
             index.model_files.insert(path, table.clone());
             index.models.insert(short, table);
         }

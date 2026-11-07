@@ -328,6 +328,20 @@ fn resource_defs(
         .collect()
 }
 
+/// `use` lines of a routes file: the namespace each short class name is imported from.
+pub fn imports(masked: &str) -> Vec<(String, String)> {
+    masked
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("use ")?.strip_suffix(';'))
+        .filter(|path| !path.contains(['{', ',', ' ']))
+        .filter_map(|path| {
+            let path = path.trim_start_matches('\\');
+            let (namespace, class) = path.rsplit_once('\\')?;
+            Some((class.to_owned(), namespace.to_owned()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +410,11 @@ mod tests {
         for end in 0..=text.len() {
             parse(&text[..end]);
         }
+    }
+
+    #[test]
+    fn reads_class_imports() {
+        let imports = imports("<?php\nuse App\\Http\\Controllers\\PostController;\nuse Foo\\{A, B};\nuse Bar\\Baz as Q;\n");
+        assert_eq!(imports, [("PostController".to_owned(), "App\\Http\\Controllers".to_owned())]);
     }
 }

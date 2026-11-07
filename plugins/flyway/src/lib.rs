@@ -6,6 +6,7 @@
 mod checks;
 mod complete;
 mod config;
+mod indexer;
 mod info;
 mod naming;
 
@@ -16,7 +17,7 @@ use openidea_plugin::host;
 use openidea_plugin::providers::{CompletionItem, Document, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project, register_plugin};
+use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project};
 use spring_text::config::is_config_file;
 use spring_text::index::project_of;
 
@@ -49,6 +50,15 @@ fn runner_args(goal: &str, json: bool) -> (&'static str, Vec<String>) {
     // ponytail: no shell quoting; quote-aware split when someone needs spaces in a value
     args.extend(host::setting_string("arguments").unwrap_or_default().split_whitespace().map(str::to_owned));
     (if maven { "mvn" } else { "flyway" }, args)
+}
+
+fn migration_description(text: &str) -> String {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect();
+    words.join("_")
 }
 
 fn root_relative<'a>(path: &'a str, root: &str) -> &'a str {
@@ -103,7 +113,7 @@ impl Flyway {
         host::notify(NotificationLevel::Info, TITLE, &format!("Checked {} migrations: {problems} problems.", results.len()));
     }
 
-    fn copy_next_version(&mut self, project: &Project) -> Result<(), Error> {
+    fn next_migration(&mut self, project: &Project) -> Result<(String, String, String), Error> {
         let (config, files, _) = self.scan(project);
         let naming = &config.naming;
         let root = project.root()?;
@@ -139,6 +149,12 @@ impl Flyway {
         let version_refs: Vec<&str> = versions.iter().map(String::as_str).collect();
         let next = format!("{}{}{}", naming.versioned, next_version(&version_refs), naming.separator);
         let suffix = naming.suffixes.first().map_or(".sql", String::as_str);
+        Ok((next, directory, suffix.to_owned()))
+    }
+
+    fn copy_next_version(&mut self, project: &Project) -> Result<(), Error> {
+        let (next, directory, suffix) = self.next_migration(project)?;
+        let suffix = suffix.as_str();
 
         match host::copy_to_clipboard(&next) {
             Ok(()) => host::notify(
@@ -156,18 +172,66 @@ impl Flyway {
         Ok(())
     }
 
-    fn run_flyway(&mut self, goal: &str) -> Result<Option<String>, Error> {
-        if goal == "clean" {
-            let confirmed = self.clean_asked.take().is_some_and(|asked| asked.elapsed() < Duration::from_secs(30));
-            if !confirmed {
-                self.clean_asked = Some(Instant::now());
+    fn new_migration(&mut self, project: &Project) -> Result<(), Error> {
+        let (prefix, directory, suffix) = self.next_migration(project)?;
+        let Some(description) = host::input("Migration description", None)? else { return Ok(()) };
+        let description = migration_description(&description);
+        if description.is_empty() {
+            return Err("Enter a description made of letters, digits or spaces.".into());
+        }
+
+        let root = project.root()?;
+        let relative = if directory.is_empty() { String::new() } else { format!("{directory}/") };
+        let name = format!("{prefix}{description}{suffix}");
+        let path = format!("{}/{relative}{name}", root.trim_end_matches('/'));
+        if project.read_file(&format!("{relative}{name}")).is_ok() {
+            return Err(format!("{name} already exists.").into());
+        }
+
+        let written = host::run_process("tee", &[path.clone()], Some(""))
+            .and_then(|out| if out.status == Some(0) { Ok(()) } else { Err(Error::Invalid(out.stderr)) });
+        match written {
+            Ok(()) => host::open_location(&path, 0, 0),
+            Err(Error::Denied(_)) => {
+                let _ = host::copy_to_clipboard(&name);
                 host::notify(
                     NotificationLevel::Warning,
                     TITLE,
-                    "Clean drops every object in the schemas Flyway manages. Run Flyway: Clean (Drops All Objects)… again within 30 seconds to confirm.",
+                    &format!("Create {name} in {directory} yourself (name copied if the clipboard is allowed). Allow running tee for Flyway Migrations in Settings › Plugins to create it here."),
                 );
-                return Ok(None);
+                Ok(())
             }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn clean_confirmed(&mut self) -> Result<bool, Error> {
+        match host::confirm(
+            "Flyway: Clean",
+            "Clean drops every object in the schemas Flyway manages. Run it?",
+        ) {
+            Ok(confirmed) => Ok(confirmed),
+            Err(Error::Invalid(_)) => Ok(self.confirmed_by_rerun()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn confirmed_by_rerun(&mut self) -> bool {
+        let confirmed = self.clean_asked.take().is_some_and(|asked| asked.elapsed() < Duration::from_secs(30));
+        if !confirmed {
+            self.clean_asked = Some(Instant::now());
+            host::notify(
+                NotificationLevel::Warning,
+                TITLE,
+                "Clean drops every object in the schemas Flyway manages. Run Flyway: Clean (Drops All Objects)… again within 30 seconds to confirm.",
+            );
+        }
+        confirmed
+    }
+
+    fn run_flyway(&mut self, goal: &str) -> Result<Option<String>, Error> {
+        if goal == "clean" && !self.clean_confirmed()? {
+            return Ok(None);
         }
 
         let (program, args) = runner_args(goal, false);
@@ -196,6 +260,11 @@ impl Plugin for Flyway {
             "copy-next-version" => {
                 let project = ctx.project().ok_or("Open a project first.")?;
                 self.copy_next_version(&project)?;
+                Ok(None)
+            }
+            "new-migration" => {
+                let project = ctx.project().ok_or("Open a project first.")?;
+                self.new_migration(&project)?;
                 Ok(None)
             }
             "info" | "validate" | "migrate" | "repair" | "clean" => self.run_flyway(id),
@@ -343,12 +412,24 @@ impl Views for Flyway {
     }
 }
 
-register_plugin!(Flyway, providers, views);
+// `register_plugin!` has no arm for providers, views and indexing together.
+#[cfg(not(target_arch = "wasm32"))]
+const _: fn() -> Flyway = <Flyway as Default>::default;
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    struct Component;
+    openidea_plugin::__plugin_exports!(Flyway, Component, openidea_plugin::bindings);
+    openidea_plugin::__providers_exports!(Flyway, Component);
+    openidea_plugin::__views_exports!(Flyway, Component);
+    openidea_plugin::__indexing_exports!(Flyway, Component);
+    openidea_plugin::bindings::__export_plugin_world!(Component with_types_in openidea_plugin::bindings);
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use openidea_plugin::Event;
+    use openidea_plugin::ProcessOutput;
     use openidea_plugin::Severity;
     use openidea_plugin::mock::MockHost;
 
@@ -452,6 +533,57 @@ mod tests {
         );
     }
 
+    fn tee_host(status: Option<i32>) -> MockHost {
+        let host = MockHost::install().with_capabilities(&["project.read", "process:tee", "clipboard"]);
+        host.add_file("src/main/resources/db/migration/V1__a.sql", "");
+        host.add_file("src/main/resources/db/migration/V2__b.sql", "");
+        host.on_process("tee", move |_, _| Ok(ProcessOutput { status, stdout: String::new(), stderr: String::new() }));
+        host
+    }
+
+    #[test]
+    fn new_migration_writes_the_next_version_with_tee_and_opens_it() {
+        let host = tee_host(Some(0));
+        host.answer_next_prompt(Some(&["add customer  email!"]));
+        Flyway::default().run_command("new-migration", &host.invocation(), None).unwrap();
+        let path = format!("{DIR}/V3__add_customer_email.sql");
+        let run = host.process_runs().into_iter().find(|r| r.program == "tee").unwrap();
+        assert_eq!(run.args, [path.clone()]);
+        assert_eq!(host.opened_locations(), [(path, 0, 0)]);
+    }
+
+    #[test]
+    fn new_migration_does_nothing_when_dismissed() {
+        let host = tee_host(Some(0));
+        Flyway::default().run_command("new-migration", &host.invocation(), None).unwrap();
+        assert!(host.process_runs().is_empty());
+    }
+
+    #[test]
+    fn new_migration_rejects_an_empty_description() {
+        let host = tee_host(Some(0));
+        host.answer_next_prompt(Some(&["!!"]));
+        assert!(Flyway::default().run_command("new-migration", &host.invocation(), None).is_err());
+        assert!(host.process_runs().is_empty());
+    }
+
+    #[test]
+    fn new_migration_reports_a_failing_tee() {
+        let host = tee_host(Some(1));
+        host.answer_next_prompt(Some(&["x"]));
+        assert!(Flyway::default().run_command("new-migration", &host.invocation(), None).is_err());
+        assert!(host.opened_locations().is_empty());
+    }
+
+    #[test]
+    fn new_migration_falls_back_to_the_clipboard_when_tee_is_denied() {
+        let host = tee_host(Some(0)).with_capabilities(&["project.read", "clipboard"]);
+        host.answer_next_prompt(Some(&["x"]));
+        Flyway::default().run_command("new-migration", &host.invocation(), None).unwrap();
+        assert_eq!(host.clipboard().as_deref(), Some("V3__x.sql"));
+        assert!(host.opened_locations().is_empty());
+    }
+
     #[test]
     fn copies_the_next_version() {
         let host = MockHost::install();
@@ -496,19 +628,25 @@ mod tests {
     fn clean_runs_only_when_confirmed() {
         let host = host();
         let mut flyway = Flyway::default();
+
+        host.answer_next_prompt(None);
         flyway.run_command("clean", &host.invocation(), None).unwrap();
         assert!(host.terminals().is_empty());
-        assert_eq!(host.notifications()[0].level, NotificationLevel::Warning);
-        assert_eq!(
-            host.notifications()[0].body,
-            "Clean drops every object in the schemas Flyway manages. Run Flyway: Clean (Drops All Objects)… again within 30 seconds to confirm."
-        );
 
+        host.answer_next_prompt(Some(&[]));
         flyway.run_command("clean", &host.invocation(), None).unwrap();
         assert_eq!(host.terminals()[0].args, ["clean"]);
+    }
 
-        flyway.run_command("clean", &host.invocation(), None).unwrap();
-        assert_eq!(host.terminals().len(), 1, "confirmation is used up");
+    #[test]
+    fn clean_asks_twice_when_the_host_cannot_confirm() {
+        let host = host();
+        let mut flyway = Flyway::default();
+
+        assert!(!flyway.confirmed_by_rerun());
+        assert_eq!(host.notifications()[0].level, NotificationLevel::Warning);
+        assert!(flyway.confirmed_by_rerun());
+        assert!(!flyway.confirmed_by_rerun(), "confirmation is used up");
     }
 
     #[test]
@@ -772,5 +910,20 @@ mod tests {
         let detectors = run_detectors();
         let migrate = detectors.iter().find(|d| d["id"] == "migrate").unwrap();
         assert_eq!(migrate["name"], "Flyway: migrate (writes to the database)");
+    }
+
+    #[test]
+    fn every_declared_template_and_icon_exists() {
+        let manifest = include_str!("../plugin.toml");
+        let paths: Vec<&str> = manifest
+            .lines()
+            .filter_map(|l| l.strip_prefix("path = \"").or_else(|| l.strip_prefix("icon = \"")))
+            .map(|l| l.trim_end_matches('"'))
+            .collect();
+        assert!(paths.iter().filter(|p| p.starts_with("templates/")).count() == 5);
+        for path in paths {
+            let full = format!("{}/{path}", env!("CARGO_MANIFEST_DIR"));
+            assert!(std::path::Path::new(&full).is_file(), "{path}");
+        }
     }
 }
