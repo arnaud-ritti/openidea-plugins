@@ -109,6 +109,12 @@ jobs:
           git commit -m "aritti.$NAME $VERSION"
           git push --force origin "$branch"
 
+          existing=$(gh pr list -R "$REGISTRY" --head "${fork%%/*}:$branch" --json url --jq '.[0].url')
+          if [ -n "$existing" ]; then
+            echo "Registry pull request already open, branch updated: $existing"
+            exit 0
+          fi
+
           gh pr create -R "$REGISTRY" --head "${fork%%/*}:$branch" --title "aritti.$NAME $VERSION" --body "**Plugin:** aritti.$NAME (https://github.com/$GITHUB_REPOSITORY)
 
           **What changed:** https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME
