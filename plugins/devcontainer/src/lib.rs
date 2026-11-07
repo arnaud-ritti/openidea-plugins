@@ -973,6 +973,18 @@ mod tests {
     }
 
     #[test]
+    fn feature_keys_are_found_after_comments() {
+        for text in [
+            "{\"features\": { // first\n  \"ghcr.io/a/b:1\": {},\n  /* next */ \"x\": {} }}",
+            "{\"features\": {\n  \"a\": {}, // next\n  \"x\": {} }}",
+        ] {
+            let offset = text.find("\"x\"").unwrap() + 2;
+
+            assert!(checks::feature_key_at(text, offset).is_some(), "{text}");
+        }
+    }
+
+    #[test]
     fn completion_ranges_use_utf16_columns_with_multibyte_text() {
         let _host = host();
 

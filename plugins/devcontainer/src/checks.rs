@@ -122,14 +122,12 @@ pub fn feature_key_at(text: &str, offset: usize) -> Option<Range<usize>> {
     }
     let quote = line_start + before.rfind('"')?;
 
-    let previous = text[..quote].trim_end();
-    let at_key = match previous.as_bytes().last() {
-        Some(b'{') => previous.len() - 1 == features.value_range.start,
-        Some(b',') => members(bytes, features.value_range.start)
-            .iter()
-            .any(|m| skip_trivia(bytes, m.value_range.end) == previous.len() - 1),
-        _ => false,
-    };
+    let after_opening_brace = quote == skip_trivia(bytes, features.value_range.start + 1);
+    let after_comma = members(bytes, features.value_range.start).iter().any(|m| {
+        let comma = skip_trivia(bytes, m.value_range.end);
+        bytes.get(comma) == Some(&b',') && skip_trivia(bytes, comma + 1) == quote
+    });
+    let at_key = after_opening_brace || after_comma;
     if !at_key {
         return None;
     }
