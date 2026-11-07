@@ -3,6 +3,7 @@
 //! the chosen options. OpenIDEA has no new-project API: the browser downloads
 //! the zip.
 
+mod dependencies;
 mod starters;
 
 use openidea_plugin::views::{Body, Button, Field, FieldValue, View, ViewEvent, Viewport, Views};
@@ -10,9 +11,16 @@ use openidea_plugin::{Error, Invocation, NotificationLevel, PickItem, Plugin, Te
 use openidea_plugin::Range;
 use openidea_plugin::text::position;
 use std::collections::BTreeMap;
+use ui_kit::sections::{SectionDef, Switcher};
 
 const START: &str = "https://start.spring.io";
 const STORAGE_KEY: &str = "form";
+const PROJECT_SECTION: &str = "project";
+const DEPENDENCIES_SECTION: &str = "dependencies";
+const SECTIONS: &[SectionDef] = &[
+    SectionDef { id: PROJECT_SECTION, label: "Project" },
+    SectionDef { id: DEPENDENCIES_SECTION, label: "Dependencies" },
+];
 
 /// Key (the server's parameter name), label, default and choices as (id, shown
 /// name) (none: free text), in the order of the form and of the URL.
@@ -68,10 +76,17 @@ fn encode(s: &str) -> String {
         .collect()
 }
 
-#[derive(Default)]
 pub struct Launcher {
     /// Values the user changed from their defaults; read from storage on first use.
     changed: Option<BTreeMap<String, String>>,
+    sections: Switcher,
+    dependencies: dependencies::State,
+}
+
+impl Default for Launcher {
+    fn default() -> Self {
+        Self { changed: None, sections: Switcher::new("initializr.section", SECTIONS), dependencies: Default::default() }
+    }
 }
 
 impl Launcher {
@@ -246,21 +261,6 @@ impl Launcher {
         }
     }
 
-    fn pick_dependencies(&mut self) -> Result<(), Error> {
-        let Some(items) = self.catalogue(starters::dependency_items) else { return Ok(()) };
-        let Some(chosen) = host::pick_many("Spring Initializr dependencies", &items)? else { return Ok(()) };
-        let current = self.get("dependencies");
-        let mut ids: Vec<&str> = current.split([',', ' ']).filter(|d| !d.is_empty()).collect();
-        for id in &chosen {
-            if !ids.contains(&id.as_str()) {
-                ids.push(id);
-            }
-        }
-        let joined = ids.join(",");
-        self.set("dependencies", &joined);
-        Ok(())
-    }
-
     fn pick_boot_version(&mut self) -> Result<(), Error> {
         let Some(items) = self.catalogue(starters::boot_version_items) else { return Ok(()) };
         if let Some(version) = host::pick("Spring Boot version", &items)? {
@@ -306,45 +306,56 @@ impl Launcher {
 
 impl Views for Launcher {
     fn render(&mut self, _view: &str, _viewport: Option<Viewport>, _ctx: &Invocation) -> Result<View, Error> {
-        let fields = FIELDS
-            .iter()
-            .map(|(key, label, _, choices)| {
-                let value = self.get(key);
-                let value = if choices.is_empty() {
-                    FieldValue::Text(value)
-                } else {
-                    let name = choices.iter().find(|(id, _)| *id == value).map_or(value.as_str(), |(_, name)| name);
-                    let name = name.to_owned();
-                    FieldValue::Choice(choices.iter().map(|(_, name)| (*name).to_owned()).collect(), name)
-                };
-                Field::new(key, label, value)
-            })
-            .collect();
         let problem = self.problem();
+        let generate = |button: Button| button.enabled(problem.is_none());
         let status = match &problem {
             Some(p) => p.clone(),
             None => format!("Generate Project downloads {}.zip in the browser.", self.get("artifactId")),
         };
-        Ok(View::new(Body::Form(fields))
-            .button(Button::new("generate", "Generate Project").icon("export").enabled(problem.is_none()))
-            .button(Button::new("cli", "Generate with Spring Boot CLI").icon("terminal").enabled(problem.is_none()))
-            .button(Button::new("explore", "Explore in Browser").icon("external-link").enabled(problem.is_none()))
-            .button(Button::new("pickBoot", "Pick Spring Boot Version").icon("list"))
-            .button(Button::new("pickDependencies", "Pick Dependencies").icon("list"))
-            .button(Button::new("reset", "Reset").icon("revert"))
-            .status(&status))
+        let mut view = if self.sections.active() == DEPENDENCIES_SECTION {
+            let (view, tree_status) = self.dependencies_tree();
+            let status = if problem.is_some() { status } else { tree_status };
+            view.status(&status)
+        } else {
+            let fields = FIELDS
+                .iter()
+                .map(|(key, label, _, choices)| {
+                    let value = self.get(key);
+                    let value = if choices.is_empty() {
+                        FieldValue::Text(value)
+                    } else {
+                        let name = choices.iter().find(|(id, _)| *id == value).map_or(value.as_str(), |(_, name)| name);
+                        let name = name.to_owned();
+                        FieldValue::Choice(choices.iter().map(|(_, name)| (*name).to_owned()).collect(), name)
+                    };
+                    Field::new(key, label, value)
+                })
+                .collect();
+            View::new(Body::Form(fields)).status(&status)
+        };
+        view = view
+            .button(generate(Button::new("generate", "Generate Project").icon("export")))
+            .button(generate(Button::new("cli", "Generate with Spring Boot CLI").icon("terminal")))
+            .button(generate(Button::new("explore", "Explore in Browser").icon("external-link")));
+        if self.sections.active() == PROJECT_SECTION {
+            view = view.button(Button::new("pickBoot", "Pick Spring Boot Version").icon("list")).button(Button::new("reset", "Reset").icon("revert"));
+        }
+        let badges = [(DEPENDENCIES_SECTION, self.dependencies_badge())];
+
+        Ok(self.sections.buttons(view, &badges))
     }
 
     fn handle(&mut self, view: &str, event: ViewEvent, _ctx: &Invocation) -> Result<(), Error> {
-        match event {
-            ViewEvent::Field(key, value) if FIELDS.iter().any(|f| f.0 == key) => self.set(&key, &value),
-            ViewEvent::Button(b) if b == "reset" => self.reset(),
-            ViewEvent::Button(b) if b == "pickBoot" => self.pick_boot_version()?,
-            ViewEvent::Button(b) if b == "pickDependencies" => self.pick_dependencies()?,
-            ViewEvent::Button(b) if self.problem().is_none() && b == "generate" => host::open_url(&self.starter_url())?,
-            ViewEvent::Button(b) if self.problem().is_none() && b == "cli" => self.generate_with_cli()?,
-            ViewEvent::Button(b) if self.problem().is_none() && b == "explore" => host::open_url(&self.explore_url())?,
-            _ => {}
+        if !self.sections.handle(&event) && !self.handle_dependencies(&event)? {
+            match event {
+                ViewEvent::Field(key, value) if FIELDS.iter().any(|f| f.0 == key) => self.set(&key, &value),
+                ViewEvent::Button(b) if b == "reset" => self.reset(),
+                ViewEvent::Button(b) if b == "pickBoot" => self.pick_boot_version()?,
+                ViewEvent::Button(b) if self.problem().is_none() && b == "generate" => host::open_url(&self.starter_url())?,
+                ViewEvent::Button(b) if self.problem().is_none() && b == "cli" => self.generate_with_cli()?,
+                ViewEvent::Button(b) if self.problem().is_none() && b == "explore" => host::open_url(&self.explore_url())?,
+                _ => {}
+            }
         }
         host::refresh_view(view);
         Ok(())
@@ -369,6 +380,7 @@ register_plugin!(Launcher, views);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dependencies::in_range;
     use openidea_plugin::mock::MockHost;
 
     const VIEW: &str = "initializr";
@@ -444,8 +456,8 @@ mod tests {
         assert!(!host.storage().contains_key("form"));
         assert_eq!((fresh.get("groupId"), fresh.get("type")), ("com.example".into(), "maven-project".into()));
         let view = fresh.render(VIEW, None, &host.invocation()).unwrap();
-        let icons: Vec<_> = view.toolbar.iter().map(|b| (b.label.as_str(), b.icon.as_deref().unwrap())).collect();
-        assert_eq!(icons, [("Generate Project", "export"), ("Generate with Spring Boot CLI", "terminal"), ("Explore in Browser", "external-link"), ("Pick Spring Boot Version", "list"), ("Pick Dependencies", "list"), ("Reset", "revert")]);
+        let icons: Vec<_> = view.toolbar.iter().filter(|b| !b.id.starts_with("section:")).map(|b| (b.label.as_str(), b.icon.as_deref().unwrap())).collect();
+        assert_eq!(icons, [("Generate Project", "export"), ("Generate with Spring Boot CLI", "terminal"), ("Explore in Browser", "external-link"), ("Pick Spring Boot Version", "list"), ("Reset", "revert")]);
     }
 
     #[test]
@@ -455,7 +467,7 @@ mod tests {
         field(&mut l, &host, "server", "ftp://start.spring.io");
         let view = l.render(VIEW, None, &host.invocation()).unwrap();
         assert!(view.status.unwrap().starts_with("The server URL must start with http:// or https://"));
-        assert!(view.toolbar.iter().filter(|b| b.id != "reset" && !b.id.starts_with("pick")).all(|b| !b.enabled));
+        assert!(view.toolbar.iter().filter(|b| b.id != "reset" && !b.id.starts_with("pick") && !b.id.starts_with("section:")).all(|b| !b.enabled));
         click(&mut l, &host, "generate");
         assert!(host.opened_urls().is_empty());
 
@@ -584,29 +596,23 @@ mod tests {
     }
 
     #[test]
-    fn picks_dependencies_and_boot_version() {
+    fn picks_the_boot_version() {
         let host = MockHost::install().with_capabilities(NET);
         serve(&host);
         let mut l = Launcher::default();
-        field(&mut l, &host, "dependencies", "web");
-        host.answer_next_prompt(Some(&["web", "data-jpa"]));
-        click(&mut l, &host, "pickDependencies");
-        assert_eq!(l.get("dependencies"), "web,data-jpa");
         host.answer_next_prompt(Some(&["4.0.0"]));
         click(&mut l, &host, "pickBoot");
         assert_eq!(l.get("bootVersion"), "4.0.0");
     }
 
     #[test]
-    fn dismissed_picks_change_nothing() {
+    fn dismissed_boot_pick_changes_nothing() {
         let host = MockHost::install().with_capabilities(NET);
         serve(&host);
         let mut l = Launcher::default();
         host.answer_next_prompt(None);
-        click(&mut l, &host, "pickDependencies");
-        host.answer_next_prompt(None);
         click(&mut l, &host, "pickBoot");
-        assert_eq!((l.get("dependencies"), l.get("bootVersion")), (String::new(), String::new()));
+        assert_eq!(l.get("bootVersion"), "");
     }
 
     #[test]
@@ -665,5 +671,204 @@ mod tests {
         assert_eq!(host.editor_text(), POM);
         assert!(add(&host, "/project/readme.md", "x", Some(&["web"])).is_err());
         assert!(add(&host, "/project/pom.xml", "<project/>", Some(&["web"])).is_err());
+    }
+
+    fn serve_catalogue(host: &MockHost) {
+        host.on_fetch(|_| {
+            let body = r#"{"dependencies":{"values":[
+                {"name":"Web","values":[{"id":"web","name":"Spring Web","description":"Build MVC apps"},
+                                        {"id":"old","name":"Legacy","description":"Gone since 3.4","compatibilityRange":"[2.0.0,3.4.0)"}]},
+                {"name":"SQL","values":[{"id":"data-jpa","name":"JPA","description":"Persist with Hibernate"},
+                                        {"id":"new","name":"Newcomer","description":"Needs 3.6","compatibilityRange":"3.6.0"}]}]},
+                "bootVersion":{"default":"3.5.16","values":[]}}"#;
+            Ok(openidea_plugin::HttpResponse { status: 200, body: body.as_bytes().to_vec(), ..Default::default() })
+        });
+    }
+
+    fn tree(l: &mut Launcher, host: &MockHost) -> (Vec<openidea_plugin::views::TreeItem>, View) {
+        let view = l.render(VIEW, None, &host.invocation()).unwrap();
+        let Body::Tree(items) = view.body.clone() else { panic!("tree expected") };
+        (items, view)
+    }
+
+    fn open_dependencies(host: &MockHost) -> Launcher {
+        let mut l = Launcher::default();
+        click(&mut l, host, "section:dependencies");
+        l
+    }
+
+    fn labels(items: &[openidea_plugin::views::TreeItem]) -> Vec<&str> {
+        items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    fn activate(l: &mut Launcher, host: &MockHost, key: &str) {
+        l.handle(VIEW, ViewEvent::Activate(key.into()), &host.invocation()).unwrap();
+    }
+
+    #[test]
+    fn tree_has_selected_and_categories_collapsed() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve_catalogue(&host);
+        let mut l = open_dependencies(&host);
+        let (items, view) = tree(&mut l, &host);
+        assert_eq!(labels(&items), ["Selected (0)", "Web", "Spring Web", "SQL", "JPA"]);
+        assert!(!items[0].expandable, "no chosen id, nothing to expand");
+        assert!(items[1].expandable && !items[1].expanded);
+        assert_eq!(items[2].detail.as_deref(), Some("Build MVC apps"));
+        assert_eq!(view.status.as_deref(), Some("0 selected. Double-click a dependency to add or remove it."));
+        assert!(view.toolbar.iter().any(|b| b.id == "search") && !view.toolbar.iter().any(|b| b.id == "clearSearch"));
+    }
+
+    #[test]
+    fn activating_toggles_the_id_in_the_field() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve_catalogue(&host);
+        let mut l = open_dependencies(&host);
+        activate(&mut l, &host, "dep:web");
+        activate(&mut l, &host, "dep:data-jpa");
+        assert_eq!(l.get("dependencies"), "web,data-jpa");
+        let (items, view) = tree(&mut l, &host);
+        assert_eq!(labels(&items)[..3], ["Selected (2)", "Spring Web", "JPA"]);
+        assert!(items[0].expanded);
+        assert_eq!(items.iter().find(|i| i.key == "dep:web").unwrap().icon.as_deref(), Some("check"));
+        let badge = view.toolbar.iter().find(|b| b.id == "section:dependencies").unwrap();
+        assert_eq!(badge.label, "\u{25cf} Dependencies (2)");
+
+        activate(&mut l, &host, "dep:web");
+        assert_eq!(l.get("dependencies"), "data-jpa");
+        activate(&mut l, &host, "sel:data-jpa");
+        assert_eq!(l.get("dependencies"), "");
+    }
+
+    #[test]
+    fn selected_shows_unknown_ids_by_their_id() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve_catalogue(&host);
+        let mut l = open_dependencies(&host);
+        field(&mut l, &host, "dependencies", "web, mystery");
+        let (items, _) = tree(&mut l, &host);
+        assert_eq!(labels(&items)[..3], ["Selected (2)", "Spring Web", "mystery"]);
+        assert_eq!(items[2].detail, None);
+    }
+
+    #[test]
+    fn search_filters_and_clears() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve_catalogue(&host);
+        let mut l = open_dependencies(&host);
+        host.answer_next_prompt(Some(&["HIBERNATE"]));
+        click(&mut l, &host, "search");
+        let (items, view) = tree(&mut l, &host);
+        assert_eq!(labels(&items), ["Selected (0)", "SQL", "JPA"]);
+        assert!(items[1].expanded);
+        assert_eq!(view.status.as_deref(), Some("1 matches for \"HIBERNATE\""));
+        assert!(view.toolbar.iter().any(|b| b.id == "clearSearch"));
+
+        click(&mut l, &host, "clearSearch");
+        let (items, view) = tree(&mut l, &host);
+        assert_eq!(items.len(), 5);
+        assert!(!items[1].expanded);
+        assert!(!view.toolbar.iter().any(|b| b.id == "clearSearch"));
+
+        host.answer_next_prompt(None);
+        click(&mut l, &host, "search");
+        assert_eq!(tree(&mut l, &host).0.len(), 5);
+    }
+
+    #[test]
+    fn incompatible_dependencies_are_hidden_and_chosen_ones_flagged() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve_catalogue(&host);
+        let mut l = open_dependencies(&host);
+        let (items, _) = tree(&mut l, &host);
+        assert!(!labels(&items).contains(&"Legacy") && !labels(&items).contains(&"Newcomer"));
+
+        field(&mut l, &host, "dependencies", "old");
+        field(&mut l, &host, "bootVersion", "3.6.1");
+        let (items, _) = tree(&mut l, &host);
+        assert_eq!(items[1].label, "Legacy");
+        assert_eq!(items[1].detail.as_deref(), Some("(not compatible with 3.6.1)"));
+        assert!(!labels(&items).contains(&"Gone since 3.4"));
+        assert!(labels(&items).contains(&"Newcomer"));
+        assert_eq!(items.iter().filter(|i| i.label == "Legacy").count(), 1, "hidden from the category");
+    }
+
+    #[test]
+    fn version_ranges() {
+        assert!(in_range("3.4.0", "[3.3.0,3.5.0)"));
+        assert!(!in_range("3.5.0", "[3.3.0,3.5.0)"));
+        assert!(in_range("3.5.0", "[3.3.0,3.5.0]"));
+        assert!(!in_range("3.1.9", "3.2.0") && in_range("3.2.0", "3.2.0") && in_range("4.0.1", "3.2.0"));
+        assert!(!in_range("3.4.0-M1", "[3.4.0,4.0.0-M1)"));
+        assert!(in_range("3.4.0-RC1", "[3.4.0-M1,4.0.0-M1)"));
+        assert!(!in_range("4.0.0", "[3.4.0-M1,4.0.0-M1)"));
+        assert!(in_range("3.4.0-SNAPSHOT", "[3.4.0-M1,4.0.0-M1)"));
+        assert!(in_range("garbage", "[3.3.0,3.5.0)") && in_range("3.4.0", "[nonsense") && in_range("3.4.0", "[x,y)"));
+    }
+
+    #[test]
+    fn unavailable_catalogue_shows_a_message_and_selected_still_works() {
+        let host = MockHost::install().with_capabilities(&["storage"]);
+        let mut l = open_dependencies(&host);
+        activate(&mut l, &host, "sel:web");
+        field(&mut l, &host, "dependencies", "web");
+        let (items, _) = tree(&mut l, &host);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[1].label, "web");
+        assert!(items[2].label.contains("net:start.spring.io"));
+        activate(&mut l, &host, "sel:web");
+        assert_eq!(l.get("dependencies"), "");
+
+        field(&mut l, &host, "server", "http://localhost:8080");
+        let (items, _) = tree(&mut l, &host);
+        assert!(items[1].label.contains("only available for https://start.spring.io"));
+    }
+
+    #[test]
+    fn catalogue_is_fetched_once_until_refreshed() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve_catalogue(&host);
+        let mut l = open_dependencies(&host);
+        tree(&mut l, &host);
+        tree(&mut l, &host);
+        assert_eq!(host.requests().len(), 1);
+        click(&mut l, &host, "refreshCatalogue");
+        tree(&mut l, &host);
+        assert_eq!(host.requests().len(), 2);
+    }
+
+    #[test]
+    fn clearing_all_asks_first() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve_catalogue(&host);
+        let mut l = open_dependencies(&host);
+        field(&mut l, &host, "dependencies", "web,data-jpa");
+        host.answer_next_prompt(None);
+        click(&mut l, &host, "clearAll");
+        assert_eq!(l.get("dependencies"), "web,data-jpa");
+        host.answer_next_prompt(Some(&[]));
+        click(&mut l, &host, "clearAll");
+        assert_eq!(l.get("dependencies"), "");
+    }
+
+    #[test]
+    fn switcher_shows_the_count_and_keeps_generate_buttons() {
+        let host = MockHost::install().with_capabilities(NET);
+        serve_catalogue(&host);
+        let mut l = Launcher::default();
+        field(&mut l, &host, "dependencies", "web,data-jpa,flyway");
+        let view = l.render(VIEW, None, &host.invocation()).unwrap();
+        let ids: Vec<_> = view.toolbar.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids[..2], ["section:project", "section:dependencies"]);
+        assert_eq!(view.toolbar[0].label, "\u{25cf} Project");
+        assert_eq!(view.toolbar[1].label, "Dependencies (3)");
+
+        click(&mut l, &host, "section:dependencies");
+        let view = l.render(VIEW, None, &host.invocation()).unwrap();
+        assert_eq!(view.toolbar[1].label, "\u{25cf} Dependencies (3)");
+        for id in ["generate", "cli", "explore"] {
+            assert!(view.toolbar.iter().any(|b| b.id == id), "{id}");
+        }
+        assert!(!view.toolbar.iter().any(|b| b.id == "reset"));
     }
 }

@@ -13,7 +13,7 @@ pub struct Coordinates {
     pub version: Option<String>,
 }
 
-fn get(path: &str) -> Result<Value, Error> {
+pub(crate) fn get(path: &str) -> Result<Value, Error> {
     let url = format!("{}{path}", crate::START);
     let response = host::fetch(&HttpRequest::get(&url).header("Accept", ACCEPT))?;
     if response.status != 200 {
