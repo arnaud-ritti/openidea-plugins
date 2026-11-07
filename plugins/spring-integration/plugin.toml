@@ -1,6 +1,6 @@
 id = "aritti.spring-integration"
 name = "Spring Structure Tools"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Spring Structure window and editor support for Spring Integration, Spring Batch and Spring Modulith. Integration: channel index for Java and XML, navigation and completion of channel names and bean refs, producer/consumer gutter arrows, unconsumed channel warnings. Batch: XML job navigation, completion and transition/bean checks, spring.batch.job.name navigation, Spring Batch 5 migration hints. Modulith: application module checks, allowedDependencies completion, open-module quick fix. One Spring Structure tool window switches between the integration channels, batch jobs, modulith modules and the module diagram; modules whose dependency the build files do not mention stay idle. Replaces aritti.spring-batch and aritti.spring-modulith: uninstall them to avoid duplicate windows and completions. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

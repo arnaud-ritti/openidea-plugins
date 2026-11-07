@@ -1,6 +1,6 @@
 id = "aritti.tasks"
 name = "Tasks"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = """\
 Work on one task at a time. Create local tasks or pick issues from GitHub, GitLab, Codeberg, YouTrack Cloud, \
 Jira Cloud and Trello. With git, each task can have its own branch and shelved changes. Switching back to a \

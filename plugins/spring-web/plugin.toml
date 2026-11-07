@@ -1,6 +1,6 @@
 id = "aritti.spring-web"
 name = "Spring Endpoints Tools"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Spring Endpoints window and editor support for Spring MVC, WebSocket, messaging, GraphQL, Web Flow and Spring Cloud. Web: checks @PathVariable parameters against the URI templates of their request mappings with a quick fix, links the view names a @Controller returns to their template files, links functional routes and test URLs to their handlers, checks API version values, and offers actions that add a @RequestMapping or @ExceptionHandler method. WebSocket: STOMP destinations linked between handlers, sends and JavaScript/TypeScript clients. Messaging: Kafka, RabbitMQ and JMS destinations. GraphQL: controller methods linked to schema fields. Web Flow: flow definitions with a state diagram. Cloud: OpenFeign clients, Stream function bindings and Gateway predicates. One Spring Endpoints tool window switches between the HTTP route list, WebSocket destinations, messaging destinations, GraphQL endpoints, the Web Flow diagram and Feign clients; modules whose dependency the build files do not mention stay idle. Replaces aritti.spring-websocket, aritti.spring-messaging, aritti.spring-graphql, aritti.spring-webflow and aritti.spring-cloud: uninstall them to avoid duplicate windows and completions. Independent implementation, not affiliated with JetBrains or Broadcom."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

@@ -1,6 +1,6 @@
 id = "aritti.blade"
 name = "Blade"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "Laravel Blade support for .blade.php files: highlighting of Blade directives, echo statements, PHP and the HTML around them, sections and pushes in the structure view, folding of directive pairs and multi-line comments, and inspections for unpaired directives and unbalanced parentheses in directive arguments."
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 license = "MIT"

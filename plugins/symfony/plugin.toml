@@ -1,6 +1,6 @@
 id = "aritti.symfony"
 name = "Symfony"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = """Symfony support in PHP, Twig, YAML and XML files. Completion and go to definition for routes, \
 Twig templates and blocks, services, classes, translation keys (per domain), assets, Encore and AssetMapper entries, \
 and roles, plus completion of the variables controllers pass to a Twig template. Reports missing routes, templates, \
