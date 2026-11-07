@@ -28,5 +28,6 @@ jobs:
           done
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           PATHS: ${{ steps.rp.outputs.paths_released }}
           OUTPUTS: ${{ toJSON(steps.rp.outputs) }}
