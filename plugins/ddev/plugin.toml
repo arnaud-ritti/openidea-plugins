@@ -1,6 +1,6 @@
 id = "aritti.ddev"
 name = "DDEV Integration"
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 description = "DDEV project controls, service links and streaming logs in Services. Requires an approved DDEV executable and OpenIDEA API 1.4. Native database credentials, keyed terminals and a project execution target for PHP, Node and Composer."
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 homepage = "https://github.com/arnaud-ritti/openidea-plugins/tree/main/plugins/ddev"

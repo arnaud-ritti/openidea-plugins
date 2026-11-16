@@ -1,6 +1,6 @@
 id = "aritti.spring-osgi"
 name = "Spring OSGi"
-version = "0.2.0" # x-release-please-version
+version = "0.3.0" # x-release-please-version
 description = "Spring Dynamic Modules (Spring OSGi) support for Spring XML files. Checks <osgi:service>, <osgi:reference>, <osgi:list>/<osgi:set> and their listeners: conflicting declarations, service beans that don't implement the exported interfaces, listener methods with a wrong signature, and listeners that don't implement OsgiServiceLifecycleListener. Adds Go to Definition and completion for bean references, exported interfaces and listener methods."
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"

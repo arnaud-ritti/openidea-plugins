@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/arnaud-ritti/openidea-plugins/compare/ignore-v0.2.0...ignore-v0.3.0) (2026-11-16)
+
+
+### Features
+
+* adopt API 1.4 and extend scoped plugin workflows ([5a8a92b](https://github.com/arnaud-ritti/openidea-plugins/commit/5a8a92b6a6268552c45d1e67b8ae40866a25daee))
+* close bounded Dependency Audit, GitLab, Ignore, Kubernetes and OpenAPI residual slices ([88748a2](https://github.com/arnaud-ritti/openidea-plugins/commit/88748a26fac2cebe07889ba68263889b4573fde0))
+* close six small non-Laravel parity residuals ([7fabc9c](https://github.com/arnaud-ritti/openidea-plugins/commit/7fabc9ca01e86306c5596c64c04df72a59caa6c7))
+* implement plugin parity workflows and scoped refactors ([d0e1efc](https://github.com/arnaud-ritti/openidea-plugins/commit/d0e1efcd3f7017bb4ebfba8b50901d8affe0e8ba))
+* **ui:** consolidate plugin panels and native service actions ([16bbb3e](https://github.com/arnaud-ritti/openidea-plugins/commit/16bbb3eba4999c7dbd0b2d1215ee3db3116ae4c3))
+
+
+### Bug Fixes
+
+* **deps:** build against OpenIDEA SDK v0.1.42 and require plugin API 1.5 ([4ec2afa](https://github.com/arnaud-ritti/openidea-plugins/commit/4ec2afa5da97997d15e0cab94f3cfcadbb89e375))
+
 ## [0.2.0](https://github.com/arnaud-ritti/openidea-plugins/compare/ignore-v0.1.0...ignore-v0.2.0) (2026-11-07)
 
 

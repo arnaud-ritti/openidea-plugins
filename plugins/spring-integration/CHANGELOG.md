@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-integration-v0.2.0...spring-integration-v0.3.0) (2026-11-16)
+
+
+### Features
+
+* adopt API 1.4 and extend scoped plugin workflows ([5a8a92b](https://github.com/arnaud-ritti/openidea-plugins/commit/5a8a92b6a6268552c45d1e67b8ae40866a25daee))
+* close bounded Devcontainer, Flyway, Boot, Twig, Batch and Runtime residual slices ([e8b6bb5](https://github.com/arnaud-ritti/openidea-plugins/commit/e8b6bb515cd3266490b081421eb889191a8b06a4))
+* custom gutter marker icons for Spring, data and PHP plugins ([1b180e5](https://github.com/arnaud-ritti/openidea-plugins/commit/1b180e583da9bae60f8ba3da6940ca94c4b275f0))
+* implement plugin parity workflows and scoped refactors ([d0e1efc](https://github.com/arnaud-ritti/openidea-plugins/commit/d0e1efcd3f7017bb4ebfba8b50901d8affe0e8ba))
+* SpEL validation, Modulith use-site checks, WSDL pairs, OpenAPI constraints, Actuator source links, persistence units ([a3f36c9](https://github.com/arnaud-ritti/openidea-plugins/commit/a3f36c9fc61bf32bea1c9f7f0bfb94afbcd5f66d))
+* **spring:** close another residual round across Data, Security, Initializr, Integration, Shell, JPA and Quarkus ([bfb4579](https://github.com/arnaud-ritti/openidea-plugins/commit/bfb45790361d4fafb2db3e42f5de9bd7094bff14))
+* **spring:** endpoint names, GraphQL/messaging hints, effective bean conditions, Batch launch command ([6a71f36](https://github.com/arnaud-ritti/openidea-plugins/commit/6a71f3670ad0c202a34025923ccb9daea81aae32))
+* **spring:** Gradle cache metadata, WSDL QNames, effective contexts, Security verification fixes, HTTP exchange clients, MVC XML imports ([f371c2f](https://github.com/arnaud-ritti/openidea-plugins/commit/f371c2f5717aa806725da24e646300d8401c4ef6))
+* twig.paths list form, Integration expression attrs and XPath, DefaultWsdl11Definition literals, Kotlin ctor PropertyKey, producer routing keys, Weight/Retry args ([36d07da](https://github.com/arnaud-ritti/openidea-plugins/commit/36d07da51c606c1e619f4fb8f59aa109199087c9))
+* **ui:** consolidate plugin panels and native service actions ([16bbb3e](https://github.com/arnaud-ritti/openidea-plugins/commit/16bbb3eba4999c7dbd0b2d1215ee3db3116ae4c3))
+* wire custom gutter marker icons in Spring, data and PHP plugins ([9417a2f](https://github.com/arnaud-ritti/openidea-plugins/commit/9417a2f76bb5fc3699d2e665662457cdd03d8df3))
+
+
+### Bug Fixes
+
+* verify Liquibase and Spring context rules against sources, tidy leftovers ([be4e938](https://github.com/arnaud-ritti/openidea-plugins/commit/be4e938ec5a803b82f22bdb65055a7e662daa5a2))
+
 ## [0.2.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-integration-v0.1.0...spring-integration-v0.2.0) (2026-11-07)
 
 

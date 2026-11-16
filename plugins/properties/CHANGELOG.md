@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/arnaud-ritti/openidea-plugins/compare/properties-v0.2.0...properties-v0.3.0) (2026-11-16)
+
+
+### Features
+
+* adopt API 1.4 and extend scoped plugin workflows ([5a8a92b](https://github.com/arnaud-ritti/openidea-plugins/commit/5a8a92b6a6268552c45d1e67b8ae40866a25daee))
+* close follow-up residuals in dotenv, Properties, Symfony and Twig plugins ([9b7041f](https://github.com/arnaud-ritti/openidea-plugins/commit/9b7041fc978120f694c424b91be6c629863bda89))
+* implement plugin parity workflows and scoped refactors ([d0e1efc](https://github.com/arnaud-ritti/openidea-plugins/commit/d0e1efcd3f7017bb4ebfba8b50901d8affe0e8ba))
+* twig.paths list form, Integration expression attrs and XPath, DefaultWsdl11Definition literals, Kotlin ctor PropertyKey, producer routing keys, Weight/Retry args ([36d07da](https://github.com/arnaud-ritti/openidea-plugins/commit/36d07da51c606c1e619f4fb8f59aa109199087c9))
+* **ui:** consolidate plugin panels and native service actions ([16bbb3e](https://github.com/arnaud-ritti/openidea-plugins/commit/16bbb3eba4999c7dbd0b2d1215ee3db3116ae4c3))
+
+
+### Bug Fixes
+
+* **deps:** build against OpenIDEA SDK v0.1.42 and require plugin API 1.5 ([4ec2afa](https://github.com/arnaud-ritti/openidea-plugins/commit/4ec2afa5da97997d15e0cab94f3cfcadbb89e375))
+
 ## [0.2.0](https://github.com/arnaud-ritti/openidea-plugins/compare/properties-v0.1.0...properties-v0.2.0) (2026-11-07)
 
 

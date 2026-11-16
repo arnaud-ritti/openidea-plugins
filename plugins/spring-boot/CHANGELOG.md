@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-boot-v0.2.0...spring-boot-v0.3.0) (2026-11-16)
+
+
+### Features
+
+* adopt API 1.4 and extend scoped plugin workflows ([5a8a92b](https://github.com/arnaud-ritti/openidea-plugins/commit/5a8a92b6a6268552c45d1e67b8ae40866a25daee))
+* close bounded Devcontainer, Flyway, Boot, Twig, Batch and Runtime residual slices ([e8b6bb5](https://github.com/arnaud-ritti/openidea-plugins/commit/e8b6bb515cd3266490b081421eb889191a8b06a4))
+* close queued follow-ups (twig.paths, Boot profile includes, Shell inheritance, XPath prefixes, Symfony time events) ([0bbd769](https://github.com/arnaud-ritti/openidea-plugins/commit/0bbd769278d0587c93690a0c0183e78fc4f48649))
+* implement plugin parity workflows and scoped refactors ([d0e1efc](https://github.com/arnaud-ritti/openidea-plugins/commit/d0e1efcd3f7017bb4ebfba8b50901d8affe0e8ba))
+* Maven BOM metadata, oasdiff compat rules, Docker ARG scope, form/column checks, workspace chains, JAX-RS checks, view names, wiring registrations ([17b4876](https://github.com/arnaud-ritti/openidea-plugins/commit/17b48765dc99e46aa52915c5a4139d00a66a0ce2))
+* **spring:** close follow-up residuals across Spring, JPA, Flyway and Quarkus plugins ([d152eb1](https://github.com/arnaud-ritti/openidea-plugins/commit/d152eb1429e6f06237b3dd6c80c151e25e2010f9))
+* **spring:** Gradle cache metadata, WSDL QNames, effective contexts, Security verification fixes, HTTP exchange clients, MVC XML imports ([f371c2f](https://github.com/arnaud-ritti/openidea-plugins/commit/f371c2f5717aa806725da24e646300d8401c4ef6))
+
+
+### Bug Fixes
+
+* **deps:** build against OpenIDEA SDK v0.1.42 and require plugin API 1.5 ([4ec2afa](https://github.com/arnaud-ritti/openidea-plugins/commit/4ec2afa5da97997d15e0cab94f3cfcadbb89e375))
+* verify Liquibase and Spring context rules against sources, tidy leftovers ([be4e938](https://github.com/arnaud-ritti/openidea-plugins/commit/be4e938ec5a803b82f22bdb65055a7e662daa5a2))
+
 ## [0.2.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-boot-v0.1.0...spring-boot-v0.2.0) (2026-11-07)
 
 

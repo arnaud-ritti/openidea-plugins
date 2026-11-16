@@ -1,6 +1,6 @@
 id = "aritti.tasks"
 name = "Tasks"
-version = "0.2.0" # x-release-please-version
+version = "0.3.0" # x-release-please-version
 description = """Work on one task at a time. Create local tasks or pick issues from GitHub, GitLab, Codeberg, YouTrack Cloud, Jira Cloud and Trello. With git, each task can have its own branch and shelved changes. Switching back to a task reopens its files. The plugin tracks the time spent on each task, closes tasks (optionally resolving the issue and merging the branch), opens issues in the browser and copies the active task's commit message."""
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 homepage = "https://github.com/arnaud-ritti/openidea-plugins/tree/main/plugins/tasks"

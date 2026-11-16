@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-data-v0.2.0...spring-data-v0.3.0) (2026-11-16)
+
+
+### Features
+
+* adopt API 1.4 and extend scoped plugin workflows ([5a8a92b](https://github.com/arnaud-ritti/openidea-plugins/commit/5a8a92b6a6268552c45d1e67b8ae40866a25daee))
+* custom gutter marker icons for Spring, data and PHP plugins ([1b180e5](https://github.com/arnaud-ritti/openidea-plugins/commit/1b180e583da9bae60f8ba3da6940ca94c4b275f0))
+* implement plugin parity workflows and scoped refactors ([d0e1efc](https://github.com/arnaud-ritti/openidea-plugins/commit/d0e1efcd3f7017bb4ebfba8b50901d8affe0e8ba))
+* **spring:** close another residual round across Data, Security, Initializr, Integration, Shell, JPA and Quarkus ([bfb4579](https://github.com/arnaud-ritti/openidea-plugins/commit/bfb45790361d4fafb2db3e42f5de9bd7094bff14))
+* wire custom gutter marker icons in Spring, data and PHP plugins ([9417a2f](https://github.com/arnaud-ritti/openidea-plugins/commit/9417a2f76bb5fc3699d2e665662457cdd03d8df3))
+
 ## [0.2.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-data-v0.1.0...spring-data-v0.2.0) (2026-11-07)
 
 

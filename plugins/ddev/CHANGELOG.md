@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0](https://github.com/arnaud-ritti/openidea-plugins/compare/ddev-v0.1.0...ddev-v0.2.0) (2026-11-16)
+
+
+### Features
+
+* adopt plugin API 1.5 (net:ask, extension points, run-target validation, project notifications) ([08db51a](https://github.com/arnaud-ritti/openidea-plugins/commit/08db51a54c99b3b4ae414ab790be2a0783add3c7))
+* **ddev:** port DDEV Integration with API 1.4 workflows and parity checks ([575be26](https://github.com/arnaud-ritti/openidea-plugins/commit/575be26f35318a57643c84c1728a10c501c0cdeb))
+* **ui:** consolidate plugin panels and native service actions ([16bbb3e](https://github.com/arnaud-ritti/openidea-plugins/commit/16bbb3eba4999c7dbd0b2d1215ee3db3116ae4c3))
+
 ## 0.1.0
 
 Initial OpenIDEA release of DDEV integration.
