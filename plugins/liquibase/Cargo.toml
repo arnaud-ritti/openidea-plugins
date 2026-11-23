@@ -20,6 +20,9 @@ serde = "1"
 quick-xml = "0.42"
 yaml-rust2 = { version = "0.13", default-features = false }
 
+[dev-dependencies]
+regex = "1"
+
 [profile.release]
 opt-level = "s"
 lto = true

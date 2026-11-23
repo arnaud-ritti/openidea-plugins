@@ -65,6 +65,10 @@ The **Liquibase** tool window lists changesets in execution order.
 - **New…** opens the selected changelog so you can add a changeset with ⌥⏎.
 - Browsing never runs Liquibase. The status line says `partial` when a size or time limit is hit.
 
+### Find a changeset
+
+Press Shift twice and open the **Liquibase Changesets** tab. Type part of a changeset id, its author or the changelog path to open the changelog at that changeset. In a large project the first queries show what has been read so far, and **Show more** reads further.
+
 ### Choose which changelog to browse
 
 By default the tool window shows every changelog. To focus on one root:
@@ -155,6 +159,8 @@ With a `liquibase.properties` in the project root, the Run menu offers **Liquiba
 - Database-writing commands are never Run configurations: you review them each time.
 
 All of these need `process:liquibase`.
+
+Once the project has a changelog or a `liquibase.properties`, Run consoles colour Liquibase's messages, from the CLI or from an application log (Spring Boot runs Liquibase at startup): `ERROR:` lines, `Unexpected error running Liquibase` and `Validation Failed` in red, successful commands, updates, validations and changesets in green, and `Running Changeset:` in cyan.
 
 ### Compare two offline snapshots
 

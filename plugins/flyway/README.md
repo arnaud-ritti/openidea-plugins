@@ -110,7 +110,15 @@ After Info, migration files in the project tree show a short note with their sta
 
 ### See the target database
 
-When the project has a Flyway config file (`flyway.toml` or `flyway.conf`), the status bar shows the target database from it, for example **Flyway: db.example:5432/app**. It shows just **Flyway** when the target is unknown. Click it, or run **Flyway: Show Migrations**, to open the **Flyway** tab.
+When the project has a Flyway config file (`flyway.toml` or `flyway.conf`), the status bar shows the target database from it, for example **Flyway: db.example:5432/app**. It shows just **Flyway** when the target is unknown. Click it for a menu: **Show Migrations**, **New Migration…**, **Run Info…**, **Validate**, **Migrate** and **Repair**. After Info, the menu starts with the number of pending migrations. Migrate and Repair still ask before they run.
+
+### Find a migration
+
+Press Shift twice and open the **Flyway Migrations** tab. Type part of a version or description, for example `V12` or `add users`, to open the migration file. The list shows naming problems next to the path.
+
+### Coloured console output
+
+Once a project uses Flyway, Run consoles colour Flyway's messages, from the CLI or from an application log (Spring Boot runs Flyway at startup): `ERROR:` lines in red, `WARNING:` lines in yellow, failed migrations and `Validate failed` in bold red, applied, validated and repaired results in green, and `Migrating schema …` in cyan.
 
 ### Complete placeholders and config keys
 

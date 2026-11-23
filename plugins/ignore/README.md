@@ -61,6 +61,7 @@ Quick fixes on ⌥⏎: remove the entry, remove the relative part, or switch to 
 ### Know when a file is ignored
 
 - **Ignored** shows in the status bar while the focused file is ignored. The plugin reads `.git/info/exclude` and every `.gitignore` from the root down to the file.
+- Click **Ignored** to see the rule and the file it comes from. **Go to Rule** opens that file at the rule. **Ignore: Go to Rule Ignoring This File** does the same from the command palette.
 - A warning appears once per project when a Git repository has no `.gitignore`.
 
 ### Highlighting and folder markers
@@ -104,6 +105,7 @@ Find them in Search Everywhere › Actions (⇧⇧) under **Ignore**; bind keys 
 | **Ignore: Add Selected Paths to the Open Ignore File** | Adds the paths selected in the Project view to the open ignore file, or to a root ignore file you pick. Also in the Project view and editor context menus. | none |
 | **Ignore: Unignore Selected Paths in the Open Ignore File** | Adds `!` entries for the selected paths. Also in the Project view and editor context menus. | none |
 | **Ignore: New Ignore File…** | Creates an ignore file directly after you confirm (not a single undo step): the editor's **Create exact-name ignore file…**, or an empty file of the picked type in the selected folder or at the project root. Also in the Project view menu and Tools. | none |
+| **Ignore: Go to Rule Ignoring This File** | Opens the ignore file at the rule that ignores the focused file. Also in the **Ignored** status bar menu. | none |
 | **Ignore: Dialect Checks and Preferences** | Opens the per-file-type preferences form. Also in Tools. | none |
 | **Ignore: Scan Git for Ignored Files…** | Shows the Git command, then collects a sample of ignored paths. | none |
 | **Ignore: Show Last Git Scan of Ignored Files** | Shows the cached sample and rule match counts. | none |

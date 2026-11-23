@@ -6,6 +6,7 @@ mod generated_changelog;
 mod execution_review;
 mod catalog;
 mod changelog;
+mod console;
 mod native_runs;
 mod native_browser;
 mod checks;
@@ -20,6 +21,7 @@ mod local_references;
 mod file_references;
 mod selection;
 mod offline_diff;
+mod search;
 mod status;
 
 use changelog::{Changelog, Format, Include, Target};
@@ -60,6 +62,7 @@ pub struct Liquibase {
     git_user: Option<Option<String>>,
     /// The last explicit `status` run, kept until its sources change.
     status: status::State,
+    search: search::Index,
 }
 
 impl Plugin for Liquibase {
@@ -130,6 +133,7 @@ impl Liquibase {
                 openidea_plugin::Event::FilesChanged(batch) => {
                     for path in batch.created.iter().chain(&batch.modified).chain(&batch.removed) {
                         self.live.invalidate(path);
+                        self.search.invalidate(path);
                     }
                     for path in &batch.modified {
                         self.status_touched(path, false);
@@ -142,6 +146,7 @@ impl Liquibase {
                 openidea_plugin::Event::FileOpened(path) | openidea_plugin::Event::FileSaved(path) => {
                     if matches!(event, openidea_plugin::Event::FileSaved(_)) {
                         self.status_touched(path, false);
+                        self.search.invalidate(path);
                     }
                     self.live.forget(path);
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -866,7 +871,7 @@ impl openidea_plugin::hover::HoverProvider for Liquibase {
         self.live.hover(doc, at)
     }
 }
-openidea_plugin::register_plugin!(Liquibase, providers, views, diagnostics, hover, file_actions, run_configurations);
+openidea_plugin::register_plugin!(Liquibase, providers, views, diagnostics, hover, file_actions, run_configurations, search);
 
 #[cfg(test)]
 mod tests {

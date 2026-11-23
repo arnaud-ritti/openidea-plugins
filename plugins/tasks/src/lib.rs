@@ -11,6 +11,7 @@ mod model;
 mod search;
 mod self_hosted;
 mod state;
+mod task_search;
 mod trackers;
 mod view_scope;
 
@@ -19,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Context, Error, Event, Invocation, LogLevel, NotificationLevel, PickItem, Plugin, Project, StatusItem, host, register_plugin,
+    Context, Error, Event, Invocation, LogLevel, NotificationLevel, PickItem, Plugin, Project, StatusItem, StatusMenuEntry, host, register_plugin,
 };
 
 use git::Git;
@@ -80,7 +81,7 @@ impl Plugin for Tasks {
         Ok(())
     }
 
-    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
         let _ = host::remove_window_status_item(STATUS_ITEM);
         if matches!(id, "open-issue-at-caret" | "activate-issue-at-caret") {
             issue_context::run(&self.issue_search, ctx, id == "activate-issue-at-caret")?;
@@ -133,6 +134,14 @@ impl Plugin for Tasks {
                 refresh_tasks_view();
                 if host::reveal_view(VIEW).is_err() {
                     host::notify(NotificationLevel::Info, "Close the active task", "Review the close options in the Tasks tool window.");
+                }
+            }
+            "switch" if arg.is_some() => {
+                let id = arg.unwrap_or_default();
+                if id != tasks.active {
+                    tasks.find(id).filter(|task| !task.closed).ok_or("This task is closed or no longer listed. Choose another with Tasks: Switch Task.")?;
+                    self.switch_task(&project, id, false, &tasks.choices)?;
+                    refresh_tasks_view();
                 }
             }
             "switch" => {
@@ -1194,11 +1203,47 @@ fn update<R>(root: &str, change: impl FnOnce(&mut TaskList, u64) -> Result<R, Er
 fn show_status(_root: &str, tasks: &TaskList) {
     let item = StatusItem {
         text: trimmed(&tasks.active().label(), 40),
-        tooltip: Some("Active task. Click to copy its commit message.".into()),
+        tooltip: Some("Active task. Click to switch, close or copy its commit message.".into()),
         command: Some("copy-commit-message".into()),
     };
+    if host::set_window_status_item_menu(STATUS_ITEM, &item, &status_menu(tasks)).is_err() {
+        let item = StatusItem { tooltip: Some("Active task. Click to copy its commit message.".into()), ..item };
+        let _ = host::set_window_status_item(STATUS_ITEM, &item);
+    }
+}
 
-    let _ = host::set_window_status_item(STATUS_ITEM, &item);
+/// Tasks the status bar menu switches to directly; the rest are behind Switch Task.
+const MENU_TASKS: usize = 20;
+
+/// The active task's actions, then the other open tasks to switch to.
+fn status_menu(tasks: &TaskList) -> Vec<StatusMenuEntry> {
+    let active = tasks.active();
+    let mut menu = vec![StatusMenuEntry::Header(active.label()), StatusMenuEntry::action("Copy Commit Message", "copy-commit-message")];
+    if active.url.is_some() {
+        menu.push(StatusMenuEntry::action("Open in Browser", "open-in-browser"));
+    }
+    if !active.is_default() {
+        menu.push(StatusMenuEntry::action("Close Task…", "close"));
+    }
+    let others: Vec<&Task> = tasks.tasks.iter().filter(|task| !task.closed && task.id != tasks.active).collect();
+    if !others.is_empty() {
+        menu.push(StatusMenuEntry::Separator);
+        menu.push(StatusMenuEntry::Header("Switch to".into()));
+        for task in others.iter().take(MENU_TASKS) {
+            let entry = StatusMenuEntry::action(task.label(), "switch").with_argument(task.id.clone());
+            menu.push(match &task.branch {
+                Some(branch) => entry.with_description(branch.clone()),
+                None => entry,
+            });
+        }
+        if others.len() > MENU_TASKS {
+            menu.push(StatusMenuEntry::action(format!("All {} Open Tasks…", others.len()), "switch"));
+        }
+    }
+    menu.push(StatusMenuEntry::Separator);
+    menu.push(StatusMenuEntry::action("New Task…", "new-task"));
+    menu.push(StatusMenuEntry::action("Open Task…", "open-task"));
+    menu
 }
 
 fn setting_or(key: &str, default: &str) -> String {
@@ -1237,7 +1282,7 @@ impl openidea_plugin::hover::HoverProvider for Tasks {
     }
 }
 
-register_plugin!(Tasks, views, hover);
+register_plugin!(Tasks, views, hover, search);
 
 #[cfg(test)]
 mod tests {
@@ -1411,6 +1456,52 @@ mod tests {
         plugin.run_command("switch",&host.invocation(),None).unwrap();
         assert!(notified(&host,before));assert_eq!(load("/project").unwrap().active,DEFAULT_TASK_ID);
         assert!(host.requests().is_empty());assert!(host.process_runs().is_empty());
+    }
+    #[test]
+    fn status_menu_lists_the_active_task_actions_and_switches_directly() {
+        let (host,mut plugin)=seeded();
+        update("/project",|tasks,_| { tasks.add_local("Second task",""); Ok(()) }).unwrap();
+        plugin.render(VIEW,None,&host.invocation()).unwrap();
+        assert_eq!(host.status_menu(STATUS_ITEM), [
+            StatusMenuEntry::Header("Private project task".into()),
+            StatusMenuEntry::action("Copy Commit Message","copy-commit-message"),
+            StatusMenuEntry::action("Close Task…","close"),
+            StatusMenuEntry::Separator,
+            StatusMenuEntry::Header("Switch to".into()),
+            StatusMenuEntry::action("Default task","switch").with_argument(DEFAULT_TASK_ID),
+            StatusMenuEntry::action("Second task","switch").with_argument("LOCAL-00002"),
+            StatusMenuEntry::Separator,
+            StatusMenuEntry::action("New Task…","new-task"),
+            StatusMenuEntry::action("Open Task…","open-task"),
+        ]);
+        plugin.run_command("switch",&host.invocation(),Some("LOCAL-00002")).unwrap();
+        assert_eq!(load("/project").unwrap().active,"LOCAL-00002");
+        plugin.run_command("switch",&host.invocation(),Some("LOCAL-00002")).unwrap();
+        assert_eq!(load("/project").unwrap().active,"LOCAL-00002","switching to the active task changes nothing");
+        assert!(plugin.run_command("switch",&host.invocation(),Some("LOCAL-09999")).is_err());
+    }
+    #[test]
+    fn status_menu_keeps_to_the_host_limit() {
+        let (_host,_plugin)=seeded();
+        update("/project",|tasks,_| { for n in 0..40 { tasks.add_local(&format!("Task {n}"),""); } Ok(()) }).unwrap();
+        let menu=status_menu(&load("/project").unwrap());
+        assert!(menu.len()<=64);
+        assert_eq!(menu[menu.len()-4], StatusMenuEntry::action("All 41 Open Tasks…","switch"));
+    }
+    #[test]
+    fn search_tab_lists_open_tasks_that_switch_when_chosen() {
+        use openidea_plugin::search::{SearchProvider, SearchTarget};
+        let (host,mut plugin)=seeded();
+        update("/project",|tasks,_| { tasks.add_local("Fix login page",""); Ok(()) }).unwrap();
+        let page=plugin.search("tasks","login",50,&host.invocation()).unwrap();
+        assert_eq!(page.items.len(),1);
+        assert_eq!(page.items[0].title,"Fix login page");
+        assert_eq!(page.items[0].description.as_deref(),Some("Switch to this task"));
+        assert_eq!(page.items[0].target,SearchTarget::Command{id:"switch".into(),arg:Some("LOCAL-00002".into())});
+        let all=plugin.search("tasks","",2,&host.invocation()).unwrap();
+        assert_eq!((all.items.len(),all.has_more),(2,true));
+        let active=plugin.search("tasks","private",50,&host.invocation()).unwrap();
+        assert_eq!(active.items[0].description.as_deref(),Some("Active"));
     }
     #[test]
     fn external_reset_and_committed_update_notify_only_tasks_view() {

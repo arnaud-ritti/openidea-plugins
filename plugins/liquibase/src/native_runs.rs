@@ -19,7 +19,13 @@ pub(crate) fn configurations(root: &str) -> Vec<PluginRunConfiguration> {
 }
 const FILES: &[&str] = &["liquibase.properties"];
 impl RunConfigurations for Liquibase {
-    fn configurations(&mut self, project_root: &str) -> Vec<PluginRunConfiguration> { configurations(project_root) }
+    fn configurations(&mut self, project_root: &str) -> Vec<PluginRunConfiguration> {
+        let runs = configurations(project_root);
+        if !runs.is_empty() && !std::mem::replace(&mut self.live.console_rules, true) {
+            crate::console::apply();
+        }
+        runs
+    }
 }
 
 #[cfg(test)]

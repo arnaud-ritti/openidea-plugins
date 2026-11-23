@@ -5,7 +5,7 @@ description = "Flyway database migrations in OpenIDEA. Checks migration file nam
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = """\
-Next release: Migration files show their Info state in the project tree, the status bar shows the target database, background runs offer Run Info, and Prepare opens the newest migration; run confirmations name the target database (more JDBC URL types, -environment honoured), Clean of an unknown target asks you to type clean, and a blocked runner permission shows how to allow it; the migration browser is a table with Version, Type, State and Installed columns and filters, lists local migrations and their problems before Info runs and shows a finished Info right away; table names link to Kotlin and Java entities and get a gutter icon listing their CREATE TABLE migrations and entities, long Hibernate schema runs show progress, and the comparison works with an installed Flyway CLI behind a shorter toolbar; projects without Flyway are not scanned, hidden secrets no longer garble output, and placeholder markers have their own icon and cover every placeholder on a line. \
+Next release: The status bar shows the target database and opens a menu of Flyway commands with the pending count, a Search Everywhere tab finds migrations, Run consoles colour Flyway output, migration files show their Info state, and managed runs finish without another Refresh Output; confirmations name the target database (more JDBC URL types, -environment honoured), Clean of an unknown target asks you to type clean, and a blocked runner permission shows how to allow it; the migration browser is a table with Version, Type, State and Installed columns and filters, lists local migrations and their problems before Info runs and shows a finished Info right away; table names link to Kotlin and Java entities with a gutter icon, long Hibernate schema runs show progress, and the comparison works with an installed Flyway CLI; projects without Flyway are not scanned, hidden secrets no longer garble output, and placeholder markers have their own icon and cover every placeholder on a line. \
 0.3.0: Kotlin table mappings, configured placeholder delimiters and a consolidated window. \
 0.2.0: plugin icon and expanded migration checks."""
 categories = ["frameworks", "linters"]
@@ -73,6 +73,10 @@ category = "Flyway"
 # Database-writing operations remain freshly reviewed commands; never native Rerun.
 [[contributes.runConfigurations]]
 files = ["flyway.toml", "flyway.conf", "conf/flyway.toml", "conf/flyway.conf"]
+
+[[contributes.searchCategories]]
+id = "migrations"
+title = "Flyway Migrations"
 
 [[contributes.views]]
 id = "migrations"

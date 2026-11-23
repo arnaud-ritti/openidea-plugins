@@ -219,6 +219,30 @@ fn status_bar_tells_when_the_focused_file_is_ignored() {
 }
 
 #[test]
+fn ignored_status_menu_goes_to_the_rule() {
+    let host = MockHost::install();
+    host.add_file(".gitignore", "target/\n*.log\n!keep.log\n");
+    host.add_file("debug.log", "");
+    IgnorePlugin::default().handle_events(&[Event::EditorFocused(Some("/project/debug.log".into()))], &host.invocation());
+    assert_eq!(
+        host.status_menu(IGNORED_STATUS),
+        [
+            StatusMenuEntry::Header("Ignored by *.log in .gitignore".into()),
+            StatusMenuEntry::action("Go to Rule", "open-ignoring-rule").with_description(".gitignore"),
+            StatusMenuEntry::action("Dialect Checks and Preferences", "preferences"),
+        ]
+    );
+
+    host.open_editor("/project/debug.log", "plaintext", "", &[]);
+    IgnorePlugin::default().run_command("open-ignoring-rule", &host.invocation(), None).unwrap();
+    assert_eq!(host.opened_locations().last(), Some(&("/project/.gitignore".to_owned(), 1, 0)));
+
+    host.open_editor("/project/keep.log", "plaintext", "", &[]);
+    IgnorePlugin::default().run_command("open-ignoring-rule", &host.invocation(), None).unwrap();
+    assert!(host.notifications().last().unwrap().body.contains("ignores keep.log"));
+}
+
+#[test]
 fn warns_once_about_a_git_project_without_gitignore() {
     let host = MockHost::install();
     host.add_file(".git/HEAD", "ref: refs/heads/main\n");
