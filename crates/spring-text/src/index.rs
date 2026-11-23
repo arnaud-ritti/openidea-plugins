@@ -10,8 +10,13 @@ const MAX_FILES: u32 = 10_000;
 const TTL: Duration = Duration::from_secs(120);
 /// Reading time per editor provider call.
 pub const PROVIDER_BUDGET: Duration = Duration::from_millis(30);
-/// Reading time for a command or a view.
+/// Reading time for a command.
 pub const COMMAND_BUDGET: Duration = Duration::from_secs(3);
+/// Discovery and reading time for a view render or an `endpoints` export. The
+/// host gives an export 2 s and every call 5×10⁹ fuel; a call that runs out
+/// traps and drops the instance with its index, so a large project would start
+/// over on every attempt. Views refresh themselves while scanning instead.
+pub const VIEW_BUDGET: Duration = Duration::from_millis(300);
 /// Reading time a diagnostics call may spend advancing a cold or stale index.
 pub const DIAGNOSTICS_WARM: Duration = Duration::from_millis(10);
 
@@ -40,6 +45,8 @@ pub struct Index<T> {
     files: BTreeMap<String, T>,
     next: BTreeMap<String, T>,
     unread: Vec<String>,
+    /// Discovery under way: the next glob to list and the paths listed so far.
+    discovering: Option<(usize, Vec<String>)>,
     scanned: Option<Instant>,
     /// A pass has started and not finished.
     reading: bool,
@@ -98,6 +105,7 @@ impl<T: Clone> Index<T> {
             files: BTreeMap::new(),
             next: BTreeMap::new(),
             unread: Vec::new(),
+            discovering: None,
             scanned: None,
             reading: false,
             passes: 0,
@@ -177,15 +185,23 @@ impl<T: Clone> Index<T> {
         }
     }
 
-    /// Reads files for at most `budget`. Starting a pass (cold, or past its
-    /// TTL) first discovers files with one `find_files` per glob, which
-    /// `budget` does not bound.
+    /// Discovers and reads files for at most `budget`. Starting a pass (cold,
+    /// or past its TTL) first lists files with one `find_files` per glob; each
+    /// call lists at least one glob, then more while `budget` lasts, so a pass
+    /// moves on however small the budget.
     pub fn scan(&mut self, project: &Project, budget: Duration) {
-        if self.unread.is_empty() && self.scanned.is_none_or(|at| at.elapsed() > TTL) {
+        let start = Instant::now();
+        if self.discovering.is_none() && self.unread.is_empty() && self.scanned.is_none_or(|at| at.elapsed() > TTL) {
             self.pass_failed.clear();
             self.pass_discovery_incomplete = false;
-            let mut paths = Vec::new();
-            for glob in self.globs {
+            self.discovering = Some((0, Vec::new()));
+            self.reading = true;
+        }
+        if let Some((mut next, mut paths)) = self.discovering.take() {
+            let mut listed = false;
+            while let Some(glob) = self.globs.get(next)
+                && (!listed || start.elapsed() < budget)
+            {
                 match project.find_files(glob, MAX_FILES) {
                     Ok(found) => {
                         self.pass_discovery_incomplete |= found.len() >= MAX_FILES as usize;
@@ -193,6 +209,12 @@ impl<T: Clone> Index<T> {
                     }
                     Err(_) => self.pass_discovery_incomplete = true,
                 }
+                next += 1;
+                listed = true;
+            }
+            if next < self.globs.len() {
+                self.discovering = Some((next, paths));
+                return;
             }
             paths.sort();
             paths.dedup();
@@ -203,9 +225,7 @@ impl<T: Clone> Index<T> {
             paths.reverse(); // popped from the end: read in path order
             self.unread = paths;
             self.scanned = Some(Instant::now());
-            self.reading = true;
         }
-        let start = Instant::now();
         let first = self.passes == 0;
         while start.elapsed() < budget
             && let Some(path) = self.unread.pop()
@@ -288,7 +308,8 @@ impl<T: Clone> Index<T> {
     /// Every path the index knows of: kept, queued or unreadable.
     pub fn inventory(&self) -> BTreeSet<&str> {
         let kept = self.files.keys().chain(self.next.keys());
-        kept.chain(&self.unread).chain(&self.failed).chain(&self.pass_failed).map(String::as_str).collect()
+        let discovered = self.discovering.iter().flat_map(|(_, paths)| paths);
+        kept.chain(&self.unread).chain(discovered).chain(&self.failed).chain(&self.pass_failed).map(String::as_str).collect()
     }
 
     /// Queues `paths` (such as an inventory saved by an earlier session) to
@@ -296,7 +317,7 @@ impl<T: Clone> Index<T> {
     /// only the discovery that follows can complete the index. Ignored once
     /// the index has started reading.
     pub fn seed(&mut self, mut paths: Vec<String>) {
-        if self.passes > 0 || self.reading || self.scanned.is_some() || paths.is_empty() {
+        if self.passes > 0 || self.reading || self.discovering.is_some() || self.scanned.is_some() || paths.is_empty() {
             return;
         }
         paths.sort();
@@ -345,6 +366,7 @@ impl<T: Clone> Index<T> {
         self.stale = true;
         self.scanned = None;
         self.unread.clear();
+        self.discovering = None;
         self.next.clear();
     }
 
@@ -368,6 +390,7 @@ impl<T: Clone> Index<T> {
         self.files.clear();
         self.next.clear();
         self.unread.clear();
+        self.discovering = None;
         self.scanned = None;
         self.reading = false;
         self.passes = 0;
@@ -387,6 +410,9 @@ impl<T: Clone> Index<T> {
         self.files.remove(path);
         self.next.remove(path);
         self.unread.retain(|p| p != path);
+        if let Some((_, paths)) = &mut self.discovering {
+            paths.retain(|p| p != path);
+        }
     }
 
     /// Forgets the files of projects nested inside `project`, when this index
@@ -588,9 +614,9 @@ impl<T: Clone> Indexes<T> {
         })
     }
 
-    /// The index of `project`, read for at most `budget` more. Starting a
-    /// pass discovers files first (`find_files` per glob), which `budget`
-    /// does not bound: providers use [`Self::advance`] instead.
+    /// The index of `project`, discovered and read for at most `budget` more.
+    /// A pass lists at least one glob per call (`find_files`), which the budget
+    /// cannot cut short: providers use [`Self::advance`] instead.
     pub fn get(&mut self, project: &Project, budget: Duration) -> &mut Index<T> {
         let Ok(root) = project.root() else {
             self.unidentified.reset();
@@ -658,8 +684,8 @@ impl<T: Clone> Indexes<T> {
 
     /// Like [`Self::for_cached_document`], but a cold, stale, expired or
     /// refreshing index reads on for at most `budget` first. A cold, stale or
-    /// expired index first discovers its files (`find_files` per glob), which
-    /// `budget` does not bound.
+    /// expired index first lists its files, at least one glob (`find_files`)
+    /// per call, which the budget cannot cut short.
     pub fn for_cached_document_warm(&mut self, path: &str, text: &str, budget: Duration) -> Option<&mut Index<T>> {
         let project = project_of(path)?;
         let root = project.root().ok().filter(|root| !root.is_empty())?;
@@ -1157,6 +1183,58 @@ mod tests {
         assert_eq!(index.files().len(), 2, "the pass already under way reads what it discovered");
         indexes.warm(&project, COMMAND_BUDGET, false);
         assert_eq!(indexes.cached("/project/src/A.java").unwrap().files().len(), 2, "a finished pass is not restarted");
+    }
+
+    fn slow_words(path: &str, text: &str) -> Option<usize> {
+        std::thread::sleep(Duration::from_millis(1));
+        words(path, text)
+    }
+
+    #[test]
+    fn a_large_project_fills_over_several_calls_each_within_its_budget() {
+        let host = MockHost::install();
+        for n in 0..400 {
+            host.add_file(&format!("module{}/src/F{n}.java", n % 20), "a b");
+        }
+        host.add_file("module0/src/K.kt", "k");
+        let project = host.invocation().project().unwrap();
+        let mut indexes = Indexes::new(&["**/*.java", "**/*.kt"], slow_words);
+        let budget = Duration::from_millis(20);
+        let (mut calls, mut read) = (0, 0);
+        loop {
+            calls += 1;
+            let started = Instant::now();
+            let index = indexes.get(&project, budget);
+            assert!(started.elapsed() < budget + Duration::from_millis(30), "call {calls} took {:?}", started.elapsed());
+            assert!(index.files().len() >= read, "call {calls} lost files read earlier");
+            read = index.files().len();
+            if !index.scanning() {
+                break;
+            }
+            assert!(!index.walked() && !index.complete());
+            assert!(calls < 1_000);
+        }
+        assert!(calls >= 5, "{calls} calls");
+        let index = indexes.get(&project, budget);
+        assert!(index.complete());
+        assert_eq!(index.files().len(), 401);
+    }
+
+    #[test]
+    fn discovery_lists_one_glob_per_call_once_the_budget_is_spent() {
+        let host = MockHost::install();
+        host.add_file("src/A.java", "a");
+        host.add_file("src/K.kt", "k");
+        let project = host.invocation().project().unwrap();
+        let mut index = Index::new(&["**/*.java", "**/*.kt"], words);
+        index.scan(&project, Duration::ZERO);
+        assert!(index.scanning() && !index.walked());
+        assert_eq!(index.inventory().into_iter().collect::<Vec<_>>(), ["/project/src/A.java"]);
+        index.scan(&project, Duration::ZERO);
+        assert_eq!(index.inventory().len(), 2);
+        index.scan(&project, COMMAND_BUDGET);
+        assert!(index.complete());
+        assert_eq!(index.files().len(), 2);
     }
 
     #[test]

@@ -6,7 +6,9 @@ use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineM
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host};
-use spring_text::index::{COMMAND_BUDGET, Index, Indexes, project_of};
+#[cfg(test)]
+use spring_text::index::COMMAND_BUDGET;
+use spring_text::index::{Index, Indexes, project_of};
 use spring_text::java::{self, Annotation, Member, Str, TypeDecl};
 use spring_text::kotlin;
 use spring_text::tree::Expansion;
@@ -1099,7 +1101,7 @@ impl Views for GraphQlTools {
             let Some(project) = ctx.project() else {
                 return Ok(View::message("Open a project to see its GraphQL endpoints."));
             };
-            Ok(self.endpoints_view(view, &project, COMMAND_BUDGET))
+            Ok(self.endpoints_view(view, &project, spring_text::index::VIEW_BUDGET))
         })().map(ui_kit::actions::available)
     }
 

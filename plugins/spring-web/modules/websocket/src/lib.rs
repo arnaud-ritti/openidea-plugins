@@ -7,7 +7,9 @@ use openidea_plugin::providers::{CompletionItem, CompletionKind, Document, LineM
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Diagnostic, Error, Invocation, Location, Plugin, Position, Project, Range, Severity, host};
-use spring_text::index::{COMMAND_BUDGET, Indexes, project_of};
+#[cfg(test)]
+use spring_text::index::COMMAND_BUDGET;
+use spring_text::index::{Indexes, project_of};
 use spring_text::tree::Expansion;
 use spring_text::{parse_source, range, source_calls};
 use std::collections::{BTreeMap, BTreeSet};
@@ -487,7 +489,7 @@ impl Views for WebSocketTools {
                 return Ok(View::message("Open a project to see its STOMP destinations."));
             };
 
-            Ok(self.destinations_view(view, &project, COMMAND_BUDGET))
+            Ok(self.destinations_view(view, &project, spring_text::index::VIEW_BUDGET))
         })().map(ui_kit::actions::available)
     }
 

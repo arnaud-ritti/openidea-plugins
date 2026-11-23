@@ -7,7 +7,9 @@ use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Error, Invocation, Location, Plugin, Position, Range, host};
 use spring_text::constants::Constants;
-use spring_text::index::{COMMAND_BUDGET, Index, Indexes};
+#[cfg(test)]
+use spring_text::index::COMMAND_BUDGET;
+use spring_text::index::{Index, Indexes, VIEW_BUDGET};
 use spring_text::java::{self, Annotation, Arg, Call, CallArg, JavaFile, Str, Tok};
 use spring_text::tree::Expansion;
 use spring_text::{config, xml};
@@ -863,11 +865,13 @@ impl Views for Messaging {
             let Some(project) = ctx.project() else {
                 return Ok(View::message("Open a project to see its messaging destinations."));
             };
-            let props = props_of(self.config.get(&project, COMMAND_BUDGET).iter());
-            let index = self.index.get(&project, COMMAND_BUDGET);
+            let config = self.config.get(&project, VIEW_BUDGET / 2);
+            let config_scanning = config.scanning();
+            let props = props_of(config.iter());
+            let index = self.index.get(&project, VIEW_BUDGET / 2);
             let constants = constant_values(index);
             let note = spring_text::index::coverage_note(index);
-            let scanning = index.scanning();
+            let scanning = index.scanning() || config_scanning;
             if scanning {
                 refresh(view);
             }
