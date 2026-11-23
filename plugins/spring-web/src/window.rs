@@ -351,6 +351,37 @@ mod tests {
     }
 
     #[test]
+    fn endpoints_fill_a_large_project_over_several_calls_without_failing() {
+        use openidea_plugin::endpoints::EndpointsProvider;
+        let host = setup(WEB_POM);
+        let body = (0..40).map(|m| format!("    public String field{m}(String a, int b) {{ return a + b + \"{m}\"; }}\n")).collect::<String>();
+        for n in 0..6_000 {
+            let route = match n % 100 {
+                0 => format!("    RouterFunction<ServerResponse> r() {{ return RouterFunctions.route(RequestPredicates.GET(\"/r{n}\"), this::list); }}\n"),
+                _ => String::new(),
+            };
+            host.add_file(&format!("module{}/src/main/java/com/acme/m{n}/S{n}.java", n % 66), &format!("package com.acme.m{n};\n\npublic class S{n} {{\n{route}{body}}}\n"));
+        }
+        let mut endpoints = Endpoints::default();
+        let (mut calls, mut published) = (0, 0);
+        loop {
+            calls += 1;
+            let started = Instant::now();
+            let found = endpoints.endpoints(&host.invocation()).expect("partial routes, not an error, while scanning");
+            let took = started.elapsed();
+            assert!(took < spring_text::index::VIEW_BUDGET + Duration::from_millis(200), "call {calls} took {took:?}");
+            assert!(found.len() >= published, "call {calls} lost routes");
+            published = found.len();
+            if endpoints.web.endpoints.cached("/project/pom.xml").is_some_and(|index| !index.scanning()) {
+                break;
+            }
+            assert!(calls < 1_000);
+        }
+        assert!(calls >= 2, "{calls} calls");
+        assert_eq!(published, 60);
+    }
+
+    #[test]
     fn pom_line_markers_do_not_refresh_view() {
         let host = setup("<project><artifactId>spring-webflow</artifactId></project>");
         let mut endpoints = Endpoints::default();
@@ -552,10 +583,7 @@ impl openidea_plugin::endpoints::EndpointsProvider for Endpoints {
         let Some(project) = ctx.project() else {
             return Ok(Vec::new());
         };
-        let found = self.web.ide_routes(&project, spring_text::index::COMMAND_BUDGET);
-        if found.scanning && !found.walked {
-            return Err(Error::Failed("Spring routes are still being indexed; try again in a moment.".into()));
-        }
+        let found = self.web.ide_routes(&project, spring_text::index::VIEW_BUDGET);
         Ok(ui_kit::routes::endpoints(&found.routes, "Spring"))
     }
 }

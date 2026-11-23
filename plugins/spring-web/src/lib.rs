@@ -13,7 +13,7 @@ use openidea_plugin::views::{Body, Button, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
     Diagnostic, Error, Invocation, Location, NotificationLevel, Plugin, Position, Project, Range, Severity, TextEdit, host,
 };
-use spring_text::index::{COMMAND_BUDGET, Index, Indexes, project_of};
+use spring_text::index::{COMMAND_BUDGET, Index, Indexes, VIEW_BUDGET, project_of};
 use spring_text::java::{self, Annotation, JavaFile, Param, Str};
 use spring_text::{SOURCE_GLOBS, config, contains, is_kotlin, parse_source, range, source_calls};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1115,7 +1115,7 @@ impl Views for WebTools {
                 return Ok(View::message("Open a project to see its endpoints."));
             };
 
-            Ok(self.endpoints_view(view, &project, COMMAND_BUDGET))
+            Ok(self.endpoints_view(view, &project, VIEW_BUDGET))
         })().map(ui_kit::actions::available)
     }
 

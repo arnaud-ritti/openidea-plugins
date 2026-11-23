@@ -167,7 +167,9 @@ See also the [repository guide](../../README.md#troubleshooting).
 | The HTTP section says "No routes found in this project." | Routes need literal paths in a `@Controller`/`@RestController`, or functional routes. Paths built from constants, concatenation or `${…}` are not read. Check the root build file mentions Spring. |
 | "Copy Endpoint as cURL needs the clipboard permission. Allow it in Settings › Plugins › Spring Endpoints Tools." | Allow `clipboard` in Settings › Plugins › Spring Endpoints Tools. |
 | **Create HTTP Request File** copies the request instead of creating a file | Allow `project.write`. |
-| "Spring route index is incomplete; refresh after indexing." | Wait for indexing to finish, then click **Refresh** in the window. |
+| "Spring routes are still being indexed; try again in a moment." from **Copy as OpenAPI** | The project is still being read. Wait until the **Spring Endpoints** window stops showing "scanning…", then run the command again. |
+| The **Spring Endpoints** window shows "scanning…" on a large project | It reads a few hundred files at a time and fills in as it goes. Leave the window open; the list completes on its own. |
+| The IDE's own endpoint list misses functional routes (`RouterFunction`) right after opening a large project | The IDE keeps the first, partial list until a Java or Kotlin file changes. Once the **Spring Endpoints** window has finished scanning, save any Java or Kotlin file. |
 | "GraphQL schema index is incomplete; refresh before generating a request." | Wait for indexing, then try again. |
 | "Endpoint changed; refresh its HTTP request lens." | The source changed since the lens appeared. Use the refreshed lens. |
 | "The OpenAPI document is too large to copy (over 1 MiB)." | The project has too many routes for one export. |
