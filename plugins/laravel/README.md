@@ -58,7 +58,7 @@ More completion:
 - Gutter markers link controllers, routes, views, layouts, sections, stacks, models, migrations, listeners and events. Each relationship has its own icon.
 - A controller method's Laravel icon lists the routes that point to it (`Route::get(...)`, `Route::resource()` actions). Click it to pick one from the list under the icon, or to go straight to the route when there is only one. Copy URL, Copy as cURL and Create HTTP Request stay as code lenses above the method.
 - Route and controller hints show in PHP files (setting `routeHints`).
-- The status bar shows the Laravel and PHP versions. Click it for a menu: Run Artisan Command…, Run Migrations, Clear All Caches, Search Routes…, Send Request…, Show Laravel Tool Window and Reindex Project.
+- The status bar shows the Laravel and PHP versions. Click it for a menu: Run Artisan Command…, Clear All Caches, Search Routes…, Send Request…, Show Laravel Tool Window and Reindex Project.
 
 ### Search Everywhere and Run consoles
 

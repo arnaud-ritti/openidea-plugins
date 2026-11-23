@@ -78,7 +78,13 @@ impl Index {
         found.sort_by_key(|(rank, ..)| *rank);
         let limit = limit as usize;
         let root = format!("{}/", self.root.trim_end_matches('/'));
-        let items = found.iter().take(limit).map(|(_, route, location)| item(route, location, &root)).collect();
+        let mut ids = std::collections::HashSet::new();
+        let items = found
+            .iter()
+            .map(|(_, route, location)| item(route, location, &root))
+            .filter(|item| ids.insert(item.id.clone()))
+            .take(limit)
+            .collect();
         Ok(SearchPage { items, has_more: found.len() > limit || !self.complete() })
     }
 }
@@ -91,7 +97,7 @@ fn item(route: &Route, location: &Location, root: &str) -> SearchItem {
     }
     description.push(file);
     SearchItem {
-        id: format!("{}:{}:{}", location.path, location.range.start.line, route.method),
+        id: format!("{}:{}:{}:{} {}", location.path, location.range.start.line, location.range.start.character, route.method, route.path),
         title: format!("{} {}", route.method, route.path),
         description: Some(description.join(" · ")),
         target: SearchTarget::Location(location.clone()),

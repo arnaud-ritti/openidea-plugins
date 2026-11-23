@@ -77,11 +77,16 @@ impl SearchProvider for Liquibase {
         let limit = limit as usize;
         let mut items = Vec::new();
         let mut matched = 0;
+        let mut seen = std::collections::HashSet::new();
         for (path, sets) in &self.search.sets {
             let relative = root_relative(path, &root);
             for (id, author, line) in sets {
                 let haystack = format!("{id} {author} {relative}").to_lowercase();
                 if !terms.iter().all(|term| haystack.contains(term.as_str())) {
+                    continue;
+                }
+                let item_id = format!("{relative}::{id}::{author}::{line}");
+                if !seen.insert(item_id.clone()) {
                     continue;
                 }
                 matched += 1;
@@ -90,7 +95,7 @@ impl SearchProvider for Liquibase {
                 }
                 let place = format!("{relative}:{}", line + 1);
                 items.push(SearchItem {
-                    id: place.clone(),
+                    id: item_id,
                     title: id.clone(),
                     description: Some(if author.is_empty() { place } else { format!("{author} · {place}") }),
                     target: SearchTarget::Location(Location { path: path.clone(), range: Range { start: Position::new(*line, 0), end: Position::new(*line, 0) } }),

@@ -526,7 +526,12 @@ impl Plugin for OpenApi {
 
     fn handle_events(&mut self, events: &[Event], ctx: &Invocation) {
         self.codegen.observe(events);
-        if events.iter().any(|event| matches!(event, Event::FileSaved(_) | Event::FilesChanged(_))) {
+        let may_hold_spec = |path: &String| is_spec_file(path) || !path.rsplit('/').next().unwrap_or_default().contains('.');
+        if events.iter().any(|event| match event {
+            Event::FileSaved(path) => may_hold_spec(path),
+            Event::FilesChanged(batch) => batch.created.iter().chain(&batch.modified).chain(&batch.removed).any(may_hold_spec),
+            _ => false,
+        }) {
             self.search.forget();
         }
         if events.iter().any(|event| matches!(event, Event::EditorFocused(_) | Event::FileOpened(_) | Event::FileSaved(_))) {
@@ -3114,7 +3119,10 @@ impl HoverActions for OpenApi {
             return Vec::new();
         }
         let tryable = self.tryable_operations(&doc.text);
-        let Some(spec) = spec::parse(&doc.text).filter(|_| !tryable.is_empty()) else {
+        if tryable.is_empty() {
+            return Vec::new();
+        }
+        let Some(spec) = spec::parse(&doc.text) else {
             return Vec::new();
         };
         spec::operations(&doc.text, &spec.keys)

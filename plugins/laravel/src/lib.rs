@@ -984,7 +984,6 @@ fn status_menu() -> Vec<openidea_plugin::StatusMenuEntry> {
     let action = |key: &str, label: &'static str, command: &str| StatusMenuEntry::action(crate::ui_text::text(key, label), command);
     vec![
         action("statusMenu.artisanRun", "Run Artisan Command…", "artisan-run"),
-        action("statusMenu.migrate", "Run Migrations", "migrate"),
         action("statusMenu.optimizeClear", "Clear All Caches", "optimize-clear"),
         StatusMenuEntry::Separator,
         action("statusMenu.routeSearch", "Search Routes…", "route-search"),

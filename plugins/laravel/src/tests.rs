@@ -3738,6 +3738,6 @@ fn version_status_item_opens_a_menu_of_declared_commands() {
         openidea_plugin::StatusMenuEntry::Action { command, .. } => Some(command.as_str()),
         _ => None,
     }).collect();
-    assert_eq!(commands, ["artisan-run", "migrate", "optimize-clear", "route-search", "route-send-request", "reveal", "reindex"]);
+    assert_eq!(commands, ["artisan-run", "optimize-clear", "route-search", "route-send-request", "reveal", "reindex"]);
     assert!(commands.iter().all(|command| include_str!("../plugin.toml").contains(&format!("id = \"{command}\""))), "{commands:?}");
 }
