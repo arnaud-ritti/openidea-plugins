@@ -209,7 +209,7 @@ impl DataTools {
                 "Live checking needs the events permission. Allow it in Settings › Plugins › Spring Data Tools.",
             );
         }
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + spring_text::index::COMMAND_BUDGET;
         for project in host::projects().unwrap_or_default() {
             let budget = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(250));
             if budget.is_zero() {
@@ -219,7 +219,7 @@ impl DataTools {
         }
     }
     pub(crate) fn live_events(&mut self, events: &[Event]) {
-        self.live.files.on_events(events, Instant::now() + Duration::from_secs(3));
+        self.live.files.on_events(events, Instant::now() + spring_text::index::COMMAND_BUDGET);
     }
 }
 fn supported(doc: &Document) -> bool {

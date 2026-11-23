@@ -13,7 +13,7 @@ impl SecurityTools {
             ui_kit::denied::notify_once(&self.events_notice, "Missing-bean checks", "events", "Spring Security Tools");
         }
         let _ = host::subscribe(EventKind::FileSaved);
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + spring_text::index::COMMAND_BUDGET;
         for project in host::projects().unwrap_or_default() {
             let budget = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(250));
             if budget.is_zero() {
@@ -24,7 +24,7 @@ impl SecurityTools {
         }
     }
     pub(crate) fn live_events(&mut self, events: &[Event]) {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + spring_text::index::COMMAND_BUDGET;
         self.beans.on_events(events, deadline);
         self.mappings.on_events(events, deadline);
     }

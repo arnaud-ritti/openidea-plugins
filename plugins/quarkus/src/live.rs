@@ -52,7 +52,7 @@ impl QuarkusTools {
         self.live.watching = host::subscribe_paths("files-changed", WATCH).is_ok();
         let _ = host::subscribe(EventKind::FileOpened);
         let _ = host::subscribe(EventKind::FileSaved);
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + spring_text::index::COMMAND_BUDGET;
         for project in host::projects().unwrap_or_default() {
             if Instant::now() >= deadline {
                 break;
@@ -102,7 +102,7 @@ impl QuarkusTools {
         self.live.env.insert(root, env);
     }
     pub(crate) fn live_events(&mut self, events: &[Event]) {
-        self.live_events_until(events, Instant::now() + Duration::from_secs(3));
+        self.live_events_until(events, Instant::now() + spring_text::index::COMMAND_BUDGET);
     }
     fn live_events_until(&mut self, events: &[Event], deadline: Instant) {
         // Invalidation is mandatory even when later discovery exhausts its budget.

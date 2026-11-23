@@ -264,6 +264,9 @@ impl Index {
         self.cache_settings.as_ref().is_none_or(|expected|cache_settings().as_ref()==Some(expected))
     }
     pub fn build(project: &Project) -> Index {
+        // A call gets 5×10⁹ fuel, which BUDGET of parsing can use up on a large project; one
+        // that began a task gets 12 times more, so the build can't trap the plugin.
+        let _task = host::begin_task("Reading the Symfony project", false);
         let started = Instant::now();
         let mut index = Index::default();
         index.cache_settings=Some(cache_settings().unwrap_or_default());

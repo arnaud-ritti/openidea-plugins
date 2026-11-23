@@ -124,7 +124,7 @@ impl Endpoints {
         self.live.watching = host::subscribe_paths("files-changed", &globs).is_ok();
         let _ = host::subscribe(EventKind::FileOpened);
         let _ = host::subscribe(EventKind::FileSaved);
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + spring_text::index::COMMAND_BUDGET;
         for project in host::projects().unwrap_or_default() {
             let budget = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(600));
             if budget.is_zero() {
@@ -134,7 +134,7 @@ impl Endpoints {
         }
     }
     pub(super) fn live_events(&mut self, events: &[Event]) {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + spring_text::index::COMMAND_BUDGET;
         let mut touched = BTreeMap::new();
         for path in event_paths(events) {
             let template = TEMPLATE_GLOBS.iter().any(|glob| spring_text::index::glob_matches(glob, path));

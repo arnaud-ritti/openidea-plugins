@@ -5624,10 +5624,30 @@ impl openidea_plugin::endpoints::EndpointsProvider for Main {
         let Some(index) = self.view_index(ctx) else {
             return Ok(Vec::new());
         };
-        if index.partial {
-            return Err(Error::Failed("Symfony route index is incomplete; refresh after indexing.".into()));
-        }
         Ok(ui_kit::routes::endpoints(&self.routes(index), "Symfony"))
+    }
+}
+
+#[cfg(test)]
+mod endpoints_tests {
+    use super::*;
+    use openidea_plugin::endpoints::EndpointsProvider;
+    use openidea_plugin::mock::MockHost;
+
+    #[test]
+    fn a_partial_index_still_publishes_its_routes_from_a_build_under_a_task() {
+        let host = MockHost::install();
+        host.add_file("composer.json", r#"{"require": {"symfony/framework-bundle": "^7.0"}, "autoload": {"psr-4": {"App\\": "src/"}}}"#);
+        host.add_file("src/Controller/BlogController.php", "<?php\nnamespace App\\Controller;\nclass BlogController\n{\n    public function index() {}\n}\n");
+        host.add_file("config/routes.yaml", "blog:\n    path: /blog\n    controller: App\\Controller\\BlogController::index\n");
+        host.set_setting("compiledContainers", r#""custom/container.xml""#);
+        let mut plugin = Main::default();
+
+        let published = plugin.endpoints(&host.invocation()).expect("routes, not an error, from a partial index");
+
+        assert!(plugin.view_index(&host.invocation()).unwrap().partial);
+        assert_eq!(published.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["/blog"]);
+        assert!(host.tasks().iter().any(|task| task.title == "Reading the Symfony project" && task.ended));
     }
 }
 

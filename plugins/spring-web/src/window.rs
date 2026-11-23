@@ -351,9 +351,8 @@ mod tests {
         assert!(view.status.unwrap().contains("partial index (1 unreadable)"));
     }
 
-    #[test]
-    fn endpoints_fill_a_large_project_over_several_calls_without_failing() {
-        use openidea_plugin::endpoints::EndpointsProvider;
+    /// 6,000 sources in 66 modules, every 100th with one functional route.
+    fn large_project() -> MockHost {
         let host = setup(WEB_POM);
         let body = (0..40).map(|m| format!("    public String field{m}(String a, int b) {{ return a + b + \"{m}\"; }}\n")).collect::<String>();
         for n in 0..6_000 {
@@ -363,6 +362,13 @@ mod tests {
             };
             host.add_file(&format!("module{}/src/main/java/com/acme/m{n}/S{n}.java", n % 66), &format!("package com.acme.m{n};\n\npublic class S{n} {{\n{route}{body}}}\n"));
         }
+        host
+    }
+
+    #[test]
+    fn endpoints_fill_a_large_project_over_several_calls_without_failing() {
+        use openidea_plugin::endpoints::EndpointsProvider;
+        let host = large_project();
         let mut endpoints = Endpoints::default();
         let (mut calls, mut published) = (0, 0);
         loop {
@@ -380,6 +386,17 @@ mod tests {
         }
         assert!(calls >= 2, "{calls} calls");
         assert_eq!(published, 60);
+    }
+
+    #[test]
+    fn copy_as_openapi_reads_a_large_project_in_one_run() {
+        let host = large_project();
+
+        Endpoints::default().run_command("copy-endpoints-openapi", &host.invocation(), None).unwrap();
+
+        let exported: serde_json::Value = serde_json::from_str(&host.clipboard().unwrap()).unwrap();
+        assert_eq!(exported["paths"].as_object().unwrap().len(), 61, "60 functional routes and the controller from setup");
+        assert!(host.tasks().iter().all(|task| task.ended));
     }
 
     #[test]

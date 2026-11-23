@@ -5,7 +5,7 @@ description = "Spring Endpoints window and editor support for Spring MVC, WebSoc
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = """\
-Next release: A Spring Endpoints tab in Search Everywhere finds every route, controller mappings included, by path, method or controller; the Spring Endpoints window and the IDE's endpoint list no longer stop the plugin on large projects: they read a few hundred files at a time and show what they found so far; a GraphQL subscription that ends stops reading at once. \
+Next release: A Spring Endpoints tab in Search Everywhere finds every route, controller mappings included, by path, method or controller; the Spring Endpoints window and the IDE's endpoint list no longer stop the plugin on large projects: they read a few hundred files at a time and show what they found so far, and Copy as OpenAPI reads the whole project in one go; a GraphQL subscription that ends stops reading at once. \
 0.4.0: Spring Endpoints window only in Maven or Gradle projects, endpoint pickers, plainer messages and faster editor features on large projects. \
 0.3.0: endpoint browser and request drafts. \
 0.2.0: plugin icon and mapping navigation."""

@@ -10,8 +10,11 @@ const MAX_FILES: u32 = 10_000;
 const TTL: Duration = Duration::from_secs(120);
 /// Reading time per editor provider call.
 pub const PROVIDER_BUDGET: Duration = Duration::from_millis(30);
-/// Reading time for a command.
-pub const COMMAND_BUDGET: Duration = Duration::from_secs(3);
+/// Reading time for a command, an activation or a batch of file events. Every
+/// call gets 5×10⁹ fuel, which a few seconds of parsing can use up: the call
+/// then traps and drops the instance. A call that began a task gets 12 times
+/// more, refilled by each `report` or `is_cancelled`, and can read on in steps.
+pub const COMMAND_BUDGET: Duration = Duration::from_secs(1);
 /// Discovery and reading time for a view render or an `endpoints` export. The
 /// host gives an export 2 s and every call 5×10⁹ fuel; a call that runs out
 /// traps and drops the instance with its index, so a large project would start

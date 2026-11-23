@@ -107,7 +107,7 @@ impl BootTools {
             ui_kit::denied::notify_once(&self.live.events_notice, "Checking the whole project (unknown keys, test constructors)", "events", "Spring Boot Tools");
         }
         let _ = host::subscribe(EventKind::FileSaved);
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + spring_text::index::COMMAND_BUDGET;
         for project in host::projects().unwrap_or_default() {
             let budget = deadline
                 .saturating_duration_since(Instant::now())
@@ -129,7 +129,7 @@ impl BootTools {
             .update_existing(&project, &doc.path, Some(&doc.text));
     }
     pub(crate) fn live_events(&mut self, events: &[Event]) {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + spring_text::index::COMMAND_BUDGET;
         for (path, removed) in event_paths(events) {
             self.jars.source_changed(path, removed);
         }

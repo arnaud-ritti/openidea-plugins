@@ -5,7 +5,7 @@ description = "Spring Shell 3.x/4.x commands in Java and Kotlin projects, for bo
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = """\
-Next release: Plainer wording for checks, the @ShellComponent fix and the rename preview. New icon for availability markers, and code lenses only for commands with more than one occurrence; hover and rename for commands inherited from a superclass, and rename refuses to run on a partly indexed project; availability lookup follows superclasses, and abstract base classes are no longer asked to add @ShellComponent; Spring Shell 3 and 4 commands are indexed, and deleted or moved files no longer cause false duplicate-command errors; one name per command, row commands say what to select, fixes on unsaved files ask you to save first, and fixes work with Windows drive-letter roots. \
+Next release: Plainer wording for checks, the @ShellComponent fix and the rename preview. New icon for availability markers, and code lenses only for commands with more than one occurrence; hover and rename for commands inherited from a superclass, and rename refuses to run on a partly indexed project; availability lookup follows superclasses, and abstract base classes are no longer asked to add @ShellComponent; Spring Shell 3 and 4 commands are indexed, and deleted or moved files no longer cause false duplicate-command errors; one name per command, row commands say what to select, fixes on unsaved files ask you to save first, and fixes work with Windows drive-letter roots, and large projects no longer stop the plugin while it reads them. \
 0.3.0: command navigation and availability checks. \
 0.2.0: plugin icon and command markers."""
 categories = ["frameworks"]

@@ -5,7 +5,7 @@ description = "Spring Security checks for Java, Kotlin and Spring XML that flag 
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = """\
-Next release: Clearer role prefix findings that match Spring Security behaviour; @PreAuthorize and @PostAuthorize expressions are checked for typos and unknown parameters; more security XML checks, and unknown bean reference notes stay on as the index follows saved and changed files; path globs such as /api/** in Java comments no longer hide the rest of the file, the path matcher checks path patterns, and quick fixes and bean navigation work on Windows drives; shorter matcher hints and hover text, short setting titles and clearer permission messages. \
+Next release: Clearer role prefix findings that match Spring Security behaviour; @PreAuthorize and @PostAuthorize expressions are checked for typos and unknown parameters; more security XML checks, and unknown bean reference notes stay on as the index follows saved and changed files; path globs such as /api/** in Java comments no longer hide the rest of the file, the path matcher checks path patterns, and quick fixes and bean navigation work on Windows drives; shorter matcher hints and hover text, short setting titles and clearer permission messages, and large projects no longer stop the plugin while it reads them. \
 0.3.0: filter chain and method security checks. \
 0.2.0: plugin icon and XML checks."""
 categories = ["frameworks"]

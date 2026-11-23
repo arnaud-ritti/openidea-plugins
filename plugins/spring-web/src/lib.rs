@@ -1158,7 +1158,9 @@ impl Plugin for WebTools {
         if id == "copy-endpoints-openapi" {
             let project = ctx.project().ok_or_else(|| Error::Failed("Open a project to export Spring endpoints.".into()))?;
             let task=host::begin_task("Exporting Spring endpoints as OpenAPI",true);
-            let found=self.routes(&project,COMMAND_BUDGET);
+            let mut found=self.routes(&project,COMMAND_BUDGET);
+            let until=Instant::now()+Duration::from_secs(50);
+            while found.scanning&&!found.walked&&Instant::now()<until&&!task.is_cancelled(){found=self.routes(&project,COMMAND_BUDGET);}
             if found.scanning&&!found.walked{return Err(Error::Failed("Spring routes are still being indexed; try again in a moment.".into()))}
             let mut skipped=Vec::new();
             if let Some(note)=&found.note{skipped.push(format!("some endpoints ({note})"));}
