@@ -35,6 +35,8 @@ The window has six sections:
 
 Click a row to open its source. **Refresh** rescans. The window remembers the last section you used.
 
+To jump to a route without the window, press Shift twice and open the **Spring Endpoints** tab. Type part of the path, the HTTP method or the controller (`get users`, `/orders`, `UserController`); Enter opens the mapping. In a large project the tab first lists what is already indexed and **Show more** finds the rest.
+
 ### Try an endpoint
 
 - **Copy Endpoint as cURL** (right-click a route) copies a curl command.
@@ -86,7 +88,7 @@ Sending requests stays with the IDE's built-in HTTP client.
 - Handler methods (`@QueryMapping`, `@SchemaMapping`…) link to their schema field, and fields link back.
 - Client documents under `graphql-documents/` navigate to the schema.
 - Handlers for fields the schema doesn't declare get a warning.
-- **Prepare GraphQL Subscription from Handler** writes an editable `.graphql` subscription document. **Start GraphQL Subscription…** runs it and shows a review screen before connecting. **Read GraphQL Subscription Output** and **Cancel GraphQL Subscription** are available only while a subscription runs.
+- **Prepare GraphQL Subscription from Handler** writes an editable `.graphql` subscription document. **Start GraphQL Subscription…** runs it and shows a review screen before connecting. **Read GraphQL Subscription Output** and **Cancel GraphQL Subscription** are available only while a subscription runs. Once the output says the subscription ended, everything it printed has been shown.
 
 ### Edit Web Flow definitions
 

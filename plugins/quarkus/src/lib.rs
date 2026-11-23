@@ -3,6 +3,7 @@
 
 pub mod checks;
 mod build_source;
+mod console;
 mod source_features;
 mod indexer;
 mod jar_archive;
@@ -461,6 +462,7 @@ impl Providers for QuarkusTools {
 
 impl Plugin for QuarkusTools {
     fn activate(&mut self, _ctx: &openidea_plugin::Context) -> Result<(), Error> {
+        console::apply();
         self.activate_live();
         Ok(())
     }

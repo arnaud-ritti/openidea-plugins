@@ -42,6 +42,7 @@ struct Applies {
 
 mod live;
 mod path_actions;
+mod search;
 #[cfg(test)]
 mod feign_navigation_tests;
 

@@ -112,6 +112,8 @@ Three run configurations are offered:
 
 Each needs its program on `PATH` and its `process:` permission allowed.
 
+In the Run and Debug consoles, Quarkus log lines get their level coloured: `ERROR` in red and `WARN` in yellow, from the timestamp to the category. `Caused by:` lines show the exception in red, and the `(powered by Quarkus …) started in …s` line shows in green. The colours apply only to Quarkus' default log format, so other programs' output is left alone.
+
 ### Create a new project
 
 - **Quarkus: Open code.quarkus.io** opens the official project generator in your browser.

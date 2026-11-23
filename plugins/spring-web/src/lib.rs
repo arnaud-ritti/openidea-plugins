@@ -1234,7 +1234,7 @@ pub fn applies(project: &openidea_plugin::Project) -> bool {
     spring_text::build::applies(project, &DEPENDENCY_MARKERS)
 }
 
-openidea_plugin::register_plugin!(window::Endpoints, providers, views, endpoints, diagnostics, hover, file_actions, language_features, injections);
+openidea_plugin::register_plugin!(window::Endpoints, providers, views, endpoints, search, diagnostics, hover, file_actions, language_features, injections);
 
 #[cfg(test)]
 impl WebTools {

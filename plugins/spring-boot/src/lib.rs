@@ -6,6 +6,7 @@
 
 mod build;
 mod checks;
+mod console;
 mod cron;
 mod database;
 mod facts;
@@ -742,6 +743,7 @@ fn severity_rank(severity: Severity) -> u8 {
 
 impl Plugin for BootTools {
     fn activate(&mut self, _ctx: &openidea_plugin::Context) -> Result<(), Error> {
+        console::apply();
         self.activate_live();
         Ok(())
     }
