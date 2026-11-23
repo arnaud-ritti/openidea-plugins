@@ -184,5 +184,6 @@
   "Laravel: Copy as cURL": "Laravel: cURLとしてコピー",
   "Offer to convert query scopes to the #[Scope] attribute (Laravel 12.6+)": "クエリスコープを #[Scope] 属性に変換する操作を表示（Laravel 12.6以降）",
   "Show route and controller hints in the editor": "エディターにルートとコントローラーのヒントを表示",
-  "Shown only when composer.lock pins Laravel 12.6 or newer.": "composer.lock でLaravel 12.6以降が固定されている場合のみ表示されます。"
+  "Shown only when composer.lock pins Laravel 12.6 or newer.": "composer.lock でLaravel 12.6以降が固定されている場合のみ表示されます。",
+  "Laravel Routes": "Laravel ルート"
 }
