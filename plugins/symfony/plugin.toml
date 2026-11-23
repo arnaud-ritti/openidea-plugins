@@ -6,7 +6,7 @@ authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 homepage = "https://github.com/arnaud-ritti/openidea-plugins/tree/main/plugins/symfony"
 license = "MIT"
 change-notes = """\
-Next release: console commands, Send Request, the Database tab and the Serve, Test and worker run configurations can run in a Docker container picked with Choose Docker Target…, and through php-win on Windows; the tool window opens at the bottom with new Request, Database, Runtime, Console, Generators, Components and Events tabs: send a route through the kernel with changes rolled back, compare Doctrine mappings with the database, read the log, retry failed messages, run commands and makers from a form; route links above controller methods, docs links in hovers, and ⌥⏎ to generate a functional test, extract a Twig template or translation key, inject instead of the container, add validation constraints, create or extract request DTOs, rename templates, translation keys and service ids; Create Missing Template or Class…, Find Unused Templates, Run Command from Class…, New Symfony Project… and MCP tools that run console commands; completion for Stimulus, Vite, Twig components and typed members, faster saves, Related files icons, route rename updates every usage, no crashes on accents or emoji. \
+Next release: console commands, Send Request, the Database tab and run configurations can run in a Docker container picked with Choose Docker Target…, and through php-win on Windows; the tool window opens at the bottom with new Request, Database, Runtime, Console, Generators, Components and Events tabs: send routes with changes rolled back, compare mappings with the database, read the log, retry messages, run commands and makers; route links above controller methods, docs links in hovers, and ⌥⏎ to generate a functional test, extract a template or translation key, inject instead of the container, add validation constraints, create or extract request DTOs, rename templates, translation keys and service ids; Create Missing Template or Class…, Find Unused Templates, Run Command from Class…, New Symfony Project… and MCP tools that run console commands; Routes and Services tabs in Search Everywhere, a status bar menu, coloured Run consoles, completion for Stimulus, Vite, Twig components and typed members, faster saves, Related files icons, route rename updates every usage, no crashes on accents or emoji. \
 0.3.0: indexer, Twig and Doctrine support. \
 0.2.0: plugin icon and route navigation."""
 categories = ["frameworks"]
@@ -421,6 +421,14 @@ id = "symfony"
 patterns = ["services.yaml", "services.yml", "routes.yaml", "routes.yml", "bundles.php", "symfony.lock"]
 icon = "icons/symfony.svg"
 iconDark = "icons/symfony_dark.svg"
+
+[[contributes.searchCategories]]
+id = "routes"
+title = "Symfony Routes"
+
+[[contributes.searchCategories]]
+id = "services"
+title = "Symfony Services"
 
 [[contributes.endpoints]]
 files = ["config/**/*.yaml", "config/**/*.yml", "config/**/*.xml", "config/**/*.php", "src/**/*.php", "composer.json"]

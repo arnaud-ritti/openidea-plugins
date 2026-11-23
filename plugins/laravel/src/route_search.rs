@@ -1,4 +1,5 @@
 //! Explicit fuzzy route search. Only fresh, owned source destinations are opened.
+use openidea_plugin::search::{SearchItem, SearchPage, SearchTarget};
 use openidea_plugin::{Error, Invocation, PickItem, host};
 use ui_kit::routes::Route;
 
@@ -39,6 +40,38 @@ fn score(query: &str, candidate: &str) -> Option<usize> {
         }
     }
     Some(total)
+}
+/// The Laravel Routes tab of Search Everywhere: routes with a source location, best match first,
+/// all of them for an empty query.
+pub(crate) fn page(routes: Vec<Route>, query: &str, limit: u32) -> SearchPage {
+    let mut ranked: Vec<_> = routes
+        .into_iter()
+        .filter_map(|route| {
+            let location = route.location.clone()?;
+            let text = label(&route);
+            Some((score(query, &text)?, text, route, location))
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    ranked.dedup_by(|a, b| a.1 == b.1);
+    let has_more = ranked.len() > limit as usize;
+    let items = ranked
+        .into_iter()
+        .take(limit as usize)
+        .map(|(_, text, route, location)| SearchItem {
+            id: text,
+            title: format!("{} {}", route.method, route.path),
+            description: Some(
+                [route.name.clone(), Some(format!("{}{}", route.handler.class, route.handler.member.as_ref().map(|m| format!("@{m}")).unwrap_or_default()))]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            ),
+            target: SearchTarget::Location(location),
+        })
+        .collect();
+    SearchPage { items, has_more }
 }
 pub(crate) fn run(
     ctx: &Invocation,
@@ -152,6 +185,29 @@ mod tests {
         assert!(score("DELETE", &label(&route())).is_none());
         assert!(score("éx", "/éclair/extra").is_some());
         assert!(score("users", "users") < score("usr", "users"));
+    }
+    #[test]
+    fn search_page_ranks_located_routes_and_reports_more() {
+        let _host = MockHost::install();
+        let mut other = route();
+        other.path = "/health".into();
+        other.name = None;
+        let mut unlocated = route();
+        unlocated.path = "/vendor-route".into();
+        unlocated.location = None;
+        let routes = vec![route(), other, unlocated];
+
+        let page = super::page(routes.clone(), "users", 50);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].title, "GET /users/{user}/orders");
+        assert_eq!(page.items[0].description.as_deref(), Some("users.orders.show · OrderController@show"));
+        assert!(matches!(&page.items[0].target, SearchTarget::Location(l) if l.path == "/project/routes/web.php"));
+
+        let all = super::page(routes.clone(), "", 50);
+        assert_eq!(all.items.len(), 2, "an empty query lists every located route");
+        assert!(!all.has_more);
+        let first = super::page(routes, "", 1);
+        assert_eq!((first.items.len(), first.has_more), (1, true));
     }
     #[test]
     fn selection_opens_only_refreshed_owned_route() {

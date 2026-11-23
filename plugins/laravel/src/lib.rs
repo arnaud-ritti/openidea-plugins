@@ -40,6 +40,7 @@ mod enum_config_keys;
 mod config_inspections;
 mod controllers;
 mod console_editor;
+mod console_rules;
 mod directives;
 mod eloquent_checks;
 mod enum_where_values;
@@ -735,6 +736,8 @@ pub struct Main {
     runtime_inspection: runtime_inspection::State,
     index_ticks: u32,
     model_rows: std::cell::RefCell<BTreeMap<String, Vec<serde_json::Value>>>,
+    /// Whether the Run console colours are set.
+    console_rules: bool,
 }
 
 /// First `KEY=value` of the project's `.env`, unquoted; `None` when unset or unreadable.
@@ -968,8 +971,28 @@ impl Main {
             None => format!("Laravel {major}.{minor}"),
         };
 
-        host::set_status_item("laravel-version", &openidea_plugin::StatusItem { text, tooltip: None, command: None });
+        let item = openidea_plugin::StatusItem { text, tooltip: None, command: None };
+        if host::set_status_item_menu("laravel-version", &item, &status_menu()).is_err() {
+            host::set_status_item("laravel-version", &item);
+        }
     }
+}
+
+/// The Laravel status bar item's menu: the commands used most while working on the project.
+fn status_menu() -> Vec<openidea_plugin::StatusMenuEntry> {
+    use openidea_plugin::StatusMenuEntry;
+    let action = |key: &str, label: &'static str, command: &str| StatusMenuEntry::action(crate::ui_text::text(key, label), command);
+    vec![
+        action("statusMenu.artisanRun", "Run Artisan Command…", "artisan-run"),
+        action("statusMenu.migrate", "Run Migrations", "migrate"),
+        action("statusMenu.optimizeClear", "Clear All Caches", "optimize-clear"),
+        StatusMenuEntry::Separator,
+        action("statusMenu.routeSearch", "Search Routes…", "route-search"),
+        action("statusMenu.sendRequest", "Send Request…", "route-send-request"),
+        StatusMenuEntry::Separator,
+        action("statusMenu.reveal", "Show Laravel Tool Window", "reveal"),
+        action("statusMenu.reindex", "Reindex Project", "reindex"),
+    ]
 }
 
 impl Plugin for Main {
@@ -2769,10 +2792,20 @@ impl openidea_plugin::language_features::LanguageFeatures for Main {
     }
 }
 
-openidea_plugin::register_plugin!(Main, providers, views, indexing, endpoints, file_actions, hover, diagnostics, mcp, inlay_hints, language_features);
+openidea_plugin::register_plugin!(Main, providers, views, indexing, endpoints, search, file_actions, hover, diagnostics, mcp, inlay_hints, language_features);
 
 #[cfg(test)]
 mod tests;
+
+impl openidea_plugin::search::SearchProvider for Main {
+    /// Answers from the finished index only: no indexing step, no process, no prompt.
+    fn search(&mut self, category: &str, query: &str, limit: u32, ctx: &Invocation) -> Result<openidea_plugin::search::SearchPage, Error> {
+        let Some(index) = self.view_index(ctx).filter(|_| category == "routes") else {
+            return Ok(Default::default());
+        };
+        Ok(route_search::page(self.search_routes_from_index(ctx, index), query, limit))
+    }
+}
 
 impl openidea_plugin::endpoints::EndpointsProvider for Main {
     fn endpoints(&mut self, ctx: &Invocation) -> Result<Vec<openidea_plugin::endpoints::Endpoint>, Error> {

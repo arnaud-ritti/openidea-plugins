@@ -7,6 +7,8 @@ mod attr_args;
 mod checks;
 mod config_checks;
 mod console_job;
+mod console_rules;
+mod search_tabs;
 mod console_runner;
 mod console_workspace;
 mod database;
@@ -88,7 +90,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::views::{Body, Button, Table, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{Context, Diagnostic, Event, EventKind, Location, PickItem, Position, Range, Severity, TextEdit};
-use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, host, text};
+use openidea_plugin::{Error, Invocation, LogLevel, NotificationLevel, Plugin, Project, StatusItem, StatusMenuEntry, host, text};
 
 pub use index::Index;
 use index::{Entry, Names, Sink};
@@ -1171,6 +1173,8 @@ pub struct Main {
     checked: BTreeSet<String>,
     /// The Events tab shows a flat list instead of grouping by event.
     events_flat: bool,
+    /// Whether the Run console colours are set.
+    console_rules: bool,
 }
 
 fn concrete_method(route: &Route) -> Route {
@@ -1194,6 +1198,22 @@ fn one_method(route: Route) -> Result<Option<Route>, Error> {
         return Err(Error::Stale);
     }
     Ok(Some(Route { method, ..route }))
+}
+
+/// The Symfony status bar item's menu: the commands used most while working on the project.
+fn status_menu() -> Vec<StatusMenuEntry> {
+    vec![
+        StatusMenuEntry::action("Run Console Command…", "run-console-command"),
+        StatusMenuEntry::action("Show Console", "show-console"),
+        StatusMenuEntry::action("Clear Cache", "cache-clear"),
+        StatusMenuEntry::Separator,
+        StatusMenuEntry::action("Go to Route…", "go-to-route"),
+        StatusMenuEntry::action("Go to Service…", "go-to-service"),
+        StatusMenuEntry::action("Open Route in Request Tab…", "route-send-request"),
+        StatusMenuEntry::Separator,
+        StatusMenuEntry::action("Show Profiler", "show-profiler"),
+        StatusMenuEntry::action("Reindex Project", "reindex"),
+    ]
 }
 
 /// The title of the route picker of route command `command`.
@@ -1244,7 +1264,8 @@ impl Main {
         refresh_main_view();
     }
 
-    fn update_status_item(&self, root: &str) {
+    fn update_status_item(&mut self, root: &str) {
+        self.show_console_rules(!self.indexes.is_empty());
         let remaining = self.indexes.iter().next();
         let Some((root, index)) = self.indexes.get_key_value(root).or(remaining) else {
             host::remove_status_item(STATUS_ITEM);
@@ -1256,7 +1277,9 @@ impl Main {
             None => "Symfony".to_owned(),
         };
         let item = StatusItem { text, tooltip: Some(self.summary_of(root, index)), command: Some("reindex".into()) };
-        host::set_status_item(STATUS_ITEM, &item);
+        if host::set_status_item_menu(STATUS_ITEM, &item, &status_menu()).is_err() {
+            host::set_status_item(STATUS_ITEM, &item);
+        }
     }
 
     fn index_all(&mut self) {
@@ -2808,7 +2831,7 @@ impl openidea_plugin::language_features::LanguageFeatures for Main {
     }
 }
 
-openidea_plugin::register_plugin!(Main, providers, views, indexing, endpoints, file_actions, hover, diagnostics, mcp, language_features, run_configurations);
+openidea_plugin::register_plugin!(Main, providers, views, indexing, endpoints, search, file_actions, hover, diagnostics, mcp, language_features, run_configurations);
 
 #[cfg(test)]
 mod tests {
@@ -5113,6 +5136,19 @@ mod tests {
         assert_eq!(item.text, "Symfony 7.1");
         assert_eq!(item.command.as_deref(), Some("reindex"));
         assert!(item.tooltip.as_deref().unwrap().contains("routes"));
+    }
+
+    #[test]
+    fn status_item_opens_a_menu_of_declared_commands() {
+        let host = MockHost::install();
+        let _plugin = activated(&host);
+
+        let commands: Vec<String> = host.status_menu("symfony").into_iter().filter_map(|entry| match entry {
+            StatusMenuEntry::Action { command, .. } => Some(command),
+            _ => None,
+        }).collect();
+        assert_eq!(commands, ["run-console-command", "show-console", "cache-clear", "go-to-route", "go-to-service", "route-send-request", "show-profiler", "reindex"]);
+        assert!(commands.iter().all(|command| include_str!("../plugin.toml").contains(&format!("id = \"{command}\""))), "{commands:?}");
     }
 
     #[test]

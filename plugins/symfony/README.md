@@ -290,6 +290,11 @@ Each link reads the route again from its file before it acts. If the route chang
 
 - **Symfony: Go to Route…**, **Symfony: Go to Service…**, **Symfony: Go to Console Command…** and **Symfony: Go to Template…**.
 - **Symfony: Find Source Occurrences** lists the literal references to the route, service or template under the caret.
+- Search Everywhere (⇧⇧) has **Symfony Routes** and **Symfony Services** tabs: type part of a path, route name, controller or service id. They list what the project defines, once it is indexed.
+
+### Colours in Run consoles
+
+While a Symfony project is open, Run and Debug consoles colour Monolog lines at error level and above in red and warnings in yellow (log files, `bin/console -v` and the Symfony CLI server log), PHP fatal errors and warnings, `[ERROR]`, `[CAUTION]`, `[WARNING]` and `[OK]` blocks, `In File.php line N:` exception headers and exception class names. Trace frames in `vendor/` are dimmed.
 
 ### Let AI agents use the project (MCP)
 
@@ -312,7 +317,7 @@ Four more tools work with the commands loaded in the **Console** tab:
 
 - `services.yaml`, `services.yml`, `routes.yaml`, `routes.yml`, `bundles.php` and `symfony.lock` get a small "S" icon. It's drawn for this plugin, not the Symfony logo.
 - HTTP request files get per-method route icons.
-- The status bar shows `Symfony 7.1` (the `symfony/framework-bundle` constraint, or just `Symfony`). The tooltip has route, service and template counts. Click it to reindex. It's hidden outside Symfony projects.
+- The status bar shows `Symfony 7.1` (the `symfony/framework-bundle` constraint, or just `Symfony`). The tooltip has route, service and template counts. Click it for a menu: Run Console Command…, Show Console, Clear Cache, Go to Route…, Go to Service…, Open Route in Request Tab…, Show Profiler and Reindex Project. It's hidden outside Symfony projects.
 
 ## Commands
 
