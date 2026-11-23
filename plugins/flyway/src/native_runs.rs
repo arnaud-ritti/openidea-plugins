@@ -20,7 +20,13 @@ pub(crate) fn configurations(root: &str) -> Vec<PluginRunConfiguration> {
     }).collect()
 }
 impl RunConfigurations for Flyway {
-    fn configurations(&mut self, project_root: &str) -> Vec<PluginRunConfiguration> { configurations(project_root) }
+    fn configurations(&mut self, project_root: &str) -> Vec<PluginRunConfiguration> {
+        let runs = configurations(project_root);
+        if !runs.is_empty() {
+            self.uses_flyway();
+        }
+        runs
+    }
 }
 
 #[cfg(test)]

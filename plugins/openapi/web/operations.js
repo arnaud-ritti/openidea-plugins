@@ -9,6 +9,9 @@ let target = null;
 let reply = null;
 let asked = -1;
 let timer = 0;
+// API 1.10 editor data, absent in older IDEs: the main caret's line and the marker bar's problems.
+let caret = null;
+let problems = [];
 
 function ask(next) {
   if (!next?.path) {
@@ -35,7 +38,6 @@ function row(operation) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "ops-row";
-  button.title = `${operation.method} ${operation.path}${operation.operationId ? ` (${operation.operationId})` : ""}`;
   const method = document.createElement("span");
   method.className = "ui-http-method";
   method.dataset.method = operation.method;
@@ -44,6 +46,7 @@ function row(operation) {
   path.className = "ops-path";
   path.textContent = operation.path;
   button.append(method, path);
+  button.operation = operation;
   button.addEventListener("click", () =>
     window.openidea.postMessage(JSON.stringify({ op: "open", path: reply.path, line: operation.line, column: operation.column })),
   );
@@ -78,6 +81,48 @@ function show() {
     }),
   );
   status.textContent = shown.length === all.length ? `${all.length} operations` : `${shown.length} of ${all.length} operations`;
+  mark();
+}
+
+// The worst problem inside an operation's lines, or null.
+function severity(operation) {
+  const last = operation.endLine ?? operation.line;
+  let found = null;
+  for (const problem of problems) {
+    if (problem.line > last || problem.lastLine < operation.line) continue;
+    if (problem.severity === "error") return "error";
+    if (problem.severity === "warning") found = "warning";
+  }
+  return found;
+}
+
+// Tints the operation holding the caret and flags those with errors or warnings.
+function mark() {
+  for (const button of list.querySelectorAll(".ops-row")) {
+    const operation = button.operation;
+    const current = caret !== null && caret >= operation.line && caret <= (operation.endLine ?? operation.line);
+    if (current && !button.classList.contains("is-current") && !list.contains(document.activeElement)) {
+      button.scrollIntoView({ block: "nearest" });
+    }
+    button.classList.toggle("is-current", current);
+    if (current) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+    const problem = severity(operation);
+    if (problem) button.dataset.problem = problem;
+    else delete button.dataset.problem;
+    const note = problem === "error" ? " · has errors" : problem === "warning" ? " · has warnings" : "";
+    button.title = `${operation.method} ${operation.path}${operation.operationId ? ` (${operation.operationId})` : ""}${note}`;
+  }
+}
+
+function onSelections(selections) {
+  caret = selections?.[0]?.head?.line ?? null;
+  mark();
+}
+
+function onProblems(found) {
+  problems = found ?? [];
+  mark();
 }
 
 window.openidea.onMessage((text) => {
@@ -109,6 +154,14 @@ list.addEventListener("keydown", (e) => {
 
 editor.get().then(ask);
 editor.onTarget(ask);
+if (editor.selections) {
+  Promise.resolve(editor.selections()).then(onSelections);
+  editor.onSelections(onSelections);
+}
+if (editor.problems) {
+  Promise.resolve(editor.problems()).then(onProblems);
+  editor.onProblems(onProblems);
+}
 // Edits re-ask after a pause, and only when the version moved: highlight changes come without
 // the document's text, which `document.onChange` would copy on every keystroke.
 editor.onHighlights(() => {

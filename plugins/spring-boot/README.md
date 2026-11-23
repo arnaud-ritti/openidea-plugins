@@ -97,6 +97,10 @@ Allow `process:mvn` or `process:gradle` first.
 
 To get native Run entries instead, turn on **Offer native Boot Maven/Gradle run profiles** (`springBoot.nativeRunProfiles`). Run then lists **Spring Boot: Maven spring-boot:run (project build)** or **Spring Boot: Gradle bootRun (project build)**. It also lists Maven modules and Gradle subprojects that apply the Boot plugin. Native Run handles start, stop, rerun and logs.
 
+### Read the Run console
+
+In the Run and Debug consoles, Spring Boot log lines get their level coloured: `ERROR` in red and `WARN` in yellow, from the timestamp to the `---` separator. The `APPLICATION FAILED TO START` block and its `***` banners show in red, `Caused by:` lines show the exception in red, and `Started … in … seconds` and `… started on port …` show in green. The colours apply only to Spring Boot's default log format (Boot 2 and 3), so other programs' output is left alone.
+
 ### Create a Database source
 
 Open a configuration file with literal `spring.datasource.url`, `username` and `password` values. Run **Spring Boot: Configure Database from Current Source…** and confirm. The plugin creates a native Database source. The password goes straight to the secure credential store and never appears in the confirmation. It doesn't connect or run SQL: open Database to connect.

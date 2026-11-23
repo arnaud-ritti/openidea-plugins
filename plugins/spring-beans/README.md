@@ -125,6 +125,10 @@ Click **Refresh** to index the project. A large project scans as a background ta
 
 When no bean is found and the project root has no `pom.xml` or `build.gradle`, the window says the project doesn't look like a Spring project.
 
+### Find a bean from Search Everywhere
+
+Press Shift twice and open the **Spring Beans** tab. Type part of a bean name, its kind (`@Service`, `@Bean`) or its type; Enter opens the declaration. Each result shows the bean's kind, type and file. In a large project the tab first lists what is already indexed and **Show more** finds the rest.
+
 ### Choose active profiles
 
 Run **Change Active Spring Profiles** (Tools menu). Pick profiles found in `@Profile`, `<beans profile>` and `application-*.yml`/`.properties` files. The duplicate-name and inactive-profile checks then use your choice. Choosing none means every bean is considered.

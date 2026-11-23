@@ -660,17 +660,16 @@ impl Runtime {
                     self.session = None;
                     return Err(error);
                 }
+                // Since 0.1.50 the exit status arrives only with the last output chunk.
                 let result = if let Some(status) = chunk.status {
                     let terminal = session.terminal;
-                    if terminal {
-                        self.session = None;
-                    }
+                    self.session = None;
                     format!(
                         "The subscription ended (exit status {status}). {} Check the output for errors.",
                         if terminal {
                             "All output has been read."
                         } else {
-                            "Read the output again for the rest, or cancel the subscription."
+                            "It stopped before reporting how it ended."
                         }
                     )
                 } else {
@@ -703,8 +702,7 @@ impl Runtime {
     }
 }
 fn append(session: &mut Session, chunk: &host::Chunk) -> Result<(), Error> {
-    // Native Child.status is process exit, not reader EOF. Retire automatically
-    // only after the helper's final stdout record was physically received.
+    // `terminal` tells a clean end (the helper's final record arrived) from a crash.
     session.pending.push_str(&chunk.stdout);
     if session.pending.len() > 256 * 1024 {
         session.child.kill()?;
@@ -1030,7 +1028,7 @@ mod tests {
         assert!(runtime.session.is_none());
     }
     #[test]
-    fn process_exit_without_final_record_keeps_reader_for_late_protocol_output() {
+    fn exit_status_means_all_output_was_read_even_without_final_record() {
         let (h, mut runtime, mut backend) = setup();
         answers(&h, true);
         runtime
@@ -1045,18 +1043,8 @@ mod tests {
             .run_with(POLL, &h.invocation(), &mut backend)
             .unwrap()
             .unwrap();
-        assert!(result.contains("Read the output again for the rest"));
-        assert!(runtime.session.is_some());
-        backend.state.borrow_mut().chunks.push_back(host::Chunk {
-            stdout: "{\"type\":\"server-complete\"}\n".into(),
-            status: Some(0),
-            ..Default::default()
-        });
-        runtime
-            .run_with(POLL, &h.invocation(), &mut backend)
-            .unwrap();
+        assert!(result.contains("stopped before reporting how it ended"));
         assert!(runtime.session.is_none());
-        assert!(h.output()[OUTPUT].contains("server-complete"));
     }
     #[test]
     fn configured_path_suggestion_requires_complete_unique_literal_local_configuration() {

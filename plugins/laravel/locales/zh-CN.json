@@ -184,5 +184,6 @@
   "Laravel: Copy as cURL": "Laravel: 复制为cURL",
   "Offer to convert query scopes to the #[Scope] attribute (Laravel 12.6+)": "提供将查询作用域转换为 #[Scope] 特性的操作（Laravel 12.6+）",
   "Show route and controller hints in the editor": "在编辑器中显示路由和控制器提示",
-  "Shown only when composer.lock pins Laravel 12.6 or newer.": "仅当 composer.lock 锁定Laravel 12.6或更新版本时显示。"
+  "Shown only when composer.lock pins Laravel 12.6 or newer.": "仅当 composer.lock 锁定Laravel 12.6或更新版本时显示。",
+  "Laravel Routes": "Laravel 路由"
 }

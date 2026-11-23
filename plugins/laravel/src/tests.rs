@@ -3707,3 +3707,37 @@ fn class_names_resolve_against_each_text_in_turn() {
         assert_eq!(crate::eloquent_members::source_class_name(b, "TimelineController").as_deref(), Some("Other\\TimelineController"));
     }
 }
+
+#[test]
+fn routes_search_tab_answers_from_the_finished_index_only() {
+    use openidea_plugin::search::{SearchProvider, SearchTarget};
+    let host = MockHost::install();
+    laravel_project(&host);
+    let mut plugin = Main::default();
+    plugin.activate(&host.context("aritti.laravel")).unwrap();
+    assert!(plugin.search("routes", "dashboard", 50, &host.invocation()).unwrap().items.is_empty(), "nothing while indexing");
+
+    crate::tests::finish_indexing(&mut plugin);
+    let page = plugin.search("routes", "dashboard", 50, &host.invocation()).unwrap();
+    assert_eq!(page.items[0].title, "GET /admin/dashboard");
+    assert!(matches!(&page.items[0].target, SearchTarget::Location(location) if location.path == "/project/routes/web.php" && location.range.start.line == 6));
+    assert!(plugin.search("other", "dashboard", 50, &host.invocation()).unwrap().items.is_empty());
+    assert!(host.process_runs().is_empty());
+}
+
+#[test]
+fn version_status_item_opens_a_menu_of_declared_commands() {
+    let host = MockHost::install();
+    let mut plugin = activated(&host);
+    plugin.indexes.get_mut("/project").unwrap().metadata.framework_version = Some((11, 2, 0));
+    plugin.show_version_status("/project/routes/web.php");
+
+    assert_eq!(host.status_items()["laravel-version"].text, "Laravel 11.2");
+    let menu = host.status_menu("laravel-version");
+    let commands: Vec<&str> = menu.iter().filter_map(|entry| match entry {
+        openidea_plugin::StatusMenuEntry::Action { command, .. } => Some(command.as_str()),
+        _ => None,
+    }).collect();
+    assert_eq!(commands, ["artisan-run", "optimize-clear", "route-search", "route-send-request", "reveal", "reindex"]);
+    assert!(commands.iter().all(|command| include_str!("../plugin.toml").contains(&format!("id = \"{command}\""))), "{commands:?}");
+}

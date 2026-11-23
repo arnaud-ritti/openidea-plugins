@@ -15,6 +15,7 @@ pub mod kotlin;
 pub mod metadata;
 pub mod provenance;
 pub mod scope;
+pub mod search;
 pub mod sibling;
 pub mod text;
 pub mod tree;

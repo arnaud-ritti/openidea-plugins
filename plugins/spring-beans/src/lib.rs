@@ -21,6 +21,7 @@ mod kotlin_build;
 mod live_templates;
 mod model;
 mod resources;
+mod search;
 mod sites;
 mod spel;
 mod graph;
@@ -1610,7 +1611,7 @@ impl Plugin for Navigator {
 }
 
 // API 1.3 registers the optional exports on the same component.
-openidea_plugin::register_plugin!(Navigator, providers, views, indexing, diagnostics, file_actions, hover, injections, syntax);
+openidea_plugin::register_plugin!(Navigator, providers, views, indexing, search, diagnostics, file_actions, hover, injections, syntax);
 
 #[cfg(test)]
 mod tests;

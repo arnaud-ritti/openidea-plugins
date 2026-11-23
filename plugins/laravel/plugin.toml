@@ -6,7 +6,7 @@ authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 homepage = "https://github.com/arnaud-ritti/openidea-plugins/tree/main/plugins/laravel"
 license = "MIT"
 change-notes = """\
-Next release: Fresh Migration and Seed Database confirm with the project and database, palette commands ask which route, model, failed job or log entry, commands show only in projects with an artisan file, model helper commands, Create Missing View and the Generators tab write their files after one confirmation, the hub groups its tabs into sections and a controller method's Laravel gutter icon lists all its routes in the IDE's target chooser, also in large projects; Database tab with models, columns, indexes, a Compare view, a Schema sub-tab and a Tables tree, and unreadable migrations are listed instead of breaking it; Send Request shows the response and handles large inputs; Choose Docker Target works again, accepts DDEV synced volumes and refreshes Artisan commands after a pick; enum quick fix in where(), Windows PHP calls without a console window, faster indexing on large projects, shorter setting titles, plainer command names and messages, clear permission messages, shortcuts for Search Routes and Search Names and database errors without SQL or connection details. \
+Next release: Fresh Migration and Seed Database confirm first, palette commands ask which route, model, failed job or log entry, commands show only in projects with an artisan file, model helper commands, Create Missing View and the Generators tab write after one confirmation, the hub groups its tabs into sections and a controller method's Laravel gutter icon lists all its routes in the IDE's target chooser, also in large projects; Database tab with models, columns, indexes, a Compare view, a Schema sub-tab and a Tables tree, and unreadable migrations are listed instead of breaking it; Send Request shows the response and handles large inputs; Choose Docker Target works again, accepts DDEV synced volumes and refreshes Artisan commands after a pick; a Routes tab in Search Everywhere, a status bar menu, coloured Run consoles, enum quick fix in where(), Windows PHP calls without a console window, faster indexing on large projects, plainer settings, command names, messages and permission messages, shortcuts for Search Routes and Search Names and database errors without SQL or credentials. \
 0.3.0: broader Laravel navigation and the hub window. \
 0.2.0: plugin icon and window consolidation."""
 categories = ["frameworks"]
@@ -595,6 +595,10 @@ icon = "icons/route-patch.svg"
 id = "route-other"
 patterns = ["*.laravel-route-other"]
 icon = "icons/route-other.svg"
+
+[[contributes.searchCategories]]
+id = "routes"
+title = "Laravel Routes"
 
 [[contributes.endpoints]]
 files = ["routes/**/*.php", "app/Http/routes.php", "app/routes.php", "app/Http/Controllers/**/*.php", "bootstrap/app.php", "app/Providers/RouteServiceProvider.php", "composer.json"]

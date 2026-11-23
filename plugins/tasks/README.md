@@ -41,6 +41,11 @@ Open and Close forms remember your last choices. Task descriptions open in read-
 
 When the Issues group is empty, its row says why: no tracker is set up, network access isn't allowed, the update failed, or there are no open issues.
 
+### Switch from the status bar or Search Everywhere
+
+- The status bar shows the active task. Click it for a menu: **Copy Commit Message**, **Open in Browser** (issues), **Close Task…**, the other open tasks to switch to in one click (up to 20, then **All N Open Tasks…**), **New Task…** and **Open Task…**.
+- Press Shift twice and open the **Tasks** tab to find an open task by id, summary or branch. Choosing it switches to it.
+
 ### Branch per task (Git)
 
 With `process:git` allowed:
@@ -60,8 +65,7 @@ Named contexts save up to ten open editors of the current window, plus the activ
 
 ### Commit messages
 
-- The status bar shows the active task. Click it to copy its commit message.
-- **Tasks: Copy Commit Message** does the same.
+- **Tasks: Copy Commit Message**, or **Copy Commit Message** in the status bar menu, copies the active task's commit message.
 - **Tasks: Apply Active Task to Commit Message** fills the Commit message field. It's also above the Commit message field. You review the old and new text first. It doesn't stage or commit anything.
 
 The message uses **Commit message format** (default `{id} {summary}`).
@@ -122,7 +126,7 @@ Find them in Search Everywhere › Actions (⇧⇧) under **Tasks**; bind keys i
 | **Tasks: Switch Task** | Picks another task and switches to it. | |
 | **Tasks: Close Active Task** | Opens the close form with your last choices. Also in **Tools**. | ⌥⇧W |
 | **Tasks: Open Active Task in Browser** | Opens the active issue's page. Also in **Tools**. | ⌥⇧B |
-| **Tasks: Copy Commit Message** | Copies the active task's commit message. Same as clicking the status bar. | |
+| **Tasks: Copy Commit Message** | Copies the active task's commit message. Also in the status bar menu. | |
 | **Tasks: Apply Active Task to Commit Message** | Replaces the Commit message with the active task's, after review. Also above the Commit message field. | |
 | **Tasks: Update Issues** | Refreshes issues from all trackers now. | |
 | **Tasks: Search Issues** | Searches one tracker and opens the picked issue. | |
@@ -183,7 +187,7 @@ Secrets (set in the same page): **GitHub token**, **GitLab token**, **Codeberg t
 | `process:python3` | FogBugz, Redmine, MantisBT and generic tracker transports. | Those trackers are unavailable. |
 | `events` | Recording the files of each task. | Switching back doesn't reopen files. |
 | `editor.read` | Saving named contexts; the caret issue commands. | Those features are off. |
-| `clipboard` | **Tasks: Copy Commit Message** and the status bar click. | Copying fails. |
+| `clipboard` | **Tasks: Copy Commit Message**, also in the status bar menu. | Copying fails. |
 | `vcs.read` | Reading tracker remotes and the current commit draft. | Those features are off. |
 | `vcs.write` | **Tasks: Apply Active Task to Commit Message**. | That command is off. |
 

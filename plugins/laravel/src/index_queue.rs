@@ -38,6 +38,7 @@ impl Main {
         self.pending_indexes.retain(|root| roots.contains(root));
         self.index_progress.retain(|root, _| roots.contains(root));
         self.index_rechecks.retain(|root, _| roots.contains(root));
+        self.show_console_rules(projects.iter().any(index::is_laravel));
         for project in projects { self.queue_index(&project); }
     }
 
@@ -125,6 +126,7 @@ impl Main {
         self.pending_indexes.remove(&root);
         self.model_rows.borrow_mut().remove(&root);
         self.indexes.insert(root.clone(), index);
+        self.show_console_rules(true);
         let _ = host::set_context("indexed", true);
         let checked = self.checked.iter().filter(|path| crate::under(path, &root)).cloned().collect::<Vec<_>>();
         if !checked.is_empty() {

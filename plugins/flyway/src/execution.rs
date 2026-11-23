@@ -673,14 +673,11 @@ impl Execution {
                 session.raw.push_str(&chunk.stdout);
             }
         }
-        let drained = chunk.stdout.is_empty() && chunk.stderr.is_empty() && chunk.status.is_some();
+        // The exit status comes with the chunk holding the last output.
+        let drained = chunk.status.is_some();
         session.output.push(&chunk.stdout, &session.redactor, drained);
         session.stderr.push(&chunk.stderr, &session.redactor, drained);
         let status = chunk.status?;
-        if !drained {
-            session.status = format!("Process exited {status}; Refresh Output to read the remaining output.");
-            return None;
-        }
         session.status = format!(
             "Finished with exit {status} after {}s. Database outcome is not inferred from local source.",
             session.started.elapsed().as_secs()
@@ -940,13 +937,10 @@ mod tests {
         let host=managed();let mut plugin=Flyway::default();start(&mut plugin.execution,&host,false);
         plugin.execution.session.as_ref().unwrap().child.as_ref().unwrap().kill().unwrap();
         plugin.run_command("status",&host.invocation(),None).unwrap();
-        assert!(plugin.execution.migration_status("/project").unwrap().contains("remaining output"));
+        assert!(plugin.execution.migration_status("/project").unwrap().contains("Finished"));
         assert_eq!(invalidations(&host),2);
         plugin.run_command("status",&host.invocation(),None).unwrap();
-        assert!(plugin.execution.migration_status("/project").unwrap().contains("Finished"));
-        assert_eq!(invalidations(&host),3);
-        plugin.run_command("status",&host.invocation(),None).unwrap();
-        assert_eq!(invalidations(&host),3,"no snapshot/status change, no redundant native invalidation");
+        assert_eq!(invalidations(&host),2,"no snapshot/status change, no redundant native invalidation");
         assert!(plugin.info_cache.is_none());
     }
     #[test]
@@ -1139,16 +1133,15 @@ mod tests {
         assert!(matches!(execution.view("/other").body, Body::Message(_)));
     }
     #[test]
-    fn status_drains_final_chunks_before_marking_json_complete_and_caps_raw_output() {
+    fn status_completes_json_with_the_last_output_chunk_and_caps_raw_output() {
         let host = managed();
         let mut execution = Execution::default();
         start(&mut execution, &host, true);
         let session = execution.session.as_mut().unwrap();
-        let first = Chunk { stdout: "{\"migrations\":[".into(), stderr: "password=hidden\n".into(), status: Some(0) };
+        let first = Chunk { stdout: "{\"migrations\":[".into(), stderr: "password=hidden\n".into(), status: None };
         assert!(Execution::ingest(session, first).is_none());
         assert!(session.child.is_some());
-        assert!(Execution::ingest(session, Chunk { stdout: "]}".into(), status: Some(0), ..Default::default() }).is_none());
-        let finished = Execution::ingest(session, Chunk { status: Some(0), ..Default::default() }).unwrap();
+        let finished = Execution::ingest(session, Chunk { stdout: "]}".into(), status: Some(0), ..Default::default() }).unwrap();
         assert!(info::parse(&finished.output.stdout).unwrap().is_empty());
         assert!(!finished.output.stderr.contains("hidden"));
         assert!(session.child.is_none());
@@ -1223,6 +1216,23 @@ mod tests {
         let item = &host.status_items()["flyway-target"];
         assert_eq!(item.text, "Flyway: db.example/app");
         assert_eq!(item.command.as_deref(), Some("show-migrations"));
+        let commands: Vec<String> = host.status_menu("flyway-target").into_iter().filter_map(|entry| match entry {
+            StatusMenuEntry::Action { command, .. } => Some(command),
+            _ => None,
+        }).collect();
+        assert_eq!(commands, ["show-migrations", "new-migration", "info", "validate", "migrate", "repair"]);
+        assert!(!host.status_menu("flyway-target").iter().any(|entry| matches!(entry, StatusMenuEntry::Header(_))), "no Info yet, no pending count");
+    }
+    #[test]
+    fn status_menu_heads_with_the_pending_count_of_the_last_info() {
+        let host = managed();
+        host.add_file("flyway.toml", "[flyway]\nurl = \"jdbc:mysql://db.example/app\"\n");
+        let mut plugin = Flyway::default();
+        let mut finished = finished_info(&host);
+        finished.output.stdout = r#"{"migrations":[{"version":"1","description":"init","state":"Success"},{"version":"2","description":"more","state":"Pending"}]}"#.into();
+        plugin.accept_finished(&host.invocation().project().unwrap(), finished).unwrap();
+        assert_eq!(host.status_menu("flyway-target")[0], StatusMenuEntry::Header("1 pending migration at the last Info".into()));
+        assert_eq!(crate::status_menu(Some(3))[0], StatusMenuEntry::Header("3 pending migrations at the last Info".into()));
     }
     #[test]
     fn successful_managed_write_offers_refresh_info() {

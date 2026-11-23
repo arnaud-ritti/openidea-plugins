@@ -45,6 +45,8 @@ pub struct State {
     resolved: BTreeMap<String, Resolution>,
     /// Set when the host refused the event subscriptions; diagnostics then warm the open document themselves.
     pub events_denied: bool,
+    /// Whether the console rules are set: from the first changelog seen on.
+    pub console_rules: bool,
 }
 fn text_hash(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -129,6 +131,9 @@ impl State {
     fn store(&mut self, root: &str, path: &str, bytes: usize, log: Rc<Changelog>, source: Option<(u64, u64)>) {
         if !owned(root, path) {
             return;
+        }
+        if !std::mem::replace(&mut self.console_rules, true) {
+            crate::console::apply();
         }
         if !self.roots.contains_key(root) && self.roots.len() >= 8 {
             self.roots.clear();

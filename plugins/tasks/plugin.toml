@@ -6,7 +6,7 @@ authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 homepage = "https://github.com/arnaud-ritti/openidea-plugins/tree/main/plugins/tasks"
 license = "MIT"
 change-notes = """\
-Next release: Closing a task says when it worked, the merge option says it also deletes the branch, a denied tracker update is reported, and the empty Issues row says why it is empty; self-hosted YouTrack, Redmine, MantisBT, FogBugz, Lighthouse and custom REST trackers, and Jira search accepts JQL with a jql: prefix; issue descriptions show on hover and in task tabs, and tracker credentials are sent only to the configured tracker server; an update where one tracker fails keeps that tracker's issues, GitHub issues from several repositories get distinct ids, and the commit template works in a repository with no commits; Open Task reveals the Tasks window when it needs its form, New Task gets Alt+Shift+K, the toolbar moves Search Issues, Update Issues and contexts into More…, caret commands need a focused editor, and plainer confirmations, settings and permission messages. \
+Next release: The active task in the status bar opens a menu to copy its commit message, close it or switch tasks, and a Tasks tab in Search Everywhere switches to the task you choose. Closing a task says when it worked, the merge option says it also deletes the branch, a denied tracker update is reported, and the empty Issues row says why it is empty; self-hosted YouTrack, Redmine, MantisBT, FogBugz, Lighthouse and custom REST trackers, and Jira search accepts JQL with a jql: prefix; issue descriptions show on hover and in task tabs, and tracker credentials are sent only to the configured tracker server; an update where one tracker fails keeps that tracker's issues, GitHub issues from several repositories get distinct ids, and the commit template works in a repository with no commits; Open Task reveals the Tasks window when it needs its form, New Task gets Alt+Shift+K, the toolbar moves Search Issues, Update Issues and contexts into More…, caret commands need a focused editor, and plainer confirmations, settings and permission messages. \
 0.3.0: more trackers and closed-issue search. \
 0.2.0: plugin icon and task tree."""
 categories = ["tools", "vcs"]
@@ -80,6 +80,10 @@ id = "tasks"
 title = "Tasks"
 icon = "icons/tasks.svg"
 location = "left"
+
+[[contributes.searchCategories]]
+id = "tasks"
+title = "Tasks"
 
 [[contributes.statusBar]]
 id = "active-task"

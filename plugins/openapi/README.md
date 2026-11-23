@@ -81,6 +81,8 @@ The **OpenAPI Endpoints** window lists `METHOD /path` for every OpenAPI file in 
 - **Refresh** rescans the project.
 - Row actions: **Copy as curl** and **Create HTTP Request File** (writes `http/<verb>-<path>.http` beside the spec).
 
+Search Everywhere (⇧⇧) has an **OpenAPI Operations** tab: type a method, path, tag or operationId (`listPets`, `get /pets`) to find an operation in any spec of the project and open it. An exact operationId comes first. The first query in a large project may list only part of the operations; **Show more** reads the rest.
+
 ### Jump between operations
 
 An **Operations** panel sits beside the editor of an OpenAPI YAML or JSON file. It lists the file's operations (`METHOD /path`) grouped by tag.
@@ -88,6 +90,7 @@ An **Operations** panel sits beside the editor of an OpenAPI YAML or JSON file. 
 - Type in the filter to match a method, path, tag or operationId. Escape clears it.
 - Click an operation, or press Enter on it, to move the caret there. Arrow keys move between rows.
 - The list follows your edits after a short pause.
+- The operation holding the caret is highlighted, and a dot marks operations with errors (red) or warnings (yellow).
 
 ### Preview the API
 
@@ -105,7 +108,7 @@ Swagger UI 5.34.1 opens beside the text for `openapi.*`, `swagger.*`, `*.openapi
 
 ### Try a local request
 
-**OpenAPI: Try Local GET/HEAD Request…** prepares a GET or HEAD request from an OpenAPI 3.0/3.1 spec in JSON or YAML. Run it from the Command Palette or the preview's **Try…** button. It shows in the **Request / Response** tab. Nothing is sent until you click **Send once**.
+**OpenAPI: Try Local GET/HEAD Request…** prepares a GET or HEAD request from an OpenAPI 3.0/3.1 spec in JSON or YAML. Run it from the Command Palette or the preview's **Try…** button, or hover the left edge of a `get:` or `head:` line and click **Try GET /path…** to skip choosing the operation. It shows in the **Request / Response** tab. Nothing is sent until you click **Send once**.
 
 It needs one literal `127.0.0.1` server with a port, and `net:127.0.0.1`. With `net:ask`, a single literal `https://host` server works too; the IDE asks before the first request to each host.
 

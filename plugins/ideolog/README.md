@@ -25,8 +25,12 @@ A log viewer. It detects the log format, colours each event by level, folds mult
 - Each event is coloured by level (error, warning, info), stack trace included. The time column gets its own colour.
 - Multi-line events such as stack traces fold.
 - The structure view lists errors and warnings.
-- The status bar names the format (`Log: IntelliJ IDEA` or `Log: plain text`). Click it to open the **Formats and Highlighting** tab.
+- The status bar names the format (`Log: IntelliJ IDEA` or `Log: plain text`). Click it for a menu: **Go to Next Error**, **Go to Next Warning**, **Go to Next Exception**, **Jump to Source**, **Capture Active Log Snapshot**, **Open Live Log Tail** and **Formats and Highlighting**.
 - On a large log, the status bar adds how much is coloured: `(first 1200 lines highlighted)` or `(too large to highlight)`. Over 512 KiB, its tooltip says folding, outline and stack-frame links are off.
+
+### Errors in Run consoles
+
+Ideolog also colours the output of every Run and Debug console: the words `ERROR`, `FATAL`, `SEVERE`, `CRITICAL` (red) and `WARN`, `WARNING` (yellow) in capitals, and the first line of a Java exception (`java.lang.IllegalStateException: …`, `Caused by: …`) or a Python traceback. Only those words are coloured; lines keep the console's own level colours. Turn it off with **Highlight errors, warnings and exceptions in Run consoles**.
 
 ### Spot pauses
 
@@ -151,6 +155,7 @@ Settings › Plugins › Ideolog.
 |---|---|---|---|
 | Custom log formats and highlighting | `customPatterns` | empty | Pasted Ideolog `<LogParsingPattern>` and `<LogHighlightingPattern>` XML. |
 | Mark time gaps (seconds) | `timeGapSeconds` | `0` (off) | Colours the time of an event after a pause this long. |
+| Highlight errors, warnings and exceptions in Run consoles | `consoleHighlighting` | on | Colours level words and exception lines in Run and Debug console output. |
 
 Patterns made in the Formats and Highlighting tab are kept in plugin storage, not in this setting. They work without an open project.
 

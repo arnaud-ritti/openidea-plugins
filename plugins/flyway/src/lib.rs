@@ -7,6 +7,7 @@ mod native_runs;
 mod native_browser;
 mod checks;
 mod comparison;
+mod console;
 mod complete;
 mod config;
 mod execution;
@@ -14,6 +15,7 @@ mod generate;
 mod hibernate_schema;
 mod info;
 mod naming;
+mod search;
 pub(crate) const PLACEHOLDER_MARKER: &str = "icons/marker-placeholder.svg";
 pub(crate) const TABLE_MARKER: &str = "icons/flyway.svg";
 /// Markers one gutter button lists at most; the IDE merges a line's same-icon markers into one chooser.
@@ -42,7 +44,7 @@ use openidea_plugin::host;
 use openidea_plugin::providers::{CompletionItem, Document, Providers};
 use openidea_plugin::text::offset;
 use openidea_plugin::views::{Body, Button, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project, StatusItem};
+use openidea_plugin::{Diagnostic, Error, Event, Invocation, NotificationLevel, Plugin, Position, Project, StatusItem, StatusMenuEntry};
 use spring_text::config::is_config_file;
 use spring_text::index::{glob_matches, project_of};
 
@@ -73,6 +75,8 @@ pub struct Flyway {
     info_cache: Option<(String, View)>,
     info_scope: Option<execution::Proof>,
     info_at: Option<std::time::Instant>,
+    /// Pending migrations in the cached Info result.
+    info_pending: Option<usize>,
     targets_root: Option<String>,
     /// Migration file by tree item key, from the last render of the migrations view.
     targets: BTreeMap<String, String>,
@@ -85,6 +89,8 @@ pub struct Flyway {
     info_noted: bool,
     /// Table cells by migrations row key (`l:` local, `m:` Info), for the packaged view's columns.
     row_cells: BTreeMap<String, Vec<String>>,
+    /// Whether the console rules are set: from the first Flyway project seen on.
+    console_rules: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -134,25 +140,50 @@ fn notify_runner_denied(goal: &str) {
     host::notify(NotificationLevel::Warning, TITLE, &ui_kit::denied::message("Running Flyway", &format!("process:{program}"), PLUGIN));
 }
 /// Shows the confirmation's redacted target hint in the window's status bar while the
-/// project has a Flyway config file; clicking opens the Flyway panel.
-fn update_status(ctx: &Invocation) {
-    let Some(project) = ctx.project() else { return };
-    let item = open_root(&project).and_then(|_| execution::status_target(&project)).map(|target| match target {
+/// project has a Flyway config file; clicking opens a menu of the Flyway commands
+/// (the panel on hosts without status bar menus).
+fn update_status(project: &Project, pending: Option<usize>) {
+    let item = open_root(project).and_then(|_| execution::status_target(project)).map(|target| match target {
         Some((short, hint)) => StatusItem {
             text: format!("Flyway: {short}"),
-            tooltip: Some(format!("Target database: {hint}. Click to open the Flyway panel.")),
+            tooltip: Some(format!("Target database: {hint}. Click for Flyway commands.")),
             command: Some("show-migrations".into()),
         },
         None => StatusItem {
             text: "Flyway".into(),
-            tooltip: Some("Target database unknown from the project's Flyway config files. Click to open the Flyway panel.".into()),
+            tooltip: Some("Target database unknown from the project's Flyway config files. Click for Flyway commands.".into()),
             command: Some("show-migrations".into()),
         },
     });
-    let _ = match item {
-        Some(item) => host::set_window_status_item(STATUS_ITEM, &item),
-        None => host::remove_window_status_item(STATUS_ITEM),
+    let Some(item) = item else {
+        let _ = host::remove_window_status_item(STATUS_ITEM);
+        return;
     };
+    if host::set_window_status_item_menu(STATUS_ITEM, &item, &status_menu(pending)).is_err() {
+        let item = StatusItem { tooltip: item.tooltip.map(|tip| tip.replace("Click for Flyway commands.", "Click to open the Flyway panel.")), ..item };
+        let _ = host::set_window_status_item(STATUS_ITEM, &item);
+    }
+}
+/// The status bar menu: the pending count from the last Info, when there is one, then the commands.
+fn status_menu(pending: Option<usize>) -> Vec<StatusMenuEntry> {
+    let mut menu = Vec::new();
+    if let Some(pending) = pending {
+        menu.push(StatusMenuEntry::Header(match pending {
+            0 => "No pending migrations at the last Info".into(),
+            1 => "1 pending migration at the last Info".into(),
+            n => format!("{n} pending migrations at the last Info"),
+        }));
+    }
+    menu.extend([
+        StatusMenuEntry::action("Show Migrations", "show-migrations"),
+        StatusMenuEntry::action("New Migration…", "new-migration"),
+        StatusMenuEntry::Separator,
+        StatusMenuEntry::action("Run Info…", "info"),
+        StatusMenuEntry::action("Validate", "validate"),
+        StatusMenuEntry::action("Migrate", "migrate").with_description("Asks first"),
+        StatusMenuEntry::action("Repair", "repair").with_description("Asks first"),
+    ]);
+    menu
 }
 fn open_root(project: &Project) -> Option<String> {
     let root = project.root().ok()?;
@@ -162,8 +193,16 @@ fn open_root(project: &Project) -> Option<String> {
         .then_some(root)
 }
 impl Flyway {
+    /// Pending migrations in this project's current Info result.
+    fn pending(&self, project: &Project) -> Option<usize> {
+        let root = project.root().ok()?;
+        let current = self.info_cache.as_ref().is_some_and(|(owner, _)| owner == &root)
+            && self.info_scope.as_ref().is_some_and(|scope| scope.settings_current(&root));
+        self.info_pending.filter(|_| current)
+    }
     fn drop_info(&mut self) {
         self.info_cache = None;
+        self.info_pending = None;
         self.info_scope = None;
         self.targets.clear();
         self.targets_root = None;
@@ -211,6 +250,7 @@ impl Flyway {
     /// A Flyway project has a Flyway config file or migration files; the inventory is computed once, then kept current by events.
     pub(crate) fn flyway_project(&mut self, project: &Project) -> bool {
         if configured(project) {
+            self.uses_flyway();
             return true;
         }
         let Ok(root) = project.root() else { return false };
@@ -219,7 +259,18 @@ impl Flyway {
             let files = migration_files(project, &config);
             self.record_local(&root, &config, &files);
         }
-        self.local.get(&root).is_some_and(|local| !local.files.is_empty())
+        let flyway = self.local.get(&root).is_some_and(|local| !local.files.is_empty());
+        if flyway {
+            self.uses_flyway();
+        }
+        flyway
+    }
+
+    /// Console rules go on once a project is seen to use Flyway and stay until the plugin stops.
+    pub(crate) fn uses_flyway(&mut self) {
+        if !std::mem::replace(&mut self.console_rules, true) {
+            console::apply();
+        }
     }
 
     /// Drops a cached "no migrations" result when a config file or a file in its locations changes.
@@ -384,12 +435,14 @@ impl Flyway {
             self.info_at = Some(std::time::Instant::now());
             self.targets.clear();
             self.targets_root = Some(root.clone());
+            self.info_pending = None;
             let view = if let Some(error) = finished.info_error {
                 View::message(error).button(Button::new("refresh", "Run Info…").icon("refresh"))
             } else {
                 self.accept_info(&project, finished.output, &finished.redactor)
             };
             self.info_cache = Some((root, view));
+            update_status(project, self.pending(project));
             refresh_migrations();
         }
         Ok(())
@@ -411,7 +464,9 @@ impl Plugin for Flyway {
         Ok(())
     }
     fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
-        update_status(ctx);
+        if let Some(project) = ctx.project() {
+            update_status(&project, self.pending(&project));
+        }
         match id {
             "show-migrations" => {
                 ui_kit::web::reveal_view("migrations", include_str!("ui_config.json"))?;
@@ -499,7 +554,9 @@ impl Plugin for Flyway {
             _ => None,
         });
         let Some(path) = qualifying else { return };
-        update_status(_ctx);
+        if let Some(project) = _ctx.project() {
+            update_status(&project, self.pending(&project));
+        }
         let Some(project) = project_of(path) else {
             return;
         };
@@ -519,6 +576,7 @@ impl Plugin for Flyway {
             return;
         }
 
+        self.uses_flyway();
         let (_, _, results) = self.analyse(&project, config, files);
         self.publish(&root, &results, false);
         if self.local.get(&root) != before.as_ref() {
@@ -729,6 +787,7 @@ impl Flyway {
 
         self.show_info_notes(&notes);
         let pending = migrations.iter().filter(|m| m.state == "Pending").count();
+        self.info_pending = Some(pending);
         View::new(Body::Tree(items)).button(refresh).status(&format!("{} migrations, {pending} pending", migrations.len()))
     }
 }
@@ -800,7 +859,7 @@ impl Views for Flyway {
 }
 
 // API 1.3 registers the optional exports on the same component.
-openidea_plugin::register_plugin!(Flyway, providers, views, file_actions, run_configurations);
+openidea_plugin::register_plugin!(Flyway, providers, views, file_actions, run_configurations, search);
 
 #[cfg(test)]
 mod tests {

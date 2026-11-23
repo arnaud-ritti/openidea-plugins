@@ -27,7 +27,8 @@ To use a kubeconfig other than kubectl's default, set **Kubeconfig file** in the
 ### Browse the cluster in Services
 
 - Double-click a context or namespace to switch to it. Right-click › **Switch Context or Namespace** does the same.
-- The status bar shows `⎈ context / namespace`: where every `kubectl` call goes. Click it to show the cluster tree.
+- The status bar shows `⎈ context / namespace`: where every `kubectl` call goes. Click it for **Switch Context…**, **Switch Namespace…**, **Show Cluster Tree**, **Start Resource Watch…**, **Apply Copied YAML…** and **Choose Kubeconfig**.
+- **Kube Explorer: Switch Context or Namespace** from Search Everywhere lists the contexts and namespaces to pick from.
 - Expand a kind to list its resources. The tree is grouped under **Kubernetes — selected context**, with the selected namespace beside it.
 - **Custom Resources** lists the cluster's CRD kinds by API group. Expand a kind to see its instances; they take **Describe**, **YAML** and **Delete**.
 - **All namespaces**, at the top of the namespace list, shows every namespaced kind as `namespace/name` rows. Actions on a row run in that row's namespace.
@@ -122,7 +123,9 @@ Right-click in a YAML editor, or use Search Everywhere:
 - **Kube Explorer: Preview Helm Template**, **Lint Helm Chart** and **Update Helm Dependencies** use the chart around the file. **Configure Helm Parameters** sets the release name, values file and `--set` overrides for template and lint.
 - **Kube Explorer: Create Helm Chart** scaffolds a new chart.
 
-In **All namespaces** mode, Apply Manifest, Apply Kustomization, Delete Manifest Resources and Create Secret are refused. Pick a namespace first.
+**Kube Explorer: Apply Copied YAML…** applies a manifest you copied (from a browser, a chat or another file) without saving it first. It names the copied resources and the target context and namespace, and offers the same **Apply** or **Show Diff with Cluster First** choice. Needs `clipboard.read`; the clipboard is read only when you run the command.
+
+In **All namespaces** mode, Apply Manifest, Apply Copied YAML, Apply Kustomization, Delete Manifest Resources and Create Secret are refused. Pick a namespace first.
 
 ### Manage Helm repositories
 
@@ -207,6 +210,7 @@ Find them in Search Everywhere › Actions (⇧⇧) under **Kube Explorer**; bin
 | Command | What it does | Shortcut |
 |---|---|---|
 | **Kube Explorer: Apply Manifest to Cluster** (*Editor*) | Applies the open manifest, after asking (or shows the diff first). | None |
+| **Kube Explorer: Apply Copied YAML…** | Applies the manifest on the clipboard, after naming its resources and the target (or shows the diff first). | None |
 | **Kube Explorer: Validate Manifest (Server Dry Run)** | Validates it with a server dry run. | None |
 | **Kube Explorer: Diff Manifest with Cluster** (*Editor*) | Opens the diff with the cluster's objects. | None |
 | **Kube Explorer: Delete Manifest Resources from Cluster…** | Lists the resources, then deletes after **Confirm Delete** and a confirmation. | None |
@@ -232,7 +236,8 @@ Find them in Search Everywhere › Actions (⇧⇧) under **Kube Explorer**; bin
 
 | Command | What it does | Shortcut |
 |---|---|---|
-| **Kube Explorer: Show Cluster Tree** | Reveals the cluster tree (same as clicking the status bar item). | None |
+| **Kube Explorer: Show Cluster Tree** | Reveals the cluster tree (also in the status bar item's menu). | None |
+| **Kube Explorer: Switch Context or Namespace** | Picks a context or namespace (from a row: switches to it). | None |
 | **Kube Explorer: Choose Kubeconfig** | Picks which configured kubeconfig file to use. | None |
 | **Kube Explorer: Customize Namespaces** | Chooses which namespaces the tree lists. | None |
 | **Kube Explorer: Edit Recent Debug Images** | Edits the recent images offered by **Debug Pod…**. | None |
@@ -318,6 +323,7 @@ The plugin always uses its own storage (`storage`). Optional permissions are off
 | `process:helm` | Helm template, lint, dependency and repository commands. | Those commands fail with a notification. |
 | `process:telepresence` | Telepresence Connect and Quit. | Those commands fail. |
 | `clipboard` | **Copy** in the Log Viewer. | Copy is refused. |
+| `clipboard.read` | **Kube Explorer: Apply Copied YAML…** reads the copied manifest. | That command explains where to allow it. |
 
 ## Troubleshooting
 

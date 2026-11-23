@@ -5,7 +5,7 @@ use openidea_plugin::syntax::{SyntaxProvider, Token};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
     Diagnostic, Error, Event, FileKind, Invocation, Location, NotificationLevel, PickItem, Position, Project, Range, Severity, StatusItem,
-    TextEdit, host, text,
+    StatusMenuEntry, TextEdit, host, text,
 };
 use std::collections::HashSet;
 
@@ -281,21 +281,42 @@ fn setting(key: &str, default: bool) -> bool {
     preferences::boolean(key, default)
 }
 
-/// The status bar says when the focused file is ignored.
+/// The status bar says when the focused file is ignored; its menu goes to the rule.
 fn show_ignored_status(path: Option<&str>) {
     let verdict = path.filter(|_| setting("ignoredEditing", true)).and_then(|path| {
         let (project, root, relative) = project_of(path)?;
         let sources = ignore_sources(&project, &root, &relative);
         let (file, entry) = ignored_by(&sources, &relative)?;
-        Some(format!("This file is ignored by `{entry}` in {file}."))
+        Some((file.to_owned(), entry.to_owned()))
     });
-
-    match verdict {
-        Some(tooltip) => {
-            host::set_status_item(IGNORED_STATUS, &StatusItem { text: "Ignored".into(), tooltip: Some(tooltip), command: None })
-        }
-        None => host::remove_status_item(IGNORED_STATUS),
+    let Some((file, entry)) = verdict else {
+        host::remove_status_item(IGNORED_STATUS);
+        return;
+    };
+    let item = StatusItem { text: "Ignored".into(), tooltip: Some(format!("This file is ignored by `{entry}` in {file}.")), command: None };
+    let menu = [
+        StatusMenuEntry::Header(format!("Ignored by {entry} in {file}")),
+        StatusMenuEntry::action("Go to Rule", "open-ignoring-rule").with_description(file),
+        StatusMenuEntry::action("Dialect Checks and Preferences", "preferences"),
+    ];
+    if host::set_status_item_menu(IGNORED_STATUS, &item, &menu).is_err() {
+        host::set_status_item(IGNORED_STATUS, &item);
     }
+}
+
+/// Opens the ignore file at the rule that ignores the focused file.
+fn open_ignoring_rule(ctx: &Invocation) -> Result<(), Error> {
+    let path = ctx.editor().map(|editor| editor.path()).ok_or("Open the file to check first.")?;
+    let (project, root, relative) = project_of(&path).ok_or("This file is outside the open project.")?;
+    let sources = ignore_sources(&project, &root, &relative);
+    let Some((file, entry)) = ignored_by(&sources, &relative) else {
+        let name = relative.rsplit('/').next().unwrap_or(&relative);
+        host::notify(NotificationLevel::Info, ".ignore", &format!("No rule in the project's ignore files ignores {name}."));
+        return Ok(());
+    };
+    let text = sources.iter().find(|(_, name, _)| name == file).map_or("", |(_, _, text)| text.as_str());
+    let line = text.lines().enumerate().filter(|(_, line)| line.trim() == entry).last().map_or(0, |(index, _)| index);
+    host::open_location(&format!("{root}/{file}"), line as u32, 0)
 }
 
 /// Once per project: a Git repository without a root .gitignore.
@@ -599,6 +620,7 @@ impl openidea_plugin::Plugin for IgnorePlugin {
             "add-selected" => add_selected(ctx, false).map(|()| None),
             "unignore-selected" => add_selected(ctx, true).map(|()| None),
             "new-file" => new_ignore_file(self, ctx).map(|()| None),
+            "open-ignoring-rule" => open_ignoring_rule(ctx).map(|()| None),
             _ => Err(Error::NotFound(format!("command {id}"))),
         }
     }

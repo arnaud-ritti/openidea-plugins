@@ -50,7 +50,7 @@ use std::path::Path;
 
 use openidea_plugin::providers::{CodeAction, CompletionItem, Document, Providers};
 use openidea_plugin::views::{Body, Button, Field, FieldValue, TreeItem, View, ViewEvent, Viewport, Views};
-use openidea_plugin::{Context, Error, Event, EventKind, FileDiff, Invocation, LogLevel, NotificationAction, NotificationLevel, PickItem, Plugin, Position, Range, StatusItem, host};
+use openidea_plugin::{Context, Error, Event, EventKind, FileDiff, Invocation, LogLevel, NotificationAction, NotificationLevel, PickItem, Plugin, Position, Range, StatusItem, StatusMenuEntry, host};
 
 pub const TREE: &str = "kube";
 const PANEL: &str = "resource-details";
@@ -68,6 +68,19 @@ fn refresh_views() {
 const KUBECTL: &str = "kubectl";
 /// Status bar item naming the context and namespace kubectl calls go to.
 const CONTEXT_STATUS: &str = "kube-context";
+
+/// The context item's menu: switching first, then the cluster-wide commands.
+fn status_menu() -> Vec<StatusMenuEntry> {
+    vec![
+        StatusMenuEntry::action("Switch Context…", "tree-switch").with_argument("ctx"),
+        StatusMenuEntry::action("Switch Namespace…", "tree-switch").with_argument("ns"),
+        StatusMenuEntry::Separator,
+        StatusMenuEntry::action("Show Cluster Tree", SHOW_TREE),
+        StatusMenuEntry::action("Start Resource Watch…", "watch-resources"),
+        StatusMenuEntry::action("Apply Copied YAML…", "apply-copied-yaml"),
+        StatusMenuEntry::action("Choose Kubeconfig", "choose-kubeconfig"),
+    ]
+}
 /// Reveals the cluster tree: the status item's and Apply notification's action.
 const SHOW_TREE: &str = "show-tree";
 /// The context shown when kubectl runs but no current context is set.
@@ -563,11 +576,108 @@ impl KubeExplorer {
             Some(namespace) => namespace,
             None => "(default)",
         };
-        host::set_status_item(CONTEXT_STATUS, &StatusItem {
+        let item = |click: &str| StatusItem {
             text: format!("⎈ {context} / {namespace}"),
-            tooltip: Some(format!("Kube Explorer runs kubectl against context {context}, namespace {namespace}. Click to show the cluster tree and switch.")),
+            tooltip: Some(format!("Kube Explorer runs kubectl against context {context}, namespace {namespace}. {click}")),
             command: Some(SHOW_TREE.into()),
-        });
+        };
+        // Older IDEs refuse the menu: the item then shows the cluster tree, as before.
+        if host::set_status_item_menu(CONTEXT_STATUS, &item("Click to switch."), &status_menu()).is_err() {
+            host::set_status_item(CONTEXT_STATUS, &item("Click to show the cluster tree and switch."));
+        }
+    }
+
+    /// Switches from a picker over the contexts (`ctx`), the namespaces (`ns`) or both (`None`):
+    /// Switch Context or Namespace from the palette or the status bar.
+    fn pick_context_or_namespace(&mut self, scope: Option<&str>) -> Result<(), Error> {
+        let mut items = Vec::new();
+        if scope != Some("ns") {
+            let current = self.context.as_deref().or(self.current_context.as_deref());
+            for name in self.load("ctx")? {
+                let note = if Some(name.as_str()) == current { "current context" } else { "context" };
+                items.push(PickItem::new(&format!("ctx/{name}"), &name).description(note));
+            }
+        }
+        if scope != Some("ctx") {
+            let note = |name: &str| if self.namespace.as_deref() == Some(name) { "current namespace" } else { "namespace" };
+            items.push(PickItem::new(&format!("ns/{ALL_NAMESPACES}"), "All namespaces").description(note(ALL_NAMESPACES)));
+            for name in self.load("ns")? {
+                items.push(PickItem::new(&format!("ns/{name}"), &name).description(note(&name)));
+            }
+        }
+        let title = match scope {
+            Some("ctx") => "Switch Kubernetes context",
+            Some("ns") => "Switch namespace",
+            _ => "Switch context or namespace",
+        };
+        let Some(choice) = host::pick(title, &items)? else {
+            return Ok(());
+        };
+        let (parent, name) = choice.split_once('/').ok_or(Error::Stale)?;
+        self.switch_to(parent, name);
+        Ok(())
+    }
+
+    /// Makes `name` the context (`parent` = `ctx`) or the namespace (`ns`) of every kubectl call.
+    fn switch_to(&mut self, parent: &str, name: &str) {
+        if parent == "ctx" {
+            if self.context.as_deref() != Some(name) { self.retire_forward("Kubernetes context changed"); }
+            self.context = Some(name.to_owned());
+            self.namespace = None;
+        } else {
+            if self.namespace.as_deref() != Some(name) { self.retire_forward("Kubernetes namespace changed"); }
+            self.namespace = Some(name.to_owned());
+        }
+        self.selected = None;
+        self.save();
+        self.reload();
+    }
+
+    /// Kube Explorer: Apply Copied YAML…: applies the Kubernetes manifest on the clipboard after
+    /// naming its resources and the target, with the same Apply / Show Diff first choice as the
+    /// open-file Apply.
+    fn apply_copied_yaml(&mut self) -> Result<String, Error> {
+        const FEATURE: &str = "Apply Copied YAML";
+        self.single_namespace_gate(FEATURE)?;
+        let clipboard = host::read_clipboard().map_err(|error| ui_kit::denied::map(error, FEATURE, "clipboard.read", "Kube Explorer"))?;
+        let manifest = clipboard
+            .text
+            .filter(|text| !text.trim().is_empty())
+            .ok_or("The clipboard holds no text. Copy a Kubernetes manifest, then run Kube Explorer: Apply Copied YAML… again.")?;
+        if manifest.len() > 512 << 10 {
+            return Err("The copied text is over 512 KiB. Save it to a file and run Kube Explorer: Apply Manifest to Cluster.".into());
+        }
+        let docs = manifest::documents(&manifest);
+        if docs.is_empty() || !docs.iter().all(manifest::Doc::is_manifest) {
+            return Err("The clipboard doesn't hold a Kubernetes manifest: each YAML document needs apiVersion and kind.".into());
+        }
+        let resources: Vec<String> = docs
+            .iter()
+            .map(|doc| {
+                let kind = doc.kind.as_ref().map_or("", |kind| kind.text.as_str());
+                format!("{kind}/{}", doc.name.as_ref().map_or("(no name)", |name| name.text.as_str()))
+            })
+            .collect();
+        let what = match resources.len() {
+            1..=3 => resources.join(", "),
+            count => format!("{count} resources ({}, …)", resources[..2].join(", ")),
+        };
+        let choices = [PickItem::new("apply", "Apply"), PickItem::new("diff", "Show Diff with Cluster First")];
+        match host::pick(&self.apply_question(&what), &choices)?.as_deref() {
+            Some("apply") => {}
+            Some("diff") => {
+                let shown = self.diff_manifest(&manifest, "copied YAML")?;
+                if !host::confirm(&format!("Apply {what}?"), &format!("{shown}\n{}", self.apply_question(&what)))? {
+                    return Err(Error::Cancelled);
+                }
+            }
+            _ => return Err(Error::Cancelled),
+        }
+        let _task = host::begin_task("Applying copied YAML", false);
+        let out = self.kubectl(&["apply", "-f", "-"], Some(&manifest))?;
+        let target = self.target();
+        self.reload();
+        Ok(format!("{target}: {}", out.trim()))
     }
 
     /// One terminal per action and target: running it again focuses the open one.
@@ -1052,21 +1162,7 @@ impl KubeExplorer {
                 crate::refresh_views();
             }
             ViewEvent::Activate(key) => match self.checked_choice(&key)? {
-                Some((parent,name)) if parent=="ctx" => {
-                    if self.context.as_deref() != Some(name.as_str()) { self.retire_forward("Kubernetes context changed"); }
-                    self.context = Some(name.to_owned());
-                    self.namespace = None;
-                    self.selected = None;
-                    self.save();
-                    self.reload();
-                }
-                Some((parent,name)) if parent=="ns" => {
-                    if self.namespace.as_deref() != Some(name.as_str()) { self.retire_forward("Kubernetes namespace changed"); }
-                    self.namespace = Some(name.to_owned());
-                    self.selected = None;
-                    self.save();
-                    self.reload();
-                }
+                Some((parent,name)) => self.switch_to(&parent, &name),
                 _ => {
                     if let Some((kind, name)) = self.checked_resource(&key)? {
                         if self.rich_owner.is_none() { return Err(rich_details_unavailable()); }
@@ -1852,8 +1948,16 @@ impl KubeExplorer {
         self.expire_forward_context(Some(ctx));
         self.expire_log_context(Some(ctx));
         self.expire_rich_context(Some(ctx));
+        if id == "tree-switch" && matches!(arg, None | Some("ctx") | Some("ns")) {
+            return self.pick_context_or_namespace(arg).map(|()| None);
+        }
         if id.starts_with("tree-") { return self.tree_context_action(id, arg, ctx).map(|()|None); }
         match id {
+            "apply-copied-yaml" => {
+                let text = self.apply_copied_yaml()?;
+                config::notify_success_with("Copied YAML applied", &text, &[NotificationAction::new("Show in Kube Explorer", SHOW_TREE)]);
+                return Ok(None);
+            }
             "reload-from-cluster" => return self.reload_from_cluster(ctx).map(|()| None),
             "helm-repo-update" => return helm_repo_update().map(|()| None),
             "helm-create" => return self.helm_create(ctx).map(|()| None),
@@ -3196,6 +3300,75 @@ mod tests {
         kube.current_context = Some(NO_CONTEXT.into());
         kube.update_context_status();
         assert!(!host.status_items().contains_key(CONTEXT_STATUS));
+    }
+
+    #[test]
+    fn status_bar_menu_switches_and_runs_declared_commands() {
+        let host = host();
+        let mut kube = KubeExplorer { namespace: Some("shop".into()), ..Default::default() };
+        kube.render(TREE, None, &host.invocation()).unwrap();
+        let menu = host.status_menu(CONTEXT_STATUS);
+        assert_eq!(menu, status_menu());
+        let manifest = include_str!("../plugin.toml");
+        for entry in &menu {
+            if let StatusMenuEntry::Action { command, .. } = entry {
+                assert!(manifest.contains(&format!("id = \"{command}\"")), "{command}");
+            }
+        }
+        assert!(host.status_items()[CONTEXT_STATUS].tooltip.as_deref().unwrap().ends_with("Click to switch."));
+    }
+
+    #[test]
+    fn switch_from_the_palette_or_status_bar_picks_a_context_or_namespace() {
+        let host = host();
+        let mut kube = KubeExplorer { current_context: Some("minikube".into()), namespace: Some("shop".into()), ..Default::default() };
+        host.answer_next_prompt(Some(&["ctx/arn:aws:eks:eu-west-1:1:cluster/prod"]));
+        kube.run_command("tree-switch", &host.invocation(), Some("ctx")).unwrap();
+        assert_eq!((kube.context.as_deref(), kube.namespace.as_deref()), (Some("arn:aws:eks:eu-west-1:1:cluster/prod"), None));
+        assert!(host.status_items()[CONTEXT_STATUS].text.starts_with("⎈ arn:aws:eks:eu-west-1:1:cluster/prod / "));
+
+        host.answer_next_prompt(Some(&[&format!("ns/{ALL_NAMESPACES}")]));
+        kube.run_command("tree-switch", &host.invocation(), Some("ns")).unwrap();
+        assert_eq!(kube.namespace.as_deref(), Some(ALL_NAMESPACES));
+
+        host.answer_next_prompt(None);
+        kube.run_command("tree-switch", &host.invocation(), None).unwrap();
+        assert_eq!(kube.namespace.as_deref(), Some(ALL_NAMESPACES));
+    }
+
+    #[test]
+    fn apply_copied_yaml_names_the_resources_and_applies_after_the_choice() {
+        const COPIED: &str = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: web\n";
+        let applied = |host: &MockHost| kubectl_calls(host).iter().any(|call| call.contains(&"apply".to_owned()));
+        let host = host().with_capabilities(&["process:kubectl", "project.read", "editor.read", "storage", "clipboard.read"]);
+        let mut kube = KubeExplorer { current_context: Some("minikube".into()), namespace: Some("shop".into()), ..Default::default() };
+
+        host.set_clipboard(Some(COPIED), None);
+        host.answer_next_prompt(None);
+        assert!(matches!(kube.run_command("apply-copied-yaml", &host.invocation(), None), Err(Error::Cancelled)));
+        assert!(!applied(&host));
+
+        host.answer_next_prompt(Some(&["apply"]));
+        kube.run_command("apply-copied-yaml", &host.invocation(), None).unwrap();
+        assert!(applied(&host));
+        assert_eq!(host.notifications().last().unwrap().title, "Copied YAML applied");
+
+        host.set_clipboard(Some("just some text"), None);
+        let error = kube.run_command("apply-copied-yaml", &host.invocation(), None).unwrap_err().to_string();
+        assert!(error.contains("doesn't hold a Kubernetes manifest"), "{error}");
+        host.set_clipboard(None, None);
+        let error = kube.run_command("apply-copied-yaml", &host.invocation(), None).unwrap_err().to_string();
+        assert!(error.contains("holds no text"), "{error}");
+    }
+
+    #[test]
+    fn apply_copied_yaml_without_the_permission_says_where_to_allow_it() {
+        let host = host();
+        host.set_clipboard(Some("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"), None);
+        let mut kube = KubeExplorer { current_context: Some("minikube".into()), ..Default::default() };
+        let error = kube.run_command("apply-copied-yaml", &host.invocation(), None).unwrap_err().to_string();
+        assert!(error.contains("clipboard.read") && error.contains("Kube Explorer"), "{error}");
+        assert!(kubectl_calls(&host).iter().all(|call| !call.contains(&"apply".to_owned())));
     }
 
     #[test]

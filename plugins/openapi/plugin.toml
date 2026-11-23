@@ -5,7 +5,7 @@ description = "Editing support for OpenAPI 3 and Swagger 2 files in YAML and JSO
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = """\
-Next release: An Operations panel beside spec editors lists operations by tag with a filter and jumps to one on click; Copy as cURL and Create HTTP Request File suggest the spec server as the base URL and let you pick an endpoint from Search Everywhere, and the preview remembers Redoc or Swagger UI; Try it out works with YAML specs, starts from the preview Try button, accepts a single https server with the optional net:ask permission and refuses private, single-label and localhost servers, with plainer messages there and in component rename; Draft Spec from Source Mappings and Breaking-Change Report commands, operation and response quick fixes in JSON, and self-contained export no longer duplicates components; gutter markers skip files that are not OpenAPI specs, list every $ref of an operation in a chooser and mark component declarations with their local $ref uses, files in hidden folders are ignored, setting titles are shorter, spec commands are enabled only in a spec, and code generation says when it finishes and how to apply it. \
+Next release: An OpenAPI Operations tab in Search Everywhere finds operations by method, path, tag or ID, and an Operations panel beside spec editors lists them by tag with a filter, highlights the one at the caret and marks problems; Copy as cURL and Create HTTP Request File suggest the spec server and work from Search Everywhere, and the preview remembers Redoc or Swagger UI; Try it out works with YAML specs, starts from the preview Try button or a Try action on the left edge of GET and HEAD lines, accepts a single https server with the optional net:ask permission and refuses private, single-label and localhost servers; Draft Spec from Source Mappings and Breaking-Change Report commands, operation and response quick fixes in JSON, and self-contained export stops duplicating components; gutter markers skip non-spec files, list an operation's $refs in a chooser and mark component declarations with their $ref uses, files in hidden folders are ignored, setting titles are shorter, spec commands are enabled only in a spec, and code generation says when it is done and how to apply it. \
 0.3.0: generation with preview and apply, richer checks. \
 0.2.0: plugin icon and audit improvements."""
 categories = ["languages", "tools"]
@@ -38,6 +38,15 @@ languages = ["json"]
 [[contributes.providers]]
 kinds = ["hover"]
 languages = ["json", "yaml"]
+
+# "Try GET /pets…" at the left edge of operation lines that Try it out can send.
+[[contributes.providers]]
+kinds = ["hover-actions"]
+languages = ["json", "yaml"]
+
+[[contributes.searchCategories]]
+id = "operations"
+title = "OpenAPI Operations"
 
 # Beside the editor of a spec: the active editor's spec status comes from host::set_context.
 [[contributes.editorPanels]]

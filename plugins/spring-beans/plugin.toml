@@ -5,7 +5,7 @@ description = "Spring Framework beans for Java, Kotlin and XML configuration: fi
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = """\
-Next release: The Spring Beans window docks on the right next to Spring Structure and Spring Endpoints, appears only in Maven or Gradle projects, the empty Report tab has a Check Spring Configuration button, and Find Bean or Focus in Graph shows one bean with its dependencies and dependents. Beans, Graph and Report share one Spring Beans window, and Check Spring Configuration runs as a background task; beans switched off by a false @ConditionalOnProperty, @Profile or @ConditionalOnMissingBean show as inactive, and @NoRepositoryBean interfaces are not beans; SpEL completion and checks in injections, and bean navigation, markers and completion cover the whole project with no 512-file limit, and a bean gutter icon with several targets opens the IDE's target list under the icon; Create Bean from a reference in XML, and the Generate commands, Move Annotation String to Property and XML bean intentions work on files of any size and show only the changed lines; short setting titles, clearer permission messages, one Refresh scans the whole project, and Report results can be run again. \
+Next release: A Spring Beans tab in Search Everywhere finds beans by name, kind or type and opens their declaration. The Spring Beans window docks on the right, appears only in Maven or Gradle projects, and Find Bean or Focus in Graph shows one bean with its dependencies and dependents; Beans, Graph and Report share one window, Check Spring Configuration runs in the background, beans switched off by @ConditionalOnProperty, @Profile or @ConditionalOnMissingBean show as inactive, and @NoRepositoryBean interfaces are not beans; SpEL completion and checks in injections, and bean navigation, markers and completion cover the whole project, and a gutter icon with several targets opens a target list; Create Bean from an XML reference, the Generate commands and XML bean intentions work on files of any size; shorter setting titles, clearer permission messages, one Refresh scans the whole project, and Report results can be run again. \
 0.3.0: one Spring Beans window with live templates and more completion. \
 0.2.0: plugin icon and bean checks."""
 categories = ["frameworks"]
@@ -21,6 +21,10 @@ optional = ["events", "editor.write", "storage", "project.write"]
 [[contributes.providers]]
 kinds = ["definition", "line-markers", "completion", "code-actions", "diagnostics", "injections"]
 languages = ["java", "kotlin", "xml"]
+
+[[contributes.searchCategories]]
+id = "beans"
+title = "Spring Beans"
 
 [[contributes.commands]]
 id = "generate-setter"

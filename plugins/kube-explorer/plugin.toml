@@ -5,7 +5,7 @@ description = "Browse a Kubernetes cluster with kubectl. Switch context and name
 authors = ["Arnaud RITTI <arnaud.ritti@gmail.com>"]
 license = "MIT"
 change-notes = """\
-Next release: The status bar shows the current context and namespace, Diff Manifest with Cluster compares live objects with a server dry run, Apply success offers Show in Kube Explorer, and Open Shell and Attach reuse the pod's open terminal; Apply, Delete, Delete Manifest Resources, panel YAML Apply and Secret Save ask first and name the context, namespace and target, and Apply can show the diff and then apply; kubectl failures name the context and a reason (expired login, unreachable, forbidden, not found), and a missing current context offers Choose Kubeconfig; validation reports unknown fields in custom resources, manifest problems stay in place while you type, Helm and Kustomize navigation improved, label gutter icons with several matches open a chooser, imported kubeconfigs can be used and deleted, and watch survives malformed events; port forward and watch start after one confirmation, Reload from Cluster keeps Secret values out unless Show Secret is allowed, and messages, the Kube Explorer Details panel and setting titles use plain, consistent names. \
+Next release: The status bar shows the current context and namespace with a menu to switch them, Switch Context or Namespace picks from the palette, Apply Copied YAML applies a copied manifest after naming it and the target, Diff Manifest with Cluster uses a server dry run, Apply success offers Show in Kube Explorer, and Open Shell and Attach reuse the pod's open terminal; Apply, Delete, Delete Manifest Resources, panel YAML Apply and Secret Save ask first and name the context, namespace and target, and Apply can show the diff and then apply; kubectl failures name the context and a reason, and a missing current context offers Choose Kubeconfig; validation reports unknown fields in custom resources, manifest problems stay in place while you type, label gutter icons with several matches open a chooser, imported kubeconfigs can be used and deleted, and watch survives malformed events; port forward and watch start after one confirmation, Reload from Cluster keeps Secret values out unless Show Secret is allowed, and messages, panels and setting titles use plain names. \
 0.3.0: consolidated panels, label graph and native service actions. \
 0.2.0: plugin icon and window consolidation."""
 categories = ["tools"]
@@ -18,8 +18,9 @@ activation = ["on-view:kube", "on-view:resource-details", "on-event:file-opened"
 required = ["storage"]
 # Reload from Cluster edits the open file. Private YAML copies use storage; reviewed apply additionally needs editor.read and kubectl.
 # Helm commands run helm; finding the chart around the open file reads the project.
+# clipboard.read: Apply Copied YAML reads the manifest you copied, only when you run it.
 # events + project.read: manifest problems on open and save (silently off without them).
-optional = ["process:kubectl", "editor.read", "events", "project.read", "project.write", "editor.write", "process:helm", "process:telepresence", "clipboard"]
+optional = ["process:kubectl", "editor.read", "events", "project.read", "project.write", "editor.write", "process:helm", "process:telepresence", "clipboard", "clipboard.read"]
 
 [[contributes.views]]
 id = "kube"
@@ -73,6 +74,11 @@ command = "delete-imported-kubeconfig"
 [[contributes.commands]]
 id = "apply"
 title = "Kube Explorer: Apply Manifest to Cluster"
+category = "Kube Explorer"
+
+[[contributes.commands]]
+id = "apply-copied-yaml"
+title = "Kube Explorer: Apply Copied YAML…"
 category = "Kube Explorer"
 
 [[contributes.commands]]
