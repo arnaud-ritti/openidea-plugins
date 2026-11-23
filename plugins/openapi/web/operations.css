@@ -11,3 +11,6 @@ html,body{margin:0;overflow-x:clip;background:var(--ui-bg);color:var(--ui-fg);fo
 .ops-row:focus-visible{outline:2px solid var(--ui-focus);outline-offset:-2px}
 .ops-row .ui-http-method{flex:0 0 3.5em;font-size:var(--ui-text-small)}
 .ops-path{min-width:0;font-family:var(--ui-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ops-row.is-current{background:var(--ui-selected)}
+.ops-row[data-problem]::after{content:"";flex:0 0 6px;height:6px;margin-left:auto;align-self:center;border-radius:50%;background:var(--ui-status-warning-icon)}
+.ops-row[data-problem="error"]::after{background:var(--ui-status-error-icon)}

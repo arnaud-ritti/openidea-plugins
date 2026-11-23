@@ -1600,13 +1600,16 @@ impl Plugin for GitLab {
         Ok(())
     }
 
-    fn run_command(&mut self, id: &str, ctx: &Invocation, _arg: Option<&str>) -> Result<Option<String>, Error> {
+    fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
         let _interactive = api::Interactive::start();
         self.ensure_account()?;
         api::begin_budget();
         match id {
             "new-token" => host::open_url(&api::new_token_url())?,
-            "open-in-browser" => host::open_url(&current_link(ctx)?)?,
+            "open-in-browser" => match arg.filter(|url| self.is_branch_link(url)) {
+                Some(url) => host::open_url(url)?,
+                None => host::open_url(&current_link(ctx)?)?,
+            },
             "copy-link" => copy_link(&current_link(ctx)?)?,
             "create-snippet" => return create_snippet(ctx),
             "share-project" => {

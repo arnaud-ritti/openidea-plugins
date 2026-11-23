@@ -5,7 +5,7 @@
 
 use openidea_plugin::host;
 use openidea_plugin::providers::{CodeAction, Document, LineMarker};
-use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem, TextEdit};
+use openidea_plugin::{Diagnostic, Error, Invocation, LogLevel, Position, ProcessOutput, Project, Range, Severity, StatusItem, StatusMenuEntry, TextEdit};
 
 use crate::api::{self, Discussion, MergeRequest};
 use crate::sections::Section;
@@ -14,6 +14,21 @@ use crate::{DETAILS, GitLab, first_line, relative_path, review, safe};
 pub const STATUS_ITEM: &str = "merge-request";
 pub(crate) const THREAD_MARKER: &str = "icons/marker-thread.svg";
 const RECHECK_SECS: u64 = 300;
+
+/// The menu of the branch's merge request item, from the merge request already fetched.
+fn status_menu(mr: &MergeRequest) -> Vec<StatusMenuEntry> {
+    let title: String = mr.title.chars().take(60).collect();
+    let mut menu = vec![
+        StatusMenuEntry::Header(format!("!{} {title}", mr.iid)),
+        StatusMenuEntry::action("Show Merge Request", "show-branch-merge-request"),
+        StatusMenuEntry::action("Open Merge Request on GitLab", "open-in-browser").with_argument(&mr.web_url),
+    ];
+    if let Some(pipeline) = mr.head_pipeline.as_ref().filter(|pipeline| !pipeline.web_url.is_empty()) {
+        let status = pipeline.status.replace('_', " ");
+        menu.push(StatusMenuEntry::action(format!("Open Pipeline ({status}) on GitLab"), "open-in-browser").with_argument(&pipeline.web_url));
+    }
+    menu
+}
 
 pub struct BranchReview {
     /// Repository root, upstream and commit the lookup was made for.
@@ -407,9 +422,15 @@ impl GitLab {
             None => None,
         };
 
-        match item {
-            Some(item) => host::set_status_item(STATUS_ITEM, &item),
-            None => host::remove_status_item(STATUS_ITEM),
+        match (item, &mr) {
+            // Older IDEs refuse the menu: the item then shows the merge request, as before.
+            (Some(item), Some(mr)) => {
+                if host::set_status_item_menu(STATUS_ITEM, &item, &status_menu(mr)).is_err() {
+                    host::set_status_item(STATUS_ITEM, &item);
+                }
+            }
+            (Some(item), None) => host::set_status_item(STATUS_ITEM, &item),
+            (None, _) => host::remove_status_item(STATUS_ITEM),
         }
 
         let _ = host::set_context("branchMergeRequest", mr.is_some());
@@ -417,6 +438,14 @@ impl GitLab {
         self.republish();
 
         Ok(())
+    }
+
+    /// Whether `url` is the web page of the branch's merge request or of its pipeline: the only
+    /// links the status bar menu passes to GitLab: Open on GitLab.
+    pub(crate) fn is_branch_link(&self, url: &str) -> bool {
+        self.branch.as_ref().and_then(|b| b.mr.as_ref()).is_some_and(|mr| {
+            mr.web_url == url || mr.head_pipeline.as_ref().is_some_and(|pipeline| pipeline.web_url == url)
+        })
     }
 
     /// Shows the review threads of `path` as problems (or clears them).

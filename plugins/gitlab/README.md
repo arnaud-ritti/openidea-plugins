@@ -106,7 +106,7 @@ The **Description** and diff comments render CommonMark: tables, task lists, str
 
 ### Work with the current branch
 
-When the branch's upstream is on a GitLab remote, the status bar shows `!iid on <branch>` for its open merge request. Forks are skipped. Click it to select the merge request in **Details**.
+When the branch's upstream is on a GitLab remote, the status bar shows `!iid on <branch>` for its open merge request. Forks are skipped. Click it for a menu: **Show Merge Request** selects it in **Details**, **Open Merge Request on GitLab** opens its page, and **Open Pipeline on GitLab** appears when GitLab reported its latest pipeline.
 
 A branch other than the default branch with no open merge request shows **GitLab: Create Merge Request** instead. The lookup runs again on every repository change. It also runs when a file opens, if the commit changed or the last lookup is over 5 minutes old.
 
@@ -202,7 +202,7 @@ Find them in Search Everywhere › Actions (⇧⇧) under **GitLab**; bind keys 
 | **GitLab: Create Snippet** | Creates a snippet from the selection, the file or the selected files. | Editor, editor tab and Project view context |
 | **GitLab: Create Merge Request** | Asks for branches, title, description and draft, then creates the merge request. | Tools |
 | **GitLab: Share Project** | Creates a GitLab project and pushes this repository to it. Needs a commit, a checked-out branch and no GitLab remote yet. | Tool window button, when there is no GitLab remote |
-| **GitLab: Show Current Branch's Merge Request** | Selects the current branch's merge request (the status bar item runs it). | — |
+| **GitLab: Show Current Branch's Merge Request** | Selects the current branch's merge request (also in the status bar item's menu). | — |
 | **GitLab: Open Merge Request in Worktree** | Adds a detached worktree for the merge request in a sibling folder. | — |
 | **GitLab: Open Existing Merge Request Worktree** | Opens a local worktree that matches the merge request's head, in a new window. Creates nothing. | Details › **More…** |
 | **GitLab: Open Cloned or Worktree Folder** | Opens the folder from the last clone or new worktree in a new window. The **Open Clone** / **Open Worktree** notification buttons run it. | — |

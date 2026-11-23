@@ -17,14 +17,15 @@ use openidea_plugin::providers::{Document, Providers};
 use openidea_plugin::syntax::{Fold, FoldKind, Highlight, Symbol, SymbolKind, SyntaxProvider, Token};
 use openidea_plugin::views::{View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Error, Event as HostEvent, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Project, StatusItem, TextEditor, host,
-    text,
+    ConsoleRule, Error, Event as HostEvent, Invocation, Location, LogLevel, NotificationLevel, Plugin, Position, Project, StatusItem,
+    StatusMenuEntry, TextEditor, host, text,
 };
 use std::ops::Range;
 use std::rc::Rc;
 
 const CUSTOM_PATTERNS: &str = "customPatterns";
 const TIME_GAP: &str = "timeGapSeconds";
+const CONSOLE_HIGHLIGHTING: &str = "consoleHighlighting";
 const FORMAT_STATUS: &str = "format";
 // ponytail: only the head of a big log is parsed, so the provider answers within
 // the IDE's 50 ms edit budget; parse incrementally if big logs need colour past it.
@@ -75,15 +76,54 @@ impl Ideolog {
         };
 
         let config = self.config();
-        let (mut text, mut tooltip) = match config.detect(head(&document.text)) {
-            Some(format) => (format!("Log: {}", format.name), "The log format Ideolog detected. Click to manage custom formats.".to_owned()),
-            None => ("Log: plain text".to_owned(), "No known log format matches this file. Click to add a custom format.".to_owned()),
+        let (mut text, mut tooltip, click) = match config.detect(head(&document.text)) {
+            Some(format) => (format!("Log: {}", format.name), "The log format Ideolog detected.".to_owned(), "manage custom formats"),
+            None => ("Log: plain text".to_owned(), "No known log format matches this file.".to_owned(), "add a custom format"),
         };
         text.push_str(&highlight_limit_note(&editor.language(), &document.text));
         if document.text.len() > MAX_DOCUMENT_BYTES {
             tooltip.push_str(" Folding, outline and stack-frame links are off for logs over 512 KiB.");
         }
-        host::set_status_item(FORMAT_STATUS, &StatusItem { text, tooltip: Some(tooltip), command: Some("patterns".into()) });
+        let item = |hint: &str| StatusItem { text: text.clone(), tooltip: Some(format!("{tooltip} {hint}")), command: Some("patterns".into()) };
+        // Older IDEs refuse the menu: the item then opens Formats and Highlighting, as before.
+        if host::set_status_item_menu(FORMAT_STATUS, &item("Click for log navigation and formats."), &status_menu()).is_err() {
+            host::set_status_item(FORMAT_STATUS, &item(&format!("Click to {click}.")));
+        }
+    }
+}
+
+/// The format item's menu: the log commands that act on the focused log, then the tools.
+fn status_menu() -> Vec<StatusMenuEntry> {
+    vec![
+        StatusMenuEntry::action("Go to Next Error", "next-error"),
+        StatusMenuEntry::action("Go to Next Warning", "next-warning"),
+        StatusMenuEntry::action("Go to Next Exception", "next-exception"),
+        StatusMenuEntry::action("Jump to Source", "jump-to-source"),
+        StatusMenuEntry::Separator,
+        StatusMenuEntry::action("Capture Active Log Snapshot", "capture-log"),
+        StatusMenuEntry::action("Open Live Log Tail", "live-tail"),
+        StatusMenuEntry::Separator,
+        StatusMenuEntry::action("Formats and Highlighting", "patterns"),
+    ]
+}
+
+/// Run console rules: colour only the level words loggers print in capitals and the first line of
+/// a Java or Python exception, never whole lines, so the IDE's own level colours stay. Each
+/// pattern passes the host's backtracking check (one repetition, or anchored with `^`).
+fn console_rules() -> Vec<ConsoleRule> {
+    vec![
+        ConsoleRule::new(r"\b(ERROR|FATAL|SEVERE|CRITICAL)\b").foreground("red").style("bold"),
+        ConsoleRule::new(r"\b(WARN|WARNING)\b").foreground("yellow").style("bold"),
+        ConsoleRule::new(r#"^(Caused by: |Exception in thread "[^"]*" )?[\w$.]+(Exception|Error)\b"#).foreground("red"),
+        ConsoleRule::new(r"^Traceback \(most recent call last\):").foreground("red"),
+    ]
+}
+
+/// Sets the console rules, or removes them when the setting is off.
+fn apply_console_rules() {
+    let rules = if host::setting_bool(CONSOLE_HIGHLIGHTING).unwrap_or(true) { console_rules() } else { Vec::new() };
+    if let Err(error) = host::set_console_rules(&rules) {
+        host::log(LogLevel::Warn, &format!("Ideolog: console highlighting unavailable: {error}"));
     }
 }
 
@@ -201,6 +241,7 @@ impl Plugin for Ideolog {
         self.editor_denied = !ctx.has("editor.read");
         // Compile bounded stored regex configuration outside editor requests.
         self.config();
+        apply_console_rules();
         Ok(())
     }
     fn deactivate(&mut self) {
@@ -210,6 +251,7 @@ impl Plugin for Ideolog {
     fn handle_events(&mut self, events: &[HostEvent], ctx: &Invocation) {
         if events.iter().any(|e| matches!(e, HostEvent::Other { kind, .. } if kind == "settings-changed")) {
             self.config();
+            apply_console_rules();
         }
         if self.events_name_a_tracked_log(events) {
             self.tail_lifecycle(ctx);
@@ -714,6 +756,59 @@ java.lang.IllegalStateException: boom
         host.open_editor("/p/a.rs", "rust", "fn main() {}", &[]);
         plugin.handle_events(&[HostEvent::EditorFocused(None)], &host.invocation());
         assert!(host.status_items().is_empty());
+    }
+
+    #[test]
+    fn status_item_menu_offers_declared_log_commands() {
+        let host = MockHost::install();
+        open_log(&host, 0, 0);
+        Ideolog::default().handle_events(&[HostEvent::EditorFocused(None)], &host.invocation());
+        let menu = host.status_menu("format");
+        assert_eq!(menu, status_menu());
+        let manifest = include_str!("../plugin.toml");
+        for entry in menu {
+            if let StatusMenuEntry::Action { command, .. } = entry {
+                assert!(manifest.contains(&format!("id = \"{command}\"")), "{command} is not declared");
+            }
+        }
+        assert!(host.status_items()["format"].tooltip.as_deref().unwrap().ends_with("Click for log navigation and formats."));
+    }
+
+    #[test]
+    fn console_rules_follow_the_setting() {
+        let host = MockHost::install();
+        let mut plugin = Ideolog::default();
+        plugin.activate(&openidea_plugin::Context::default()).unwrap();
+        assert_eq!(host.console_rules(), console_rules());
+        assert!(host.console_rules().iter().all(|rule| !rule.whole_line && !rule.ignore_case));
+
+        host.set_setting(CONSOLE_HIGHLIGHTING, "false");
+        plugin.handle_events(&[HostEvent::Other { kind: "settings-changed".into(), data: String::new() }], &host.invocation());
+        assert!(host.console_rules().is_empty());
+
+        host.set_setting(CONSOLE_HIGHLIGHTING, "true");
+        plugin.handle_events(&[HostEvent::Other { kind: "settings-changed".into(), data: String::new() }], &host.invocation());
+        assert_eq!(host.console_rules().len(), 4);
+    }
+
+    #[test]
+    fn console_rules_colour_levels_and_exceptions_only() {
+        let rules: Vec<_> = console_rules().into_iter().map(|rule| fancy_regex::Regex::new(&rule.pattern).unwrap()).collect();
+        let hits = |line: &str| rules.iter().filter(|rule| rule.is_match(line).unwrap()).count();
+        for line in [
+            "2024-05-01 10:00:02,000 ERROR c.e.Boom - card declined",
+            "[WARN] slow indexing",
+            "java.lang.IllegalStateException: boom",
+            "Caused by: java.io.IOException: closed",
+            "Exception in thread \"main\" java.lang.OutOfMemoryError: heap",
+            "Traceback (most recent call last):",
+            "ValueError: invalid literal",
+        ] {
+            assert_eq!(hits(line), 1, "{line}");
+        }
+        for line in ["INFO started in 2 s", "no errors found", "NO_ERROR code", "Error: plain message", "\tat com.example.Foo.bar(Foo.java:42)"] {
+            assert_eq!(hits(line), 0, "{line}");
+        }
     }
 
     #[test]

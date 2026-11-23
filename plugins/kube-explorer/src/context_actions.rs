@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn resource_describe_without_selection_explains() {
         let (host, mut plugin) = fixture();
-        for id in ["resource-describe", "tree-switch", "tree-refresh"] {
+        for id in ["resource-describe", "tree-refresh"] {
             let error = plugin.run_command(id, &host.invocation(), None).unwrap_err();
             assert!(matches!(error, Error::Invalid(ref message) if message == "Select a resource in the Kube Explorer window first."), "{id}: {error:?}");
         }

@@ -483,19 +483,35 @@ impl State {
 }
 impl OpenApi {
     /// Prompts produce a readonly intent only. This command never fetches.
-    pub(crate) fn try_local(&mut self, ctx: &Invocation) -> Result<Option<String>, Error> {
+    /// The method and path of each operation Try it out can send, none when it is unavailable.
+    pub(crate) fn tryable_operations(&self, text: &str) -> Vec<(String, String)> {
+        if self.try_http.guard().is_err() {
+            return Vec::new();
+        }
+        operations(text, self.try_http.ask).map(|ops| ops.into_iter().map(|op| (op.method, op.path)).collect()).unwrap_or_default()
+    }
+    /// `request` (`GET /pets`, from a hover action) picks the operation without asking.
+    pub(crate) fn try_local(&mut self, ctx: &Invocation, request: Option<&str>) -> Result<Option<String>, Error> {
         self.try_http.guard()?; // No host calls at all on the released API1.3 branch.
         let nonce = self.try_http.begin()?;
         let result = (|| {
             let source = binding(ctx)?;
             let operations = operations(&source.text, self.try_http.ask)?;
-            let choices: Vec<_> = operations
-                .iter()
-                .enumerate()
-                .map(|(i, op)| PickItem { key: i.to_string(), label: format!("{} {}", op.method, op.path), description: None })
-                .collect();
-            let selected = host::pick("Operation to try", &choices)?.ok_or(Error::Cancelled)?;
-            let op = selected.parse::<usize>().ok().and_then(|i| operations.get(i)).ok_or(Error::Stale)?;
+            let op = match request {
+                Some(request) => operations
+                    .iter()
+                    .find(|op| format!("{} {}", op.method, op.path) == request)
+                    .ok_or_else(|| invalid("This operation is no longer in the spec, or Try it out can't send it."))?,
+                None => {
+                    let choices: Vec<_> = operations
+                        .iter()
+                        .enumerate()
+                        .map(|(i, op)| PickItem { key: i.to_string(), label: format!("{} {}", op.method, op.path), description: None })
+                        .collect();
+                    let selected = host::pick("Operation to try", &choices)?.ok_or(Error::Cancelled)?;
+                    selected.parse::<usize>().ok().and_then(|i| operations.get(i)).ok_or(Error::Stale)?
+                }
+            };
             let mut values = Vec::new();
             for p in &op.parameters {
                 values.push(
@@ -693,6 +709,33 @@ mod tests {
     }
 
     #[test]
+    fn hover_action_prepares_its_operation_without_the_picker() {
+        use openidea_plugin::HoverActions;
+        let (h, mut p) = setup();
+        let doc = Document { path: "/project/openapi.json".into(), language: "json".into(), version: 1, text: SPEC.into() };
+        let actions = p.hover_actions(&doc);
+        assert_eq!(actions.len(), 1);
+        assert_eq!((actions[0].line, actions[0].start_line, actions[0].end_line), (0, 0, 0));
+        assert_eq!(actions[0].label, "Try GET /pets/{id}…");
+        assert_eq!((actions[0].command.as_str(), actions[0].argument.as_deref()), ("try-local-read", Some("GET /pets/{id}")));
+        assert!(include_str!("../plugin.toml").contains("id = \"try-local-read\""));
+
+        h.answer_next_prompt(Some(&["snow"]));
+        h.answer_next_prompt(Some(&[""]));
+        p.run_command("try-local-read", &h.invocation(), actions[0].argument.as_deref()).unwrap();
+        assert!(p.try_http.preview.as_ref().unwrap().review.starts_with("GET http://127.0.0.1:32109/api/pets/snow"));
+        assert!(h.requests().is_empty());
+
+        let gone = p.run_command("try-local-read", &h.invocation(), Some("GET /gone")).unwrap_err().to_string();
+        assert!(gone.contains("no longer in the spec"), "{gone}");
+
+        p.activate(&Context { api_version: "1.4".into(), ..Context::default() }).unwrap();
+        assert!(p.hover_actions(&doc).is_empty());
+        let yaml = Document { path: "/project/k8s.yaml".into(), language: "yaml".into(), version: 1, text: "kind: Pod\n".into() };
+        assert!(p.hover_actions(&yaml).is_empty());
+    }
+
+    #[test]
     fn try_it_refuses_private_hosts() {
         for u in ["https://169.254.169.254", "https://10.0.0.5/v1", "https://localhost", "https://intranet", "https://localhost:8443", "https://2130706433", "https://evil.localhost", "https://a.b.localhost", "https://0x7f.0.0.0x1", "https://127.0.0.0x1", "https://localhost.", "https://[::1]", "https://metadata.google.internal", "https://printer.local", "https://x.home.arpa"] {
             assert!(literal_base(u, true).is_err(), "{u}");
@@ -742,10 +785,10 @@ mod tests {
         let (h, mut p) = setup();
         for api in ["1.3", "1.2", "", "2.0", "bogus", "1.+4", "1.4.", "1.4.preview", "1.4.0.extra"] {
             p.activate(&Context { api_version: api.into(), capabilities: vec!["net:127.0.0.1".into()], ..Context::default() }).unwrap();
-            assert!(p.try_local(&h.invocation()).is_err());
+            assert!(p.try_local(&h.invocation(), None).is_err());
             assert!(p.send_prepared(&h.invocation(), "send:1").is_err());
         }
-        assert!(OpenApi::default().try_local(&h.invocation()).is_err());
+        assert!(OpenApi::default().try_local(&h.invocation(), None).is_err());
         for cap in ["net:*", "net:localhost", "net.http:127.0.0.1"] {
             p.activate(&Context {
                 api_version: "1.4".into(),
@@ -753,10 +796,10 @@ mod tests {
                 ..Context::default()
             })
             .unwrap();
-            assert!(p.try_local(&h.invocation()).is_err());
+            assert!(p.try_local(&h.invocation(), None).is_err());
         }
         p.activate(&Context { api_version: "1.4".into(), ..Context::default() }).unwrap();
-        let error = p.try_local(&h.invocation()).unwrap_err().to_string();
+        let error = p.try_local(&h.invocation(), None).unwrap_err().to_string();
         assert!(error.contains("needs the net:127.0.0.1 permission"), "{error}");
         assert!(h.requests().is_empty());
     }
@@ -993,7 +1036,7 @@ mod tests {
         for (path, language) in [("/project/openapi.yaml", "json"), ("/project/openapi.json", "yaml"), ("/project/openapi.txt", "yaml")] {
             let (h, mut p) = setup();
             h.open_editor(path, language, YAML_SPEC, &[]);
-            assert!(p.try_local(&h.invocation()).is_err(), "{path} {language}");
+            assert!(p.try_local(&h.invocation(), None).is_err(), "{path} {language}");
             assert!(p.try_http.preview.is_none() && h.requests().is_empty());
         }
     }

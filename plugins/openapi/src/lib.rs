@@ -24,14 +24,15 @@ mod json_actions;
 mod operation_actions;
 mod section_actions;
 mod yaml_scan;
+mod search;
 
 use checks::Fetched;
 use openidea_plugin::providers::{CodeAction, CompletionItem, CompletionKind, Document, LineMarker, Providers};
 use openidea_plugin::text::{offset, position};
 use openidea_plugin::views::{Body, Button, ListItem, View, ViewEvent, Viewport, Views};
 use openidea_plugin::{
-    Diagnostic, Error, Event, Invocation, Location, LogLevel, NotificationLevel, PickItem, Plugin, Position, Project, Range, TextEdit,
-    host, register_plugin,
+    Diagnostic, Error, Event, HoverAction, HoverActions, Invocation, Location, LogLevel, NotificationLevel, PickItem, Plugin, Position,
+    Project, Range, TextEdit, host, register_plugin,
 };
 use ui_kit::routes::{self, Handler, Route, RouteEvent, RouteList};
 
@@ -43,6 +44,7 @@ pub struct OpenApi {
     /// Status line and changes of the last comparison.
     comparison: Option<Comparison>,
     routes: Option<RouteList>,
+    search: search::Index,
 }
 
 struct Comparison {
@@ -524,6 +526,9 @@ impl Plugin for OpenApi {
 
     fn handle_events(&mut self, events: &[Event], ctx: &Invocation) {
         self.codegen.observe(events);
+        if events.iter().any(|event| matches!(event, Event::FileSaved(_) | Event::FilesChanged(_))) {
+            self.search.forget();
+        }
         if events.iter().any(|event| matches!(event, Event::EditorFocused(_) | Event::FileOpened(_) | Event::FileSaved(_))) {
             let _ = host::set_context(SPEC_CONTEXT, ctx.editor().is_some_and(|editor| editor.document().is_ok_and(|doc| is_spec_text(&editor.path(), &doc.text))));
         }
@@ -569,7 +574,7 @@ impl Plugin for OpenApi {
 
     fn run_command(&mut self, id: &str, ctx: &Invocation, arg: Option<&str>) -> Result<Option<String>, Error> {
         if id == "try-local-read" {
-            return match self.try_local(ctx) {
+            return match self.try_local(ctx, arg) {
                 Err(Error::Cancelled) => Ok(None),
                 result => result,
             };
@@ -1406,9 +1411,11 @@ fn operations_panel(request: &str) -> Result<(), Error> {
                 Ok(text) => match spec_or_fragment(path, &text) {
                     None => serde_json::json!({ "message": "Not an OpenAPI document." }),
                     Some(spec) => {
+                        let ends = operation_end_lines(&text, &spec);
                         let operations: Vec<_> = routes(path, &text, &spec)
                             .into_iter()
-                            .map(|route| {
+                            .zip(ends)
+                            .map(|(route, end_line)| {
                                 let at = route.location.map(|location| location.range.start).unwrap_or_default();
                                 serde_json::json!({
                                     "method": route.method.to_ascii_uppercase(),
@@ -1417,6 +1424,7 @@ fn operations_panel(request: &str) -> Result<(), Error> {
                                     "operationId": route.handler.member,
                                     "line": at.line,
                                     "column": at.character,
+                                    "endLine": end_line,
                                 })
                             })
                             .collect();
@@ -1430,6 +1438,22 @@ fn operations_panel(request: &str) -> Result<(), Error> {
         }
         _ => Err(Error::Invalid("Unknown panel request.".into())),
     }
+}
+
+/// The last line of each operation (its deepest key or value), in [`spec::operations`] order, so
+/// the panel can tell which operation holds the caret or a problem.
+fn operation_end_lines(text: &str, spec: &spec::Spec) -> Vec<u32> {
+    let mut keys: Vec<(&str, usize)> = spec.keys.iter().map(|key| (key.key.as_str(), key.end.max(key.value_end))).collect();
+    keys.sort_unstable();
+    spec::operations(text, &spec.keys)
+        .into_iter()
+        .map(|operation| {
+            let prefix = format!("{}.", operation.key);
+            let from = keys.partition_point(|(key, _)| *key < prefix.as_str());
+            let end = keys[from..].iter().take_while(|(key, _)| key.starts_with(&prefix)).map(|(_, end)| *end).max();
+            position(text, end.unwrap_or(operation.end)).line
+        })
+        .collect()
 }
 
 const DEFAULT_BASE: &str = "http://localhost:8080";
@@ -1489,32 +1513,32 @@ fn routes(path: &str, text: &str, spec: &spec::Spec) -> Vec<Route> {
         .collect()
 }
 
-// ponytail: re-scans the project on every render; cache per file version if large projects make it slow.
-fn project_routes(project: &Project) -> Result<Vec<Route>, Error> {
+/// The YAML and JSON files of the project that may hold a spec, outside hidden folders.
+fn spec_paths(project: &Project) -> Result<Vec<String>, Error> {
     let mut paths = project.find_files("**/*.yaml", 500)?;
     paths.extend(project.find_files("**/*.yml", 500)?);
     paths.extend(project.find_files("**/*.json", 500)?);
 
     let root = project.root()?;
     paths.retain(|path| !in_hidden_dir(&root, path));
+    Ok(paths)
+}
 
-    let mut found = Vec::new();
-    for path in paths {
-        let Ok(text) = project.read_file(&path) else {
-            continue;
-        };
-        if text.len() > MAX_SCANNED_FILE_BYTES {
-            continue;
-        }
-
-        let Some(spec) = spec_or_fragment(&path, &text) else {
-            continue;
-        };
-
-        found.extend(routes(&path, &text, &spec));
+/// The operations of one file, none when it is unreadable, too large or not a spec.
+fn file_routes(project: &Project, path: &str) -> Vec<Route> {
+    let Ok(text) = project.read_file(path) else {
+        return Vec::new();
+    };
+    if text.len() > MAX_SCANNED_FILE_BYTES {
+        return Vec::new();
     }
 
-    Ok(found)
+    spec_or_fragment(path, &text).map(|spec| routes(path, &text, &spec)).unwrap_or_default()
+}
+
+// ponytail: re-scans the project on every render; cache per file version if large projects make it slow.
+fn project_routes(project: &Project) -> Result<Vec<Route>, Error> {
+    Ok(spec_paths(project)?.iter().flat_map(|path| file_routes(project, path)).collect())
 }
 
 impl OpenApi {
@@ -1571,7 +1595,7 @@ impl Views for OpenApi {
                 return Ok(());
             };
             if request == "try" {
-                return match self.try_local(ctx) {
+                return match self.try_local(ctx, None) {
                     Err(Error::Cancelled) => Ok(()),
                     result => result.map(|_| ()),
                 };
@@ -1650,7 +1674,7 @@ impl openidea_plugin::hover::HoverProvider for OpenApi {
     }
 }
 
-register_plugin!(OpenApi, providers, views, endpoints, diagnostics, hover, file_actions);
+register_plugin!(OpenApi, providers, views, endpoints, diagnostics, hover, file_actions, search, hover_actions);
 
 #[cfg(test)]
 mod tests {
@@ -1847,8 +1871,10 @@ mod tests {
         assert_eq!((view.as_str(), reply["id"].as_str(), reply["path"].as_str()), (OPERATIONS_PANEL, Some("f1"), Some("/project/api/openapi.yaml")));
         let operations = reply["operations"].as_array().unwrap();
         assert_eq!(operations.len(), 3);
-        assert_eq!(operations[0], serde_json::json!({"method":"GET","path":"/pets","tag":"Pets","operationId":"listPets","line":8,"column":4}));
+        assert_eq!(operations[0], serde_json::json!({"method":"GET","path":"/pets","tag":"Pets","operationId":"listPets","line":8,"column":4,"endLine":19}));
+        assert_eq!((operations[1]["line"].as_u64(), operations[1]["endLine"].as_u64()), (Some(23), Some(27)));
         assert_eq!(operations[2]["method"], "DELETE");
+        assert_eq!((operations[2]["line"].as_u64(), operations[2]["endLine"].as_u64()), (Some(28), Some(35)));
         let open = r#"{"op":"open","path":"/project/api/openapi.yaml","line":8,"column":4}"#;
         plugin.handle(OPERATIONS_PANEL, ViewEvent::Message(open.into()), &host.invocation()).unwrap();
         assert_eq!(host.opened_locations(), [("/project/api/openapi.yaml".to_owned(), 8, 4)]);
@@ -3069,6 +3095,46 @@ mod tests {
         assert!(js.contains("./vendor/redoc.standalone.js") && js.contains("Redoc.init("));
         assert!(js.contains("disableSearch: true"));
         assert!(redoc.contains("exports.Redoc="));
+    }
+}
+
+impl openidea_plugin::search::SearchProvider for OpenApi {
+    fn search(&mut self, category: &str, query: &str, limit: u32, ctx: &Invocation) -> Result<openidea_plugin::search::SearchPage, Error> {
+        if category != search::CATEGORY {
+            return Ok(Default::default());
+        }
+        self.search.search(query, limit, ctx)
+    }
+}
+
+impl HoverActions for OpenApi {
+    /// "Try GET /pets…" on each operation line that Try it out can send.
+    fn hover_actions(&mut self, doc: &Document) -> Vec<HoverAction> {
+        if !is_spec_file(&doc.path) || !spec::maybe_spec(&doc.text) {
+            return Vec::new();
+        }
+        let tryable = self.tryable_operations(&doc.text);
+        let Some(spec) = spec::parse(&doc.text).filter(|_| !tryable.is_empty()) else {
+            return Vec::new();
+        };
+        spec::operations(&doc.text, &spec.keys)
+            .into_iter()
+            .filter(|operation| tryable.contains(&(operation.method.clone(), operation.path.clone())))
+            .map(|operation| {
+                let line = position(&doc.text, operation.at).line;
+                let request = format!("{} {}", operation.method, operation.path);
+                HoverAction {
+                    line,
+                    start_line: line,
+                    end_line: line,
+                    icon: Some("run".into()),
+                    label: format!("Try {request}…"),
+                    tooltip: Some(format!("Prepare {request} in Try it out. Nothing is sent until you press Send.")),
+                    command: "try-local-read".into(),
+                    argument: Some(request),
+                }
+            })
+            .collect()
     }
 }
 

@@ -1,6 +1,6 @@
 use super::*;
 use openidea_plugin::mock::MockHost;
-use openidea_plugin::{HttpRequest, HttpResponse, ProcessOutput};
+use openidea_plugin::{HttpRequest, HttpResponse, ProcessOutput, StatusMenuEntry};
 
 fn forwarded_message(message:&str)->String {
     let value=serde_json::from_str::<serde_json::Value>(message).unwrap_or_default();
@@ -736,6 +736,31 @@ fn the_current_branch_shows_its_merge_request_and_threads_in_the_editor() {
 
     plugin.run_command("show-branch-merge-request", &host.invocation(), None).unwrap();
     assert_eq!(host.storage().get("selected").map(String::as_str), Some("7"));
+}
+
+#[test]
+fn the_merge_request_item_menu_opens_only_the_branch_merge_request_links() {
+    let host = setup();
+    host.set_vcs_status(Some(status("feature")));
+    let mut plugin = GitLab::default();
+    plugin.handle_events(&[Event::VcsChanged("/project".into())], &host.invocation());
+
+    let menu = host.status_menu("merge-request");
+    let url = "https://gitlab.com/g/p/-/merge_requests/7";
+    assert!(matches!(&menu[0], StatusMenuEntry::Header(label) if label.starts_with("!7 ")));
+    assert_eq!(menu[1], StatusMenuEntry::action("Show Merge Request", "show-branch-merge-request"));
+    assert_eq!(menu[2], StatusMenuEntry::action("Open Merge Request on GitLab", "open-in-browser").with_argument(url));
+    let manifest = include_str!("../plugin.toml");
+    for entry in &menu {
+        if let StatusMenuEntry::Action { command, .. } = entry {
+            assert!(manifest.contains(&format!("id = \"{command}\"")), "{command}");
+        }
+    }
+
+    plugin.run_command("open-in-browser", &host.invocation(), Some(url)).unwrap();
+    assert_eq!(host.opened_urls(), [url]);
+    let _ = plugin.run_command("open-in-browser", &host.invocation(), Some("https://evil.example/"));
+    assert!(!host.opened_urls().iter().any(|opened| opened.contains("evil")));
 }
 
 #[test]
