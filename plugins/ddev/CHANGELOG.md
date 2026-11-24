@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/ddev-v0.3.0...ddev-v0.4.0) (2026-11-24)
+
+
+### Features
+
+* **ddev:** open a menu from the status bar item ([756d555](https://github.com/arnaud-ritti/openidea-plugins/commit/756d5553ac00d5eec78a503a0478064e7763503e))
+
+
+### Bug Fixes
+
+* **ddev:** offer Start in the status bar menu when the status can't be read ([0ef1087](https://github.com/arnaud-ritti/openidea-plugins/commit/0ef108705d0db59f0ee98d4664344a63b1acc15b))
+
 ## [0.3.0](https://github.com/arnaud-ritti/openidea-plugins/compare/ddev-v0.2.0...ddev-v0.3.0) (2026-11-18)
 
 

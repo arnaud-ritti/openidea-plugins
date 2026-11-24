@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-security-v0.3.1...spring-security-v0.3.2) (2026-11-24)
+
+
+### Bug Fixes
+
+* **symfony,spring-text:** keep index builds within the per-call CPU budget on large projects ([06744d3](https://github.com/arnaud-ritti/openidea-plugins/commit/06744d38e2528dd3314434980e77f7f353dd6f14))
+
 ## [0.3.1](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-security-v0.3.0...spring-security-v0.3.1) (2026-11-18)
 
 

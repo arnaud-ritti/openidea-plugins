@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-web-v0.4.0...spring-web-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **spring-web,spring-beans,spring-boot,quarkus:** Search Everywhere tabs and console colours ([2913575](https://github.com/arnaud-ritti/openidea-plugins/commit/2913575c6cb69db741c0e9de4f5cf6b9d5bbe08a))
+
+
+### Bug Fixes
+
+* **spring-web:** fill the Spring Endpoints window over several calls on large projects ([#23](https://github.com/arnaud-ritti/openidea-plugins/issues/23)) ([8271607](https://github.com/arnaud-ritti/openidea-plugins/commit/827160790ac4338992408f53f3995bc245e0812a)), closes [#21](https://github.com/arnaud-ritti/openidea-plugins/issues/21)
+* **symfony,spring-text:** keep index builds within the per-call CPU budget on large projects ([06744d3](https://github.com/arnaud-ritti/openidea-plugins/commit/06744d38e2528dd3314434980e77f7f353dd6f14))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-web-v0.3.0...spring-web-v0.4.0) (2026-11-18)
 
 

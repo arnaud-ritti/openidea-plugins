@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/arnaud-ritti/openidea-plugins/compare/dotenv-v0.4.0...dotenv-v0.4.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **dotenv,liquibase,symfony,spring-integration,spring-ws,spring-shell:** keep the remaining scans within the per-call CPU budget ([a732240](https://github.com/arnaud-ritti/openidea-plugins/commit/a7322404f1b4285febd6f7d08b329d2059ee3f2f))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/dotenv-v0.3.0...dotenv-v0.4.0) (2026-11-18)
 
 

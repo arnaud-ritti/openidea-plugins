@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/arnaud-ritti/openidea-plugins/compare/openapi-v0.4.0...openapi-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **openapi,ideolog,kube-explorer,gitlab:** search, status menus, console colours, clipboard ([6116c36](https://github.com/arnaud-ritti/openidea-plugins/commit/6116c36b3e2cdd76a3aaac09a4882b48b8495baa))
+
+
+### Bug Fixes
+
+* **openapi,liquibase,laravel:** unique search ids, cheaper hover actions, no unconfirmed migrate in menu ([ed0334a](https://github.com/arnaud-ritti/openidea-plugins/commit/ed0334a6919ae21fcadc8c95ee892ede7447ee6c))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/openapi-v0.3.0...openapi-v0.4.0) (2026-11-18)
 
 

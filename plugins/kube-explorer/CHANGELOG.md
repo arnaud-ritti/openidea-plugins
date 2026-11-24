@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/arnaud-ritti/openidea-plugins/compare/kube-explorer-v0.4.0...kube-explorer-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **openapi,ideolog,kube-explorer,gitlab:** search, status menus, console colours, clipboard ([6116c36](https://github.com/arnaud-ritti/openidea-plugins/commit/6116c36b3e2cdd76a3aaac09a4882b48b8495baa))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/kube-explorer-v0.3.0...kube-explorer-v0.4.0) (2026-11-18)
 
 

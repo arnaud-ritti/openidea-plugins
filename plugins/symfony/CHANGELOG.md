@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/arnaud-ritti/openidea-plugins/compare/symfony-v0.4.0...symfony-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **laravel,symfony:** Search Everywhere tabs, status bar menus and console colours ([7c4e5cd](https://github.com/arnaud-ritti/openidea-plugins/commit/7c4e5cd772f6ab4ab8598006f472f26883ac36c6))
+
+
+### Bug Fixes
+
+* **dotenv,liquibase,symfony,spring-integration,spring-ws,spring-shell:** keep the remaining scans within the per-call CPU budget ([a732240](https://github.com/arnaud-ritti/openidea-plugins/commit/a7322404f1b4285febd6f7d08b329d2059ee3f2f))
+* **symfony,spring-text:** keep index builds within the per-call CPU budget on large projects ([06744d3](https://github.com/arnaud-ritti/openidea-plugins/commit/06744d38e2528dd3314434980e77f7f353dd6f14))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/symfony-v0.3.0...symfony-v0.4.0) (2026-11-18)
 
 

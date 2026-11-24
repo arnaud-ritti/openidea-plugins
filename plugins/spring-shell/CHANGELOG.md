@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-shell-v0.3.1...spring-shell-v0.3.2) (2026-11-24)
+
+
+### Bug Fixes
+
+* **dotenv,liquibase,symfony,spring-integration,spring-ws,spring-shell:** keep the remaining scans within the per-call CPU budget ([a732240](https://github.com/arnaud-ritti/openidea-plugins/commit/a7322404f1b4285febd6f7d08b329d2059ee3f2f))
+* **symfony,spring-text:** keep index builds within the per-call CPU budget on large projects ([06744d3](https://github.com/arnaud-ritti/openidea-plugins/commit/06744d38e2528dd3314434980e77f7f353dd6f14))
+
 ## [0.3.1](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-shell-v0.3.0...spring-shell-v0.3.1) (2026-11-18)
 
 
