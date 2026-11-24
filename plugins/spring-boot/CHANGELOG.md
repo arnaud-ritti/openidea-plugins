@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-boot-v0.4.0...spring-boot-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **spring-web,spring-beans,spring-boot,quarkus:** Search Everywhere tabs and console colours ([2913575](https://github.com/arnaud-ritti/openidea-plugins/commit/2913575c6cb69db741c0e9de4f5cf6b9d5bbe08a))
+
+
+### Bug Fixes
+
+* **symfony,spring-text:** keep index builds within the per-call CPU budget on large projects ([06744d3](https://github.com/arnaud-ritti/openidea-plugins/commit/06744d38e2528dd3314434980e77f7f353dd6f14))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/spring-boot-v0.3.0...spring-boot-v0.4.0) (2026-11-18)
 
 

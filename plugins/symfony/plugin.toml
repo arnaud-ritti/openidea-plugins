@@ -1,6 +1,6 @@
 id = "aritti.symfony"
 name = "Symfony"
-version = "0.4.0" # x-release-please-version
+version = "0.5.0" # x-release-please-version
 description = """Symfony support in PHP, Twig, YAML and XML files: completion, go to definition, checks and quick fixes for routes, templates, services, translation keys, assets, Twig components and Doctrine entities, renames for routes, templates, translation keys and service ids, and links to the Symfony docs in hovers. A Symfony tool window lists routes, templates, components, services, events, config, translations and entities, compares Doctrine mappings with the database, sends requests through the app kernel, reads the log and Messenger failed messages, runs console commands and MakerBundle makers, and shows the profiler. Console commands, requests and run configurations can run in a Docker container. Twig files need the aritti.twig plugin."""
 authors = ["Arnaud Ritti <arnaud.ritti@gmail.com>"]
 homepage = "https://github.com/arnaud-ritti/openidea-plugins/tree/main/plugins/symfony"

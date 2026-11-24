@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/arnaud-ritti/openidea-plugins/compare/tasks-v0.4.0...tasks-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **flyway,liquibase,ignore,tasks:** status bar menus, Search Everywhere tabs and console colours ([65df94d](https://github.com/arnaud-ritti/openidea-plugins/commit/65df94db07ab2b86d602b16384b102dd1ef6830b))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/tasks-v0.3.0...tasks-v0.4.0) (2026-11-18)
 
 

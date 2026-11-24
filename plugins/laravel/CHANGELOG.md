@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/arnaud-ritti/openidea-plugins/compare/laravel-v0.4.0...laravel-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **laravel,symfony:** Search Everywhere tabs, status bar menus and console colours ([7c4e5cd](https://github.com/arnaud-ritti/openidea-plugins/commit/7c4e5cd772f6ab4ab8598006f472f26883ac36c6))
+
+
+### Bug Fixes
+
+* **laravel:** translate the Laravel Routes search tab title ([1ac8868](https://github.com/arnaud-ritti/openidea-plugins/commit/1ac88680a38677b8890cc99136738a10bb535e80))
+* **openapi,liquibase,laravel:** unique search ids, cheaper hover actions, no unconfirmed migrate in menu ([ed0334a](https://github.com/arnaud-ritti/openidea-plugins/commit/ed0334a6919ae21fcadc8c95ee892ede7447ee6c))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/laravel-v0.3.0...laravel-v0.4.0) (2026-11-18)
 
 

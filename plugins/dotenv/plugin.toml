@@ -1,6 +1,6 @@
 id = "aritti.dotenv"
 name = ".env files"
-version = "0.4.0" # x-release-please-version
+version = "0.4.1" # x-release-please-version
 description = ".env file support: highlighting, inspections with quick fixes and ${VARIABLE} completion. Environment variables in code (getenv, os.environ, process.env, ENV[…], env::var, PHPUnit <env>, …) get completion and go to declaration in .env files, Dockerfiles and docker-compose files. Go to declaration on a key in a .env file lists its usages, and after you rename a key you can update its ${VARIABLE} references in the same file."
 authors = ["Arnaud RITTI"]
 license = "MIT"

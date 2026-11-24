@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/arnaud-ritti/openidea-plugins/compare/liquibase-v0.4.0...liquibase-v0.5.0) (2026-11-24)
+
+
+### Features
+
+* **flyway,liquibase,ignore,tasks:** status bar menus, Search Everywhere tabs and console colours ([65df94d](https://github.com/arnaud-ritti/openidea-plugins/commit/65df94db07ab2b86d602b16384b102dd1ef6830b))
+
+
+### Bug Fixes
+
+* **dotenv,liquibase,symfony,spring-integration,spring-ws,spring-shell:** keep the remaining scans within the per-call CPU budget ([a732240](https://github.com/arnaud-ritti/openidea-plugins/commit/a7322404f1b4285febd6f7d08b329d2059ee3f2f))
+* **openapi,liquibase,laravel:** unique search ids, cheaper hover actions, no unconfirmed migrate in menu ([ed0334a](https://github.com/arnaud-ritti/openidea-plugins/commit/ed0334a6919ae21fcadc8c95ee892ede7447ee6c))
+
 ## [0.4.0](https://github.com/arnaud-ritti/openidea-plugins/compare/liquibase-v0.3.0...liquibase-v0.4.0) (2026-11-18)
 
 
