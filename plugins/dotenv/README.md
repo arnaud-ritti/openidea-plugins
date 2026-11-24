@@ -144,7 +144,7 @@ See also the [repository guide](../../README.md#troubleshooting).
 | Problem | What to do |
 |---|---|
 | A key from an unusual env file is missing | Open or save that file once. Only a fixed list of env file names is found automatically (see Technical details). |
-| Some usages are missing in a large project | The project walk stops at 50,000 paths or about 3 seconds. Open or save the files you need. |
+| Some usages are missing in a large project | The project walk stops at 50,000 paths and reads about 1 second per activation or file change, resuming on the next. Open or save the files you need. |
 | "Variable '…' is not declared in any .env file, Dockerfile or compose file." | Declare the key, or ignore it if it comes from the real environment. |
 | No hover on a key in code right after opening the project | Wait for indexing to finish; hover reads only the built index. |
 | A key held in a variable (`process.env[name]`) isn't recognised | Expected: only literal keys are matched. |
@@ -171,7 +171,7 @@ See also the [repository guide](../../README.md#troubleshooting).
 
 **Usage matching.** Usages in code are matched on the text right before the key, compared lowercased. Blanks before the quote are allowed. The usages index reads files with the supported languages' extensions plus `phpunit.xml*`.
 
-**Project index.** The index is built by a walk (at most 50,000 paths, about 3 s per activation or event batch, declarations first) and updated when a file is opened or saved. Until the walk is done, only the root's env files are known. A cut-off walk leaves some usages out. The walk can't list hidden files, so it looks for a fixed list of names (`.env`, `.env.local`, `.env.example`, `.env.dist`, `.env.production`, …, `.flaskenv`) in the project root and in every folder holding a project marker (`package.json`, `composer.json`, `go.mod`, `Cargo.toml`, `Dockerfile`, …). Any other env file is known only once it has been opened or saved.
+**Project index.** The index is built by a walk (at most 50,000 paths, about 1 s per activation or event batch, resuming on the next, declarations first) and updated when a file is opened or saved. Until the walk is done, only the root's env files are known. A cut-off walk leaves some usages out. The walk can't list hidden files, so it looks for a fixed list of names (`.env`, `.env.local`, `.env.example`, `.env.dist`, `.env.production`, …, `.flaskenv`) in the project root and in every folder holding a project marker (`package.json`, `composer.json`, `go.mod`, `Cargo.toml`, `Dockerfile`, …). Any other env file is known only once it has been opened or saved.
 
 **Extension point.** Other plugins can register additional env declaration files or env readers through the `aritti.dotenv.sources` extension point (exact file names, role `declares` or `reads`); changes apply without a restart.
 

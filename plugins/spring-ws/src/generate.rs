@@ -274,7 +274,9 @@ fn source_paths(project: &openidea_plugin::Project) -> Result<BTreeSet<String>, 
 }
 
 fn inventory(project: &openidea_plugin::Project, root: &str, qname: &QName, source: &Document) -> Result<Inventory, Error> {
-    let deadline = Instant::now() + COMMAND_BUDGET;
+    // A task gives the call 60 s and 12 times the fuel of a plain call: enough to read all 8 MiB.
+    let _task = host::begin_task("Checking the project for conflicts", false);
+    let deadline = Instant::now() + Duration::from_secs(20);
     let mut paths = source_paths(project)?;
     paths.insert(source.path.clone());
     let mut result = Inventory { files: vec![], packages: vec![], types: BTreeSet::new(), mappings: BTreeSet::new() };
@@ -282,7 +284,7 @@ fn inventory(project: &openidea_plugin::Project, root: &str, qname: &QName, sour
     let mut qnames = 0;
     for path_ in paths {
         if Instant::now() >= deadline {
-            return Err("Ran out of time checking the project for conflicts. Try again.".into());
+            return Err("Checking the project for conflicts took over 20 seconds, so nothing was changed.".into());
         }
         if !path(&path_) || !path_.strip_prefix(root).is_some_and(|tail| tail.starts_with('/')) {
             return Err(Error::Stale);

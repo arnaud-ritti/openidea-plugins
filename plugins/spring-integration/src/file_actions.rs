@@ -170,6 +170,8 @@ fn inventory_inner(
     doc: &Document,
     include_types: bool,
 ) -> Result<Inventory, Error> {
+    // A task gives the call 60 s and 12 times the fuel of a plain call: enough to read all 8 MiB.
+    let _task = host::begin_task("Checking that the name is free", false);
     let started = std::time::Instant::now();
     let root = project.root()?;
     let mut paths = BTreeSet::new();
@@ -190,10 +192,8 @@ fn inventory_inner(
     let mut bytes = 0usize;
     let mut name_bytes = 0usize;
     for path in paths {
-        if started.elapsed() > COMMAND_BUDGET {
-            return Err(
-                "Ran out of time checking that the name is free. Try again.".into(),
-            );
+        if started.elapsed() > std::time::Duration::from_secs(20) {
+            return Err("Checking that the name is free took over 20 seconds, so nothing was changed.".into());
         }
         if beans::ignored(&path) {
             continue;

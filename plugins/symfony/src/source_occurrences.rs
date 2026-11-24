@@ -90,6 +90,8 @@ pub(crate) fn run(owner: &Main, ctx: &Invocation) -> Result<Option<String>, Erro
     if !owned(&project, &root, &entry.path) {
         return Err(Error::Stale);
     }
+    // A task gives the call 12 times the fuel of a plain call, so the 3 s scan can't trap the plugin.
+    let _task = host::begin_task("Searching Symfony sources", false);
     let started = Instant::now();
     let mut partial = index.partial;
     let mut paths = BTreeSet::new();

@@ -5,7 +5,7 @@ description = ".env file support: highlighting, inspections with quick fixes and
 authors = ["Arnaud RITTI"]
 license = "MIT"
 change-notes = """\
-Next release: Other plugins can register their own env files; Docker Compose variables and Dockerfile ARG values link to .env keys with hover details, and a gutter icon on each .env key lists its usages and the other env files declaring it; values of keys like PASSWORD, SECRET, TOKEN and KEY show as •••• in completion and hover, and .env: Show Value at Caret reveals one in a picker, never in the notification history; saving no longer re-scans the whole project, and changes made outside the editor are picked up; settings to turn checks off, single-quoted values with ${…} are no longer flagged, one name per action and clearer messages. \
+Next release: Other plugins can register their own env files; Docker Compose variables and Dockerfile ARG values link to .env keys with hover details, and a gutter icon on each .env key lists its usages and the other env files declaring it; values of keys like PASSWORD, SECRET, TOKEN and KEY show as •••• in completion and hover, and .env: Show Value at Caret reveals one in a picker, never in the notification history; saving no longer re-scans the whole project, and changes made outside the editor are picked up; settings to turn checks off, single-quoted values with ${…} are no longer flagged, one name per action and clearer messages, and large projects no longer stop the plugin while it reads them. \
 0.3.0: Docker ARG scope, Compose and env_file checks and more code references. \
 0.2.0: plugin icon and window consolidation."""
 categories = ["languages", "linters"]

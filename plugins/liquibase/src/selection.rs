@@ -287,6 +287,7 @@ impl Liquibase {
         // Persist only after all prompts and fresh source reads succeed.
         let existing = host::storage::get(&key(&root))?;
         guard_owner(existing.as_deref(), &root)?;
+        let _task = host::begin_task("Reading Liquibase changelogs", false);
         let mut walk = Walk::new(&project, &root, self.max_files.unwrap_or(MAX_FILES));
         walk.discover();
         let paths: Vec<_> = walk.found.iter().filter(|(_, log)| log.1.header).filter_map(|(path, _)| relative(&root, path)).collect();

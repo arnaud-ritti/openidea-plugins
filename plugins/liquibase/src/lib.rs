@@ -37,7 +37,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const MAX_FILES: usize = 2000;
+/// Reading time of a command's changelog walk, under a task (12 times the fuel of a plain call).
 const DISCOVERY_BUDGET: Duration = Duration::from_secs(3);
+/// Reading time of a render, which runs without a task: its 5×10⁹ fuel must last the whole call.
+const VIEW_BUDGET: Duration = Duration::from_secs(1);
 
 /// Refresh the native browser without touching CLI/output views.
 fn refresh_browser() {
@@ -121,7 +124,7 @@ impl Plugin for Liquibase {
 
 const TITLE: &str = "Liquibase Changelogs";
 /// One event batch, all of it: the host stops a handler at 5 s.
-const EVENT_BUDGET: Duration = Duration::from_secs(4);
+const EVENT_BUDGET: Duration = Duration::from_secs(1);
 
 impl Liquibase {
     /// Applies a batch of events by `deadline`. Changelogs it does not reach are forgotten, so their
@@ -435,6 +438,7 @@ struct Walk<'a> {
     resolved: BTreeMap<(String, usize), (Vec<String>, Target)>,
     max_files: usize,
     partial: bool,
+    budget: Duration,
     deadline: Instant,
     reads: usize,
     discovery_done: bool,
@@ -453,13 +457,20 @@ impl<'a> Walk<'a> {
             resolved: BTreeMap::new(),
             max_files,
             partial: false,
+            budget: DISCOVERY_BUDGET,
             deadline: Instant::now() + DISCOVERY_BUDGET,
             reads: 0,
             discovery_done: false,
         }
     }
 
-    // ponytail: reads every xml/yaml/sql file the host lists, up to MAX_FILES per extension and DISCOVERY_BUDGET (checked between reads), on every render; index them (spring_text::index) if big projects hit the cap
+    fn within(mut self, budget: Duration) -> Self {
+        self.budget = budget;
+        self.deadline = Instant::now() + budget;
+        self
+    }
+
+    // ponytail: reads every xml/yaml/sql file the host lists, up to MAX_FILES per extension and the walk's budget (checked between reads), on every render; index them (spring_text::index) if big projects hit the cap
     fn discover(&mut self) {
         if self.discovery_done {
             return;
@@ -483,7 +494,7 @@ impl<'a> Walk<'a> {
             paths.extend(listed);
         }
         for path in paths {
-            if self.found.len() >= self.max_files || start.elapsed() > DISCOVERY_BUDGET {
+            if self.found.len() >= self.max_files || start.elapsed() > self.budget {
                 self.partial = true;
                 break;
             }
@@ -760,7 +771,7 @@ impl Views for Liquibase {
                 selection::State::Unavailable(message) => (None, Some(message)),
                 selection::State::Invalid(message) => return Ok(View::message(&message).button(choose()).button(clear())),
             };
-            let mut walk = Walk::new(&project, &root, self.max_files.unwrap_or(MAX_FILES));
+            let mut walk = Walk::new(&project, &root, self.max_files.unwrap_or(MAX_FILES)).within(VIEW_BUDGET);
             if let Some(selected) = &selected {
                 if walk.load(selected).is_none() {
                     return Ok(View::message("The changelog you chose was changed, moved or deleted. Pick another with Choose Sources…, or press Browse All Changelogs.")

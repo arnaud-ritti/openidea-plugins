@@ -370,9 +370,16 @@ impl ShellTools {
     /// a subclass chain, selector or command name cannot be proven literal and collision free.
     fn inherited_selectors(&mut self, doc: &Document, command: &CommandName, new: &str, project: &host::Project) -> Result<Vec<(String, String, Range)>, Error> {
         let unproven = || Error::Invalid("A subclass of this class can't be read completely, so the rename could miss commands. Rename it by hand.".into());
+        // Under a task the call gets 60 s and fuel refilled by each is_cancelled: read on until the pass ends.
+        let task = host::begin_task("Reading Spring Shell commands", true);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < until
+            && !task.is_cancelled()
+            && self.indexes.for_document(&doc.path, &doc.text, COMMAND_BUDGET).is_some_and(|index| index.scanning())
+        {}
         let index = self.indexes.for_document(&doc.path, &doc.text, COMMAND_BUDGET).ok_or_else(unproven)?;
         if !trustworthy(index) {
-            return Err(Error::Invalid("Spring Shell commands are still being indexed. Try again in a moment.".into()));
+            return Err(Error::Invalid("Spring Shell commands are still being read after 20 seconds, so nothing was renamed. Try again once the project has been read.".into()));
         }
         let mut subclasses = Vec::new();
         for (path, shell) in index.iter() {
@@ -1185,6 +1192,25 @@ mod implicit_transaction_tests {
         assert!(rename_from(false, &CHILD.replace("(\"shared\")", "(KEY)")).is_err());
         let colliding = CHILD.replace("extends Base {", "extends Base { @org.springframework.shell.standard.ShellMethod(key=\"common\",value=\"C\") void c(){}");
         assert!(rename_from(false, &colliding).is_err());
+    }
+
+    #[test]
+    fn rename_reads_a_cold_large_project_to_the_end_instead_of_asking_to_retry() {
+        let h = MockHost::install();
+        let body = (0..40).map(|m| format!("    String f{m}(String a) {{ return a + \"{m}\"; }}\n")).collect::<String>();
+        for n in 0..3_000 {
+            h.add_file(&format!("module{}/src/main/java/p{n}/S{n}.java", n % 30), &format!("package p{n};\nclass S{n} {{\n{body}}}\n"));
+        }
+        h.add_file("src/main/java/p/Base.java", BASE);
+        h.add_file("src/main/java/p/Child.java", CHILD);
+        let d = Document { path: "/project/src/main/java/p/Base.java".into(), language: "java".into(), version: 1, text: BASE.into() };
+        let command = model(&d).into_iter().next().unwrap();
+        let project = host::project_of(&d.path).unwrap();
+
+        let selectors = ShellTools::default().inherited_selectors(&d, &command, "common", &project).unwrap();
+
+        assert_eq!(selectors.len(), 1, "{selectors:?}");
+        assert!(h.tasks().iter().any(|task| task.title == "Reading Spring Shell commands" && task.ended));
     }
 
     #[test]
